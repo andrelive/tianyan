@@ -58,7 +58,7 @@ Rust 下「契约 = 成本」：契约变更会穿透依赖图，改动成本随
 | 24 | `NotificationSink` | `core/src/notification/mod.rs:11` | kernel-api | 桌面通知（tauri 注入） |
 | 25 | `DocumentParser` | `core/src/knowledge/parser.rs:61` | plugins/tools-knowledge | 知识导入（PDF/DOCX/XLSX） |
 
-### B 级 · 自由（9 个）
+### B 级 · 自由（11 个）
 
 | # | trait | 位置 | 理由 |
 |---|---|---|---|
@@ -72,8 +72,10 @@ Rust 下「契约 = 成本」：契约变更会穿透依赖图，改动成本随
 | 33 | `ServiceDiscovery` | `core/src/model/traits.rs:73` | 适配器内部（模型列表探测） |
 | 34 | `SummaryService` | `core/src/vfs/summary/engine.rs:51` | 摘要策略插件内部 |
 | 35 | `ApprovalGate` | `core/src/executor/approval/gate.rs:44` | 审批门控 seam（**ADR-049 期 3-T1 新增**）：内核只认 `Arc<dyn ApprovalGate>`，实现在 `plugins/policy-approval`。按 B 级管理的理由——只有一个消费者面（内核的 4 个审批调用点）与一个实现（`ApprovalWorkflow`），属「插件自有的小契约」而非跨插件公共协议；方法集按**调用点证据**最小化到 4 个（`authorize` / `status` / `respond_to_approval` / `record_user_confirmation_by_fingerprint`），冻结时点（期 3 结束）再评估升不升 A 级 |
+| 36 | `ContextPort` | `core/src/context/port.rs` | 上下文工程 seam（**ADR-049 期 3-T2 新增**）：内核只认 `Arc<dyn ContextPort>`，实现在 `plugins/policy-context`（`ContextPipeline`）。按 B 级管理的理由——一个消费者面（内核 3 个调用点：`agent_core.rs:478` 加载注入 / `:783` 会话压缩 / `:751` 压缩点摘要提取）+ 一个实现，属「插件自有的小契约」；方法集按调用点证据最小化到 3 个，**没有** `run()` / `compress_if_needed()` / `compressor()` 之类无生产调用点的方法。**顺序契约 `compress_for_session` → 落库成功 → `ws.reshape_after_compression()`（ADR-035 §2）留在内核执行**，不进本 trait——插件只产出压缩结果。未装配时内核用 `NullContextPort` 兜底（`start_server*` 另有启动期硬守卫）。冻结时点（期 3 结束）再评估升不升 A 级 |
 
-> 小计：S 14 / A 11 / B 10 = **35**（含期 3-T1 新增的 `ApprovalGate`）。
+> 小计：S 14 / A 11 / B 11 = **36**（含期 3-T1 新增的 `ApprovalGate` 与期 3-T2 新增的
+> `ContextPort`）。反指标「每期净增 pub trait ≤ 3」：期 3 至今净增 **2**（T1 一个、T2 一个）。
 
 ---
 

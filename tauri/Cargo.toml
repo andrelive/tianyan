@@ -35,6 +35,8 @@ tianyan-task-evolution = { path = "../plugins/task-evolution" }
 # 审批策略实现（ADR-049 期 3-T1）：审批工作流搬出 core 后由桌面端注入
 # （与 `app/src/main.rs::approval_factory` 同形同源）。
 tianyan-policy-approval = { path = "../plugins/policy-approval" }
+# 上下文策略实现（ADR-049 期 3-T2）：与 `app/src/main.rs::context_factory` 同形同源。
+tianyan-policy-context = { path = "../plugins/policy-context" }
 
 # Tauri framework
 tauri = { version = "2.2", features = ["tray-icon", "devtools"] }

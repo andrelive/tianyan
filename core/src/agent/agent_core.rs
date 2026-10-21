@@ -23,7 +23,7 @@ use crate::common::error::Result;
 use crate::common::types::{
     InjectableContext, Message, MessageRole, StructuredMessage, TokenUsage,
 };
-use crate::context::{ContextAssembler, ContextPipeline};
+use crate::context::{ContextAssembler, ContextPort};
 use crate::executor::approval::ApprovalGate;
 use crate::observability::AgentMetrics;
 use crate::observability::TokenRecord;
@@ -96,7 +96,11 @@ pub(crate) struct TurnOptions {
 pub struct Agent {
     /// 默认对话模型名（配置中指定，未被请求级 model 覆盖时使用）。
     pub(crate) default_model: String,
-    pub(crate) context_pipeline: ContextPipeline,
+    /// 上下文工程端口（系统前缀加载 + 会话压缩 + 压缩点摘要提取）。
+    ///
+    /// ADR-049 期 3-T2：策略实现已出 core（`plugins/policy-context`），内核只认
+    /// [`ContextPort`]——改 prompt 模板 / 压缩阈值 / 检索策略不重编内核。
+    pub(crate) context_pipeline: Arc<dyn ContextPort>,
     pub(crate) metrics: Arc<AgentMetrics>,
     pub(crate) state: Arc<RwLock<AgentState>>,
     pub(crate) agent_loop: AgentLoop,
@@ -132,7 +136,7 @@ impl Agent {
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         default_model: String,
-        context_pipeline: ContextPipeline,
+        context_pipeline: Arc<dyn ContextPort>,
         metrics: Arc<AgentMetrics>,
         agent_loop: AgentLoop,
         session_manager: Arc<dyn SessionManager>,
@@ -747,8 +751,10 @@ impl Agent {
             let start_idx = marker_pos.unwrap_or(0);
             // 本会话已有摘要 = 链上最后一个压缩点（T1：数据源单一、天然按会话——
             // 此前用压缩器的进程级 cached_summary，跨会话串号；见 compression/mod.rs）
-            let existing = marker_pos
-                .and_then(|i| ContextPipeline::extract_marker_summary(&s.structured_messages[i]));
+            let existing = marker_pos.and_then(|i| {
+                self.context_pipeline
+                    .extract_marker_summary(&s.structured_messages[i])
+            });
             (s.structured_messages[start_idx..].to_vec(), existing)
         };
 
@@ -1394,6 +1400,7 @@ mod tests {
     use crate::common::types::{FunctionCall, ToolCall, ToolCallType};
     use crate::context::compression::{CompressionConfig, ContextCompressor};
     use crate::context::retrieval::DualLayerRetriever;
+    use crate::context::ContextPipeline;
     use crate::db::Database;
     use crate::executor::SecurityPolicy;
     use crate::model::types::{ChatChoice, ChatCompletionResponse};
@@ -1555,7 +1562,7 @@ mod tests {
         };
         Agent::new(
             "test-model".to_string(),
-            context_pipeline,
+            Arc::new(context_pipeline),
             AgentMetrics::new(),
             agent_loop,
             Arc::new(MockSessionManager),
@@ -2184,7 +2191,7 @@ mod tests {
         );
         Agent::new(
             "test-model".to_string(),
-            context_pipeline,
+            Arc::new(context_pipeline),
             AgentMetrics::new(),
             agent_loop,
             Arc::new(MockSessionManager),
@@ -2654,7 +2661,7 @@ mod tests {
         );
         Agent::new(
             "test-model".to_string(),
-            context_pipeline,
+            Arc::new(context_pipeline),
             AgentMetrics::new(),
             agent_loop,
             session_manager,

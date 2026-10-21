@@ -9235,6 +9235,7 @@ dependencies = [
  "tempfile",
  "tianyan-core",
  "tianyan-policy-approval",
+ "tianyan-policy-context",
  "tianyan-server",
  "tianyan-storage-sqlite",
  "tianyan-storage-vector",
@@ -9315,6 +9316,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "tianyan-policy-context"
+version = "0.7.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "serde",
+ "tempfile",
+ "tianyan-core",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "tianyan-server"
 version = "0.7.0"
 dependencies = [
@@ -9334,6 +9348,7 @@ dependencies = [
  "tianyan-core",
  "tianyan-mcp",
  "tianyan-policy-approval",
+ "tianyan-policy-context",
  "tianyan-storage-sqlite",
  "tianyan-task-builtin",
  "tianyan-task-evolution",
@@ -9425,6 +9440,7 @@ dependencies = [
  "tauri-plugin-updater",
  "tianyan-core",
  "tianyan-policy-approval",
+ "tianyan-policy-context",
  "tianyan-server",
  "tianyan-storage-sqlite",
  "tianyan-storage-vector",

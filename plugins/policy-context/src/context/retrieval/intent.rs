@@ -5,9 +5,9 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use crate::common::error::Result;
-use crate::common::types::{ContextNamespace, TianyanUri};
 use crate::context::compression::estimate_tokens;
+use tianyan::common::error::Result;
+use tianyan::common::types::{ContextNamespace, TianyanUri};
 
 /// 查询类型分类。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

@@ -1,14 +1,14 @@
 use super::*;
-use crate::common::types::{ContentLevel, ContextNamespace, SearchResult, TianyanUri};
-use crate::model::EmbeddingService;
-use crate::test_utils::{cosine_similarity, MockEmbeddingService};
-use crate::vfs::{
-    ContentMetadata, ContentStore, ContextEntry, VectorPoint, VectorSearchQuery,
-    VectorSearchResult, VectorStorage, VectorType, VfsCore, VfsSearch,
-};
 use async_trait::async_trait;
 use std::collections::HashMap;
 use std::sync::Arc;
+use tianyan::common::types::{ContentLevel, ContextNamespace, SearchResult, TianyanUri};
+use tianyan::model::EmbeddingService;
+use tianyan::test_utils::{cosine_similarity, MockEmbeddingService};
+use tianyan::vfs::{
+    ContentMetadata, ContentStore, ContextEntry, VectorPoint, VectorSearchQuery,
+    VectorSearchResult, VectorStorage, VectorType, VfsCore, VfsSearch,
+};
 
 /// Mock in-memory vector storage for testing.
 pub struct InMemoryVectorStorage {
@@ -268,12 +268,12 @@ async fn create_test_retriever_with_data() -> (DualLayerRetriever, Arc<InMemoryV
             ContextNamespace::Knowledge,
             vec!["documents".to_string(), format!("doc_{}", i)],
         );
-        let payload = crate::common::types::EntryMetadata::new(uri.clone(), "unknown")
+        let payload = tianyan::common::types::EntryMetadata::new(uri.clone(), "unknown")
             .with_category("knowledge")
             .with_importance(0.5 + (i as f32 * 0.1))
             .with_tags(vec![format!("tag_{}", i)]);
         let point = VectorPoint {
-            schema_version: crate::vfs::CURRENT_SCHEMA_VERSION,
+            schema_version: tianyan::vfs::CURRENT_SCHEMA_VERSION,
             id: format!("doc_{}", i),
             abstract_vector: Some(vec![0.1 + (i as f32 * 0.01); 768]),
             overview_vector: Some(vec![0.2 + (i as f32 * 0.01); 768]),
@@ -450,11 +450,11 @@ async fn test_retrieve_by_namespace_bypasses_intent_scope() {
         ContextNamespace::Memory,
         vec!["preferences".to_string(), "p1".to_string()],
     );
-    let payload = crate::common::types::EntryMetadata::new(uri.clone(), "unknown")
+    let payload = tianyan::common::types::EntryMetadata::new(uri.clone(), "unknown")
         .with_category("memory")
         .with_importance(0.9);
     let point = VectorPoint {
-        schema_version: crate::vfs::CURRENT_SCHEMA_VERSION,
+        schema_version: tianyan::vfs::CURRENT_SCHEMA_VERSION,
         id: "mem_p1".to_string(),
         abstract_vector: Some(vec![0.1; 768]),
         overview_vector: Some(vec![0.2; 768]),
@@ -499,10 +499,10 @@ async fn test_retrieve_filters_system_paths() {
         ],
     );
     for uri in [&live, &archived] {
-        let payload =
-            crate::common::types::EntryMetadata::new(uri.clone(), "unknown").with_category("agent");
+        let payload = tianyan::common::types::EntryMetadata::new(uri.clone(), "unknown")
+            .with_category("agent");
         let point = VectorPoint {
-            schema_version: crate::vfs::CURRENT_SCHEMA_VERSION,
+            schema_version: tianyan::vfs::CURRENT_SCHEMA_VERSION,
             id: uri.to_point_id(),
             abstract_vector: Some(vec![0.1; 768]),
             overview_vector: Some(vec![0.2; 768]),

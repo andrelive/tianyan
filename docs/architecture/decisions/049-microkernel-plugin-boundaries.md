@@ -793,6 +793,163 @@ GEPA）」的 **GEPA 部分作废**；`role_learning.rs`（573 生产）仍在�
      路径硬编码在 `core/src/executor/approval/mod.rs`）：改插件文件布局须同步，否则 core
      测试直接编译失败——这条既是守卫也是负担（与序 4 同型）。
 
+**实施记录（期 3-T2：policy-context，2026-10-21）**：`core/src/context/` 的
+**策略面整体迁入** `plugins/policy-context`（crate `tianyan-policy-context`，14 个公开
+符号）——`pipeline.rs`（395 生产行）、`compression/mod.rs`（509）、`retrieval/`
+（808：intent 387 + retriever 292 + loader 59 + types 54 + mod 16），合计 **1,729 生产行
++ 1,755 测试行**。**`assembler.rs`（341 生产行）按普查结论留 core**（D7 原文已修订，见
+「★ 推翻前提 1」）。这是**期 3 的主体收益**：改 prompt 模板 / 压缩阈值 / 检索 RRF 参数 /
+意图分类关键词，此前要重编 core（42.4K）+ server（13.4K），现在只重编本插件 + 装配包。
+
+- **★ 新增 1 个 pub trait `ContextPort`**（`core/src/context/port.rs`），本批只此一个
+  （期 3 至今净增 pub trait = 2 ≤ 反指标 3）。方法集按**真实调用点**最小化到 3 个：
+
+  | 方法 | 内核侧调用点 | 说明 |
+  |---|---|---|
+  | `load_injectable(query, workdir)` | `agent_core.rs:478` `ensure_injectable` | 加载可注入前缀（soul + AGENTS.md + learned rules + memories）；调用方按会话缓存，`soul` 非空即视为已加载 |
+  | `compress_for_session(messages, session_id, recent_input_tokens, force, existing_summary)` | `agent_core.rs:783` `maybe_compress_and_persist` | 判定+执行压缩，产出带 `compression_marker` 的摘要消息；`None` = 不需要压缩 / 空摘要丢弃 |
+  | `extract_marker_summary(marker)` | `agent_core.rs:751` 同函数（取「本会话已有摘要」） | 从链上最后一个压缩点剥出纯摘要文本，作增量摘要输入 |
+
+  **★ 第三个方法是勘察后补的**（任务书初稿只列了 2 个）：普查漏掉了
+  `agent_core.rs:751` 的 `ContextPipeline::extract_marker_summary(&sm)` —— 静态关联函数
+  调用，随类型搬走就会断。**为什么不把它留 core 当纯函数**：摘要的包装格式
+  （`[对话摘要] … [摘要结束]`）由 `compress_for_session` **写出**，剥壳算法若留 core，
+  改一句摘要话术就会让「已有摘要」静默提取失败（增量摘要退化为从零摘要，不报错、只是
+  丢上下文）。产生者与消费者因此必须同 crate——与 T1 的 `action_fingerprint` 同理，只是
+  方向相反（那次是提到 core 共享，这次是留在插件共享）。
+  **没有进 trait 的方法**：`run()` / `compress_if_needed()`（前者 `#[cfg(test)]`，后者只
+  被 `compress_for_session` 内部调用）、`compressor()`（只有测试用）、`fallback_load_rules()`
+  / `load_memories()`（私有）——「没有调用点的方法不进 trait」。
+
+- **★ 不抽 `UsageReporter` trait（勘察建议，本批裁决不做）**：`retriever.rs` 持
+  `Option<Arc<UsageStats>>` 直接写 SQLite 统计，普查曾建议先给 kernel-api 一个
+  `UsageReporter` 才不违 D2-1。**本批不改**，理由：① 今天 core 就是唯一的 kernel 包，
+  所有插件（`storage-sqlite` / `task-builtin` / `task-evolution` / `policy-approval` /
+  `tools-*`）都直接依赖它，仓库里根本没有「kernel-api vs kernel-impl」这条缝；
+  ② `UsageStats` 只有一个实现，此刻抽 trait 无法用第二实现压测形状——YAGNI，形状错了要等
+  有第二个实现才暴露，那时改 trait 的成本远高于现在；③ 正确时机是 **T5 切
+  `kernel-api` / `kernel-impl`**：届时 `UsageStats` 归属与 `WorkingSetPort` 一起定，
+  才有真实的 seam 需求。插件因此直接 `use tianyan::observability::usage_stats::UsageStats`。
+
+- **★ 顺序契约留在内核（不搬代码、只留语义）**：`agent_core.rs:807-818` ——
+  `compress_for_session` 返回的 `StructuredMessage` 带 `compression_marker`，**只有摘要
+  落库成功后**才允许 `ws.reshape_after_compression()`（ADR-035 §2 段化）。该顺序在
+  `Agent::maybe_compress_and_persist` 里执行；插件只产出压缩结果，连 `WorkingSetRegistry`
+  都拿不到（`ContextPort` 签名里没有它）。顺序颠倒会推进消费水位 → 把尚未注入的异步通知
+  误标为已消费 + 段起点前移到库中不存在的压缩点。这条已写进 `ContextPort` 与插件 crate
+  文档（防止后来者「顺手」把收缩搬进插件）。
+
+- **装配：`AssemblyServices` 第六个插槽 [`ContextFactory`]**（`Arc<dyn Fn(&ContextServices)
+  -> Arc<dyn ContextPort> + Send + Sync>`，**同步**：`ContextPipeline::new` /
+  `ContextCompressor::new` / `DualLayerRetriever::new` 都只存字段）。**能力集合
+  `ContextServices` 定义在 core**（`core/src/context/assembly.rs`，server 侧 re-export）：
+  `config`（`default_top_k` / `learned_rules_top_k`）、`vfs`、`usage_stats`、
+  `chat`（`ModelServices.chat` 的同一份 Arc）、`chat_model`、`chat_spec`（压缩窗口联动源）。
+  理由与 `TaskServices` 同型：**三方**同时引用（server 消费 / 装配包生产 / 插件读取），
+  住在 server 会让插件反向依赖 server（破 D2-1）。**「怎么配」进插件**：`context_window`
+  与模型规格联动、`preserve_recent_messages = 6`、`summary_model`、两个 `top_k` 全部收进
+  `tianyan_policy_context::pipeline()`——迁移前它们散在 `AgentBuilder::build`（core）与
+  `server/src/agent_builder.rs`。`AgentBuilder` 因此**删掉 `retriever` 字段与
+  `with_retriever`**（那是插件类型进内核的唯一入口），新增 `with_context_port`；
+  `Agent.context_pipeline` 的类型由 `ContextPipeline` 变为 `Arc<dyn ContextPort>`（字段名
+  保留，最小化 diff）。三处装配（`app` / `tauri` / `server/tests/common/factory.rs` 的
+  `test_assembly()`）同形同源各注入一行 `Arc::new(|s| tianyan_policy_context::pipeline(s))`。
+
+- **★ 未装配降级 = core 的 `NullContextPort`（空直通），且 `start_server*` 加**启动期硬守卫****：
+  `load_injectable` 返回空可注入上下文、`compress_for_session` 恒 `None`、
+  `extract_marker_summary` 恒 `None`，装配期 `warn!` 指路。**与任务书初稿的偏差**：初稿
+  建议「`compress_for_session` 原样返回最后一条消息」——**不能这么做**：`Some(…)` 会被
+  `maybe_compress_and_persist` 当作真的发生了压缩，落一个 `compression_marker` 进会话链、
+  再收缩工作集段，等于用最后一条用户消息顶替摘要（历史被静默丢弃）。降级只能「什么都不做」。
+  **为什么比 T1 严（硬守卫而不是只 `warn!`）**：审批缺失只是少一层策略复核；上下文缺失
+  是「整个 system 前缀没了 + 上下文只增不减」，服务起得来但行为已不成立。守卫放在
+  `start_server_inner` 入口（与存储同一手法，`has_context_factory()`），失败发生在启动前；
+  `create_app`（构造对象图，47 处 lib 单测 + 嵌入式）**不设守卫**、仍允许空直通——两条路径
+  严格度不同，判定点分开。各有红/绿判据：
+  `test_start_server_requires_context_factory` / `test_missing_context_port_falls_back_to_null_port`
+  （删守卫或把兜底改成 panic 即红）。
+
+- **★ builder 的两个窗口测试：断言跟着逻辑走，强度不降**。原
+  `core/src/agent/builder.rs` 的两条用例靠
+  `agent.context_pipeline.compressor().lock().await.get_status(0).context_window` 穿透具体
+  类型断言「chat_spec ↔ 压缩器窗口联动」（`compressor()` 全仓只有这两处用；GUI 的
+  `context_window` 是 `server/src/api/chat/handlers.rs:66` 从 config 重新派生，不走管线）。
+  管线搬走后 core 只剩 `Arc<dyn ContextPort>`，处理如下：
+  1. **联动断言迁到插件**（`plugins/policy-context/src/lib.rs::pipeline_tests`）：
+     `build_pipeline(&services).compressor().lock().await.get_status(0).context_window ==
+     spec.context_length`（有 spec）与 `== 128_000`（无 spec）——逐字保留原来的精确相等断言。
+     它测的就是管线行为，本就该归插件；
+  2. **core 侧改测接线**：`test_with_chat_model_spec_injects_spec_into_loop`（`AgentLoop.chat_spec
+     == Some(spec)` + 注入的 port 就是装配层给的那一个）与
+     `test_no_chat_model_spec_keeps_loop_spec_none`。识别「装配的是哪个 port」用契约里
+     **本来就有**的 `extract_marker_summary` 当身份探针（假端口回 marker 字符串）——
+     **没有**给 `ContextPort` 加任何只服务测试的方法（契约污染），也**没有**删掉原断言。
+
+- **测试：同源包含，core 计数不变、判别力不减**。core 的单测必须构造**真实**管线：12 个
+  `agent_core.rs` 用例锁「压缩落库 → 刷新注入缓存 → 工作集段收缩」的端到端语义，替身会把
+  它们抹平成「永远不压缩」。`[dev-dependencies]` 行不通（core 编译两份 → `ContextPort` 出现
+  两个不兼容实例，同序 4）。因此照 `storage-sqlite` 先例：`core/src/context/mod.rs` 在
+  `#[cfg(test)]` 下用 `#[path]` **同源包含** `plugins/policy-context/src/context/{pipeline.rs,
+  compression/mod.rs, retrieval/mod.rs}`，并把模块树**摆成与插件一致的形状**
+  （`context::{pipeline, compression, retrieval}`）——被包含文件里的 `crate::context::…`
+  于是两边都成立（这是本序相对 T1 的一处手法改进：T1 的 `workflow.rs` 是单文件，没有
+  兄弟模块引用问题）。两份**纪律**写进插件 crate 文档与 AGENTS.md：① 这些文件只许
+  `tianyan::…` 与 `crate::context::…`；② 它们的测试模块在 core 也会跑一遍（与序 4 先例
+  一致：`--lib` 计数不变、插件侧独立再跑一遍）。
+  - **测试守恒**：HEAD core `--lib` **1176** = 现在 core **1177**（其中 **65** 条来自
+    `#[path]` 同源包含：pipeline 16 / compression 17 / retrieval 31+1）+ 插件 **68**
+    （65 条同源重跑 + 3 条新装配门禁）**+1**（core 新增
+    `test_missing_context_port_falls_back_to_null_port`）、**−2**（两条窗口测试的 core 版本
+    被接线测试替换，窗口断言移入插件）。**零放弃、零降级**。
+  - **`ContextPipeline::compressor()` 由 `#[cfg(test)] pub(crate)` 提为 `#[cfg(test)] pub`**：
+    同源包含后在 core 构建里它是「未使用的方法」→ `dead_code` 告警（零 warning 门禁会红）。
+    提成 `pub` 后可见性图判定为「外部可达」，两边都不告警；公开面影响为零
+    （`#[cfg(test)]` 只在测试构建存在）。
+  - **删除 `core/src/test_utils::create_test_retriever`**（返回 `DualLayerRetriever`）：
+    `test-utils` 是**特性构建**（不是 `cfg(test)`），拿不到同源包含模块，core 也不能反向
+    依赖插件。删除依据：全仓**零调用者**（只有定义处 + `retriever_tests.rs` 里的同名局部
+    helper，后者自带脚手架、与本函数无关）。**不是放弃测试**，是删死脚手架的公开面。
+
+- **逐行比对证据**（`git diff --no-index`，HEAD 原文件 vs 插件文件）：
+  | 文件 | 改动行 | 归类 |
+  |---|---|---|
+  | `pipeline.rs` | 62 增 / 14 删 | ① `crate::` → `tianyan::`（core 类型）**12 处**（含测试）；② rustfmt 因 `tianyan::` 比 `crate::` 长而重排 import 块；③ `compressor()` 可见性 + 3 行文档；④ **末尾新增 44 行** `impl ContextPort for ContextPipeline`（逐方法委托）；⑤ 测试里一行 import 因变长折行 |
+  | `compression/mod.rs` | 9 / 9 | 全部是路径前缀（含 `pub use tianyan::common::token_estimator::{…}` 与测试 import） |
+  | `retrieval/retriever.rs` | 7 / 7 | 全部是路径前缀（`UsageStats` / `Result` / `system_paths` / `parse_doc_index` / `ContextNamespace`） |
+  | `retrieval/intent.rs` | 2 / 2 | 路径前缀 |
+  | `retrieval/loader.rs` | 3 / 3 | 路径前缀（`parse_doc_index` / `render_doc_index`） |
+  | `retrieval/types.rs` | 1 / 1 | 路径前缀 |
+  | `retrieval/mod.rs` | **0 / 0** | 逐字节相同 |
+  | `retrieval/retriever_tests.rs` | 14 / 14 | 路径前缀 + 1 处 rustfmt 折行（`.with_category("agent")`） |
+  **`DEFAULT_SUMMARY_PROMPT` / `INCREMENTAL_SUMMARY_PROMPT` 全文、`compression_threshold =
+  0.6` / `preserve_recent_messages = 10` / `min_messages_to_compress = 6` / `max_summary_tokens
+  = 4000` / `CRITICAL_THRESHOLD_RATIO = 0.8` / `memory_bias = 1.15` /
+  `DEFAULT_FRESHNESS_WEIGHT = 0.2` / `score > 0.6` / 意图分类关键词表 / 全部日志文案
+  （`"上下文压缩完成"` / `"压缩摘要为空（模型空响应），本次压缩丢弃，下轮重试"` /
+  `"意图分析失败，使用默认意图回退"` / `"加载核心提示词失败"` / `"已加载项目指令（AGENTS.md）"`
+  / `"Retrieval completed"` …）逐字未动。**
+
+- **门禁**：`cargo fmt --all -- --check` 干净；`cargo clippy --workspace --all-targets`
+  **零 warning**；`tianyan-core --lib` **1177 passed**；`tianyan-policy-context`
+  **68 passed**；`tianyan-server --lib` **192 passed / 1 ignored**（189 + 2 条新插槽测试 +
+  1 条启动守卫测试）；`--tests` 5 / 14 / 1 / 2 全绿；`tianyan-app` 7 passed；
+  `cargo catalog-check` OK；`cargo tree -p tianyan-policy-context --edges normal --depth 1`
+  = core / async-trait / chrono / serde / tokio / tracing，**无 `tianyan-server`**。
+  （`tianyan-core --lib` 首跑曾有一条 `executor::command::tests::test_background_list_and_unknown`
+  偶发失败——shell 后台命令并发用例，与本次改动无关，单跑与重跑均绿。）
+
+- **遗留**：
+  1. **`UsageReporter` trait 未抽**（本批裁决，见上）：T5 切 `kernel-api`/`kernel-impl` 时
+     与 `WorkingSetPort` 一起做——那时才有第二实现与真实 seam 需求；
+  2. `plugins/policy-context` 与 `core` 的**文件级耦合**（`#[path]` 硬编码在
+     `core/src/context/mod.rs`）：改插件文件布局须同步，否则 core 测试直接编译失败
+     （与序 4 / T1 同型的守卫兼负担）；
+  3. `Agent.context_pipeline` 字段名沿用了旧称（类型已是 `Arc<dyn ContextPort>`）：改名会
+     扩散到 `agent_core.rs` 的十余处调用，等 T5 切包时与 `WorkingSetPort` 一并整理；
+  4. `null` 兜底的**可观测性只到日志**：`create_app` 路径若长期误配，症状是「模型没有
+     人设 + 上下文无限增长」。`start_server*` 已有硬守卫覆盖生产形态，`create_app` 侧
+     未加运行期指标（47 处单测的可观测面不宜再动，留给期 4 清单收敛时统一）。
+
 ---
 
 ## 分期与闸门
@@ -803,7 +960,7 @@ GEPA）」的 **GEPA 部分作废**；`role_learning.rs`（573 生产）仍在�
 | **0.5** | 工具契约与注册形状 + 装配器二分（**工具侧已完成**） | ✅ 元数据表承载执行入口 + 协议工具独立成表（28 分支 match → 一次查表，内核零工具名字面量）；✅ `ToolContext` 承载六个工具域（`impl ToolContext` + 注册表 `Deref`），依赖边界实测：工具域 executor 引用仅 16 处（随插件搬走）。待办：`thin-channel` + `assembly-manifest`；`AppState` 20 字段契约化 | 工具目录 freshness ✅；工具行为零变化 ✅（1431 单测全绿）；clippy 零警告 ✅ |
 | **1** | 工具插件试点（**装配器二分 + tools-fs 骨架已完成**） | ✅ `tianyan-app` bin 包（**清单住 bin**）+ `ToolPluginFactory` 类型擦除 + `create_app_with_plugins` / `start_server_with_plugins*`；✅ `plugins/tools-fs` 独立 crate（`executor::fs` 实现整体迁入）。待续：**整域迁移**——`read_file` 目录模式反向依赖 `executor::fs::execute_list_dir`，故 fs 域必须 6 工具一起搬（read/write/edit/patch/glob/list_dir）才能删 core 侧 | 闸门 A **首测 512 行 ✅**（判据 ≤3.5K）；core 侧暂留（双路径过渡，重名注册自动跳过） |
 | **2** | 适配器与任务插件（**期 2 完成**） | 迁移顺序（按 自包含度×收益）：**0 清 core 死依赖** → 1 `tools-todo`+`tools-goal` → 2 `tools-web` → 3 `storage-vector` → 4 `storage-sqlite` → 5 `task-*`（2 crate）→ 6 `provider-llm`+`provider-embed`。详见下方「期 2 普查结论」 | 各领域 ≤ 2K；全量 release 不劣化 >10% |
-| **3** | 策略分离（最难一刀） | 抽 `kernel-impl`（loop/cancel/rollback/stream_forward/working_set）；`context`→`policy-context`；**审批→`policy-approval`（T1 ✅ 2026-10-21，见下方实施记录）**；`role_learning`→已删除（零消费者，2026-10-21 裁决）；`judge`→`policy-review` | **闸门 B**：api ≤ 6K && impl ≤ 15K（或配置外移后 16.1K）；改策略不重编内核；S 级零变更 |
+| **3** | 策略分离（最难一刀） | 抽 `kernel-impl`（loop/cancel/rollback/stream_forward/working_set）；**`context`→`policy-context`（T2 ✅ 2026-10-21，见下方实施记录；`assembler.rs` 按普查修订留 kernel-impl）**；**审批→`policy-approval`（T1 ✅ 2026-10-21）**；`role_learning`→已删除（零消费者，2026-10-21 裁决）；`judge`→`policy-review` | **闸门 B**：api ≤ 6K && impl ≤ 15K（或配置外移后 16.1K）；改策略不重编内核；S 级零变更 |
 | **4** | 清单收敛与发行版 | 清单完整化、跨插件顺序断言、desktop/headless/minimal 三份清单 | 装配清单 1 页可查；headless 可构建 |
 
 **反指标**（防拆过头）：每 crate ≥ 300 行且至少 2 个真实消费者；每期净增 pub trait ≤ 3；

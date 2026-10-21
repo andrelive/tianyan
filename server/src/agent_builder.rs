@@ -14,7 +14,6 @@ use async_trait::async_trait;
 use tianyan::agent::DynamicToolExecutor;
 use tianyan::agent::{Agent, AgentBuilder, AgentCoordinator, AgentResponse, AgentState};
 use tianyan::config::{ModelCapability, TianyanConfig};
-use tianyan::context::DualLayerRetriever;
 use tianyan::db::Database;
 use tianyan::model::ModelServices;
 use tianyan::observability::execution_log::ExecutionLog;
@@ -97,10 +96,9 @@ impl AgentBuilderFactory {
         event_tx: tokio::sync::broadcast::Sender<String>,
         working_sets: Arc<tianyan::agent::working_set::WorkingSetRegistry>,
         approval_gate: Option<Arc<dyn tianyan::executor::approval::ApprovalGate>>,
+        context_port: Option<Arc<dyn crate::ContextPort>>,
     ) -> TianyanResult<Arc<Agent>> {
         Self::validate_config(config)?;
-
-        let retriever = DualLayerRetriever::new(vfs.clone()).with_usage_stats(usage_stats.clone());
 
         // 模型名解析与 KnowledgeIngestor 构造收敛于 state.rs 唯一入口
         // （resolve_chat_model / resolve_chat_model_spec / build_knowledge_ingestor）
@@ -147,7 +145,6 @@ impl AgentBuilderFactory {
             .with_role_registry(role_registry)
             .with_role_router(role_router)
             .with_vfs(vfs.clone())
-            .with_retriever(Arc::new(retriever))
             .with_knowledge_ingestor(Arc::new(knowledge_ingestor))
             .with_security_config(config.security.clone())
             .with_usage_stats(usage_stats)
@@ -182,6 +179,14 @@ impl AgentBuilderFactory {
         // 「未装配直接放行」分支，`AgentBuilder::build` 打一条 `warn!` 指路。
         let agent = match approval_gate {
             Some(gate) => agent.with_approval_gate(gate),
+            None => agent,
+        };
+        // 上下文策略（ADR-049 期 3-T2）：实现已出 core（`plugins/policy-context`），
+        // 组合根（`AppState::new` / `reload_agent`）经 `ContextFactory` 建好实例传进来。
+        // `None` = 未装配 → `AgentBuilder::build` 用 `NullContextPort` 兜底
+        // （无 system 前缀 + 不压缩）+ `warn!` 指路；`start_server*` 入口另有启动期硬守卫。
+        let agent = match context_port {
+            Some(port) => agent.with_context_port(port),
             None => agent,
         };
         let mut builder = agent;
@@ -260,6 +265,7 @@ impl AgentBuilderFactory {
         event_tx: tokio::sync::broadcast::Sender<String>,
         working_sets: Arc<tianyan::agent::working_set::WorkingSetRegistry>,
         approval_gate: Option<Arc<dyn tianyan::executor::approval::ApprovalGate>>,
+        context_port: Option<Arc<dyn crate::ContextPort>>,
     ) -> TianyanResult<Arc<dyn AgentCoordinator>> {
         match Self::build_agent(
             config,
@@ -283,6 +289,7 @@ impl AgentBuilderFactory {
             event_tx,
             working_sets,
             approval_gate,
+            context_port,
         )
         .await
         {

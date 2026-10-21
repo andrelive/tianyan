@@ -1,8 +1,6 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use tokio::sync::Mutex as TokioMutex;
-
 use crate::agent::r#loop::{AgentLoop, AgentLoopConfig};
 use crate::agent::tool_registry::ToolRegistry;
 use crate::agent::{RoleRegistry, RoleRouter};
@@ -10,9 +8,7 @@ use crate::common::error::{Result, TianyanError};
 use crate::config::AgentConfig;
 use crate::config::AgentRolesConfig;
 use crate::config::SecurityConfig;
-use crate::context::compression::{CompressionConfig, ContextCompressor};
-use crate::context::pipeline::ContextPipeline;
-use crate::context::DualLayerRetriever;
+use crate::context::{ContextPort, NullContextPort};
 use crate::executor::approval::ApprovalGate;
 use crate::executor::SecurityPolicy;
 use crate::knowledge::KnowledgeIngestor;
@@ -34,7 +30,12 @@ pub struct AgentBuilder {
     /// 默认聊天模型（用于 AgentLoop 和委托子 Agent）。
     model: Option<String>,
     model_service: Option<Arc<dyn ChatService>>,
-    retriever: Option<Arc<DualLayerRetriever>>,
+    /// 上下文工程端口（注入/压缩/摘要提取；ADR-049 期 3-T2：实现已出 core，
+    /// 由装配层经 `ContextFactory` 构造后注入）。
+    ///
+    /// `None` = 未装配 → [`NullContextPort`]（内存直通：无 system 前缀、不压缩）
+    /// + 装配期告警，见 [`Self::with_context_port`]。
+    context_port: Option<Arc<dyn ContextPort>>,
     vfs: Option<Arc<dyn VirtualFileSystem>>,
     session_manager: Option<Arc<dyn SessionManager>>,
     knowledge_ingestor: Option<Arc<KnowledgeIngestor>>,
@@ -98,7 +99,7 @@ impl AgentBuilder {
             config: AgentConfig::default(),
             model: None,
             model_service: None,
-            retriever: None,
+            context_port: None,
             vfs: None,
             session_manager: None,
             knowledge_ingestor: None,
@@ -148,9 +149,24 @@ impl AgentBuilder {
         self
     }
 
-    /// 设置双层检索器。
-    pub fn with_retriever(mut self, retriever: Arc<DualLayerRetriever>) -> Self {
-        self.retriever = Some(retriever);
+    /// 注入上下文工程端口（系统前缀加载 + 会话压缩 + 压缩点摘要提取；
+    /// ADR-049 期 3-T2）。
+    ///
+    /// 上下文**策略**实现已出 core（`plugins/policy-context`）：注入顺序（soul →
+    /// AGENTS.md → learned rules → memories）、检索的 RRF 参数与记忆偏置、压缩阈值与
+    /// 摘要提示词、意图分类关键词都在插件里。装配层先用 `ContextFactory` 把它构造成
+    /// `Arc<dyn ContextPort>` 再经本方法交给 builder（与 `ApprovalGateFactory` /
+    /// `TaskFactory` 同一套类型擦除手法）。
+    ///
+    /// **未注入（`None`）的语义**：用 [`NullContextPort`] 兜底——`load_injectable`
+    /// 返回空可注入上下文（模型**没有** soul / rules / memories 前缀）、
+    /// `compress_for_session` 恒 `None`（上下文永不压缩），并在 `build` 里 `warn!`
+    /// 一条指路。为什么允许降级而不硬失败：`create_app`（构造对象图，47 处 lib 单测 +
+    /// 嵌入式）靠「不要求装配」才能起实例；`start_server*` 另有启动期硬守卫
+    /// （`has_context_factory`），生产误配在**启动前**响亮失败。可见性由装配期告警兜底
+    /// （ADR-038：静默降级的症状是「模型像丢了人设 + 上下文无限增长」，看不出是降级）。
+    pub fn with_context_port(mut self, port: Arc<dyn ContextPort>) -> Self {
+        self.context_port = Some(port);
         self
     }
 
@@ -383,10 +399,6 @@ impl AgentBuilder {
             .model_service
             .ok_or_else(|| TianyanError::Custom("内部错误：需要模型服务".to_string()))?;
 
-        let retriever = self
-            .retriever
-            .ok_or_else(|| TianyanError::Custom("内部错误：需要检索器".to_string()))?;
-
         let vfs = self
             .vfs
             .ok_or_else(|| TianyanError::Custom("内部错误：需要虚拟文件系统".to_string()))?;
@@ -556,27 +568,22 @@ impl AgentBuilder {
         // 聊天模型上下文规格注入（T5）：None 时 AgentLoop 内部走默认窗口
         agent_loop = agent_loop.with_chat_spec(self.chat_model_spec);
 
-        // 构建上下文管线
-        let context_pipeline = ContextPipeline::new(
-            vfs.clone(),
-            retriever.clone(),
-            Arc::new(TokioMutex::new(ContextCompressor::new(
-                model_service.clone(),
-                CompressionConfig {
-                    // 模型规格联动压缩窗口；无 spec 时保持默认 128_000（语义与
-                    // DEFAULT_CONTEXT_WINDOW 一致，不能依赖 ..Default::default() 覆盖）。
-                    context_window: self
-                        .chat_model_spec
-                        .map(|s| s.context_length)
-                        .unwrap_or(128_000),
-                    preserve_recent_messages: 6,
-                    summary_model: chat_model.clone(),
-                    ..CompressionConfig::default()
-                },
-            ))),
-            self.config.default_top_k,
-            self.config.learned_rules_top_k,
-        );
+        // 上下文工程端口（ADR-049 期 3-T2）：**实现已出 core**
+        // （`plugins/policy-context`）。注入顺序、检索策略、压缩阈值与摘要提示词都在
+        // 插件里——「`context_window` ↔ 模型规格联动」也随之进插件（
+        // `tianyan_policy_context::pipeline`，单一事实源）。装配层先用
+        // `ContextFactory` 造实例，再经 `with_context_port` 注入。
+        let context_port = match self.context_port.clone() {
+            Some(port) => port,
+            None => {
+                tracing::warn!(
+                    "未装配上下文策略（ContextFactory）：模型没有 system 前缀（soul / 项目指令 / \
+                     learned rules / memories），且上下文**永不压缩**——生产装配请用 \
+                     create_app_with_assembly / start_server_with_assembly"
+                );
+                Arc::new(NullContextPort::new())
+            }
+        };
 
         // ADR-017：会话末 GEPA 引擎移除——技能/角色演化统一由每日演化任务
         // （EvolutionTask + 演化智能体综述）驱动；执行轨迹持久化在
@@ -584,7 +591,7 @@ impl AgentBuilder {
 
         Ok(Agent::new(
             chat_model,
-            context_pipeline,
+            context_port,
             metrics,
             agent_loop,
             session_manager,
@@ -605,8 +612,7 @@ impl Default for AgentBuilder {
 mod tests {
     use super::*;
 
-    use crate::common::types::Message;
-    use crate::context::DualLayerRetriever;
+    use crate::common::types::{InjectableContext, Message, StructuredMessage};
     use crate::model::spec::ModelSpec;
     use crate::model::MockChatService;
     use crate::session::{Session, SessionManager};
@@ -629,6 +635,53 @@ mod tests {
         }
     }
 
+    /// 假上下文端口（**测接线，不测策略**）：唯一作用是把「哪个实例被装配进去」
+    /// 变成可观测的判别标记 —— `extract_marker_summary` 返回装配时给的字符串。
+    ///
+    /// 为什么不给 `ContextPort` 加一个 `marker()` 之类的方法：那是只服务测试的
+    /// 契约污染（生产唯一实现永远返回同一个常量）。这里借用契约里**本来就有**的
+    /// 第三个方法当作身份探针，零新增方法。
+    struct StubContextPort {
+        marker: &'static str,
+    }
+
+    #[async_trait]
+    impl ContextPort for StubContextPort {
+        async fn load_injectable(
+            &self,
+            _query: &str,
+            _working_directory: Option<&std::path::Path>,
+        ) -> Result<InjectableContext> {
+            Ok(InjectableContext::new())
+        }
+
+        async fn compress_for_session(
+            &self,
+            _messages: &[Message],
+            _session_id: &str,
+            _recent_input_tokens: usize,
+            _force: bool,
+            _existing_summary: Option<&str>,
+        ) -> Option<StructuredMessage> {
+            None
+        }
+
+        fn extract_marker_summary(&self, _marker: &StructuredMessage) -> Option<String> {
+            Some(self.marker.to_string())
+        }
+    }
+
+    /// 端口身份探针（任意消息即可：桩不看内容）。
+    fn probe_marker(agent: &Agent) -> Option<String> {
+        let probe = crate::context::ContextAssembler::message_to_structured(
+            &Message::user("probe"),
+            "s1",
+            None,
+            None,
+        );
+        agent.context_pipeline.extract_marker_summary(&probe)
+    }
+
     /// 用最小依赖构建一个完整 Agent（测试 build() 全链路）。
     fn build_test_agent(with_spec: bool) -> Result<Agent> {
         let vfs = Arc::new(MockVfs::new());
@@ -636,9 +689,7 @@ mod tests {
             .with_model("test-model")
             .with_model_service(Arc::new(MockChatService::new()))
             .with_vfs(vfs.clone() as Arc<dyn VirtualFileSystem>)
-            .with_retriever(Arc::new(DualLayerRetriever::new(
-                vfs.clone() as Arc<dyn VirtualFileSystem>
-            )))
+            .with_context_port(Arc::new(StubContextPort { marker: "injected" }))
             .with_session_manager(Arc::new(MockSessionManager));
         if with_spec {
             builder = builder.with_chat_model_spec(ModelSpec {
@@ -656,11 +707,16 @@ mod tests {
         assert_eq!(builder.config.max_turns, 200);
     }
 
+    /// `with_chat_model_spec(spec)` → `AgentLoop.chat_spec == Some(spec)`
+    /// 且注入的**就是**装配层给的那个端口。
+    ///
+    /// ADR-049 期 3-T2 的断言迁移：「压缩器 `context_window` 与 `spec.context_length`
+    /// 联动」的原断言随管线搬进 `plugins/policy-context`
+    /// （`pipeline_tests::test_pipeline_links_compressor_window_to_chat_spec`）——那测的是
+    /// **管线的行为**；core 这里测**接线**（spec 送进循环、port 不被替换），比原来靠
+    /// 具体类型穿透测得更准，且不弱化：窗口值仍是插件侧的精确相等断言。
     #[tokio::test]
-    async fn test_with_chat_model_spec_sets_loop_spec_and_window() {
-        // with_chat_model_spec(spec) → build() 后：
-        // 1) AgentLoop.chat_spec == Some(spec)
-        // 2) 压缩器 context_window == spec.context_length（窗口联动）
+    async fn test_with_chat_model_spec_injects_spec_into_loop() {
         let spec = ModelSpec {
             context_length: 200_000,
             max_output_tokens: 16_000,
@@ -670,10 +726,8 @@ mod tests {
         let agent = AgentBuilder::new()
             .with_model("test-model")
             .with_model_service(Arc::new(MockChatService::new()))
-            .with_vfs(vfs.clone() as Arc<dyn VirtualFileSystem>)
-            .with_retriever(Arc::new(DualLayerRetriever::new(
-                vfs.clone() as Arc<dyn VirtualFileSystem>
-            )))
+            .with_vfs(vfs as Arc<dyn VirtualFileSystem>)
+            .with_context_port(Arc::new(StubContextPort { marker: "injected" }))
             .with_session_manager(Arc::new(MockSessionManager))
             .with_chat_model_spec(spec)
             .build()
@@ -684,30 +738,64 @@ mod tests {
             Some(spec),
             "spec 应注入 AgentLoop"
         );
-        let status = agent
-            .context_pipeline
-            .compressor()
-            .lock()
-            .await
-            .get_status(0);
         assert_eq!(
-            status.context_window, spec.context_length,
-            "压缩器 context_window 应与 spec.context_length 联动"
+            probe_marker(&agent).as_deref(),
+            Some("injected"),
+            "装配层注入的端口必须原样进入 Agent（不得被兜底实现替换）"
         );
     }
 
+    /// 无 spec 时 `AgentLoop.chat_spec` 为 `None`（压缩窗口的缺省值判定在插件侧：
+    /// `pipeline_tests::test_pipeline_defaults_compressor_window_without_spec`）。
     #[tokio::test]
-    async fn test_no_chat_model_spec_defaults_window() {
-        // 无 spec 时：AgentLoop.chat_spec 为 None，压缩器 context_window 保持默认 128_000。
+    async fn test_no_chat_model_spec_keeps_loop_spec_none() {
         let agent = build_test_agent(false).unwrap();
         assert_eq!(agent.agent_loop.chat_spec, None);
+        assert_eq!(
+            probe_marker(&agent).as_deref(),
+            Some("injected"),
+            "无 spec 不影响端口装配"
+        );
+    }
 
-        let status = agent
+    /// 未装配端口 → 兜底 `NullContextPort`（降级路径要**有判别力**：症状是
+    /// 「模型没有 system 前缀 + 上下文永不压缩」，不能只靠日志）。
+    ///
+    /// 判别力：若把 `build()` 的兜底改成 panic / `Err`，本测试必红；若兜底实现
+    /// 误报「压缩已发生」（`Some(...)`），`maybe_compress_and_persist` 就会落一个
+    /// 假压缩点并收缩工作集段——用 `extract_marker_summary` 恒 `None` 锁住它。
+    #[tokio::test]
+    async fn test_missing_context_port_falls_back_to_null_port() {
+        let vfs = Arc::new(MockVfs::new());
+        let agent = AgentBuilder::new()
+            .with_model("test-model")
+            .with_model_service(Arc::new(MockChatService::new()))
+            .with_vfs(vfs as Arc<dyn VirtualFileSystem>)
+            .with_session_manager(Arc::new(MockSessionManager))
+            .build()
+            .expect("未装配端口不应让 build 失败（create_app 路径依赖这条）");
+
+        assert_eq!(
+            probe_marker(&agent).as_deref(),
+            None,
+            "未装配时应落到 NullContextPort（恒 None），而不是某个真实实现"
+        );
+        let injectable = agent
             .context_pipeline
-            .compressor()
-            .lock()
+            .load_injectable("q", None)
             .await
-            .get_status(0);
-        assert_eq!(status.context_window, 128_000);
+            .expect("降级实现不报错");
+        assert!(
+            injectable.soul.is_empty(),
+            "降级实现给空可注入上下文（不伪造 soul）"
+        );
+        assert!(
+            agent
+                .context_pipeline
+                .compress_for_session(&[], "s1", usize::MAX, true, None)
+                .await
+                .is_none(),
+            "降级实现永不压缩（force 也不压缩）"
+        );
     }
 }

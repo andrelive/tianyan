@@ -60,7 +60,7 @@
 │                          ↓ Rust Calls                       │
 │  ┌───────────────────────┴───────────────────────────────┐  │
 │  │              Core Library (core/)                     │  │
-│  │  Agent | ContextPipeline | VFS | Skills | Scheduler   │  │
+│  │  Agent | ContextPort | VFS | Skills | Scheduler       │  │
 │  └───────────────────────────────────────────────────────┘  │
 └─────────────────────────────────────────────────────────────┘
 ```
@@ -73,7 +73,7 @@ tianyan/
 │   ├── agent/      # Agent 协调器 + AgentLoop + ToolRegistry + 会话状态
 │   ├── common/     # 通用类型、错误处理、日志
 │   ├── config/     # 配置管理
-│   ├── context/    # 上下文工程（assembler、pipeline、retrieval/、compression/）
+│   ├── context/    # 上下文工程契约 + 组装机制（assembler、port.rs、assembly.rs）；策略实现 → plugins/policy-context
 │   ├── executor/   # [已废弃] 独立执行函数 + 审批工作流 + 验证门控
 │   ├── knowledge/  # 知识库导入和解析（parser、image、ingestor/）
 │   ├── model/      # 模型服务容器 + provider/
@@ -151,7 +151,7 @@ VFS 是所有上下文（知识库、记忆、技能、规则）的统一存储�
 - **图像双通道**：VLM 生成文本描述 → 文本 embedding 用于 L0/L1，同时 `embed_image()` 生成 `visual_vector` 用于视觉相似度搜索。
 - 所有命名空间（User、Session、Memory、Knowledge、Agent、Skill）共享同一套机制。
 
-关键文件：`core/src/vfs/traits.rs`（`VfsSearch` trait）、`core/src/vfs/vfs_impl.rs`（`search()`）、`core/src/vfs/vector/lancedb/`（RRF 融合）、`core/src/context/retrieval/retriever.rs`（`DualLayerRetriever`）。
+关键文件：`core/src/vfs/traits.rs`（`VfsSearch` trait）、`core/src/vfs/vfs_impl.rs`（`search()`）、`plugins/storage-vector`（LanceDB + RRF 融合检索原语）、`plugins/policy-context/src/context/retrieval/retriever.rs`（`DualLayerRetriever`）。
 
 ### 3.2 决策 2: StructuredMessage —— 核心数据结构
 
@@ -207,7 +207,7 @@ Agent :: process_message(session_id, msg) / process_message_stream（多模态 +
   ├─ SessionManager::get_session(session_id) → SessionState
   │     └─ SessionStore::load()：SQLite 按 seq 查询 → compression_marker 截断
   │
-  ├─ ContextPipeline::prepare_context()
+  ├─ ContextPort::load_injectable() + compress_for_session()（实现：plugins/policy-context）
   │     ├─ ContextAssembler::assemble()：soul → rules+memories → history（含当前用户输入）
   │     ├─ DualLayerRetriever::retrieve()：L0+L1 RRF 融合检索
   │     └─ compress_if_needed()：compression_marker 后超阈值 → LLM 摘要压缩

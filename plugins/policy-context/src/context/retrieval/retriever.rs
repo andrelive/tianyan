@@ -8,13 +8,13 @@ use std::time::Instant;
 
 use tracing::{debug, info, instrument};
 
-use crate::observability::usage_stats::UsageStats;
+use tianyan::observability::usage_stats::UsageStats;
 
 use super::types::RetrievalResult;
-use crate::common::error::Result;
-use crate::common::types::{system_paths, ContentLevel, TianyanUri};
 use crate::context::compression::estimate_tokens;
-use crate::vfs::VirtualFileSystem;
+use tianyan::common::error::Result;
+use tianyan::common::types::{system_paths, ContentLevel, TianyanUri};
+use tianyan::vfs::VirtualFileSystem;
 
 use super::intent::{Intent, IntentAnalyzer};
 use super::loader::ContentLoadStrategy;
@@ -145,7 +145,7 @@ impl DualLayerRetriever {
         &self,
         query: &str,
         top_k: usize,
-        namespace: Option<crate::common::types::ContextNamespace>,
+        namespace: Option<tianyan::common::types::ContextNamespace>,
     ) -> Result<Vec<RetrievalResult>> {
         let results = self.vfs.search(query, top_k, namespace).await?;
 
@@ -229,7 +229,7 @@ impl DualLayerRetriever {
     /// 直用/旧概览）→ 原样返回（不加 L0，避免前缀膨胀——全文已含内容）。
     async fn compose_overview(&self, uri: &TianyanUri, l1: &str) -> String {
         // 非目录：直接返回（不读 L0——避免无谓读取）
-        if crate::vfs::parse_doc_index(l1).is_none() {
+        if tianyan::vfs::parse_doc_index(l1).is_none() {
             return l1.to_string();
         }
         let abstract_text = self
@@ -253,7 +253,7 @@ impl DualLayerRetriever {
         &self,
         query: &str,
         top_k: usize,
-        namespace: crate::common::types::ContextNamespace,
+        namespace: tianyan::common::types::ContextNamespace,
     ) -> Result<Vec<RetrievalResult>> {
         let started = Instant::now();
         // 直接按 namespace 搜索（不经意图分析）

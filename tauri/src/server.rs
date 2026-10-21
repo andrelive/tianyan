@@ -7,7 +7,8 @@ use std::sync::Arc;
 use tianyan::vfs::{StorageBackend, VectorStorage};
 use tianyan_server::{
     start_server_with_shutdown_signal_and_assembly, ApprovalGateFactory, AssemblyServices,
-    PluginServices, StorageBackendFactory, TaskFactory, ToolPluginFactory, VectorStorageFactory,
+    ContextFactory, PluginServices, StorageBackendFactory, TaskFactory, ToolPluginFactory,
+    VectorStorageFactory,
 };
 use tianyan_storage_sqlite::{LocalFileBackend, SqliteBackend};
 use tianyan_storage_vector::LanceDbVectorStore;
@@ -101,6 +102,18 @@ fn approval_factory() -> ApprovalGateFactory {
     )
 }
 
+/// 上下文策略工厂（`plugins/policy-context`，ADR-049 期 3-T2）。
+///
+/// 与 `app/src/main.rs::context_factory` **同形同源**：管线（注入顺序）/ 双层检索
+/// （意图分类 + RRF）/ 分层压缩搬出 core 后由装配层注入，server 库只认
+/// `Arc<dyn ContextPort>`。注入顺序、检索参数、压缩阈值与「窗口 ↔ 模型规格联动」
+/// 都住插件里（`tianyan_policy_context::pipeline`），这里只做类型擦除包装。
+fn context_factory() -> ContextFactory {
+    Arc::new(|services: &tianyan::context::ContextServices| {
+        tianyan_policy_context::pipeline(services)
+    })
+}
+
 /// 启动 Axum 服务
 ///
 /// 此函数在后台任务中启动 Axum HTTP 服务器，
@@ -158,7 +171,8 @@ pub async fn start_axum_server(
         .with_vector_factory(vector_factory())
         .with_storage_factory(storage_factory())
         .with_task_factory(task_factory())
-        .with_approval_factory(approval_factory());
+        .with_approval_factory(approval_factory())
+        .with_context_factory(context_factory());
     if let Err(e) = start_server_with_shutdown_signal_and_assembly(
         listener,
         tianyan_config,

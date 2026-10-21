@@ -8,15 +8,15 @@ use std::sync::Arc;
 use chrono;
 use tokio::sync::Mutex as TokioMutex;
 
-use crate::common::error::Result;
-use crate::common::types::InjectableContext;
-use crate::common::types::{
+use crate::context::compression::ContextCompressor;
+use crate::context::retrieval::DualLayerRetriever;
+use tianyan::common::error::Result;
+use tianyan::common::types::InjectableContext;
+use tianyan::common::types::{
     AgentPath, CacheUsage, ContentLevel, ContextNamespace, DetailedTokenUsage, Message,
     MessageRole, MessageTime, Part, PartTime, StructuredMessage, TokenUsage,
 };
-use crate::context::compression::ContextCompressor;
-use crate::context::retrieval::DualLayerRetriever;
-use crate::vfs::VirtualFileSystem;
+use tianyan::vfs::VirtualFileSystem;
 
 /// 上下文工程管线。
 #[derive(Clone)]
@@ -67,9 +67,11 @@ impl ContextPipeline {
         }
     }
 
-    /// 压缩器引用（crate 内测试断言压缩配置用）。
+    /// 压缩器引用（测试断言压缩配置用；ADR-049 期 3-T2 起为 `pub`——core 的单元测试在
+    /// `#[cfg(test)]` 下**同源包含**本文件，`pub(crate)` 在那边会成为「未使用的方法」
+    /// 而触发 dead_code 告警）。
     #[cfg(test)]
-    pub(crate) fn compressor(&self) -> &Arc<TokioMutex<ContextCompressor>> {
+    pub fn compressor(&self) -> &Arc<TokioMutex<ContextCompressor>> {
         &self.compressor
     }
 
@@ -369,6 +371,50 @@ impl ContextPipeline {
     }
 }
 
+/// 内核视角的上下文端口（ADR-049 期 3-T2）。
+///
+/// 三个方法逐一委托给本类型的同名固有方法——契约切在**真正跨 crate 的那条线**上：
+/// 内核只问「该注入什么」「要不要压缩」「压缩点里是什么摘要」，而 prompt 模板、
+/// 阈值判定、检索策略、摘要包装格式全部留在本 crate（B 级，自由演进）。
+///
+/// **顺序契约仍在内核侧执行**（不经本实现）：`compress_for_session` 返回带
+/// `compression_marker` 的摘要消息后，只有**摘要落库成功**才允许
+/// `ws.reshape_after_compression()`（ADR-035 §2；判定点在 `agent_core.rs:807-818`）。
+/// 插件只负责产出压缩结果，不感知工作集，也不知道落库成不成功。
+#[async_trait::async_trait]
+impl tianyan::context::ContextPort for ContextPipeline {
+    async fn load_injectable(
+        &self,
+        query: &str,
+        working_directory: Option<&std::path::Path>,
+    ) -> Result<InjectableContext> {
+        ContextPipeline::load_injectable(self, query, working_directory).await
+    }
+
+    async fn compress_for_session(
+        &self,
+        messages: &[Message],
+        session_id: &str,
+        recent_input_tokens: usize,
+        force: bool,
+        existing_summary: Option<&str>,
+    ) -> Option<StructuredMessage> {
+        ContextPipeline::compress_for_session(
+            self,
+            messages,
+            session_id,
+            recent_input_tokens,
+            force,
+            existing_summary,
+        )
+        .await
+    }
+
+    fn extract_marker_summary(&self, marker: &StructuredMessage) -> Option<String> {
+        ContextPipeline::extract_marker_summary(marker)
+    }
+}
+
 /// 读取会话绑定工作目录下的 AGENTS.md（项目指令前缀）。
 ///
 /// 探测 AGENTS.md / agents.md（大小写兼容）；读取失败或不存在返回空串。
@@ -396,15 +442,17 @@ fn load_agents_md(dir: &std::path::Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_utils::MockVfs;
+    use tianyan::test_utils::MockVfs;
 
-    use crate::common::types::{ContentLevel, ContextNamespace, Message, SearchResult, TianyanUri};
     use crate::context::compression::CompressionConfig;
     use crate::context::retrieval::DualLayerRetriever;
-    use crate::model::types::{ChatChoice, ChatCompletionResponse};
-    use crate::model::ChatService;
-    use crate::test_utils::MockChatService;
-    use crate::vfs::{ContextEntry, VirtualFileSystem};
+    use tianyan::common::types::{
+        ContentLevel, ContextNamespace, Message, SearchResult, TianyanUri,
+    };
+    use tianyan::model::types::{ChatChoice, ChatCompletionResponse};
+    use tianyan::model::ChatService;
+    use tianyan::test_utils::MockChatService;
+    use tianyan::vfs::{ContextEntry, VirtualFileSystem};
 
     /// 创建返回指定响应文本的 mock ChatService。
     fn mock_chat(response: &str) -> Arc<dyn ChatService> {

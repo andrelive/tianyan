@@ -288,6 +288,12 @@ pub struct AppState {
     /// （`approval_mode` / 黑名单 / 白名单 / 总是询问）必须跟着**新配置**走，
     /// 不能沿用旧实例。`None` = 未装配（工具走「未装配直接放行」分支）。
     approval_factory: Option<crate::ApprovalGateFactory>,
+    /// 上下文策略工厂（ADR-049 期 3-T2：实现已出 core，`plugins/policy-context`）。
+    ///
+    /// 存下来供 [`Self::reload_agent`] 复用：配置热重载会重建 agent，注入顺序 /
+    /// 压缩窗口 / 检索参数必须跟着**新配置与新模型规格**走。`None` = 未装配
+    /// （`AgentBuilder` 用 `NullContextPort` 兜底 + 告警；`start_server*` 入口另有硬守卫）。
+    context_factory: Option<crate::ContextFactory>,
     usage_log: Arc<UsageLog>,
     /// 工作区快照管理器（配置了 working_directory 时启用）
     /// 工作区快照管理器（配置了 working_directory 时启用）。
@@ -367,6 +373,7 @@ impl AppState {
         vfs: Arc<VirtualFileSystemImpl>,
         database: Arc<Database>,
         approval_factory: Option<crate::ApprovalGateFactory>,
+        context_factory: Option<crate::ContextFactory>,
     ) -> TianyanResult<Self> {
         // VFS 技能管理器（技能 = VFS 方法论文档；列表/详情/执行 API 数据源）
         let skill_manager = Arc::new(SkillManager::new(vfs.clone()));
@@ -483,6 +490,23 @@ impl AppState {
                 notification_sink.clone(),
             )
         });
+        // 上下文策略（ADR-049 期 3-T2）：**实现已出 core**（`plugins/policy-context`），
+        // 组合根经 `ContextFactory` 建实例。能力集合在此组装：`usage_stats` 与
+        // `model_services.chat` 都是与 Agent **共享的同一份实例**（不重复建 HTTP
+        // 客户端池）；`chat_spec` 是压缩窗口的联动源（规格未知时 None，插件回退默认
+        // 窗口 128_000——缺省值判定住在插件里，属于压缩策略）。
+        // `None`（未装配）→ builder 用 `NullContextPort` 兜底 + `warn!`；
+        // `start_server*` 入口另有硬守卫（`has_context_factory`）。
+        let context_port = context_factory.as_ref().map(|factory| {
+            factory(&crate::ContextServices {
+                config: config.clone(),
+                vfs: vfs.clone() as Arc<dyn tianyan::vfs::VirtualFileSystem>,
+                usage_stats: usage_stats.clone(),
+                chat: model_services.chat.clone(),
+                chat_model: resolve_chat_model(&config),
+                chat_spec: Some(resolve_chat_model_spec(&config)),
+            })
+        });
         let agent = AgentBuilderFactory::build_agent_or_wizard(
             &config,
             model_services.clone(),
@@ -505,6 +529,7 @@ impl AppState {
             task_event_tx.clone(),
             working_sets.clone(),
             approval_gate.clone(),
+            context_port,
         )
         .await?;
 
@@ -541,6 +566,7 @@ impl AppState {
             user_questions,
             plugin_factory: Arc::new(RwLock::new(None)),
             approval_factory,
+            context_factory,
             session_leases: crate::session_leases::SessionLeases::new(),
             shutdown_tx: Arc::new(Mutex::new(None)),
         })
@@ -711,6 +737,18 @@ impl AppState {
                 notification_sink.clone(),
             )
         });
+        // 上下文策略随新配置与**新模型规格**重建（ADR-049 期 3-T2）：压缩窗口联动
+        // `chat_spec.context_length`，模型切换后必须跟着变（否则窗口停留在旧模型）。
+        let context_port = self.context_factory.as_ref().map(|factory| {
+            factory(&crate::ContextServices {
+                config: config.clone(),
+                vfs: self.vfs.clone() as Arc<dyn tianyan::vfs::VirtualFileSystem>,
+                usage_stats: self.usage_stats.clone(),
+                chat: model_services.chat.clone(),
+                chat_model: resolve_chat_model(&config),
+                chat_spec: Some(resolve_chat_model_spec(&config)),
+            })
+        });
         let new_agent = AgentBuilderFactory::build_agent_or_wizard(
             &config,
             model_services.clone(),
@@ -737,6 +775,7 @@ impl AppState {
             // 必须看到旧 Agent 已物化的会话缓存）
             self.working_sets.clone(),
             approval_gate,
+            context_port,
         )
         .await?;
 

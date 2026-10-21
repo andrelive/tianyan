@@ -2,7 +2,7 @@
 //!
 //! 基于相关性分数的内容加载策略（ADR-001 修订 2026-09-22：**L2 不再自动加载**）。
 
-use crate::common::types::ContentLevel;
+use tianyan::common::types::ContentLevel;
 
 /// 基于相关性分数的内容加载策略。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -45,7 +45,7 @@ impl ContentLoadStrategy {
 /// - 非目录（全文直用/旧概览）→ 原样返回（**不前置简介**，避免前缀膨胀
 ///   ——全文已含内容）。
 pub(crate) fn compose_overview_parts(abstract_text: &str, l1: &str) -> String {
-    let Some(index) = crate::vfs::parse_doc_index(l1) else {
+    let Some(index) = tianyan::vfs::parse_doc_index(l1) else {
         return l1.to_string();
     };
     let mut out = String::new();
@@ -53,7 +53,7 @@ pub(crate) fn compose_overview_parts(abstract_text: &str, l1: &str) -> String {
         out.push_str(abstract_text.trim());
         out.push_str("\n\n");
     }
-    out.push_str(&crate::vfs::render_doc_index(&index));
+    out.push_str(&tianyan::vfs::render_doc_index(&index));
     out
 }
 

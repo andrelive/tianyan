@@ -27,7 +27,7 @@ Core 是天演的核心库，提供 AI Agent 的全部基础能力。4 crate wor
 | `agent` | Agent 协调器 + AgentLoop 迭代循环 + 会话状态；**统一循环框架（ADR-030）**：主 agent 与子代理同构（`TurnPolicy` 配置），子代理用流式路径 + 消息落库不索引 FTS（ADR-031：消息不再广播，chat_stream 带 session_id=task_id 路由）；ToolRegistry 工具执行走可插拔管线（`tool_registry/pipeline.rs`：pre-execute 监听器 / 单调守卫 / post-execute 监听器）+ 内置可观测性监听器（`tool_registry/observability.rs`） | coordinator.rs, builder.rs, session_state.rs, loop.rs, tool_registry/（含 pipeline.rs、observability.rs）, tools.rs, types.rs | ✅ 已集成 |
 | `common` | 通用类型（按领域拆分）、错误处理、日志配置、token 估算 | error.rs, logging.rs, token_estimator.rs, types/ | ✅ 已集成 |
 | `config` | 配置管理（TOML + 环境变量 + 向导） | mod.rs, wizard.rs, validation.rs, agent.rs, model.rs | ✅ 已集成 |
-| `context` | 上下文工程（检索 + 压缩 + 管线 + 组装） | pipeline.rs, retrieval/, compression/, assembler.rs | ✅ 已集成 |
+| `context` | 上下文工程**契约 + 组装机制**（策略实现已迁 `plugins/policy-context`，ADR-049 期 3-T2） | assembler.rs, port.rs, assembly.rs（插件侧 pipeline.rs, retrieval/, compression/） | ✅ 已集成 |
 | `executor` | 工具执行支撑（Action、审批**门控契约**、LLM-as-Judge、验证门控）+ 编程助手执行原语（内容匹配编辑、patch、文件浏览、搜索、符号、仓库地图、测试发现）。审批**实现**已迁 `plugins/policy-approval`（ADR-049 期 3-T1） | actions.rs, security.rs, command.rs, output_parse.rs, approval/, types.rs, judge.rs, verification.rs, truncate.rs, edit.rs, patch.rs, fs.rs, search.rs, symbols.rs, project.rs, test_discovery.rs | ✅ 正常使用 |
 | `snapshot` | 工作区快照（回退/撤销回退；gzip 压缩 + GC + similar diff） | mod.rs | ✅ 正常使用 |
 | `knowledge` | 知识库管理（解析、图像、导入） | parser.rs, image/, types.rs, ingestor/ | ✅ 已集成（Server 层通过 KnowledgeIngestor 真实处理导入与检索） |
@@ -209,19 +209,29 @@ Core 是天演的核心库，提供 AI Agent 的全部基础能力。4 crate wor
 
 ### 1.8 context 子模块
 
-**职责**：上下文工程系统，包括双层检索、对话压缩、统一上下文管线和消息组装。
+**职责**：上下文工程。**ADR-049 期 3-T2 起一分为二**：组装机制留 core，策略实现搬进
+`plugins/policy-context`（crate `tianyan-policy-context`）——改 prompt 模板 / 压缩阈值 /
+检索参数 / 意图分类关键词不再重编内核（D7「按变化原因切」；普查推翻了「`context` 是干净策略簇」
+这条前提，`assembler.rs` 是 K1 机制，见 [ADR-049](architecture/decisions/049-microkernel-plugin-boundaries.md)）。
 
-**子模块组织**：
-- `context/retrieval/` — 意图分析、双层向量检索（DualLayerRetriever）、内容加载（ContentLoadStrategy）（检索轨迹已于 ADR-025 移除）
-- `context/compression/` — 对话压缩（ContextCompressor）；`TokenEstimator` / `estimate_tokens` 定义于 `common/token_estimator.rs`，此处 re-export（全系统唯一估算入口）
-- `context/pipeline.rs` — `ContextPipeline`，统一上下文管线（规则注入 → 检索 → 压缩）
-- `context/assembler.rs` — `ContextAssembler`，纯函数：存储层 `StructuredMessage` → 传输层 `Message`
+**core 侧（`core/src/context/`）**：
+- `context/assembler.rs` — `ContextAssembler`，纯函数：存储层 `StructuredMessage` → 传输层 `Message`（K1 组装机制，ADR-043 工具对规范化 + 前缀零漂移）
+- `context/port.rs` — `ContextPort`（3 方法 seam：`load_injectable` / `compress_for_session` / `extract_marker_summary`）+ `NullContextPort`（未装配兜底：空可注入上下文 + 永不压缩）
+- `context/assembly.rs` — `ContextServices`（装配能力集合：配置快照 / VFS / 统计 / 摘要模型客户端 / 模型名 / 模型规格）
+
+**插件侧（`plugins/policy-context/src/context/`，模块路径形状与 core 一致）**：
+- `retrieval/` — 意图分析、双层向量检索（DualLayerRetriever）、内容加载（ContentLoadStrategy）（检索轨迹已于 ADR-025 移除）
+- `compression/` — 对话压缩（ContextCompressor）；`TokenEstimator` / `estimate_tokens` 定义于 core 的 `common/token_estimator.rs`，此处 re-export（全系统唯一估算入口）
+- `pipeline.rs` — `ContextPipeline`，统一上下文管线（规则注入 → 检索 → 压缩）+ `impl ContextPort`
+- 装配入口 `tianyan_policy_context::pipeline(&ContextServices)`（把「压缩窗口 ↔ 模型规格联动」等构造参数收在插件里，server 库只递能力集合）
 
 **核心类型**：
 
 | 类型 | 说明 |
 |------|------|
-| `ContextPipeline` | 统一上下文管线，封装检索→规则注入→压缩的完整流程 |
+| `ContextPort`（core） | 上下文 seam：加载可注入上下文 / 会话压缩 / 压缩点摘要提取（3 方法，逐个有调用点证据） |
+| `ContextServices`（core） | 上下文装配能力集合（`ContextFactory` 的入参） |
+| `ContextPipeline`（插件） | 统一上下文管线，封装检索→规则注入→压缩的完整流程；`impl ContextPort` |
 | `ContextCompressor` | 对话压缩器，保留最近消息 + 分层压缩策略 |
 | `CompressionConfig` | 压缩配置（preserve_recent_messages 默认 6） |
 | `CompressionResult` | 压缩结果（含 `summary_usage`——生成摘要的 LLM 请求真实 token 用量） |
@@ -313,7 +323,7 @@ soul → rules+memories → history(from compression_marker，含当前用户输
 |------|------|------|
 | agent | ✅ 完整集成 | Agent、AgentLoop、ToolRegistry、SessionState、ContextPipeline 全部集成 |
 | model | ✅ 完整集成 | ModelServices + AsyncOpenAIClient 已集成；原 ModelRouter 已移除 |
-| context | ✅ 完整集成 | ContextPipeline + DualLayerRetriever + ContextAssembler 在 Agent 中完整集成 |
+| context | ✅ 完整集成 | `ContextAssembler`（core）+ `ContextPort` 端口；`ContextPipeline` / `DualLayerRetriever` 在 `plugins/policy-context`，经 `ContextFactory` 注入（未装配 → `NullContextPort` + 启动期硬守卫） |
 | skills | ✅ 完整集成 | 含 GEPA 进化引擎，通过 call_skill 工具桥接 |
 | vfs | ✅ 完整集成 | VirtualFileSystemImpl + `StorageBackend` / `VectorStorage` 契约（SQLite·本地文件实现在 `plugins/storage-sqlite`、LanceDB 在 `plugins/storage-vector`，均经装配层注入）；双层摘要索引 |
 | scheduler | ✅ 完整集成 | TaskScheduler（机制）+ 内置任务在 `plugins/task-builtin`（摘要 / GC / 快照 GC / 提醒 / 统计刷盘）+ 演化任务在 `plugins/task-evolution`（综述执行器实现在 server，经 `TaskServices` 注入） |

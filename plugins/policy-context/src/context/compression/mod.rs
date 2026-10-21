@@ -22,12 +22,12 @@
 
 use std::sync::Arc;
 
-use crate::common::error::Result;
-use crate::common::types::Message;
-use crate::common::types::TokenUsage;
-use crate::model::{ChatCompletionRequest, ChatService};
+use tianyan::common::error::Result;
+use tianyan::common::types::Message;
+use tianyan::common::types::TokenUsage;
+use tianyan::model::{ChatCompletionRequest, ChatService};
 
-pub use crate::common::token_estimator::{
+pub use tianyan::common::token_estimator::{
     estimate_tokens, EstimationDetails, MessageTokenEstimate, TokenEstimator,
 };
 
@@ -405,7 +405,7 @@ impl ContextCompressor {
                     return true;
                 }
                 // 保留用户消息
-                if msg.role == crate::common::types::MessageRole::User {
+                if msg.role == tianyan::common::types::MessageRole::User {
                     return true;
                 }
                 // 保留包含重要关键词的消息
@@ -510,9 +510,9 @@ impl std::fmt::Display for CompressionStatus {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::types::{ChatChoice, ChatCompletionResponse};
-    use crate::model::ChatService;
-    use crate::test_utils::MockChatService;
+    use tianyan::model::types::{ChatChoice, ChatCompletionResponse};
+    use tianyan::model::ChatService;
+    use tianyan::test_utils::MockChatService;
 
     /// 创建返回指定响应文本的 mock ChatService。
     fn mock_chat(response: &str) -> Arc<dyn ChatService> {

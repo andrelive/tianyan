@@ -56,7 +56,7 @@ core/src/
 ├── agent/       (coordinator, loop, session_state, tool_registry/, tools, types, builder)
 ├── common/      (error, logging, token_estimator, types/ 子模块，含 content_part.rs)
 ├── config/      (TOML 配置；LoggingConfig 自 common::logging re-export)
-├── context/     (pipeline, assembler, compression/, retrieval/)
+├── context/     (assembler + port/assembly 契约；管线/压缩/检索 → plugins/policy-context)
 ├── db/          (统一写入门面：Database 门面 + SqliteDb + stats/trace/execution/usage Repository；只依赖 common)
 ├── executor/    (工具执行：Action、审批、LLM-as-Judge、验证门控)
 ├── knowledge/   (parser, image/, ingestor/, types)
@@ -102,7 +102,7 @@ core/src/
           │  ┌──────────────────────────┐           │
           └──│          agent           │───────────┘
              │     AgentCoordinator     │
-             │  (ContextPipeline/       │
+             │  (ContextPort/           │
              │   AgentLoop/             │
              │   ToolRegistry)          │
              └────────────┬─────────────┘
@@ -119,7 +119,7 @@ core/src/
 **依赖方向说明**：
 - `common` → 所有模块的基础层（类型、错误、日志配置、token 估算），自洽无环（不依赖 config）
 - `model / vfs / session` → 中坚层，分别提供 LLM 服务、存储、会话管理
-- `context` → 依赖 vfs 和 model，提供检索+组装+压缩管线
+- `context` → 依赖 vfs 和 model，提供组装机制（`ContextAssembler`）+ 上下文端口契约（`ContextPort` / `ContextServices`）；检索+压缩管线在 `plugins/policy-context`（经 `ContextFactory` 注入）
 - `agent` → 协调者，聚合 context、model、session、vfs
 - `skills / scheduler` → 被 agent 调用，scheduler 独立运行后台任务
 
@@ -132,6 +132,7 @@ core/src/
   - 顶层：`agent` / `scheduler`（工具化装配，依赖领域层 + 基础类型）
 - ⬇️ 残留单向依赖（均非环，已接受）：`vfs→model`（`SummaryEngine` 摘要生成依赖 `ChatService`）
 - ⚠️ cfg(test) 测试工具环（`context↔test_utils`、`test_utils↔vfs`）：`test_utils` 是 `#[cfg(test)]` 专用模块，环只存在于测试编译，发布编译无环（测试 mock 的天然模式）
+- ⚠️ **测试期文件级耦合**（不是依赖边，`cargo tree` 看不见）：`core/src/context/mod.rs` 在 `#[cfg(test)]` 下用 `#[path]` **同源包含** `plugins/policy-context/src/context/**`（与 `vfs/backend/mod.rs` ← `storage-sqlite`、`executor/approval/mod.rs` ← `policy-approval` 同一手法）。改插件文件布局必须同步这些 `#[path]`，否则 core 单测直接编译失败——这条既是守卫也是负担
 
 ---
 
@@ -197,11 +198,11 @@ Agent::process_message()                  [core/src/agent/coordinator.rs]
     ├─ SessionStateManager::with_state() 获取/创建 SessionState
     ├─ SessionState::add_user_message()
     │
-    ├─ ContextPipeline::run()             [core/src/context/pipeline.rs]
+    ├─ ContextPort::load_injectable() + compress_for_session()  [plugins/policy-context]
     │     ├─ 加载 soul（首次缓存）
     │     ├─ 加载 learned rules（tianyan://agent/learned/）
     │     ├─ DualLayerRetriever::retrieve()（L0+L1 RRF 融合）
-    │     └─ ContextCompressor::compress_if_needed()
+    │     └─ ContextCompressor::compress_if_needed()          [plugins/policy-context]
     │
     ├─ AgentLoop::run()                   [core/src/agent/loop.rs]
     │     ├─ ChatCompletionRequest::new(model, messages)
@@ -349,17 +350,18 @@ TaskScheduler 触发
 |-------|---------|--------|--------|
 | `AgentCoordinator` | `core/src/agent/coordinator.rs` | `Agent` | `server/state.rs`, `server/api/chat/services.rs` |
 | `ChatService` | `core/src/model/traits.rs` | `AsyncOpenAIClient`（经 `LoggedService` 装饰） | `agent/coordinator.rs`, `agent/loop.rs` |
-| `EmbeddingService` | `core/src/model/traits.rs` | `AsyncOpenAIClient`（经 `LoggedEmbeddingService` 装饰） | `vfs/vfs_impl.rs`, `context/retrieval/` |
+| `EmbeddingService` | `core/src/model/traits.rs` | `AsyncOpenAIClient`（经 `LoggedEmbeddingService` 装饰） | `vfs/vfs_impl.rs`, `plugins/policy-context`（`context/retrieval/`） |
 | `VlmService` | `core/src/model/traits.rs` | `AsyncOpenAIClient`（经 `LoggedVlmService` 装饰） | `knowledge/image/` |
 | `ServiceDiscovery` | `core/src/model/traits.rs` | `AsyncOpenAIClient` | `server/state.rs`（健康检查） |
-| `VfsCore` | `core/src/vfs/traits.rs` | `VfsImpl` | `vfs/vfs_impl.rs`, `context/pipeline.rs` |
+| `VfsCore` | `core/src/vfs/traits.rs` | `VfsImpl` | `vfs/vfs_impl.rs`, `plugins/policy-context`（`context/pipeline.rs`） |
 | `ContentStore` | `core/src/vfs/traits.rs` | `VfsImpl` | `vfs/vfs_impl.rs`, `plugins/task-builtin/`, `plugins/task-evolution/` |
 | `EvolutionReviewExecutor` | `core/src/scheduler/evolution_executor.rs` | `AgentEvolutionExecutor`（`server/src/evolution_executor.rs`，经 `TaskServices.evolution_executor` 注入） | `plugins/task-evolution/` |
-| `VfsSearch` | `core/src/vfs/traits.rs` | `VfsImpl` | `context/retrieval/retriever.rs` |
+| `VfsSearch` | `core/src/vfs/traits.rs` | `VfsImpl` | `plugins/policy-context`（`context/retrieval/retriever.rs`） |
 | `VirtualFileSystem` | `core/src/vfs/traits.rs` | 实现 VfsCore+ContentStore+VfsSearch 的类型自动获得 | `server/state.rs`, `agent/coordinator.rs`（session/manager 已迁出 VFS，见 ADR-018） |
 | `StorageBackend` | `core/src/vfs/backend/mod.rs` | `SqliteBackend` / `LocalFileBackend`（`plugins/storage-sqlite`，装配层经 `StorageBackendFactory` 注入） | `vfs/vfs_impl.rs` |
-| `VectorStorage` | `core/src/vfs/vector/traits.rs` | `LanceDbVectorStore`（`plugins/storage-vector`，装配层经 `VectorStorageFactory` 注入） | `vfs/vfs_impl.rs`, `context/retrieval/` |
+| `VectorStorage` | `core/src/vfs/vector/traits.rs` | `LanceDbVectorStore`（`plugins/storage-vector`，装配层经 `VectorStorageFactory` 注入） | `vfs/vfs_impl.rs`, `plugins/policy-context`（`context/retrieval/`） |
 | `ApprovalGate` | `core/src/executor/approval/gate.rs` | `ApprovalWorkflow`（`plugins/policy-approval`，装配层经 `ApprovalGateFactory` 注入；**未装配 → `None`，工具走「未装配直接放行」+ 告警**） | `agent/tool_context.rs`（`ensure_approved`）、`agent/coordinator.rs`（`approval_status` / `respond_approval`）、`agent/tool_registry/mod.rs`（`confirm_pending_approval`） |
+| `ContextPort` | `core/src/context/port.rs` | `ContextPipeline`（`plugins/policy-context`，装配层经 `ContextFactory` 注入；**未装配 → `NullContextPort`（空注入 + 不压缩）+ 装配期告警，`start_server*` 另有启动期硬守卫**） | `agent/agent_core.rs`（`ensure_injectable` :478 / `maybe_compress_and_persist` :751 摘要提取 + :783 压缩） |
 | `SessionManager` | `core/src/session/manager.rs` | `PersistentSessionManager`（基于 `SessionStore`，ADR-018） | `server/state.rs`, `agent/coordinator.rs` |
 | `SkillManager` | `core/src/skills/manager.rs` | `SkillManager` | `server/state.rs`, `server/api/skills/`（VFS 技能发现/读取） |
 
@@ -443,7 +445,7 @@ SSE 事件（`server/src/api/chat/types.rs`，逐行 `data:` JSON），完整字
 | L1 Overview | ~2K | `overview_vector` | 内容导航、重排序 |
 | L2 Detail | 无限制 | — | 完整内容，按需加载 |
 
-**模块影响**：`context/retrieval/` 依赖 `vfs::VfsSearch` 做双层检索；`plugins/task-builtin/src/summary_task.rs`（ADR-049 序 5a 从 core 迁出，逻辑未变）定时生成 L0/L1 摘要（短内容判断用 `common::token_estimator::estimate_tokens`，非字节数）。`SummaryEngine` 构造仅依赖 `model::ChatService`（2 参数），构成 vfs→model 的残留单向依赖（非环，已接受）。
+**模块影响**：`plugins/policy-context` 的 `context/retrieval/` 依赖 `vfs::VfsSearch` 做双层检索；`plugins/task-builtin/src/summary_task.rs`（ADR-049 序 5a 从 core 迁出，逻辑未变）定时生成 L0/L1 摘要（短内容判断用 `common::token_estimator::estimate_tokens`，非字节数）。`SummaryEngine` 构造仅依赖 `model::ChatService`（2 参数），构成 vfs→model 的残留单向依赖（非环，已接受）。
 
 ### 决策 2：StructuredMessage — 单一真相源
 
@@ -465,7 +467,7 @@ SSE 事件（`server/src/api/chat/types.rs`，逐行 `data:` JSON），完整字
 soul → rules+memories → history(from compression_marker，含当前用户输入)
 ```
 
-**模块影响**：soul 首次加载后缓存（`context/pipeline.rs` 中的 `cached_soul`）；compression_marker 由 `context/compression/` 模块管理；顺序不可变更以保证 LLM 前缀缓存命中率。
+**模块影响**：soul 首次加载后缓存（`plugins/policy-context` 的 `context/pipeline.rs` 中 `cached_soul`）；compression_marker 由插件 `context/compression/` 管理；**组装顺序在内核**（`context/assembler.rs` 是 K1 机制，ADR-049 期 3-T2 特意留 core），不可变更以保证 LLM 前缀缓存命中率。
 
 ### 决策 5：依赖环消除与共享基础设施归属（ADR-007）
 
@@ -473,7 +475,7 @@ soul → rules+memories → history(from compression_marker，含当前用户输
 
 - `SqliteDb` → `db/sqlite_db.rs`（ADR-020 统一写入门面：全系统唯一 SQLite 连接归属 `db` 层，vfs/observability 经 `db::Database` 门面访问；`vfs/backend/sqlite_db.rs` 保留 re-export 兼容）
 - `LoggingConfig` → `common/logging.rs`（`config::LoggingConfig` re-export 仍可用）
-- `TokenEstimator`/`estimate_tokens` → `common/token_estimator.rs`（全系统唯一估算入口；`context::compression` re-export）
+- `TokenEstimator`/`estimate_tokens` → `common/token_estimator.rs`（全系统唯一估算入口；插件 `context::compression` re-export）
 
 **模块影响**：3 个依赖环（vfs→observability、context↔observability、common↔config）全部消除；残留单向依赖 `observability→vfs`、`observability→common`、`vfs→model` 均为非环。详见 [ADR-007](architecture/decisions/007-core-dependency-cycle-removal.md)。
 

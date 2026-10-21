@@ -65,6 +65,15 @@ tianyan-task-evolution = { path = "../plugins/task-evolution" }
 # ——否则「黑名单命令被审批层复核」「审批状态接口返回真实配置」这些可观测行为在
 # 集成测试里测的就不是生产形态（与序 4 的「兜底后端」同一条纪律）。同样无循环。
 tianyan-policy-approval = { path = "../plugins/policy-approval" }
+# 上下文策略实现（ADR-049 期 3-T2）：集成测试的 `test_assembly()` 注入**真实**管线
+# ——否则 `create_app` 出来的 agent 会落到 core 的空直通兜底（无 system 前缀 + 不压缩），
+# 集成测试测的就不是生产形态（与序 4 的「兜底后端」同一条纪律）。无循环。
+tianyan-policy-context = { path = "../plugins/policy-context" }
+# core 的测试替身（`MockVfs` / `MockChatService`）作为**特性构建**打开：本库的插槽
+# 测试要构造 `ContextServices`（含 `Arc<dyn VirtualFileSystem>`），不打开就只能
+# 复制一份替身（两份实现同时漂移）。仅测试构建生效，`cargo tree -p tianyan-server`
+# 生产图里没有 mockall。
+tianyan-core = { path = "../core", features = ["test-utils"] }
 
 [[bench]]
 name = "api_benchmarks"

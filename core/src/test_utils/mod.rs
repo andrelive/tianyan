@@ -705,19 +705,16 @@ impl VfsSearch for TestVfs {
 
 impl VirtualFileSystem for TestVfs {}
 
-// ── create_test_retriever ────────────────────────────────────────────────
-
-use crate::context::retrieval::DualLayerRetriever;
-
-/// Create a DualLayerRetriever backed by in-memory vector storage for testing.
-pub async fn create_test_retriever() -> DualLayerRetriever {
-    let vector_storage = Arc::new(InMemoryVectorStorage::new());
-    vector_storage.initialize().await.unwrap();
-    let vfs: Arc<dyn VirtualFileSystem> =
-        Arc::new(TestVfs::new(vector_storage, Arc::new(MockEmbeddingService)));
-
-    DualLayerRetriever::new(vfs)
-}
+// ── create_test_retriever 已删除（ADR-049 期 3-T2）────────────────────────
+//
+// 它返回 `DualLayerRetriever`，而该类型已随上下文策略搬到
+// `plugins/policy-context`——`test-utils` 是**特性构建**（不是 `cfg(test)`），
+// 拿不到 core 测试期的同源包含模块，core 也不能反向依赖插件。
+//
+// 删除依据：全仓**零调用者**（`git grep create_test_retriever` 只命中它自身与
+// `retriever_tests.rs` 里的同名局部 helper，后者自带脚手架、与此函数无关）。
+// 需要这条脚手架的插件测试请在自己的 crate 里用 `tianyan::test_utils::{TestVfs,
+// InMemoryVectorStorage, MockEmbeddingService}` 自行组装（两者仍是公开替身）。
 
 // ── search_fused 行为锁定 ────────────────────────────────────────────────
 

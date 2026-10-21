@@ -29,13 +29,18 @@
 //! 期 3-T1 扩第五插槽：**审批策略**（风险定级 / 自动规则 / 模式短路 / 人工审批挂起 /
 //! 审计）搬进 `plugins/policy-approval`，本包把插件的 `gate()` 包成
 //! `ApprovalGateFactory` 注入——server 库只认 `Arc<dyn ApprovalGate>`，不认识审批策略。
+//!
+//! 期 3-T2 扩第六插槽：**上下文策略**（注入管线 / 双层检索 RRF / 意图分类 / 分层压缩）
+//! 搬进 `plugins/policy-context`，本包把插件的 `pipeline()` 包成 `ContextFactory` 注入
+//! ——server 库只认 `Arc<dyn ContextPort>`，不认识上下文策略。这是期 3 的主体收益：
+//! 改 prompt 模板 / 压缩阈值 / 检索参数不再重编内核与通道层。
 
 use std::sync::Arc;
 
 use tianyan::vfs::{StorageBackend, VectorStorage};
 use tianyan_server::{
-    start_server_with_assembly, ApprovalGateFactory, AssemblyServices, StorageBackendFactory,
-    TaskFactory, ToolPluginFactory, VectorStorageFactory,
+    start_server_with_assembly, ApprovalGateFactory, AssemblyServices, ContextFactory,
+    StorageBackendFactory, TaskFactory, ToolPluginFactory, VectorStorageFactory,
 };
 use tianyan_storage_sqlite::{LocalFileBackend, SqliteBackend};
 use tianyan_storage_vector::LanceDbVectorStore;
@@ -147,7 +152,22 @@ fn approval_factory() -> ApprovalGateFactory {
     )
 }
 
-/// 完整装配（插件工具清单 + 向量存储 + 结构化存储 + 内置任务 + 审批门控）。
+/// 上下文策略工厂（`plugins/policy-context`，ADR-049 期 3-T2）。
+///
+/// 同款类型擦除：server 库只认 [`ContextFactory`]（`Arc<dyn Fn>`），管线 / 压缩器 /
+/// 检索器只在本包出现。注入顺序、RRF 检索参数、压缩阈值与摘要提示词、意图分类关键词
+/// ——以及「压缩窗口 ↔ 模型规格联动」——全部住**插件**里（`tianyan_policy_context::pipeline`），
+/// 三处装配因此只各写一行包装，不会各抄一份构造参数。
+///
+/// 同步工厂：`ContextPipeline::new` / `ContextCompressor::new` / `DualLayerRetriever::new`
+/// 都只存字段，没有任何 IO。
+fn context_factory() -> ContextFactory {
+    Arc::new(|services: &tianyan::context::ContextServices| {
+        tianyan_policy_context::pipeline(services)
+    })
+}
+
+/// 完整装配（插件工具清单 + 向量存储 + 结构化存储 + 内置任务 + 审批门控 + 上下文策略）。
 fn assembly() -> AssemblyServices {
     AssemblyServices::new()
         .with_plugin_factory(plugin_factory())
@@ -155,6 +175,7 @@ fn assembly() -> AssemblyServices {
         .with_storage_factory(storage_factory())
         .with_task_factory(task_factory())
         .with_approval_factory(approval_factory())
+        .with_context_factory(context_factory())
 }
 
 #[tokio::main]

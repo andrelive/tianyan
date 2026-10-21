@@ -1,12 +1,12 @@
 //! 装配扩展点（ADR-049）：插件工具清单 + 向量存储实现 + 结构化存储实现 + 内置任务清单
-//! + 审批门控实现。
+//! + 审批门控实现 + 上下文策略实现。
 //!
 //! server 库**不认识任何具体插件 crate**：本模块只定义五根**类型擦除**的插槽
 //! （以及没有插槽时的降级实现），由装配层（`app` bin / `tauri` 桌面端）在启动
 //! 时注入。这样改一行插件实现只重编插件 + 装配包，server 库（13.4K 源码）不动
 //! ——闸门 A 的前提。
 //!
-//! 五个插槽：
+//! 六个插槽：
 //! - [`ToolPluginFactory`]（`crate::ToolPluginFactory`）：工具清单，**可重复调用**
 //!   （agent 会因配置热重载 / 模型切换反复重建，每次都要重新注入插件工具）。
 //! - [`VectorStorageFactory`]：向量存储实现（`tianyan-storage-vector` 的
@@ -23,6 +23,9 @@
 //! - [`ApprovalGateFactory`]：审批门控实现（`tianyan-policy-approval`，
 //!   ADR-049 期 3-T1）。**同步**：`ApprovalWorkflow::new` 只存字段、通知器也只是存
 //!   句柄；「`SecurityConfig` → 自动审批规则」的映射随之进插件（单一事实源）。
+//! - [`ContextFactory`]：上下文策略实现（`tianyan-policy-context`，ADR-049 期 3-T2）。
+//!   **同步**：管线/压缩器/检索器的构造都只存字段（无 IO）；「注入顺序 / 压缩阈值 /
+//!   摘要提示词 / 检索参数 / 压缩窗口与模型规格联动」的映射随之进插件（单一事实源）。
 
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -45,6 +48,10 @@ use crate::ToolPluginFactory;
 // 因此不能住在 server（否则任务插件必须依赖 server 库，违反 D2-1「插件只依赖
 // kernel-api」，也与 `ToolContext` 住在 core 的先例不一致）。
 pub use tianyan::scheduler::{TaskRegistration, TaskServices};
+// 上下文策略的**契约面**（ADR-049 期 3-T2）：与任务清单同一条纪律——定义在 core 的
+// `context::{port,assembly}`，此处 re-export 成插槽契约。插件、装配层、本库三方
+// 都要引用它，住在 server 会让上下文插件反过来依赖 server 库（破 D2-1）。
+pub use tianyan::context::{ContextPort, ContextServices};
 
 /// 向量存储工厂（**装配层注入**，期 2 序 3）。
 ///
@@ -128,11 +135,34 @@ pub type ApprovalGateFactory = Arc<
         + Sync,
 >;
 
+/// 上下文策略工厂（**装配层注入**，ADR-049 期 3-T2）。
+///
+/// `Arc<dyn Fn(&ContextServices) -> Arc<dyn ContextPort>>`：参数是装配层填好的
+/// **能力集合**（[`ContextServices`]：配置快照 + VFS + 统计 + 摘要模型客户端 +
+/// 模型名 + 模型规格），返回值是内核唯一认识的上下文端口。
+///
+/// 为什么把「怎么配」放进工厂而不是留在本库：
+/// - `context_window` 与模型规格的联动、`preserve_recent_messages = 6`、
+///   `summary_model` 的取值、`default_top_k` / `learned_rules_top_k` 的读取，迁移前
+///   散在 `AgentBuilder::build`（core）与 `server/src/agent_builder.rs`（本库）；
+/// - 现在它们是**压缩/检索策略**（B 级，随插件自由演进），因此映射集中在
+///   `tianyan_policy_context::pipeline`——三处装配各写一行包装，不会各抄一份
+///   （与 [`ApprovalGateFactory`] 同一手法）。
+///
+/// **同步**（与 [`StorageBackendFactory`] / [`TaskFactory`] / [`ApprovalGateFactory`]
+/// 同理）：`ContextPipeline::new` / `ContextCompressor::new` / `DualLayerRetriever::new`
+/// 都只存字段，没有任何 IO，做成 async 只会让调用方多 await 一个纯内存操作。
+///
+/// 用 `Arc<dyn Fn>` 而非 `Box<dyn FnOnce>`：配置热重载会重建 agent
+/// （`AppState::reload_agent`），压缩窗口必须跟着**新配置/新模型规格**走。
+pub type ContextFactory = Arc<dyn Fn(&ContextServices) -> Arc<dyn ContextPort> + Send + Sync>;
+
 /// 启装配所需的外部能力集合（`None` = 该扩展点未装配，走降级路径）。
 ///
-/// 目前五个插槽：插件工具清单（[`ToolPluginFactory`]）、向量存储
+/// 目前六个插槽：插件工具清单（[`ToolPluginFactory`]）、向量存储
 /// （[`VectorStorageFactory`]）、结构化存储（[`StorageBackendFactory`]）、
-/// 内置任务清单（[`TaskFactory`]）、审批门控（[`ApprovalGateFactory`]）。用
+/// 内置任务清单（[`TaskFactory`]）、审批门控（[`ApprovalGateFactory`]）、
+/// 上下文策略（[`ContextFactory`]）。用
 /// **一个结构**而不是给每个启动入口再加一个参数：入口变体的数量是组合爆炸
 /// （listener × 关闭信号 × 插件 × 向量 × 存储 × 任务），打包后只需「默认装配」与
 /// 「装配齐全」两类入口。
@@ -143,6 +173,7 @@ pub struct AssemblyServices {
     storage_factory: Option<StorageBackendFactory>,
     task_factory: Option<TaskFactory>,
     approval_factory: Option<ApprovalGateFactory>,
+    context_factory: Option<ContextFactory>,
 }
 
 impl AssemblyServices {
@@ -180,6 +211,12 @@ impl AssemblyServices {
         self
     }
 
+    /// 装配上下文策略工厂（`app` / `tauri` 用：`tianyan-policy-context`）。
+    pub fn with_context_factory(mut self, factory: ContextFactory) -> Self {
+        self.context_factory = Some(factory);
+        self
+    }
+
     /// 插件工具清单工厂（`None` = 不注入插件工具）。
     pub(crate) fn plugin_factory(&self) -> Option<ToolPluginFactory> {
         self.plugin_factory.clone()
@@ -198,6 +235,33 @@ impl AssemblyServices {
     /// 硬失败等于删入口。
     pub(crate) fn approval_factory(&self) -> Option<ApprovalGateFactory> {
         self.approval_factory.clone()
+    }
+
+    /// 上下文策略工厂（`None` = 不装配上下文策略）。
+    ///
+    /// 与其余插槽的 `pub(crate)` 访问器同处：工厂只由本库的组合根（`AppState::new` /
+    /// `reload_agent`）取用——装配层负责**注入**，不负责调用。
+    ///
+    /// **未装配时的降级语义**（`None` 继续往下传）：`AgentBuilder::build` 用 core 的
+    /// `NullContextPort` 兜底——`load_injectable` 返回空可注入上下文（模型**没有**
+    /// soul / 项目说明 / learned rules / memories 前缀）、`compress_for_session` 恒
+    /// `None`（上下文永不压缩），并 `warn!` 一条指路。
+    ///
+    /// 与审批降级（T1）的**差异**：`start_server*` 入口对上下文策略设了**启动期硬前置**
+    /// （[`Self::has_context_factory`]，见 `start_server_inner`）——审批缺失只是「少了
+    /// 一层策略复核」，而上下文缺失是「整个 system 前缀没了 + 上下文只增不减」，服务虽然
+    /// 起得来但行为已不成立。`create_app`（构造对象图，47 处 lib 单测/嵌入式）仍允许降级。
+    pub(crate) fn context_factory(&self) -> Option<ContextFactory> {
+        self.context_factory.clone()
+    }
+
+    /// 是否装配了上下文策略工厂（**启动服务的硬前置**，见 `start_server_inner`）。
+    ///
+    /// 与 [`Self::has_storage_factory`] 同一手法：`create_app`（测试/嵌入式构造对象图）
+    /// 允许空直通兜底，`start_server*`（真跑服务）必须拒绝——两条路径严格度不同，
+    /// 判定点因此必须能被调用方分别选用。
+    pub(crate) fn has_context_factory(&self) -> bool {
+        self.context_factory.is_some()
     }
 
     /// 是否装配了结构化存储工厂（**启动服务的硬前置**，见 `start_server_inner`）。
@@ -387,7 +451,11 @@ impl VectorStorage for NoopVectorStorage {
 /// 它服务于 `create_app` / `start_server*` 这组**不带装配**的入口（测试与嵌入式，
 /// 见 [`AssemblyServices::storage_backend`]）。**没有任何持久化承诺**：进程退出即
 /// 全部消失——这不是缺陷而是刻意的（写 `error!` 留证据，不静默丢数据）。
-struct EphemeralStorageBackend {
+///
+/// `pub(crate)` 只为**本库的启动守卫测试**：`lib.rs::tests` 要构造「已装配存储、未装配
+/// 上下文策略」的装配来锁住第二道守卫，而它不需要一个真的落盘后端（守卫在 `create_app`
+/// 之前就返回了）。不对外暴露（`pub(crate)`，`tianyan_server` 的公开面仍然只有工厂类型）。
+pub(crate) struct EphemeralStorageBackend {
     /// 键 = `uri.to_string()`（与 `vfs_entries` 主键同口径）。
     entries: tokio::sync::RwLock<std::collections::HashMap<String, ContextEntry>>,
     /// 首次「本应落盘」的写入时告警一次（写入是热路径，不能刷屏）。
@@ -395,7 +463,8 @@ struct EphemeralStorageBackend {
 }
 
 impl EphemeralStorageBackend {
-    fn new() -> Self {
+    /// 构造空的进程内存后端（语义见类型文档）。
+    pub(crate) fn new() -> Self {
         Self {
             entries: tokio::sync::RwLock::new(std::collections::HashMap::new()),
             write_warned: AtomicBool::new(false),
@@ -1053,5 +1122,113 @@ mod tests {
             .await
             .expect("桩不该失败");
         assert_eq!(resp.approved_by, "stub", "应使用注入的实例");
+    }
+
+    // ── 上下文策略插槽（ADR-049 期 3-T2）────────────────────────────────
+
+    /// 只用于装配测试的上下文端口桩（本库的插槽测试只关心「工厂是否被使用」）。
+    struct StubContextPort {
+        /// 判别标记：装配层注入的是哪个实例（与「未装配」区分）。
+        marker: &'static str,
+    }
+
+    #[async_trait]
+    impl ContextPort for StubContextPort {
+        async fn load_injectable(
+            &self,
+            _query: &str,
+            _working_directory: Option<&std::path::Path>,
+        ) -> tianyan::Result<tianyan::common::types::InjectableContext> {
+            Ok(tianyan::common::types::InjectableContext::new())
+        }
+
+        async fn compress_for_session(
+            &self,
+            _messages: &[tianyan::Message],
+            _session_id: &str,
+            _recent_input_tokens: usize,
+            _force: bool,
+            _existing_summary: Option<&str>,
+        ) -> Option<tianyan::common::types::StructuredMessage> {
+            None
+        }
+
+        fn extract_marker_summary(
+            &self,
+            _marker: &tianyan::common::types::StructuredMessage,
+        ) -> Option<String> {
+            Some(self.marker.to_string())
+        }
+    }
+
+    /// 构造上下文装配能力集合（VFS / 模型服务 / 统计全为最小替身）。
+    fn make_context_services() -> ContextServices {
+        let database = tianyan::db::Database::open_in_memory().expect("内存库");
+        ContextServices {
+            config: tianyan::config::TianyanConfig::default(),
+            vfs: Arc::new(tianyan::test_utils::MockVfs::new()),
+            usage_stats: tianyan::observability::usage_stats::UsageStats::new(database)
+                .expect("统计"),
+            chat: Arc::new(StubChatService),
+            chat_model: "stub-model".to_string(),
+            chat_spec: None,
+        }
+    }
+
+    /// 未装配工厂时插槽为空：`AgentBuilder` 因此拿到 `None`，落到 `NullContextPort`
+    /// （空可注入上下文 + 永不压缩）+ 启动期告警；`start_server*` 另有硬守卫。
+    ///
+    /// 判别力：若把 `AssemblyServices::default()` 改成「兜底造一个空直通端口」，本断言
+    /// 必红——那会让「未装配」与「装配了某个真实现」在日志上**无法区分**
+    /// （ADR-038 可见失败的反面）。
+    #[test]
+    fn test_default_assembly_has_no_context_factory() {
+        assert!(
+            AssemblyServices::new().context_factory().is_none(),
+            "未装配时插槽必须为空（降级由 AgentBuilder 的 None 分支承担）"
+        );
+        assert!(
+            !AssemblyServices::new().has_context_factory(),
+            "未装配时启动守卫必须能看见「缺件」"
+        );
+    }
+
+    /// 装配了工厂时**只用工厂**，且工厂可重复调用（配置热重载 / 模型切换会重建 agent，
+    /// 压缩窗口必须跟着新模型规格走）。
+    ///
+    /// 判别力：桩在 `extract_marker_summary` 里回 marker（工厂内的判别标记）——若插槽
+    /// 没被使用（例如 `context_factory()` 恒返回 `None`），`expect` 直接 panic。
+    #[tokio::test]
+    async fn test_context_factory_is_injected_and_repeatable() {
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counter = calls.clone();
+        let factory: ContextFactory = Arc::new(move |_services: &ContextServices| {
+            counter.fetch_add(1, Ordering::SeqCst);
+            Arc::new(StubContextPort { marker: "injected" }) as Arc<dyn ContextPort>
+        });
+        let assembly = AssemblyServices::new().with_context_factory(factory);
+        assert!(assembly.has_context_factory(), "装配后守卫必须放行");
+        let services = make_context_services();
+
+        let port = assembly.context_factory().expect("装配后必须有工厂")(&services);
+        let _ = assembly.context_factory().expect("装配后必须有工厂")(&services);
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            2,
+            "工厂应可重复调用（不是 FnOnce）"
+        );
+
+        // 端口身份探针：桩不看内容，任意消息即可。
+        let probe = tianyan::context::ContextAssembler::message_to_structured(
+            &tianyan::Message::user("probe"),
+            "s1",
+            None,
+            None,
+        );
+        assert_eq!(
+            port.extract_marker_summary(&probe).as_deref(),
+            Some("injected"),
+            "应使用注入的实例"
+        );
     }
 }

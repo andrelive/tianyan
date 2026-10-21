@@ -8,6 +8,16 @@
 > [ADR-018](decisions/018-session-authoritative-sqlite.md)（会话权威存储）、
 > [ADR-027](decisions/027-session-timeline-chain.md)（时序链：存储层完整链 / 组装层压缩点视图）、
 > [ADR-031](decisions/031-optimistic-render-user-message-id.md)（user 消息 id 回显）。
+>
+> **★ 代码位置（ADR-049 期 3-T2）**：管线 / 压缩 / 检索的实现已搬出 core →
+> `plugins/policy-context/src/context/`（crate `tianyan-policy-context`）。
+> 本文提到的 `context/pipeline.rs`、`context/compression/`、`context/retrieval/`
+> 现在都在**那个插件里**；只有 `context/assembler.rs`（K1 组装机制）与
+> `context/port.rs`（`ContextPort` 契约）仍在 `core/src/context/`。
+> 内核经 `Arc<dyn ContextPort>` 访问（3 个方法：
+> `load_injectable` / `compress_for_session` / `extract_marker_summary`）。
+> **行为语义（本文的全部机制陈述）在迁移中逐字未变**——变的只是代码住在哪个 crate，
+> 以及「改 prompt 模板 / 压缩阈值 / 检索参数」现在只重编插件。
 
 ---
 

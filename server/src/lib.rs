@@ -44,8 +44,8 @@ use api::create_api_router;
 use state::AppState;
 
 pub use assembly::{
-    ApprovalGateFactory, AssemblyServices, StorageBackendFactory, TaskFactory, TaskRegistration,
-    TaskServices, VectorStorageFactory,
+    ApprovalGateFactory, AssemblyServices, ContextFactory, ContextPort, ContextServices,
+    StorageBackendFactory, TaskFactory, TaskRegistration, TaskServices, VectorStorageFactory,
 };
 
 /// Server configuration
@@ -465,7 +465,18 @@ async fn create_app_inner(
     // **与 Agent 同一个**会话工作集（ADR-039 单写入口）与通知通道，而工作集是
     // `AppState::new` 内部创建的；在本函数里另建一份会让审批提示写进另一份状态。
     // 工厂同时存进 `AppState` 供 `reload_agent`（配置热重载）重建时复用。
-    let state = AppState::new(config, vfs, database, assembly.approval_factory()).await?;
+    //
+    // 上下文策略（ADR-049 期 3-T2）：同一个 `Option<Factory>` 也交给组合根——能力集合
+    // 里要用 `AppState` 内部创建的 `usage_stats` 与共享的模型服务，在本函数里组装会
+    // 多一份实例（统计分流）。
+    let state = AppState::new(
+        config,
+        vfs,
+        database,
+        assembly.approval_factory(),
+        assembly.context_factory(),
+    )
+    .await?;
 
     // 插件工具注入（ADR-049 期 1）：agent 就绪 → 取 ctx + services → 工厂构造
     // → 注册。失败语义：ctx 不可得时静默跳过（插件是可选增强，不是启动硬依赖）。
@@ -609,6 +620,23 @@ async fn start_server_inner(
         return Err(tianyan::TianyanError::invalid_input(
             "装配缺陷：启动服务器必须注入 StorageBackendFactory（结构化存储是启动必需项；\
              缺失会静默使用进程内存后端 → 内容不落盘、重启即丢）。生产装配请用 app/tauri \
+             的 assembly()；测试/嵌入式构造对象图请改用 create_app",
+        ));
+    }
+    // 启动服务的第二道硬前置：上下文策略必须由装配层注入。
+    //
+    // 缺失的后果与存储同级（甚至更显眼）：agent 会落到 `NullContextPort`——模型**没有**
+    // system 前缀（soul / 项目说明 / learned rules / memories 全无），且上下文**永不压缩**
+    // （会话链无限增长，直到上游 400）。服务起得来，但「天演」已经不是它自己。
+    // 与审批降级的差异（T1 只 `warn!`）就在这里：审批缺失少一层策略复核，
+    // 上下文缺失等于人设与记忆全丢。
+    //
+    // `create_app`（测试/嵌入式构造对象图）**不经过**此守卫，仍允许空直通兜底：那条路径
+    // 的实例生命周期由调用方自己负责，且 47 处单测依赖它。
+    if !assembly.has_context_factory() {
+        return Err(tianyan::TianyanError::invalid_input(
+            "装配缺陷：启动服务器必须注入 ContextFactory（上下文策略是启动必需项；\
+             缺失会让 agent 失去全部 system 前缀且上下文永不压缩）。生产装配请用 app/tauri \
              的 assembly()；测试/嵌入式构造对象图请改用 create_app",
         ));
     }
@@ -1029,6 +1057,39 @@ mod tests {
         );
         assert!(
             format!("{err}").contains("StorageBackendFactory"),
+            "错误信息须点明缺的是哪个工厂（否则装配缺陷难以定位）：{err}"
+        );
+    }
+
+    /// 启动服务的**第二道**硬前置：上下文策略工厂必须注入。
+    ///
+    /// 判别力：删掉 `start_server_inner` 的 `has_context_factory()` 守卫，本测试立刻变红
+    /// （会一路走到底：建库、建 VFS、建 agent、开始监听）。存储工厂在这里显式注入，
+    /// 让本测试只锁「上下文」这一道——两道守卫因此各有独立的红/绿判据。
+    #[tokio::test]
+    async fn test_start_server_requires_context_factory() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("绑定临时端口");
+        let storage_factory: StorageBackendFactory = Arc::new(|_config, _database| {
+            let backend: Arc<dyn tianyan::vfs::StorageBackend> =
+                Arc::new(assembly::EphemeralStorageBackend::new());
+            Ok(backend)
+        });
+        let err = start_server_inner(
+            listener,
+            tianyan::config::TianyanConfig::default(),
+            None,
+            AssemblyServices::new().with_storage_factory(storage_factory),
+        )
+        .await
+        .expect_err("未装配 ContextFactory 时启动必须失败");
+        assert!(
+            err.is_invalid_input(),
+            "错误类别应为 invalid_input（ADR-014 语义谓词，不做消息文本匹配）：{err}"
+        );
+        assert!(
+            format!("{err}").contains("ContextFactory"),
             "错误信息须点明缺的是哪个工厂（否则装配缺陷难以定位）：{err}"
         );
     }

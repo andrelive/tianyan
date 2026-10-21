@@ -2,8 +2,8 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::common::types::{ContentLevel, TianyanUri};
 use crate::context::compression::estimate_tokens;
+use tianyan::common::types::{ContentLevel, TianyanUri};
 
 /// 带有内容的检索结果。
 #[derive(Debug, Clone, Serialize, Deserialize)]

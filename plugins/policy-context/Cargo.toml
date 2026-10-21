@@ -1,0 +1,26 @@
+[package]
+name = "tianyan-policy-context"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "天演上下文策略插件：注入管线（soul/AGENTS.md/rules/memories）+ 双层检索（意图分类 + RRF）+ 分层压缩"
+
+[dependencies]
+tianyan = { path = "../../core", package = "tianyan-core" }
+async-trait.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+chrono.workspace = true
+serde.workspace = true
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+# 测试替身（`MockVfs` / `MockChatService`）与「真实 ContextPipeline」的构造需求：
+# core 的 `test_utils` 默认不编译，插件测试要复用它（否则只能复制一份替身 → 两份
+# 实现同时漂移）。用法与 `plugins/task-builtin` / `policy-approval` 同源。
+tianyan = { path = "../../core", package = "tianyan-core", features = ["test-utils"] }
+tempfile.workspace = true

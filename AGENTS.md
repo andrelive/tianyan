@@ -72,17 +72,22 @@ cargo test -p tianyan-core vfs::backend::local -- --nocapture  # 指定测试模
 | `plugins/task-builtin/` | `tianyan-task-builtin` | 插件：5 个内置定时任务实现（摘要生成 / 垃圾回收 / 统计刷盘 / 快照 GC / 主动提醒，含各自内联测试） |
 | `plugins/task-evolution/` | `tianyan-task-evolution` | 插件：自演化综述任务（ADR-017 三阶段编排，含 29 个内联测试）；契约 `EvolutionReviewExecutor` 留 core，实现 `AgentEvolutionExecutor` 留 server（ADR-049 序 5b） |
 | `plugins/policy-approval/` | `tianyan-policy-approval` | 插件：**审批策略**（`ApprovalWorkflow`：风险定级 / 自动规则引擎（Deny 优先）/ `ApprovalMode` 三态短路 / 「总是询问」命令 / 人工审批挂起通道 / 审计，含 23 个迁移测试）；契约 `ApprovalGate` 与全部领域类型留 core（期 3-T1） |
+| `plugins/policy-context/` | `tianyan-policy-context` | 插件：**上下文策略**（注入管线 / 双层检索 RRF / 意图分类 / 分层压缩，1,729 生产行 + 65 个迁移测试）；`assembler.rs` 留 core（K1 组装机制）——ADR-049 期 3-T2，**期 3 的主体收益** |
 
 **依赖铁律**（破一条拆包收益全部回吐）：插件只依赖 `core`（kernel-api）；插件之间零互赖；
 `core`/`server` 不认识任何插件 crate。装配经 `server/src/assembly.rs` 的类型擦除插槽
 （`ToolPluginFactory` / `VectorStorageFactory` / `StorageBackendFactory` / `TaskFactory` /
-`ApprovalGateFactory`；
+`ApprovalGateFactory` / `ContextFactory`；
 `TaskFactory` 由装配层把 `task-builtin::tasks()` 与 `task-evolution::tasks()` 拼接成一份
 清单——`splice(1..1, …)` 让演化任务紧跟 `summary_generation`，跨插件顺序只有装配清单知道；
 `ApprovalGateFactory` 把 `policy-approval::gate()` 包成 `Arc<dyn ApprovalGate>`——
 **未装配 = 不装配审批门控**，工具走「未装配直接放行」分支 + 启动期 `warn!`，
 比存储降级（`error!`，「重启即丢数据」）轻一个量级：默认配置本就是 `ApprovalMode::Autonomous`，
-且命令黑名单在 `SecurityPolicy` 守卫层另有拦截）。
+且命令黑名单在 `SecurityPolicy` 守卫层另有拦截）；
+`ContextFactory` 把 `policy-context::pipeline()` 包成 `Arc<dyn ContextPort>`——
+**未装配 = `NullContextPort`**（空可注入上下文 + 永不压缩）+ 启动期 `warn!`，
+而 `start_server*` 对它设了**启动期硬前置**（与结构化存储同手法：缺了上下文策略，
+agent 没有 system 前缀、上下文只增不减，服务起得来但行为已不成立）。
 任务的清单项与能力集合（`TaskRegistration` / `TaskServices`）**定义在 core**
 （`core/src/scheduler/task_assembly.rs`，server 侧 re-export）：若住在 server，任务插件
 就得依赖 server 库（破第一条铁律）。
@@ -164,7 +169,7 @@ Harness 工程 → [`docs/harness核心思路/harness-engineering-overview.md`](
 | `role_store` | `core/src/role_store.rs` | 角色 VFS 存储（独立存储层，依赖 vfs + roles） | — |
 | `vfs` | `core/src/vfs/` | **基础机制**：统一存储检索层（L0/L1/L2 + RRF 融合）；只留 `StorageBackend` 契约与 `UriMapper` 等机制，后端实现已出 core（ADR-049 序 4：`backend/sqlite.rs`、`backend/local.rs` 在 `plugins/storage-sqlite`；`backend/sqlite_db.rs` 仅是 `db::sqlite_db` 的兼容 re-export）；向量实现同样在 `plugins/storage-vector`（序 3） | — |
 | `agent` | `core/src/agent/` | Agent 协调器 + AgentLoop + ToolRegistry + 后台任务（ADR-026：委托只支持异步、双信号量排队 20+40、SQL 权威 + 3 天 TTL）；**统一循环框架（ADR-030）**：主 agent 与子代理同构（`TurnPolicy` 配置——工具执行器 Global/RoleFiltered、持久化 FTS 开关、max_turns 策略、请求工具集），收尾统一"无工具调用"（submit_result 降级为可选结果落盘工具，主 agent 用 task_status 查询）；子智能体会话消息落库不索引 FTS（`add_structured_message_no_fts`）+ 流式事件同一通道（ADR-031：消息不再广播，chat_stream 带 session_id=task_id 路由）；**流式转发统一（ADR-032）**：`stream_forward.rs` 单点（建通道即消费防死锁 + 字段注入），用户轮/唤醒轮/子代理共用，映射器与送达目标可插拔；**结构性取消（ADR-036）**：`cancel.rs` 等待原语（`wait_cancelled`/`cancellable`）覆盖请求在飞/流式 recv/组装/压缩等待盲区；**排他写事务（ADR-040）**：`working_set::with_session_exclusive`（取锁 → 锁内 `rebuild` 最新链 → 闭包）+ `rollback.rs`（`rollback_to` / `redo_to`——回退「先文件、后链」全或无，session handler 退化为薄壳）；工具执行走可插拔管线（`tool_registry/pipeline.rs`：pre-execute 监听器 / 单调守卫 / post-execute 监听器，DSH 吸收）+ 内置可观测性监听器（统计/Trace/GEPA/规则学习） | 所有工具操作通过 VFS |
-| `context` | `core/src/context/` | 上下文工程（检索 + 压缩 + 组装） | 检索仅通过 `DualLayerRetriever` |
+| `context` | `core/src/context/` | 上下文工程**契约 + 组装机制**：`ContextAssembler`（K1 组装，纯静态函数，ADR-043 工具对规范化 + 前缀零漂移）、`ContextPort`（3 方法 seam）、`ContextServices`（装配能力集合）、`NullContextPort`（未装配兜底）。**策略实现已出 core**（ADR-049 期 3-T2）：管线 / 压缩 / 双层检索 → `plugins/policy-context` | 检索仅通过 `DualLayerRetriever`（在 `tianyan_policy_context`） |
 | `knowledge` | `core/src/knowledge/` | 知识库导入管道 | ❌ **不建独立检索管道**，导入→VFS→SummaryEngine |
 | `skills` | `core/src/skills/` | 技能 = VFS 方法论文档（发现/读取 + GEPA 进化引擎 + 使用复审；无执行语义） | ❌ **不全量加载**，L0 发现→L2 按需 |
 | `session` | `core/src/session/` | `SessionStore`（SQLite 权威存储，ADR-018；SQL 收敛本模块，经 db 单连接）+ `PersistentSessionManager` + `SessionRecall`（FTS 回忆） | ⚠️ 例外：会话内容不经 VFS（ADR-018）；`tianyan://session/{id}` 仅作逻辑标识 |
@@ -189,7 +194,7 @@ Harness 工程 → [`docs/harness核心思路/harness-engineering-overview.md`](
 ## 常见陷阱
 
 - `tianyan` 和 `tianyan-core` 是同一个包（lib name: `tianyan`），导入用 `tianyan::...`
-- **`plugins/storage-sqlite/src/{sqlite,local}.rs` 与 `plugins/policy-approval/src/workflow.rs` 内禁止 `crate::…`**（只允许 `tianyan::…`）：core 单测以 `#[cfg(test)] #[path]` **同源包含**这些文件（dev-dep 会让 core 编译两份 → `StorageBackend`/`ApprovalGate` 等 trait 出现两个不兼容实例，实测 22 处 E0308/E0277）。写 `crate::` 时它解析到 core 而非插件，报错位置完全不相干。改文件布局须同步 `core/src/vfs/backend/mod.rs` 与 `core/src/executor/approval/mod.rs` 的 `#[path]`
+- **`plugins/storage-sqlite/src/{sqlite,local}.rs`、`plugins/policy-approval/src/workflow.rs`、`plugins/policy-context/src/context/**` 内禁止 `crate::…`**（只允许 `tianyan::…`；`policy-context` 额外允许 `crate::context::…`——它自己的模块树，详见其 crate 文档）：core 单测以 `#[cfg(test)] #[path]` **同源包含**这些文件（dev-dep 会让 core 编译两份 → `StorageBackend`/`ApprovalGate`/`ContextPort` 等 trait 出现两个不兼容实例，实测 22 处 E0308/E0277）。写 `crate::` 时它解析到 core 而非插件，报错位置完全不相干。改文件布局须同步 `core/src/vfs/backend/mod.rs`、`core/src/executor/approval/mod.rs` 与 `core/src/context/mod.rs` 的 `#[path]`
 - **插件测试要用 core 的测试替身（`MockVfs` / `MockChatService`）时开 `test-utils` 特性**：`core/src/test_utils` 与 `model::MockChatService` 的 `cfg` 是 `any(test, feature = "test-utils")`，插件侧写 `[dev-dependencies] tianyan = { path = "../../core", package = "tianyan-core", features = ["test-utils"] }`（`mockall` 因此是 core 的**可选**依赖，默认构建不含）。不这么做只能把替身复制进插件——两份实现同时漂移，测试随即失去意义（ADR-049 序 5a）
 - `ServiceDiscovery::is_available()` 是 `async` —— 别忘了 `await`
 - 配置文件固定为 `~/.tianyan/tianyan.toml`（`TIANYAN_CONFIG` 环境变量可覆盖，e2e 用）；数据目录由配置 `storage.data_dir` 决定（默认 `%LOCALAPPDATA%/tianyan`），两者分离、搬迁只动数据（ADR-023）

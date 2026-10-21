@@ -179,8 +179,20 @@ pub fn test_assembly() -> tianyan_server::AssemblyServices {
         },
     );
 
+    // 上下文策略（ADR-049 期 3-T2）：与 `app` / `tauri` 同一份插件实现。「注入顺序 /
+    // 检索参数 / 压缩阈值 / 压缩窗口 ↔ 模型规格联动」全在插件里
+    // （`tianyan_policy_context::pipeline`），这里只做类型擦除包装。
+    // **不注入**就会落到 core 的空直通兜底（无 system 前缀 + 不压缩），集成测试测的
+    // 就不是生产形态（与序 4「不要用 `AssemblyServices::default()` 驱动集成测试」
+    // 同一条纪律；`start_server*` 入口另有硬守卫，缺件根本起不来）。
+    let context_factory: tianyan_server::ContextFactory =
+        Arc::new(|services: &tianyan_server::ContextServices| {
+            tianyan_policy_context::pipeline(services)
+        });
+
     tianyan_server::AssemblyServices::new()
         .with_storage_factory(factory)
         .with_task_factory(task_factory)
         .with_approval_factory(approval_factory)
+        .with_context_factory(context_factory)
 }
