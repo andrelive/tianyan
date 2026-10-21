@@ -1,19 +1,22 @@
 use async_trait::async_trait;
 
-use crate::common::error::Result;
-use crate::model::traits::ServiceDiscovery;
-use crate::model::types::{ModelCapability, ModelInfo, ModelType};
+use tianyan::common::error::Result;
+use tianyan::model::types::{ModelCapability, ModelInfo, ModelType};
+use tianyan::model::ServiceDiscovery;
 
-use super::client::AsyncOpenAIClient;
+use crate::client::ChatClient;
 
 const MODEL_PREFIXES: &[&str] = &["gpt", "text-embedding", "claude", "deepseek", "qwen"];
 const DEFAULT_CHAT_CONTEXT_LENGTH: usize = 8192;
 
 #[async_trait]
-impl ServiceDiscovery for AsyncOpenAIClient {
+impl ServiceDiscovery for ChatClient {
     async fn list_models(&self) -> Result<Vec<ModelInfo>> {
         let response = self.client.models().list().await.map_err(|e| {
-            crate::common::error::TianyanError::Custom(format!("模型服务错误：列出模型失败：{}", e))
+            tianyan::common::error::TianyanError::Custom(format!(
+                "模型服务错误：列出模型失败：{}",
+                e
+            ))
         })?;
 
         let models: Vec<ModelInfo> = response

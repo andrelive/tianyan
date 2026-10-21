@@ -1,5 +1,5 @@
 //! 装配扩展点（ADR-049）：插件工具清单 + 向量存储实现 + 结构化存储实现 + 内置任务清单
-//! + 审批门控实现 + 上下文策略实现。
+//! + 审批门控实现 + 上下文策略实现 + 评审策略实现 + **provider 实现（聊天/视觉/嵌入）**。
 //!
 //! server 库**不认识任何具体插件 crate**：本模块只定义五根**类型擦除**的插槽
 //! （以及没有插槽时的降级实现），由装配层（`app` bin / `tauri` 桌面端）在启动
@@ -30,6 +30,12 @@
 //!   （`tianyan-policy-review`，ADR-049 期 3-T3）。**同步**：两个实现都只存句柄与字段；
 //!   「判定提示词 / `VERDICT:` 解析口径 / 评分标准 / 截断预算」随之进插件
 //!   （任务自审走 [`TaskReviewerFactory`]，技能复审读端口走 [`SkillReviewFactory`]）。
+//! - [`ProviderLlmFactory`] / [`ProviderEmbedFactory`]：provider 实现
+//!   （`tianyan-provider-llm` / `tianyan-provider-embed`，ADR-049 期 2 序 6）。**同步**：
+//!   客户端构造与三个服务的组装都只存字段（无 IO）；「按能力解析 provider/model」「每
+//!   provider 的客户端池」「方言驱动的请求构造」随之进插件（单一事实源）。产出
+//!   [`ProviderLlmServices`] / [`ProviderEmbedServices`]（**契约在 core**，因为插件与
+//!   装配层三方共用），本库再用它们拼 [`crate::ModelServices`]。
 
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -56,6 +62,39 @@ pub use tianyan::scheduler::{TaskRegistration, TaskServices};
 // `context::{port,assembly}`，此处 re-export 成插槽契约。插件、装配层、本库三方
 // 都要引用它，住在 server 会让上下文插件反过来依赖 server 库（破 D2-1）。
 pub use tianyan::context::{ContextPort, ContextServices};
+
+// provider 能力集合的**契约面**（ADR-049 期 2 序 6）：与任务清单 / 上下文策略同一条纪律
+// ——定义在 core 的 `model::assembly`，此处 re-export 成插槽契约。插件（生产）、装配层
+// （注入）与本库（拼容器）三方都要引用它，住在 server 会让 provider 插件反过来依赖
+// server 库（破 D2-1）。
+pub use tianyan::model::{ConnectionProbe, ProviderEmbedServices, ProviderLlmServices};
+
+/// 聊天 / 视觉 provider 工厂（**装配层注入**，ADR-049 期 2 序 6）。
+///
+/// `Arc<dyn Fn(&ModelsConfig) -> Result<ProviderLlmServices>>`：参数是模型配置（借用；
+/// 实现内部按需克隆），返回值是**能力集合**（聊天服务 + 视觉服务 + 两个模型名 + 每
+/// provider 的聊天客户端池 + 连通性探针）。
+///
+/// **同步**（与 [`StorageBackendFactory`] / [`TaskFactory`] / [`ApprovalGateFactory`]
+/// 同理，与 [`VectorStorageFactory`] 相反）：`AsyncOpenAIClient::from_provider` 只构造
+/// HTTP 客户端（不发请求），没有任何需要等待的 IO。
+///
+/// 用 `Arc<dyn Fn>` 而非 `Box<dyn FnOnce>`：配置热重载会重建模型服务
+/// （`AppState::reload_agent`），客户端池必须跟着**新配置**走。
+pub type ProviderLlmFactory = Arc<
+    dyn Fn(&tianyan::config::ModelsConfig) -> tianyan::Result<ProviderLlmServices> + Send + Sync,
+>;
+
+/// 嵌入 provider 工厂（**装配层注入**，ADR-049 期 2 序 6）。
+///
+/// `Arc<dyn Fn(&ModelsConfig) -> Result<ProviderEmbedServices>>`：返回值是能力集合
+/// （嵌入服务 + 模型名 + **用量上报槽位**）。槽位由插件创建、本库持有并在拿到
+/// `UsageLog` 后后置注入（嵌入不走 AgentLoop，其 token 用量必须单独入账）。
+///
+/// **同步**（同 [`ProviderLlmFactory`]）：构造只存字段与 HTTP 客户端。
+pub type ProviderEmbedFactory = Arc<
+    dyn Fn(&tianyan::config::ModelsConfig) -> tianyan::Result<ProviderEmbedServices> + Send + Sync,
+>;
 
 /// 向量存储工厂（**装配层注入**，期 2 序 3）。
 ///
@@ -211,11 +250,12 @@ pub type SkillReviewFactory = Arc<
 
 /// 启装配所需的外部能力集合（`None` = 该扩展点未装配，走降级路径）。
 ///
-/// 目前八个插槽：插件工具清单（[`ToolPluginFactory`]）、向量存储
+/// 目前十个插槽：插件工具清单（[`ToolPluginFactory`]）、向量存储
 /// （[`VectorStorageFactory`]）、结构化存储（[`StorageBackendFactory`]）、
 /// 内置任务清单（[`TaskFactory`]）、审批门控（[`ApprovalGateFactory`]）、
 /// 上下文策略（[`ContextFactory`]）、任务自审（[`TaskReviewerFactory`]）、
-/// 技能复审（[`SkillReviewFactory`]）。用
+/// 技能复审（[`SkillReviewFactory`]）、聊天/视觉 provider（[`ProviderLlmFactory`]）、
+/// 嵌入 provider（[`ProviderEmbedFactory`]）。用
 /// **一个结构**而不是给每个启动入口再加一个参数：入口变体的数量是组合爆炸
 /// （listener × 关闭信号 × 插件 × 向量 × 存储 × 任务），打包后只需「默认装配」与
 /// 「装配齐全」两类入口。
@@ -229,6 +269,8 @@ pub struct AssemblyServices {
     context_factory: Option<ContextFactory>,
     task_reviewer_factory: Option<TaskReviewerFactory>,
     skill_review_factory: Option<SkillReviewFactory>,
+    provider_llm_factory: Option<ProviderLlmFactory>,
+    provider_embed_factory: Option<ProviderEmbedFactory>,
 }
 
 impl AssemblyServices {
@@ -280,6 +322,18 @@ impl AssemblyServices {
     /// 装配技能使用复审工厂（`app` / `tauri` 用：`tianyan-policy-review`）。
     pub fn with_skill_review_factory(mut self, factory: SkillReviewFactory) -> Self {
         self.skill_review_factory = Some(factory);
+        self
+    }
+
+    /// 装配聊天 / 视觉 provider 工厂（`app` / `tauri` 用：`tianyan-provider-llm`）。
+    pub fn with_provider_llm_factory(mut self, factory: ProviderLlmFactory) -> Self {
+        self.provider_llm_factory = Some(factory);
+        self
+    }
+
+    /// 装配嵌入 provider 工厂（`app` / `tauri` 用：`tianyan-provider-embed`）。
+    pub fn with_provider_embed_factory(mut self, factory: ProviderEmbedFactory) -> Self {
+        self.provider_embed_factory = Some(factory);
         self
     }
 
@@ -341,6 +395,20 @@ impl AssemblyServices {
     /// 降级不改变可观测形状（判别力由插槽测试锁定：装配了就一定用工厂）。
     pub(crate) fn skill_review_factory(&self) -> Option<SkillReviewFactory> {
         self.skill_review_factory.clone()
+    }
+
+    /// 聊天 / 视觉 provider 工厂（`None` = 使用 core 的「未配置」降级服务 + 装配期告警）。
+    ///
+    /// 与其余插槽的 `pub(crate)` 访问器同处：工厂只由本库的组合根（`ModelServices::
+    /// from_factories`，经 `AppState::new` / `reload_agent` 调用）取用——装配层负责
+    /// **注入**，不负责调用。
+    pub(crate) fn provider_llm_factory(&self) -> Option<ProviderLlmFactory> {
+        self.provider_llm_factory.clone()
+    }
+
+    /// 嵌入 provider 工厂（`None` = 使用 core 的「未配置」降级服务 + 装配期告警）。
+    pub(crate) fn provider_embed_factory(&self) -> Option<ProviderEmbedFactory> {
+        self.provider_embed_factory.clone()
     }
 
     /// 是否装配了上下文策略工厂（**启动服务的硬前置**，见 `start_server_inner`）。
@@ -1465,5 +1533,199 @@ mod tests {
             .expect("桩不该失败")
             .expect("桩恒回 Some");
         assert_eq!(latest.reason, "injected", "应使用注入的复审实例");
+    }
+
+    // ── provider 插槽（ADR-049 期 2 序 6）────────────────────────────────
+
+    /// 只用于装配测试的连通性探针桩（`marker` 是判别标记）。
+    struct StubConnectionProbe {
+        marker: &'static str,
+    }
+
+    #[async_trait]
+    impl ConnectionProbe for StubConnectionProbe {
+        async fn probe(
+            &self,
+            _endpoint: &str,
+            _api_key: &str,
+            model: &str,
+        ) -> tianyan::Result<Vec<String>> {
+            Ok(vec![format!("{}::{model}", self.marker)])
+        }
+    }
+
+    /// 只用于装配测试的嵌入服务桩。
+    struct StubEmbeddingService;
+
+    #[async_trait]
+    impl tianyan::model::EmbeddingService for StubEmbeddingService {
+        async fn embed(
+            &self,
+            _request: tianyan::model::EmbeddingRequest,
+        ) -> tianyan::Result<tianyan::model::EmbeddingResponse> {
+            Err(tianyan::TianyanError::Custom(
+                "测试桩：不发起嵌入请求".to_string(),
+            ))
+        }
+
+        fn embedding_dimension(&self, _model: &str) -> usize {
+            8
+        }
+    }
+
+    /// 只用于装配测试的视觉服务桩。
+    struct StubVlmService;
+
+    #[async_trait]
+    impl tianyan::model::VlmService for StubVlmService {
+        async fn analyze_image(
+            &self,
+            _request: tianyan::model::VisionRequest,
+        ) -> tianyan::Result<tianyan::model::VisionResponse> {
+            Err(tianyan::TianyanError::Custom(
+                "测试桩：不发起视觉请求".to_string(),
+            ))
+        }
+    }
+
+    /// 装配了工厂时的能力集合（`marker` 是判别标记，用来证明用的是注入的实例）。
+    fn stub_llm_services(marker: &'static str) -> ProviderLlmServices {
+        let mut chat_clients: std::collections::HashMap<String, tianyan::model::SharedChatService> =
+            std::collections::HashMap::new();
+        chat_clients.insert(
+            "p1".to_string(),
+            Arc::new(StubChatService) as tianyan::model::SharedChatService,
+        );
+        ProviderLlmServices {
+            chat: Arc::new(StubChatService),
+            chat_model: format!("{marker}-chat"),
+            vision: Arc::new(StubVlmService),
+            vision_model: Some(format!("{marker}-vision")),
+            chat_clients,
+            probe: Some(Arc::new(StubConnectionProbe { marker })),
+        }
+    }
+
+    fn stub_embed_services(marker: &'static str) -> ProviderEmbedServices {
+        ProviderEmbedServices {
+            embedding: Arc::new(StubEmbeddingService),
+            embedding_model: Some(format!("{marker}-embed")),
+            usage_handle: Arc::new(std::sync::Mutex::new(None)),
+        }
+    }
+
+    /// 未装配工厂时：两个插槽都为空，容器落到 core 的「未配置」降级服务，探针为 `None`。
+    ///
+    /// 判别力：① 若 `*_factory()` 兜底造一份实现，第一条断言必红（「未装配」与「装配了
+    /// 真实现」就再也无法区分，ADR-038 可见失败的反面）；② 若降级服务改成「静默成功」，
+    /// 调用断言必红——那会让缺配置从「响亮失败」退化成「模型莫名其妙不说话」。
+    #[tokio::test]
+    async fn test_default_assembly_provider_services_are_degraded() {
+        assert!(
+            AssemblyServices::new().provider_llm_factory().is_none(),
+            "未装配时聊天/视觉插槽必须为空"
+        );
+        assert!(
+            AssemblyServices::new().provider_embed_factory().is_none(),
+            "未装配时嵌入插槽必须为空"
+        );
+
+        let config = tianyan::config::ModelsConfig::default();
+        let services = crate::model_services::ModelServices::from_factories(&config, None, None)
+            .expect("未装配不应报错（降级服务 + 告警）");
+        assert_eq!(services.chat_model, "", "未配置时聊天模型名为空串");
+        assert!(services.embedding_model.is_none());
+        assert!(services.vision_model.is_none());
+        assert!(services.chat_clients().is_empty(), "路由池为空");
+        assert!(
+            services.probe().is_none(),
+            "未装配时探针必须缺件（配置页据此报「连接测试不可用」而不是假装成功）"
+        );
+
+        let err = services
+            .chat
+            .chat_completion(tianyan::model::ChatCompletionRequest::new(
+                "m",
+                vec![tianyan::Message::user("hi")],
+            ))
+            .await
+            .expect_err("降级服务的调用必须报错");
+        assert!(
+            err.to_string().contains("应用未配置"),
+            "降级文案必须是前端向导的判定依据：{err}"
+        );
+    }
+
+    /// 装配了工厂时**只用工厂**，且工厂可重复调用（配置热重载会重建模型服务）。
+    ///
+    /// 判别力：桩把 `marker` 写进模型名与探针返回值——插槽没被使用（`*_factory()` 恒
+    /// `None`）时容器会是降级形态，四条断言全红。
+    #[test]
+    fn test_provider_factories_are_injected_and_repeatable() {
+        let llm_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let embed_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+
+        let llm_counter = llm_calls.clone();
+        let llm_factory: ProviderLlmFactory =
+            Arc::new(move |_config: &tianyan::config::ModelsConfig| {
+                llm_counter.fetch_add(1, Ordering::SeqCst);
+                Ok(stub_llm_services("injected"))
+            });
+        let embed_counter = embed_calls.clone();
+        let embed_factory: ProviderEmbedFactory =
+            Arc::new(move |_config: &tianyan::config::ModelsConfig| {
+                embed_counter.fetch_add(1, Ordering::SeqCst);
+                Ok(stub_embed_services("injected"))
+            });
+
+        let assembly = AssemblyServices::new()
+            .with_provider_llm_factory(llm_factory)
+            .with_provider_embed_factory(embed_factory);
+        let config = tianyan::config::ModelsConfig::default();
+
+        let llm_factory = assembly.provider_llm_factory().expect("装配后必须有工厂");
+        let embed_factory = assembly.provider_embed_factory().expect("装配后必须有工厂");
+        let first = crate::model_services::ModelServices::from_factories(
+            &config,
+            Some(&llm_factory),
+            Some(&embed_factory),
+        )
+        .expect("装配后应成功");
+        let _ = crate::model_services::ModelServices::from_factories(
+            &config,
+            Some(&llm_factory),
+            Some(&embed_factory),
+        )
+        .expect("装配后应成功");
+
+        assert_eq!(
+            llm_calls.load(Ordering::SeqCst),
+            2,
+            "工厂应可重复调用（不是 FnOnce）"
+        );
+        assert_eq!(embed_calls.load(Ordering::SeqCst), 2);
+        assert_eq!(first.chat_model, "injected-chat", "应使用注入的实例");
+        assert_eq!(first.embedding_model.as_deref(), Some("injected-embed"));
+        assert_eq!(first.vision_model.as_deref(), Some("injected-vision"));
+        assert!(
+            first.chat_clients().contains_key("p1"),
+            "路由池来自注入的能力集合"
+        );
+        assert!(first.probe().is_some(), "探针随能力集合一起注入");
+    }
+
+    /// 连通性探针契约把**临时**凭据原样递给实现（不是已配置的 provider 实例），
+    /// 且错误分类仍由消费端按语义谓词完成（ADR-014）。
+    ///
+    /// 判别力：若插槽层的 `probe()` 被改成「用已配置的 provider 造客户端」，本测试
+    /// 传进去的 endpoint / key 就会丢失，返回的模型名也不再带桩的判别标记。
+    #[tokio::test]
+    async fn test_connection_probe_contract_carries_ad_hoc_credentials() {
+        let probe: Arc<dyn ConnectionProbe> = Arc::new(StubConnectionProbe { marker: "probe" });
+        let models = probe
+            .probe("https://gw.example.com/v1", "sk-temp", "gpt-test")
+            .await
+            .expect("桩不该失败");
+        assert_eq!(models, vec!["probe::gpt-test".to_string()]);
     }
 }

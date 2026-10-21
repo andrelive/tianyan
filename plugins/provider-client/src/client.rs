@@ -1,9 +1,9 @@
 use async_openai::types::chat::FinishReason;
 use async_openai::{config::OpenAIConfig, Client};
 
-use crate::common::error::{Result, TianyanError};
-use crate::config::{ProviderConfig, ProviderDialect, ThinkingParam};
-use crate::model::retry::RetryPolicy;
+use tianyan::common::error::{Result, TianyanError};
+use tianyan::config::{ProviderConfig, ProviderDialect, ThinkingParam};
+use tianyan::model::retry::RetryPolicy;
 
 /// 基于 async-openai 的模型服务客户端。
 ///
@@ -11,26 +11,29 @@ use crate::model::retry::RetryPolicy;
 /// 模型选择由调用方通过 model 参数决定，客户端本身不持有模型信息。
 #[derive(Debug, Clone)]
 pub struct AsyncOpenAIClient {
-    pub(crate) service_name: String,
-    pub(crate) client: Client<OpenAIConfig>,
+    /// 提供商名称（`ProviderConfig.name`；日志与 `ServiceDiscovery::service_name` 用）。
+    pub service_name: String,
+    /// async-openai 的类型化客户端（仅 `ServiceDiscovery` 的模型目录路径使用；
+    /// 聊天 / 嵌入 / 视觉都走手写 reqwest 请求，以便携带 per-request 头与宽容解析）。
+    pub client: Client<OpenAIConfig>,
     /// 原始 HTTP 客户端（手写流式解析用：async-openai 0.34 不解析
     /// DeepSeek 思考模型的 `reasoning_content` 增量字段）。
-    pub(crate) http: reqwest::Client,
+    pub http: reqwest::Client,
     /// 提供商 base URL（如 `https://api.openai.com/v1`）。
-    pub(crate) base_url: String,
+    pub base_url: String,
     /// API Key（可能为空，如本地服务）。
-    pub(crate) api_key: String,
+    pub api_key: String,
     /// 额外请求头（ProviderConfig.headers）。
-    pub(crate) headers: std::collections::HashMap<String, String>,
+    pub headers: std::collections::HashMap<String, String>,
     /// 请求重试策略（指数退避 + 最大重试次数；内置全局默认，对全部 provider 生效）。
-    pub(crate) retry_policy: RetryPolicy,
+    pub retry_policy: RetryPolicy,
     /// 流式读取空闲超时：相邻两个 SSE 块之间的最长静默间隔。
     /// 语义为"空闲"而非"总时长"——长思维链生成可持续数分钟，总时长
     /// 限制会把活跃长流在中途掐断（0.2.3 会话静默中断根因之一）。
-    pub(crate) read_idle: std::time::Duration,
+    pub read_idle: std::time::Duration,
     /// 首 token 预算（ADR-044）：请求发出 → 首个字节的最长等待——覆盖大
     /// 上下文预填充与弱网首包；与 `read_idle`（块间空闲）独立。
-    pub(crate) first_token: std::time::Duration,
+    pub first_token: std::time::Duration,
     /// provider wire 方言（差异判定**单点**）：思考字段名 / 缓存命中字段 /
     /// 思考参数形态 / 嵌入 usage 形状。
     ///
@@ -38,16 +41,16 @@ pub struct AsyncOpenAIClient {
     /// 缓存；请求 / 响应路径上不再做任何判定（避免同一差异散落多处嗅探）。
     /// 其中字段名类差异发错时服务端静默丢弃（请求仍成功、只静默损失上下文），
     /// 故必须单点可配。
-    pub(crate) dialect: ProviderDialect,
+    pub dialect: ProviderDialect,
     /// 模型级思考参数形态覆盖（来自 `ModelEntry.thinking_param`）。
     ///
     /// 该差异是**模型级**的（同一 provider 下 Qwen 思考族与其它模型的参数形态
     /// 不同），无法只在 provider 级方言里表达；构造时收集一次，请求路径零判定。
-    pub(crate) model_thinking_params: std::collections::HashMap<String, ThinkingParam>,
+    pub model_thinking_params: std::collections::HashMap<String, ThinkingParam>,
     /// 动态请求头绑定（ADR-046）：构造时解析一次（header 名 → `HeaderName` +
     /// 受控变量源），请求路径零判定；变量无值（非会话请求）→ 注入点用
     /// `HeaderSource::NON_SESSION_FALLBACK` 兜底（网关可能要求该头必须存在）。
-    pub(crate) dynamic_headers: Vec<(reqwest::header::HeaderName, crate::config::HeaderSource)>,
+    pub dynamic_headers: Vec<(reqwest::header::HeaderName, tianyan::config::HeaderSource)>,
 }
 
 impl AsyncOpenAIClient {
@@ -72,7 +75,7 @@ impl AsyncOpenAIClient {
         let read_idle = std::time::Duration::from_secs(config.timeout);
         let first_token = std::time::Duration::from_secs(config.first_token_timeout);
         let http_client =
-            crate::common::http::build_http_client(crate::common::http::HttpClientSpec {
+            tianyan::common::http::build_http_client(tianyan::common::http::HttpClientSpec {
                 timeout: first_token.max(read_idle),
                 connect_timeout: std::time::Duration::from_secs(30),
                 // UA 单点（ADR-046）：字段 > headers 手工项 > 预置 > tianyan/{VERSION}；
@@ -93,7 +96,7 @@ impl AsyncOpenAIClient {
 
         // 动态请求头（ADR-046）：构造时解析一次（名 → HeaderName 校验 + 缓存），
         // 请求路径零判定；非法名在此 fail fast。
-        let dynamic_headers: Vec<(reqwest::header::HeaderName, crate::config::HeaderSource)> =
+        let dynamic_headers: Vec<(reqwest::header::HeaderName, tianyan::config::HeaderSource)> =
             config
                 .resolve_dynamic_headers()
                 .into_iter()
@@ -126,7 +129,7 @@ impl AsyncOpenAIClient {
     }
 
     /// 思考参数形态解析（**单点**）：模型级显式 > provider 方言（显式 > 模型名嗅探）。
-    pub(crate) fn thinking_param_for(&self, model: &str) -> ThinkingParam {
+    pub fn thinking_param_for(&self, model: &str) -> ThinkingParam {
         self.model_thinking_params
             .get(model)
             .copied()
@@ -162,7 +165,8 @@ impl AsyncOpenAIClient {
         &self.service_name
     }
 
-    pub(crate) fn finish_reason_str(reason: &FinishReason) -> &'static str {
+    /// `finish_reason` 枚举 → wire 字符串（与 OpenAI 规范的字段值逐字一致）。
+    pub fn finish_reason_str(reason: &FinishReason) -> &'static str {
         match reason {
             FinishReason::Stop => "stop",
             FinishReason::Length => "length",
@@ -176,7 +180,7 @@ impl AsyncOpenAIClient {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{ModelEntry, ProviderConfig, ThinkingField, ThinkingParam};
+    use tianyan::config::{ModelEntry, ProviderConfig, ThinkingField, ThinkingParam};
 
     fn provider(name: &str, endpoint: &str, api_key: Option<&str>) -> ProviderConfig {
         ProviderConfig {
@@ -355,20 +359,20 @@ mod tests {
                 .unwrap()
                 .dialect
                 .embedding_usage,
-            crate::config::EmbeddingUsageShape::PromptAndTotal,
+            tianyan::config::EmbeddingUsageShape::PromptAndTotal,
             "未显式声明时回落默认方言"
         );
 
-        config.dialect = Some(crate::config::DialectPreset::DashScope);
+        config.dialect = Some(tianyan::config::DialectPreset::DashScope);
         let client = AsyncOpenAIClient::from_provider(&config).unwrap();
         assert_eq!(
             client.dialect.embedding_usage,
-            crate::config::EmbeddingUsageShape::TotalOnly,
+            tianyan::config::EmbeddingUsageShape::TotalOnly,
             "显式 preset 必须生效"
         );
         assert_eq!(
             client.dialect.cache_field,
-            crate::config::CacheField::DashScopeTop
+            tianyan::config::CacheField::DashScopeTop
         );
     }
 }

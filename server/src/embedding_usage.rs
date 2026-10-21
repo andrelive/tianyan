@@ -54,7 +54,7 @@ pub fn resolve_embedding_provider(config: &tianyan::config::TianyanConfig) -> St
 
 /// 构造并注入嵌入用量 sink（失败只告警——嵌入照常工作，仅不入账）。
 pub fn attach_embedding_usage_sink(
-    services: &tianyan::model::ModelServices,
+    services: &crate::model_services::ModelServices,
     usage_log: Arc<UsageLog>,
     config: &tianyan::config::TianyanConfig,
 ) {

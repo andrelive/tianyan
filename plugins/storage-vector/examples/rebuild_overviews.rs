@@ -27,11 +27,14 @@ use tianyan::common::token_estimator::estimate_tokens;
 use tianyan::common::types::{system_paths, ContentLevel, ContextNamespace, TianyanUri};
 use tianyan::config::{ModelCapability, TianyanConfig};
 use tianyan::db::Database;
-use tianyan::model::ModelServices;
+// ADR-049 期 2 序 6：ModelServices 容器已搬到 server 装配层；运维脚本直接用 provider
+// 插件的能力集合（	ianyan-provider-embed / 	ianyan-provider-llm）——它们只依赖 core。
 use tianyan::vfs::{
     parse_doc_index, ContentStore, StorageBackend, SummaryEngine, SummaryService, VfsCore,
     VfsSearch, VirtualFileSystem, VirtualFileSystemBuilder, OVERVIEW_TOKEN_LIMIT,
 };
+use tianyan_provider_embed::services as embedding_services;
+use tianyan_provider_llm::services as llm_services;
 use tianyan_storage_sqlite::SqliteBackend;
 use tianyan_storage_vector::LanceDbVectorStore;
 
@@ -58,7 +61,8 @@ async fn run() -> Result<(), tianyan::TianyanError> {
     let database = Database::open(db_path)?;
     let storage: Arc<dyn StorageBackend> = Arc::new(SqliteBackend::new(database));
     let vector_storage = Arc::new(LanceDbVectorStore::new(&config.storage).await?);
-    let model_services = ModelServices::from_config(&config.models).await?;
+    let llm = llm_services(&config.models)?;
+    let embed = embedding_services(&config.models)?;
     let emb_model = config
         .models
         .resolve(ModelCapability::TextEmbedding)
@@ -68,14 +72,11 @@ async fn run() -> Result<(), tianyan::TianyanError> {
         .with_config(config.storage.clone())
         .with_storage(storage)
         .with_vector_storage(vector_storage)
-        .with_embedding_provider(model_services.embedding, emb_model)
+        .with_embedding_provider(embed.embedding, emb_model)
         .build()?;
     vfs.initialize().await?;
 
-    let engine = SummaryEngine::new(
-        model_services.chat.clone(),
-        model_services.chat_model.clone(),
-    );
+    let engine = SummaryEngine::new(llm.chat.clone(), llm.chat_model.clone());
 
     println!(
         "模式：{}",

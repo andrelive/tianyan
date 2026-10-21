@@ -7,8 +7,9 @@ use std::sync::Arc;
 use tianyan::vfs::{StorageBackend, VectorStorage};
 use tianyan_server::{
     start_server_with_shutdown_signal_and_assembly, ApprovalGateFactory, AssemblyServices,
-    ContextFactory, PluginServices, SkillReviewFactory, StorageBackendFactory, TaskFactory,
-    TaskReviewerFactory, ToolPluginFactory, VectorStorageFactory,
+    ContextFactory, PluginServices, ProviderEmbedFactory, ProviderLlmFactory, SkillReviewFactory,
+    StorageBackendFactory, TaskFactory, TaskReviewerFactory, ToolPluginFactory,
+    VectorStorageFactory,
 };
 use tianyan_storage_sqlite::{LocalFileBackend, SqliteBackend};
 use tianyan_storage_vector::LanceDbVectorStore;
@@ -139,6 +140,22 @@ fn skill_review_factory() -> SkillReviewFactory {
     )
 }
 
+/// 聊天 / 视觉 provider 工厂（`plugins/provider-llm`，ADR-049 期 2 序 6）。
+///
+/// 与 `app/src/main.rs::provider_llm_factory` **同形同源**：客户端构造、按能力解析、
+/// 每 provider 的聊天路由池与连通性探针都在插件里，server 库只认
+/// `Arc<dyn Fn(&ModelsConfig) -> Result<ProviderLlmServices>>`。
+fn provider_llm_factory() -> ProviderLlmFactory {
+    Arc::new(|config: &tianyan::config::ModelsConfig| tianyan_provider_llm::services(config))
+}
+
+/// 嵌入 provider 工厂（`plugins/provider-embed`，ADR-049 期 2 序 6）。
+///
+/// 与 `app/src/main.rs::provider_embed_factory` **同形同源**；产出里带用量上报槽位。
+fn provider_embed_factory() -> ProviderEmbedFactory {
+    Arc::new(|config: &tianyan::config::ModelsConfig| tianyan_provider_embed::services(config))
+}
+
 /// 启动 Axum 服务
 ///
 /// 此函数在后台任务中启动 Axum HTTP 服务器，
@@ -189,8 +206,9 @@ pub async fn start_axum_server(
             tools
         },
     );
-    // 完整装配（ADR-049 期 2 序 3/4/5a、期 3-T1/T2/T3）：
+    // 完整装配（ADR-049 期 2 序 3/4/5a/6、期 3-T1/T2/T3）：
     // 工具清单 + 向量存储 + 结构化存储 + 内置任务 + 审批门控 + 上下文策略 + 两个评审插槽
+    // + 聊天/视觉 provider + 嵌入 provider
     let assembly = AssemblyServices::new()
         .with_plugin_factory(plugin_factory)
         .with_vector_factory(vector_factory())
@@ -199,7 +217,9 @@ pub async fn start_axum_server(
         .with_approval_factory(approval_factory())
         .with_context_factory(context_factory())
         .with_task_reviewer_factory(task_reviewer_factory())
-        .with_skill_review_factory(skill_review_factory());
+        .with_skill_review_factory(skill_review_factory())
+        .with_provider_llm_factory(provider_llm_factory())
+        .with_provider_embed_factory(provider_embed_factory());
     if let Err(e) = start_server_with_shutdown_signal_and_assembly(
         listener,
         tianyan_config,

@@ -4,9 +4,9 @@
 **状态**: ✅ 已采纳（已实施）
 **影响范围**: 配置（`core/src/config/model.rs`，新增 `CacheField` / `ThinkingParam` /
 `EmbeddingUsageShape` / `DialectPreset` / `ProviderDialect`）、客户端
-（`core/src/model/provider/client.rs`，新增 `dialect` + `model_thinking_params` 缓存）、
-chat（`core/src/model/provider/chat.rs`，缓存字段与思考参数改读方言）、
-embedding（`core/src/model/provider/embedding.rs`，绕开库类型化 + 宽容解析）、
+（`plugins/provider-client/src/client.rs`，新增 `dialect` + `model_thinking_params` 缓存）、
+chat（`plugins/provider-llm/src/chat.rs`，缓存字段与思考参数改读方言）、
+embedding（`plugins/provider-embed/src/embedding.rs`，绕开库类型化 + 宽容解析）、
 配置示例（`config.example.toml`）
 
 ---

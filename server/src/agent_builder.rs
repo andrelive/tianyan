@@ -15,7 +15,6 @@ use tianyan::agent::DynamicToolExecutor;
 use tianyan::agent::{Agent, AgentBuilder, AgentCoordinator, AgentResponse, AgentState};
 use tianyan::config::{ModelCapability, TianyanConfig};
 use tianyan::db::Database;
-use tianyan::model::ModelServices;
 use tianyan::observability::execution_log::ExecutionLog;
 use tianyan::observability::usage_log::UsageLog;
 use tianyan::observability::usage_stats::UsageStats;
@@ -45,14 +44,10 @@ impl tianyan::agent::background::TaskEventSink for TaskEventBroadcaster {
     }
 }
 
+use crate::model_services::ModelServices;
 use crate::state::{
     build_knowledge_ingestor, resolve_chat_model, resolve_chat_model_spec, resolve_chat_provider,
 };
-
-/// 根据配置创建模型服务。
-pub async fn create_model_services(config: &TianyanConfig) -> TianyanResult<ModelServices> {
-    ModelServices::from_config(&config.models).await
-}
 
 /// Agent 构建工厂
 ///

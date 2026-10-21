@@ -50,9 +50,6 @@ calamine = { workspace = true }
 async-trait = { workspace = true }
 futures = { workspace = true }
 
-# OpenAI API client
-async-openai = { workspace = true }
-
 # Time handling
 chrono = { workspace = true }
 

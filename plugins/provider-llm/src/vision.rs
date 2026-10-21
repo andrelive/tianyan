@@ -8,18 +8,18 @@ use async_openai::types::chat::{
 use async_trait::async_trait;
 use serde::Deserialize;
 
-use crate::common::error::{Result, TianyanError};
-use crate::common::types::TokenUsage;
-use crate::model::traits::VlmService;
-use crate::model::types::{
+use tianyan::common::error::{Result, TianyanError};
+use tianyan::common::types::TokenUsage;
+use tianyan::model::types::{
     ContentPart, VisionChoice, VisionContent, VisionMessage, VisionRequest, VisionResponse,
 };
+use tianyan::model::VlmService;
 
-use super::chat::RetryableFailure;
-use super::client::AsyncOpenAIClient;
+use crate::client::ChatClient;
+use tianyan_provider_client::RetryableFailure;
 
 #[async_trait]
-impl VlmService for AsyncOpenAIClient {
+impl VlmService for ChatClient {
     async fn analyze_image(&self, request: VisionRequest) -> Result<VisionResponse> {
         let model = request.model;
         let messages = convert_messages(request.messages)?;
@@ -46,7 +46,7 @@ impl VlmService for AsyncOpenAIClient {
         let body = serde_json::to_value(&chat_request)
             .map_err(|e| TianyanError::Custom(format!("VLM 服务错误：序列化请求失败: {e}")))?;
 
-        let response = crate::model::retry::with_retry(
+        let response = tianyan::model::retry::with_retry(
             &self.retry_policy,
             |e: &RetryableFailure| e.retryable,
             || self.send_chat_request(&url, &body, "VLM 服务错误", None),
@@ -189,23 +189,6 @@ fn map_image_detail(detail: Option<String>) -> ImageDetail {
     }
 }
 
-/// 根据图片字节数据推断 MIME 类型
-pub(crate) fn infer_mime_type(data: &[u8]) -> &str {
-    if data.len() >= 3 && &data[0..3] == b"\xFF\xD8\xFF" {
-        "image/jpeg"
-    } else if data.len() >= 8 && &data[0..8] == b"\x89PNG\r\n\x1A\n" {
-        "image/png"
-    } else if data.len() >= 6 && (&data[0..6] == b"GIF87a" || &data[0..6] == b"GIF89a") {
-        "image/gif"
-    } else if data.len() >= 2 && &data[0..2] == b"BM" {
-        "image/bmp"
-    } else if data.len() >= 12 && &data[0..4] == b"RIFF" && &data[8..12] == b"WEBP" {
-        "image/webp"
-    } else {
-        "image/png" // safe fallback
-    }
-}
-
 /// 上游 chat completions 响应的**宽容**形状（视觉分析所需子集）。
 ///
 /// 存在理由与 embedding 的 `RawEmbeddingResponse` 同源：async-openai 的
@@ -300,8 +283,8 @@ mod tests {
         addr
     }
 
-    fn client(name: &str, addr: std::net::SocketAddr) -> AsyncOpenAIClient {
-        let provider = crate::config::ProviderConfig {
+    fn client(name: &str, addr: std::net::SocketAddr) -> ChatClient {
+        let provider = tianyan::config::ProviderConfig {
             name: name.to_string(),
             endpoint: format!("http://{addr}/v1"),
             api_key: Some("k".to_string()),
@@ -314,7 +297,7 @@ mod tests {
             dialect: None,
             ..Default::default()
         };
-        AsyncOpenAIClient::from_provider(&provider).unwrap()
+        ChatClient::from_provider(&provider).unwrap()
     }
 
     fn text_request() -> VisionRequest {

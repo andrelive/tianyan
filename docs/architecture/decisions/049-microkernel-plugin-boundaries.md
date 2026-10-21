@@ -290,7 +290,7 @@ tauri 全域只引 `tianyan::{config,common,agent,notification}`，对候选模�
 | 3 | `storage-vector`（lancedb，收益最大） | `VectorStorage` trait 已在 core；箭头族依赖随之离开 |
 | 4 | `storage-sqlite`（sqlite 518 + local 414） | rusqlite 仍留 core（db/session/observability 共用）→ 收窄的是重编面积而非依赖面 |
 | 5 | `task-evolution` + `task-builtin`（3627，2 crate） | 前置：`EvolutionReviewExecutor` trait 提到 core |
-| 6 | `provider-llm` + `provider-embed`（3185，最难） | 前置：`ModelServices` 容器外移 assembly；连通性探测改走契约 |
+| 6 | `provider-llm` + `provider-embed`（3185，最难）✅ **2026-10-21 完成**（见「实施记录（期 2 序 6）」） | 两个前置已解：`ModelServices` 容器外移 `server/src/model_services.rs`；连通性探测改走 `ConnectionProbe` 契约 |
 
 **隐性耦合（迁移前必须先解，照 `RepoMapCache` 先例）**：`ToolRegistry.web_client`、
 `ToolContext.knowledge_ingestor`、`ToolRegistry.usage_stats` / `rule_recorder`（observability）、
@@ -1073,6 +1073,175 @@ GEPA）」的 **GEPA 部分作废**；`role_learning.rs`（573 生产）仍在�
      `record_review` 之类的方法而不是把 `review_conversation` 整个塞进 trait（后者会把
      会话解析、`call_skill` 参数形状等内核知识灌进插件的契约面）。
 
+**实施记录（期 2 序 6 补做：provider-llm + provider-embed，2026-10-21）**：
+ADR-049 期 2 的序 6（当时跳过、留待最后）在期 3-T3 之后补做——它是期 3-T4
+「config 二分」的前置（模型方言 950 行要随 `provider-llm` 走，必须先有那个 crate）。
+**本节同时更正一处历史标注**：期 2 行此前写的「期 2 完成」是错的（序 6 未做），
+现已改为「期 2 全部完成（序 0–6）」。
+
+规模：`core/src/model/provider/`（2,805 行）+ `services.rs`（232 行）搬出 core，
+合计 **3,037 行**（其中生产行约 1,850、测试 58 条）。落地形态是**三个 crate**：
+
+| crate | 内容 | 行数 | 测试 |
+|---|---|---|---|
+| `plugins/provider-client` | `AsyncOpenAIClient`（`client.rs` 378）+ `RetryableFailure` / `classify_http_status`（`failure.rs` 40）+ crate 文档 | 468 | 9（全部迁移） |
+| `plugins/provider-llm` | `chat.rs` 1672 / `vision.rs` 399 / `discovery.rs` 68 / `logging.rs` 92（聊天+视觉装饰）/ `client.rs` 67（newtype）/ `lib.rs` 329（工厂 + 探针 + 装配门禁） | 2,627 | 44（39 迁移 + 5 新增） |
+| `plugins/provider-embed` | `embedding.rs` 463 / `logging.rs` 370（装饰 + 用量上报 + 查询缓存）/ `lib.rs` 196（工厂 + 装配门禁） | 1,029 | 13（10 迁移 + 3 新增） |
+
+- **★ 为什么是三个 crate 而不是两个（本序唯一的结构性裁决，理由是硬的）**：
+
+  1. **孤儿规则**：`impl EmbeddingService for AsyncOpenAIClient` 只能写在「类型或 trait
+     属于本 crate」的地方。`EmbeddingService` 在 core、`AsyncOpenAIClient` 若在
+     `provider-llm`，则 `provider-embed` 里两样都是外部类型——直接 `impl` 被编译器拒绝
+     （实测 `E0117`/`E0116`）。而聊天 / 视觉 / 嵌入**共用同一个客户端**。
+  2. **一次构造、全路径生效**（`client.rs` 迁移前的注释逐字保留）：UA 单点（ADR-046）、
+     方言解析一次（ADR-038）、双预算超时（ADR-044）、动态会话头、`RetryPolicy`。复制一份
+     构造逻辑＝两份口径同时漂移（`RepoMapCache` / `action_fingerprint` /
+     `extract_marker_summary` 都是同一条判据的产物）。
+  3. **D2-2 插件间零互赖**：若让 `provider-embed` 依赖 `provider-llm`（或反过来），改一行
+     嵌入实现就要重编聊天插件，插件间出现直接 `use`——两条都是本 ADR 明令禁止的。
+
+  D7 的判据也支持这个切法：**客户端构造**（UA / 超时 / 方言 / 动态头 / 重试）是第三种
+  「变化原因」，与「聊天怎么发请求」「嵌入怎么解析 usage」都不同，因此值得独立成 crate。
+  反指标复核：`provider-client` 468 行（≥300 ✅）、恰有 **2 个真实消费者**（✅）、公开符号
+  3 个（`AsyncOpenAIClient` / `RetryableFailure` / `classify_http_status`，≤15 ✅）。
+  `provider-llm` 公开符号 4 个（`services` / `ChatClient` / `LoggedService` /
+  `LoggedVlmService`），`provider-embed` 2 个（`services` / `LoggedEmbeddingService`）。
+
+- **★ 两个能力插件各用 newtype + `Deref` 满足孤儿规则，行为零改动**：
+  `provider-llm::ChatClient(AsyncOpenAIClient)`、`provider-embed::EmbeddingClient(...)`。
+  二者都 `impl Deref<Target = AsyncOpenAIClient>`：**字段与方法访问因此逐字保持**——
+  `self.base_url` / `self.http` / `self.headers` / `self.dialect` / `self.retry_policy`
+  / `self.send_chat_request(...)` / `self.thinking_param_for(...)` 全部不用改写成
+  `self.0.…`（Rust 的字段访问会沿 `Deref` 链自动解引用）。构造语义也**零复制**：
+  `ChatClient::from_provider` / `EmbeddingClient::new` 直接转发给
+  `AsyncOpenAIClient::{from_provider, new}`。客户端字段因此从 `pub(crate)` 提为 `pub`
+  （`service_name` / `client` / `http` / `base_url` / `api_key` / `headers` /
+  `retry_policy` / `read_idle` / `first_token` / `dialect` / `model_thinking_params` /
+  `dynamic_headers`，全部补了文档——`missing_docs` 是 workspace 级 warn），`thinking_param_for`
+  与 `finish_reason_str` 同样提公（跨 crate 调用）。这是本序唯一的公开面扩张，且限于插件。
+
+- **哪些类型留 core（逐条理由）**：
+
+  | 留 core | 位置 | 为什么 |
+  |---|---|---|
+  | `ChatService` / `EmbeddingService` / `VlmService` / `ServiceDiscovery` | `model/traits.rs`（路径不变） | S 级契约；内核 / 通道层 / 其它插件都以 `Arc<dyn …>` 消费 |
+  | 载荷（`ChatCompletionRequest` / `ChatCompletionChunk` / `VisionRequest` / `EmbeddingResponse` …） | `model/types/` | 出现在 S 级签名里，`agent` / `server` / 多个插件共用 |
+  | `spec.rs`（739 行） | `model/spec.rs` | 模型规格 + 上下文窗口：内核动态 `max_tokens`、`policy-context` 压缩窗口联动、通道层配置面板三方共用 |
+  | `retry.rs`（365 行） | `model/retry.rs` | 请求层策略被**两个** provider 插件共用；「429/5xx/网络可重试」是跨 provider 的统一约定（ADR-014） |
+  | `config/model.rs` 全部方言数据（`ProviderDialect` / `DialectPreset` / `ThinkingParam` / `ThinkingField` / `CacheField` / `EmbeddingUsageShape` / `HeaderSource`） | `config/` | 它们是 `TianyanConfig` 的**字段形状**，随内核加载 / 校验 / 热重载；方言 950 行的外移属期 3-T4（config 二分），不在本序 |
+  | `EmbeddingUsageSink` / `EmbeddingUsageHandle` | **新建** `model/usage.rs` | 实现方是通道层（`UsageLogEmbeddingSink` 写 `usage_logs`）、消费方是插件（`LoggedEmbeddingService`）→ 契约必须在两者之上 |
+  | `Unconfigured{Chat,Embedding,Vlm}Service` | **新建** `model/unconfigured.rs` | 「能力未配置」的兜底有**两条路径**（未注入插件 / 配置缺能力），必须同一句文案与同一错误类别；插件与 server 都要用 |
+  | `ProviderLlmServices` / `ProviderEmbedServices` / `ConnectionProbe` | **新建** `model/assembly.rs` | 装配原语：server 消费、装配包生产、插件填充三方共用（与 `TaskServices` / `ContextServices` 同一条纪律：住 server 会让插件反向依赖通道层） |
+
+- **★ `ModelServices`（232 行容器 + 构造器）搬进 `server/src/model_services.rs`**：
+  core 内**零生产使用者**（只有 `model/mod.rs` 的导出 + `context/assembly.rs` 一句注释），
+  真正消费者是通道层（`create_model_services` / `AppState::shared_model_services`）。
+  按 D5 它是装配职责：三种能力今天分属**两个**插件插槽，容器只能活在认识插槽的地方。
+  能力解析、客户端池复用、降级服务、`chat_for` 的路由回落、`set_embedding_usage_sink`
+  的后置注入、`chat_clients()` 全部逐字保留；`from_config(&ModelsConfig)`（async）变为
+  `from_factories(&ModelsConfig, Option<&ProviderLlmFactory>, Option<&ProviderEmbedFactory>)`
+  （sync——客户端构造不发请求）。`AppState::new` 因此多两个工厂参数（9 个，加
+  `#[allow(clippy::too_many_arguments)]` 并就地注明「期 4 清单收敛时应按插件分组」）。
+  「部分模型能力未配置」那条 `warn!`（三个 `*_configured` 字段）随容器留在 server——它是
+  唯一同时看得见三项能力的地方，**文案与字段名逐字未动**。
+
+- **★ 连通性探测契约化：选「由工厂造临时客户端」，不选「独立探针插槽」**
+  （`POST /api/config/test-connection` 迁移前直接 `tianyan::model::AsyncOpenAIClient::new(...)`
+  ——具体类型搬走后那句代码不存在）：
+  - 新增 core trait `ConnectionProbe`（1 方法：`probe(endpoint, api_key, model) ->
+    Result<Vec<String>>`，**async**），实现 `ProviderConnectionProbe` 在
+    `plugins/provider-llm`，随 `ProviderLlmServices::probe` 由工厂产出；
+  - **为什么不单开第 11 个插槽**：探针不是「一次性装配产物」，而是「用同一套客户端构造
+    语义造临时客户端」的能力——独立插槽会让装配层多一个必填项，也让第二个工厂去重复
+    实现那五条语义；挂在能力集合里，插槽数保持 **10**（与任务书一致）；
+  - **为什么不是「用已配置的 provider 实例」**：探测用的是用户在配置页**当场输入**的
+    endpoint / api_key，此时它们还没落盘，不存在对应实例；
+  - 请求形状逐字保留：`timeout = 30` / `first_token_timeout = 300` /
+    `system("You are a helpful assistant.")` / `temperature = 0.7` / `max_tokens = 10` /
+    `stream = false`，成功返回 `vec![model]`（**不列目录**——列目录是 `ServiceDiscovery`）；
+  - **错误分类仍留通道层**：`classify_connection_error` 用 `is_permission` /
+    `is_not_found` / `is_timeout` 语义谓词（ADR-014），其单元测试原样保留；
+    `test_connection` 改为取 `State<Arc<AppState>>` → `shared_model_services().probe()`。
+  - **唯一可观测差异（如实记一条**）：迁移前「客户端构造失败」（例：`http://` 无主机）
+    走的是**未经语义分类**的早退分支，文案是「连接失败: 创建客户端失败: …」；现在构造
+    发生在探针内部、错误照常经 `classify_connection_error` 的兜底分支，文案变成
+    「连接失败: 连接失败: 创建客户端失败: …」（多一层前缀）。该兜底分支对
+    `TianyanError::Custom` **本来就有**这个双前缀（迁移前的上游错误文案即如此），且此路径
+    已被 handler 的 `http(s)://` 前缀校验挡在前面——属实现细节泄漏，不做「顺手修」以保持
+    逐字一致（修它会同时改变上游错误文案的用户可见形状）。
+
+- **`infer_mime_type` 随**消费者**留 core**：它原在 `provider/vision.rs`，但**唯一调用点**
+  是 `knowledge/image/analyzer.rs`（知识导入的图片分析），provider 侧从不调用。它跟着
+  vision 实现搬进插件就会让内核（knowledge）反向 `use tianyan_provider_llm::…`（D2-1），
+  因此移到 `knowledge/image/analyzer.rs`（私有函数，函数体与分支顺序逐字未改）。
+
+- **依赖面证据**：`core` 删除 `async-openai`（`cargo tree -p tianyan-core --edges normal`
+  无该项），它只进 `provider-client`/`provider-llm`/`provider-embed`；
+  `cargo tree -p tianyan-provider-llm --edges normal --depth 1` 与 `-p tianyan-provider-embed`
+  均**无 `tianyan-server`**（两条都是 core / 基底 crate / 通用库）。
+
+- **装配：`AssemblyServices` 加第九、第十个插槽**
+  `ProviderLlmFactory` / `ProviderEmbedFactory`（`Arc<dyn Fn(&ModelsConfig) -> Result<…>>`，
+  **同步**：客户端构造只建 HTTP 客户端、不发请求），能力集合类型
+  `ProviderLlmServices` / `ProviderEmbedServices` **定义在 core**（`model/assembly.rs`）并由
+  server re-export。`app` / `tauri` / `server/tests/common/factory.rs::test_assembly()`
+  三处各注入一行 `Arc::new(|c| tianyan_provider_llm::services(c))`（同形同源）。
+  `initialize_vfs_for_app` 的 `create_model_services` 也改走装配插槽（VFS 只需要嵌入）。
+
+- **★ 插件示例的连带修改（如实记一条）**：`plugins/storage-vector/examples/*`（4 个一次性
+  运维脚本）原先 `use tianyan::model::ModelServices` —— 容器搬走后改调两个插件的
+  `services()`（`[dev-dependencies]` 加 `tianyan-provider-{llm,embed}`，与
+  「storage-vector → storage-sqlite」同类的**只服务 examples 的 dev 边**，生产依赖图不受
+  影响）。这同时让两个工厂有了 examples 这个第三类真实消费者。
+
+- **逐行比对证据**（`git diff --no-index`，HEAD 原文件 vs 插件文件）：
+
+  | 文件 | 改动行 | 归类 |
+  |---|---|---|
+  | `provider-client/src/client.rs` ← `provider/client.rs` | 约 40 增 / 12 删 | ① `crate::` → `tianyan::`（11 处）；② 12 个字段 + 2 个方法 `pub(crate)` → `pub` 并补文档（`missing_docs`）；③ 无逻辑改动 |
+  | `provider-client/src/failure.rs` ← `chat.rs` 的两段 | 0 / 0（整块搬移） | `RetryableFailure` 与 `classify_http_status` 逐字搬走，仅 `pub(super)` → `pub` |
+  | `provider-llm/src/chat.rs` ← `provider/chat.rs` | 约 30 增 / 30 删 | ① `crate::` → `tianyan::`（18 处）；② `super::client::AsyncOpenAIClient` → `crate::client::ChatClient`；③ 两段语义分类块移出（-26 行）→ 1 行 import；④ `impl ChatService for AsyncOpenAIClient` → `for ChatClient`、`impl AsyncOpenAIClient` → `impl ChatClient`、`AsyncOpenAIClient::finish_reason_str` 保留（内层关联函数）；**请求构造 / SSE 解析 / 思考参数 / reasoning 回传 / 缓存提取一行未动** |
+  | `provider-llm/src/vision.rs` | 约 25 增 / 40 删 | 同上 + `infer_mime_type`（15 行）移出到 core（唯一消费者是 knowledge） |
+  | `provider-llm/src/discovery.rs` | 4 / 4 | 纯路径前缀 + newtype |
+  | `provider-embed/src/embedding.rs` | 约 45 增 / 20 删 | ① 路径前缀；② newtype `EmbeddingClient` + `Deref`（+14 行）；③ 测试构造改 `EmbeddingClient::new`，一处穿透 `client.0.client.embeddings()`（测的正是「上游库类型化路径必然失败」） |
+  | `provider-* /logging.rs` ← `provider/middleware.rs` | 拆 + 各约 10 增 / 5 删 | 按能力拆两个文件；用量上报契约提到 core（`model::usage`），其余逐字 |
+
+  **判定提示词 / `apply_thinking_params` 的三档预算（1024/4096/16384）/ SSE 容错口径
+  （usage-only 尾块、cost 块、非标准 `finish_reason` 上抛）/ 双预算超时文案（「流式读取
+  空闲超时」vs「首 token 超时」）/ `x-opencode-session` 注入与无值兜底 / UA 全局默认 /
+  嵌入请求体与 usage 归一（`PromptAndTotal` / `TotalOnly`）/ 查询缓存容量与键 / 日志文案
+  逐字未动。**
+
+- **测试守恒**：HEAD `tianyan-core --lib` **1166** = 现在 core **1108**（−58：`chat` 35 /
+  `client` 9 / `embedding` 6 / `middleware` 4 / `vision` 4，逐条同名同断言随迁）+
+  `provider-client` **9** + `provider-embed` **13** + `provider-llm` **44**
+  （58 迁移 + **8 新增**装配门禁：client 0 / embed 3（模型名 + 可注入用量槽位 + 多模态回落）/
+  llm 5（能力集合形状 + 无 provider 降级 + 禁用 provider 不进路由池 + 探针构造期失败 +
+  方言穿透），server 侧 +3（provider 插槽默认降级 / 注入即用且可重复 / 探针契约带临时凭据）
+  + 集成测试 +1（`/config/test-connection` 走契约且参数校验先于请求））。
+  算式：**1166 − 58 = 1108**；**1108 + 66 = 1174 = 1166 + 8（新增）**。**零放弃、零降级。**
+
+- **门禁**：`cargo fmt --all -- --check` 干净；`cargo clippy --workspace --all-targets`
+  **零 warning**（`AppState::new` 的 9 参数加了显式 `allow` + 注释）；`tianyan-core --lib`
+  **1108 passed**；`tianyan-provider-client` 9 / `tianyan-provider-embed` 13 /
+  `tianyan-provider-llm` 44 全绿（含 `chat.rs` 的流式双预算与方言基线、动态会话头、
+  reasoning 回传、`middleware` 的查询缓存/用量上报）；`tianyan-server --lib`
+  **197 passed / 1 ignored**、`--tests` 6 / 14 / 1 / 2 全绿；`tianyan-app` 7 passed；
+  `cargo catalog-check` OK；`cargo tree` 三个 provider crate 均无 `tianyan-server`。
+
+- **遗留**：
+  1. **`AssemblyServices` 已 10 个插槽**（本期 +2）。与期 3-T3 遗留 3 是同一件事：期 4
+     清单收敛时应按插件分组（每个插件一份能力接口），而不是继续平铺；`AppState::new` 的
+     5 个 `Option<Factory>` 参数同理；
+  2. **`config/model.rs` 的方言数据（950 行）仍在 core**，它是 `TianyanConfig` 的字段形状；
+     期 3-T4「config 二分」把它连同 loader（753 行）一起外移后，改一个方言细节才真正只重编
+     插件（本序只做到「改方言的**消费逻辑**不重编内核」）；
+  3. **`storage-vector` 的 4 个 examples 又添两条 dev 边**（→ provider-llm / provider-embed），
+     与序 3/4 的遗留同型：干净解法是独立的 `tools-ops` bin 包；
+  4. `provider-client` 的字段必须 `pub`（跨 crate 访问），公开面比「只有类型」略大；
+     若期 4 决定把 provider 三件套并成一个 crate，这些 `pub` 应回退成 `pub(crate)`。
+
 ---
 
 ## 分期与闸门
@@ -1082,7 +1251,7 @@ GEPA）」的 **GEPA 部分作废**；`role_learning.rs`（573 生产）仍在�
 | **0** | 地基与基线（零行为改动）✅ **已完成** | incremental 实验（**3× 加速 / 185MB 每会话**，建议开启 + GC 3 天/20GB）；`scripts/measure-rebuild.ps1`；`contracts.md`（34 trait 分级 + common 二分）；`microkernel-baseline.md` | 三场景基线齐全（**均 100% 全量重编**）；lint/unit 绿；无行为改动 ✅ |
 | **0.5** | 工具契约与注册形状 + 装配器二分（**工具侧已完成**） | ✅ 元数据表承载执行入口 + 协议工具独立成表（28 分支 match → 一次查表，内核零工具名字面量）；✅ `ToolContext` 承载六个工具域（`impl ToolContext` + 注册表 `Deref`），依赖边界实测：工具域 executor 引用仅 16 处（随插件搬走）。待办：`thin-channel` + `assembly-manifest`；`AppState` 20 字段契约化 | 工具目录 freshness ✅；工具行为零变化 ✅（1431 单测全绿）；clippy 零警告 ✅ |
 | **1** | 工具插件试点（**装配器二分 + tools-fs 骨架已完成**） | ✅ `tianyan-app` bin 包（**清单住 bin**）+ `ToolPluginFactory` 类型擦除 + `create_app_with_plugins` / `start_server_with_plugins*`；✅ `plugins/tools-fs` 独立 crate（`executor::fs` 实现整体迁入）。待续：**整域迁移**——`read_file` 目录模式反向依赖 `executor::fs::execute_list_dir`，故 fs 域必须 6 工具一起搬（read/write/edit/patch/glob/list_dir）才能删 core 侧 | 闸门 A **首测 512 行 ✅**（判据 ≤3.5K）；core 侧暂留（双路径过渡，重名注册自动跳过） |
-| **2** | 适配器与任务插件（**期 2 完成**） | 迁移顺序（按 自包含度×收益）：**0 清 core 死依赖** → 1 `tools-todo`+`tools-goal` → 2 `tools-web` → 3 `storage-vector` → 4 `storage-sqlite` → 5 `task-*`（2 crate）→ 6 `provider-llm`+`provider-embed`。详见下方「期 2 普查结论」 | 各领域 ≤ 2K；全量 release 不劣化 >10% |
+| **2** | 适配器与任务插件（**期 2 全部完成（序 0–6）**） | 迁移顺序（按 自包含度×收益）：**0 清 core 死依赖** → 1 `tools-todo`+`tools-goal` → 2 `tools-web` → 3 `storage-vector` → 4 `storage-sqlite` → 5 `task-*`（2 crate）→ **6 `provider-llm`+`provider-embed`（+ 共享基底 `provider-client`，2026-10-21 补做）**。详见下方「期 2 普查结论」与「实施记录（期 2 序 6）」 | 各领域 ≤ 2K；全量 release 不劣化 >10% |
 | **3** | 策略分离（最难一刀） | 抽 `kernel-impl`（loop/cancel/rollback/stream_forward/working_set）；**`context`→`policy-context`（T2 ✅ 2026-10-21，见下方实施记录；`assembler.rs` 按普查修订留 kernel-impl）**；**审批→`policy-approval`（T1 ✅ 2026-10-21）**；`role_learning`→已删除（零消费者，2026-10-21 裁决）；**`judge` + `skills/reviewer`→`policy-review`（T3 ✅ 2026-10-21，475 生产行；`TaskReviewer` / `SkillReviewPort` 契约留 core）** | **闸门 B**：api ≤ 6K && impl ≤ 15K（或配置外移后 16.1K）；改策略不重编内核；S 级零变更 |
 | **4** | 清单收敛与发行版 | 清单完整化、跨插件顺序断言、desktop/headless/minimal 三份清单 | 装配清单 1 页可查；headless 可构建 |
 

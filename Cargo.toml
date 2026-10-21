@@ -16,6 +16,9 @@ members = [
     "plugins/policy-approval",
     "plugins/policy-context",
     "plugins/policy-review",
+    "plugins/provider-client",
+    "plugins/provider-llm",
+    "plugins/provider-embed",
 ]
 resolver = "2"
 

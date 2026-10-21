@@ -1,0 +1,17 @@
+[package]
+name = "tianyan-provider-client"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "天演 provider 基底：OpenAI 兼容客户端（一次构造、UA/方言/动态会话头/重试全路径生效）+ 请求失败的语义分类"
+
+[dependencies]
+tianyan = { path = "../../core", package = "tianyan-core" }
+async-openai.workspace = true
+reqwest.workspace = true
+serde_json.workspace = true
+
+[lints]
+workspace = true

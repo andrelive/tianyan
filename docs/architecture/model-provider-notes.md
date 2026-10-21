@@ -8,6 +8,12 @@
 > 3. 无法在仓库内核实的历史数字，写"来源不明，待复测"，不编造。
 >
 > ⚠️ **`.scratch/` 被 `.gitignore` 忽略且从未提交**（见 `.scratch/audit-reports/bt_6893a4e4.md` §4）。本文引用的 `.scratch/*.py` / `*.json` / `*.txt` 是**本地复现材料**，不在版本控制内——本文把它们承载的结论固化下来，脚本仅作复现线索。
+>
+> 📌 **路径口径（2026-10-21，ADR-049 期 2 序 6）**：provider 实现已整体搬出 core——
+> `plugins/provider-client`（`AsyncOpenAIClient` + 状态码语义分类）、`plugins/provider-llm`
+> （聊天 / 视觉 / 模型目录 / 日志装饰 / 连通性探针）、`plugins/provider-embed`（嵌入 + 日志/
+> 用量/缓存装饰）。本文的路径已更新为插件位置；文中 `chat.rs:NNN` 之类的**行号仍是迁移前
+> 的位置**（代码逐字未变，仅 import 行有位移）——按符号名检索即可。
 
 ---
 
@@ -17,10 +23,10 @@
 
 | 事实 | 位置 |
 |---|---|
-| 天演**只实现 OpenAI 兼容 API**；若需非兼容 provider，须拆 `anthropic/` 等子目录（当前不做） | `core/src/model/provider/mod.rs:1-10` |
-| 客户端 `AsyncOpenAIClient` 绑定**一个 provider**，同一实例服务 chat / embedding / vision 三种能力 | `core/src/model/provider/client.rs:9-46` |
+| 天演**只实现 OpenAI 兼容 API**；若需非兼容 provider，须拆 `anthropic/` 等子目录（当前不做） | `plugins/provider-llm/src/lib.rs` |
+| 客户端 `AsyncOpenAIClient` 绑定**一个 provider**，同一实例服务 chat / embedding / vision 三种能力 | `plugins/provider-client/src/client.rs` |
 | 能力以三个 trait 表达：`ChatService` / `EmbeddingService` / `VlmService`（+ 轻量 `ServiceDiscovery`） | `core/src/model/traits.rs:21-31, 80-95, 100+` |
-| 请求体统一**序列化为 JSON 后再注入**方言字段（async-openai 0.34 类型缺 `reasoning_content`） | `core/src/model/provider/chat.rs:58-67, 174-182` |
+| 请求体统一**序列化为 JSON 后再注入**方言字段（async-openai 0.34 类型缺 `reasoning_content`） | `plugins/provider-llm/src/chat.rs` |
 
 **含义**：Claude / Qwen / Kimi 等都不是原生协议，而是当作 OpenAI 兼容端点接入（内置规格表里 `provider_prefix` 只用于**规格匹配**，不改变协议）。"协议差异"在代码中实际表现为**思考字段方言差异 + 少量参数差异**（见 §1.2）。
 
@@ -34,7 +40,7 @@
 - **解析优先级**：显式配置 `thinking_field` > `sniff(endpoint, name)` > 默认 `ReasoningContent`（`core/src/config/model.rs:146-149`）。
 - `sniff` **只认** ollama 域名 / `:11434` / 名称含 `ollama`，**刻意不猜自建域名/代理**（`core/src/config/model.rs:96-104`）——嗅探不到的网关用 `thinking_field` 显式逃生（`core/src/config/model.rs:137-144`，ProviderConfig 字段）。
 - **发错字段名不会报错**：Go 的 `encoding/json` 静默忽略未知字段，请求仍成功，但**思考内容根本没进 prompt**——多轮上下文与思考一致性悄悄受损（`core/src/config/model.rs:66-71`）。
-- 客户端**构造时解析一次并缓存**，请求路径不再判断（`core/src/model/provider/client.rs:29-34, 84`）。
+- 客户端**构造时解析一次并缓存**，请求路径不再判断（`plugins/provider-client/src/client.rs`）。
 
 ### 1.3 特性矩阵（按协议/字段维度）
 
@@ -78,7 +84,7 @@
 
 > **只要请求带 `tools`，就必须全量回传历史 `reasoning_content`**（含**未实际调用工具**的轮次）；不带 tools 时可不回传。
 
-- 依据：DeepSeek `thinking_mode` 官方文档 + 代码注释（`core/src/model/provider/chat.rs:649-660`、`core/src/context/assembler.rs:126-129`、`core/src/common/token_estimator.rs:40-43`）。
+- 依据：DeepSeek `thinking_mode` 官方文档 + 代码注释（`plugins/provider-llm/src/chat.rs`、`core/src/context/assembler.rs:126-129`、`core/src/common/token_estimator.rs:40-43`）。
 - **天演作为 agent 总是携带 tools** → 该契约**恒常适用**（`core/src/context/assembler.rs:127-128`、`core/src/common/token_estimator.rs:41-42`）。
 
 ### 2.2 契约实现链（`Part::Reasoning` 的组装与回传路径）
@@ -89,12 +95,12 @@
 | ② 组装 assistant | 累积结果写入 `Message.reasoning_content`（空则 `None`） | `core/src/agent/loop.rs:569-573` |
 | ③ 持久化（Message→Structured） | `reasoning_content` 非空 → `Part::Reasoning`（排在 text 之前） | `core/src/common/types/structured_message.rs:278-285` |
 | ④ 组装（Structured→Message） | `Part::Reasoning` → `reasoning_content`，**无条件保留**（不按 `has_tool_calls` 过滤） | `core/src/context/assembler.rs:115, 124-129, 165` |
-| ⑤ 发送（JSON 注入） | `convert_messages` 类型化构造后，序列化体由 `inject_reasoning_content` 按索引回填 wire 字段（非流式 + 流式都调） | `core/src/model/provider/chat.rs:660-676`；调用点 `chat.rs:66, 182` |
+| ⑤ 发送（JSON 注入） | `convert_messages` 类型化构造后，序列化体由 `inject_reasoning_content` 按索引回填 wire 字段（非流式 + 流式都调） | `plugins/provider-llm/src/chat.rs`；调用点 `chat.rs:66, 182` |
 | ⑥ 估算 | `TokenEstimator.estimate_message` 计入 `reasoning_content`（否则占用被低估） | `core/src/common/token_estimator.rs:44-48` |
 
-**回填为什么必要**：`convert_messages` 用 async-openai 0.34 的 `ChatCompletionRequestAssistantMessage`（**无 `reasoning_content` 字段**，`..Default::default()` 构造），类型化序列化会**静默丢弃**思考内容；故必须序列化后按索引回填（`core/src/model/provider/chat.rs:649-660`）。`convert_messages` 对每条 `Message` 恰好生成一条请求消息 → 索引一一对应（`chat.rs:664-666` 注释）。
+**回填为什么必要**：`convert_messages` 用 async-openai 0.34 的 `ChatCompletionRequestAssistantMessage`（**无 `reasoning_content` 字段**，`..Default::default()` 构造），类型化序列化会**静默丢弃**思考内容；故必须序列化后按索引回填（`plugins/provider-llm/src/chat.rs`）。`convert_messages` 对每条 `Message` 恰好生成一条请求消息 → 索引一一对应（`chat.rs:664-666` 注释）。
 
-**回归测试锁定**（`core/src/model/provider/chat.rs`）：
+**回归测试锁定**（`plugins/provider-llm/src/chat.rs`）：
 - `test_inject_reasoning_content_roundtrip`（`chat.rs:876`）——assistant 的 reasoning 必须回传；
 - `test_inject_reasoning_content_ollama_dialect`（`chat.rs:948`）——ollama 方言写 `reasoning`，且**不得双写** `reasoning_content`（`chat.rs:966-967`）；
 - `test_inject_reasoning_content_dialects_are_exclusive`（`chat.rs:973`）；
@@ -120,7 +126,7 @@
 
 ### 3.1 强度参数映射（代码事实）
 
-`apply_thinking_params(body, effort, model)`（`core/src/model/provider/chat.rs:213-229`）：
+`apply_thinking_params(body, effort, model)`（`plugins/provider-llm/src/chat.rs`）：
 
 | 模型族 | 附加参数 | 值 |
 |---|---|---|
@@ -130,7 +136,7 @@
 
 档位为模型自己声明的集合（`core/src/config/model.rs:245-247`），不做本地翻译；未知档位在 qwen 族用默认 `4096`。
 
-**修订（2026-09-29）**：`enable_thinking: true` 曾对全族无条件附加（依赖"DeepSeek 等实测容忍"）；实测 opencode zen 的 `glm-5.3-flash` 会 400 拒绝该字段（`Upstream request failed: ... unknown field "enable_thinking"`——曾致会话轮中断），且各渠道去掉该字段后推理照常输出，故收窄为**仅 DashScope 方言携带**（见 `core/src/model/provider/chat.rs` 的 `apply_thinking_params` 注释与回归测试）。
+**修订（2026-09-29）**：`enable_thinking: true` 曾对全族无条件附加（依赖"DeepSeek 等实测容忍"）；实测 opencode zen 的 `glm-5.3-flash` 会 400 拒绝该字段（`Upstream request failed: ... unknown field "enable_thinking"`——曾致会话轮中断），且各渠道去掉该字段后推理照常输出，故收窄为**仅 DashScope 方言携带**（见 `plugins/provider-llm/src/chat.rs` 的 `apply_thinking_params` 注释与回归测试）。
 
 ### 3.2 tokenizer 前提：中文比英文省 token
 
@@ -258,7 +264,7 @@ INFO ... embed_single_with_dimensions succeeded model=text-embedding-v4
 
 | 改动 | 内容 | 位置 |
 |---|---|---|
-| **用量入账** | `EmbeddingUsageSink` 契约（model 层定义，装配层注入实现）→ `UsageLogEmbeddingSink` 把 `provider/model/prompt_tokens` 异步写入 `usage_logs`（`session_id=""`） | `core/src/model/provider/middleware.rs`、`server/src/embedding_usage.rs` |
+| **用量入账** | `EmbeddingUsageSink` 契约（core 定义，通道层注入实现）→ `UsageLogEmbeddingSink` 把 `provider/model/prompt_tokens` 异步写入 `usage_logs`（`session_id=""`） | 契约 `core/src/model/usage.rs`；消费/装饰 `plugins/provider-embed/src/logging.rs`；实现 `server/src/embedding_usage.rs` |
 | **查询缓存 + 空串短路** | 键 `model\|dimensions\|text`，容量 256（FIFO）；命中不发请求、不重复上报。空/空白文本直接报错（日志曾出现 `text_len=0` 的调用）。VFS 侧空 query 直接返回空结果、双摘要皆空则跳过索引 | 同上、`core/src/vfs/vfs_impl.rs` |
 
 - 装配点：VFS 实例（`server/src/lib.rs` 的 `initialize_vfs_for_app`）与 Agent 实例
@@ -318,7 +324,7 @@ SELECT * FROM usage_logs WHERE session_id = '<会话 id>' ORDER BY id DESC LIMIT
 
 - **结论**：1315 token prompt 的**热请求命中 97%–99.9%**；**冷启动存在差异**（首次无缓存/部分命中）。
 - **判定**：这是**上游/网关侧**的缓存行为（前缀命中由服务端决定），**非 agent 缺陷**。
-- **旁证**：DeepSeek 官方响应用顶层 `prompt_cache_hit_tokens` / `prompt_cache_miss_tokens`（`.scratch/verify-resp-deepseek.txt:33`）；ollama 用 `prompt_tokens_details.cached_tokens`（`.scratch/v41-run2.txt`）——**两种形态已由 `extract_cache_tokens` 统一**（`core/src/model/provider/chat.rs:581-599`）。
+- **旁证**：DeepSeek 官方响应用顶层 `prompt_cache_hit_tokens` / `prompt_cache_miss_tokens`（`.scratch/verify-resp-deepseek.txt:33`）；ollama 用 `prompt_tokens_details.cached_tokens`（`.scratch/v41-run2.txt`）——**两种形态已由 `extract_cache_tokens` 统一**（`plugins/provider-llm/src/chat.rs`）。
 
 ### 6.3 其他上游异常形态
 
@@ -327,7 +333,7 @@ SELECT * FROM usage_logs WHERE session_id = '<会话 id>' ORDER BY id DESC LIMIT
 | reasoning-only（有思考无正文） | ollama 对"system 完成通知"只输出思考不输出正文是**系统性**行为（相同上下文重试结果相同）——已**移除整轮重试**，保留 loop 内部空响应单次重试 | `RELEASE_NOTES.md` 0.3.9 条目；`core/src/agent/agent_core.rs:221-224, 1093-1107` |
 | 非标准 `finish_reason` | 网关 `network_error` 等非标准值在 provider 层**显式上抛为错误**而非静默丢弃；`finish_reason` 随 assistant **持久化**到 `StructuredMessage.finish` | `docs/architecture/context-pipeline.md` §7.3 |
 | 流式中断 | 已有内容累积 → 保留为截断输出（`finish="interrupted"`）；完全无内容 → 按失败上报 | `core/src/agent/loop.rs:516-556` |
-| 上游错误分类 | 语义谓词（ADR-014）：`invalid_api_key`/`unauthorized` → permission、`model_not_found` → not_found、超时 → timeout；HTTP 401/403/404/408/504 各自语义分类 | `core/src/model/provider/chat.rs:236-256, 263-275`；`docs/architecture/decisions/014-error-classification.md` |
+| 上游错误分类 | 语义谓词（ADR-014）：`invalid_api_key`/`unauthorized` → permission、`model_not_found` → not_found、超时 → timeout；HTTP 401/403/404/408/504 各自语义分类 | `plugins/provider-llm/src/chat.rs`；`docs/architecture/decisions/014-error-classification.md` |
 
 ---
 

@@ -1,0 +1,22 @@
+[package]
+name = "tianyan-provider-embed"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "天演 provider-embed 插件：OpenAI 兼容 provider 的文本嵌入实现（宽容 usage 解析 / 用量上报 / 查询缓存）"
+
+[dependencies]
+tianyan = { path = "../../core", package = "tianyan-core" }
+tianyan-provider-client = { path = "../provider-client", package = "tianyan-provider-client" }
+async-openai.workspace = true
+async-trait.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+
+[lints]
+workspace = true

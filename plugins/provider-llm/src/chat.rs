@@ -16,19 +16,21 @@ use futures::StreamExt;
 use serde_json::Value;
 use tokio::sync::mpsc;
 
-use crate::common::error::{Result, TianyanError};
-use crate::common::types::{Message, MessageRole, TokenUsage};
-use crate::config::{ProviderDialect, ThinkingField, ThinkingParam};
-use crate::model::traits::ChatService;
-use crate::model::types::{
+use tianyan::common::error::{Result, TianyanError};
+use tianyan::common::types::{Message, MessageRole, TokenUsage};
+use tianyan::config::{ProviderDialect, ThinkingField, ThinkingParam};
+use tianyan::model::types::{
     ChatChoice, ChatCompletionChunk, ChatCompletionRequest, ChatCompletionResponse, ToolCall,
     ToolCallType, ToolChoice,
 };
+use tianyan::model::ChatService;
 
-use super::client::AsyncOpenAIClient;
+use tianyan_provider_client::{classify_http_status, AsyncOpenAIClient, RetryableFailure};
+
+use crate::client::ChatClient;
 
 #[async_trait]
-impl ChatService for AsyncOpenAIClient {
+impl ChatService for ChatClient {
     async fn chat_completion(
         &self,
         request: ChatCompletionRequest,
@@ -40,7 +42,7 @@ impl ChatService for AsyncOpenAIClient {
         // 自定义请求头（UA / 动态会话头）与状态码语义分类（429/5xx 重试判定）
         // 全路径生效；不再经 async-openai 的 create_byot（其不支持 per-request 头）。
         let url = format!("{}/chat/completions", self.base_url.trim_end_matches('/'));
-        let response = crate::model::retry::with_retry(
+        let response = tianyan::model::retry::with_retry(
             &self.retry_policy,
             |e: &RetryableFailure| e.retryable,
             || async {
@@ -100,7 +102,7 @@ impl ChatService for AsyncOpenAIClient {
                             ChatCompletionMessageToolCalls::Function(f) => Some(ToolCall {
                                 id: f.id,
                                 call_type: ToolCallType::Function,
-                                function: crate::model::types::FunctionCall {
+                                function: tianyan::model::types::FunctionCall {
                                     name: f.function.name,
                                     arguments: f.function.arguments,
                                 },
@@ -206,7 +208,7 @@ impl ChatService for AsyncOpenAIClient {
 /// （`Upstream request failed: ... unknown field "enable_thinking"`），曾致会话轮中断
 /// （此前实现依赖「DeepSeek 等实测容忍附加参数」，在多上游网关下不成立）。
 ///
-/// 形态解析在调用方**单点**完成（[`AsyncOpenAIClient::thinking_param_for`]：
+/// 形态解析在调用方**单点**完成（[`ChatClient::thinking_param_for`]：
 /// 模型级显式 > provider 方言 > 模型名嗅探）；本函数只负责按形态写参数。
 ///
 /// 档位为 "off" 时调用方不进入本函数，不附加任何参数（模型默认行为）。
@@ -228,33 +230,7 @@ fn apply_thinking_params(body: &mut Value, effort: &str, param: ThinkingParam) {
     }
 }
 
-/// 请求发送阶段的失败（携带是否可重试的类别标记）；重试是请求层自我保护。
-#[derive(Debug)]
-pub(super) struct RetryableFailure {
-    /// 是否属于可重试的临时失败（HTTP 429 / 5xx / 网络 / 超时）。
-    pub(super) retryable: bool,
-    pub(super) message: String,
-}
-
-/// HTTP 状态码 → 语义分类（ADR-014：分类契约单点；流式请求的显式状态码）。
-///
-/// 401/403 → permission、404 → not_found、408/504 → timeout；其余返回原文。
-pub(super) fn classify_http_status(status: reqwest::StatusCode, raw: &str) -> String {
-    if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
-        return TianyanError::permission(raw).to_string();
-    }
-    if status == reqwest::StatusCode::NOT_FOUND {
-        return TianyanError::not_found(raw).to_string();
-    }
-    if status == reqwest::StatusCode::REQUEST_TIMEOUT
-        || status == reqwest::StatusCode::GATEWAY_TIMEOUT
-    {
-        return TianyanError::timeout(raw).to_string();
-    }
-    raw.to_string()
-}
-
-impl AsyncOpenAIClient {
+impl ChatClient {
     /// 手写 SSE 流式补全：POST {base_url}/chat/completions（body 已含 stream: true），
     /// 逐行解析 data: 事件为内部 ChatCompletionChunk 并经 channel 返回。
     ///
@@ -274,7 +250,7 @@ impl AsyncOpenAIClient {
 
         // 请求发送阶段内置指数退避重试（全局默认策略，对齐 opencode/dsh-llm-retry）：
         // HTTP 429 / 5xx / 网络 / 超时 自动退避重试；一旦进入 2xx，流读取失败不再整段重发。
-        let response = crate::model::retry::with_retry(
+        let response = tianyan::model::retry::with_retry(
             &self.retry_policy,
             |e: &RetryableFailure| e.retryable,
             || self.send_chat_request(&url, &body, "模型服务错误", session_id),
@@ -382,7 +358,7 @@ impl AsyncOpenAIClient {
         for (name, source) in &self.dynamic_headers {
             let value = source
                 .resolve(session_id)
-                .unwrap_or_else(|| crate::config::HeaderSource::NON_SESSION_FALLBACK.to_string());
+                .unwrap_or_else(|| tianyan::config::HeaderSource::NON_SESSION_FALLBACK.to_string());
             match reqwest::header::HeaderValue::from_str(&value) {
                 Ok(parsed) => req = req.header(name.clone(), parsed),
                 Err(e) => {
@@ -394,7 +370,7 @@ impl AsyncOpenAIClient {
             req = req.bearer_auth(&self.api_key);
         }
         let response = req.send().await.map_err(|e| {
-            let retryable = crate::model::retry::should_retry_transport(&e);
+            let retryable = tianyan::model::retry::should_retry_transport(&e);
             let raw = format!("{err_prefix}：请求失败：{e}");
             let message = if e.is_timeout() {
                 TianyanError::timeout(raw).to_string()
@@ -407,7 +383,7 @@ impl AsyncOpenAIClient {
         if !status.is_success() {
             let detail = response.text().await.unwrap_or_default();
             let detail: String = detail.chars().take(300).collect();
-            let retryable = crate::model::retry::should_retry_http(status);
+            let retryable = tianyan::model::retry::should_retry_http(status);
             let raw = format!("{err_prefix}：请求被拒绝（HTTP {status}）：{detail}");
             return Err(RetryableFailure {
                 retryable,
@@ -811,8 +787,8 @@ fn convert_role(role: &OaRole) -> MessageRole {
 #[cfg(test)]
 mod convert_tests {
     use super::*;
-    use crate::common::types::Message;
-    use crate::model::types::{FunctionCall, ToolCall, ToolCallType};
+    use tianyan::common::types::Message;
+    use tianyan::model::types::{FunctionCall, ToolCall, ToolCallType};
 
     #[test]
     fn test_convert_system_message() {
@@ -1077,7 +1053,7 @@ mod convert_tests {
 #[cfg(test)]
 mod dialect_baseline_tests {
     use super::*;
-    use crate::config::DialectPreset;
+    use tianyan::config::DialectPreset;
 
     /// 预设 → 方言（测试便捷入口）。
     fn dialect(preset: DialectPreset) -> ProviderDialect {
@@ -1293,8 +1269,7 @@ mod stream_robustness_tests {
             "data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"network_error\"}]}\n\n".to_string(),
             false,
         );
-        let client =
-            AsyncOpenAIClient::new("mock", format!("http://{}/v1", addr), "", 1, 300).unwrap();
+        let client = ChatClient::new("mock", format!("http://{}/v1", addr), "", 1, 300).unwrap();
 
         let mut rx = client
             .create_raw_stream(serde_json::json!({"model": "m", "stream": true}), None)
@@ -1321,8 +1296,7 @@ mod stream_robustness_tests {
             chunk.len() + 200
         );
         let addr = spawn_mock_sse_with_body(listener, header, chunk, true);
-        let client =
-            AsyncOpenAIClient::new("mock", format!("http://{}/v1", addr), "", 1, 300).unwrap();
+        let client = ChatClient::new("mock", format!("http://{}/v1", addr), "", 1, 300).unwrap();
 
         let started = std::time::Instant::now();
         let mut rx = client
@@ -1372,8 +1346,7 @@ mod stream_robustness_tests {
             std::thread::sleep(Duration::from_secs(3));
         });
         // read_idle = 1s（旧实现必杀）；首包预算 = 4s
-        let client =
-            AsyncOpenAIClient::new("mock", format!("http://{}/v1", addr), "", 1, 4).unwrap();
+        let client = ChatClient::new("mock", format!("http://{}/v1", addr), "", 1, 4).unwrap();
         let mut rx = client
             .create_raw_stream(serde_json::json!({"model": "m", "stream": true}), None)
             .await
@@ -1404,8 +1377,7 @@ mod stream_robustness_tests {
             std::thread::sleep(Duration::from_secs(5));
         });
         // read_idle = 30s（若误用空闲预算，测试会明显变慢）；首包预算 = 1s
-        let client =
-            AsyncOpenAIClient::new("mock", format!("http://{}/v1", addr), "", 30, 1).unwrap();
+        let client = ChatClient::new("mock", format!("http://{}/v1", addr), "", 30, 1).unwrap();
 
         let started = std::time::Instant::now();
         let mut rx = client
@@ -1434,8 +1406,7 @@ mod stream_robustness_tests {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let body = "data: {\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hi\"},\"finish_reason\":null}]}\n\ndata: {\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"m\",\"choices\":[],\"usage\":{\"prompt_tokens\":123,\"completion_tokens\":45,\"total_tokens\":168}}\n\ndata: [DONE]\n\n".to_string();
         let addr = spawn_mock_sse(listener, body, false);
-        let client =
-            AsyncOpenAIClient::new("mock", format!("http://{}/v1", addr), "", 1, 300).unwrap();
+        let client = ChatClient::new("mock", format!("http://{}/v1", addr), "", 1, 300).unwrap();
 
         let mut rx = client
             .create_raw_stream(serde_json::json!({"model": "m", "stream": true}), None)
@@ -1468,8 +1439,7 @@ mod stream_robustness_tests {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let body = "data: {\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"m\",\"choices\":[],\"cost\":\"0.001\"}\n\ndata: [DONE]\n\n".to_string();
         let addr = spawn_mock_sse(listener, body, false);
-        let client =
-            AsyncOpenAIClient::new("mock", format!("http://{}/v1", addr), "", 1, 300).unwrap();
+        let client = ChatClient::new("mock", format!("http://{}/v1", addr), "", 1, 300).unwrap();
 
         let mut rx = client
             .create_raw_stream(serde_json::json!({"model": "m", "stream": true}), None)
@@ -1518,8 +1488,7 @@ mod stream_robustness_tests {
 
         // read_idle 放大到 30s：确保"旧实现等待空闲超时"的场景在测试窗口
         // （2s）内不会自然退出（本测试在旧实现下必红）。
-        let client =
-            AsyncOpenAIClient::new("mock", format!("http://{}/v1", addr), "", 30, 300).unwrap();
+        let client = ChatClient::new("mock", format!("http://{}/v1", addr), "", 30, 300).unwrap();
         let mut rx = client
             .create_raw_stream(serde_json::json!({"model": "m", "stream": true}), None)
             .await
@@ -1605,13 +1574,13 @@ mod stream_robustness_tests {
         );
         let (addr, captured) = spawn_mock_capture(listener, header, chunk);
 
-        let provider = crate::config::ProviderConfig {
+        let provider = tianyan::config::ProviderConfig {
             name: "opencode".to_string(),
             endpoint: format!("http://{addr}/v1"),
             api_key: Some("k".to_string()),
             ..Default::default()
         };
-        let client = AsyncOpenAIClient::from_provider(&provider).unwrap();
+        let client = ChatClient::from_provider(&provider).unwrap();
 
         let mut rx = client
             .create_raw_stream(
@@ -1629,7 +1598,7 @@ mod stream_robustness_tests {
             "请求应携带会话头（值 = session_id）: {text}"
         );
         assert!(
-            text.contains(&format!("tianyan/{}", crate::VERSION)),
+            text.contains(&format!("tianyan/{}", tianyan::VERSION)),
             "请求应携带专属 UA（非 reqwest 默认）: {text}"
         );
     }
@@ -1649,13 +1618,13 @@ mod stream_robustness_tests {
         );
         let (addr, captured) = spawn_mock_capture(listener, header, chunk);
 
-        let provider = crate::config::ProviderConfig {
+        let provider = tianyan::config::ProviderConfig {
             name: "opencode".to_string(),
             endpoint: format!("http://{addr}/v1"),
             api_key: Some("k".to_string()),
             ..Default::default()
         };
-        let client = AsyncOpenAIClient::from_provider(&provider).unwrap();
+        let client = ChatClient::from_provider(&provider).unwrap();
 
         let mut rx = client
             .create_raw_stream(serde_json::json!({"model": "m", "stream": true}), None)
@@ -1681,13 +1650,13 @@ mod stream_robustness_tests {
         );
         let (addr, captured) = spawn_mock_capture(listener, header, body);
 
-        let provider = crate::config::ProviderConfig {
+        let provider = tianyan::config::ProviderConfig {
             name: "opencode".to_string(),
             endpoint: format!("http://{addr}/v1"),
             api_key: Some("k".to_string()),
             ..Default::default()
         };
-        let client = AsyncOpenAIClient::from_provider(&provider).unwrap();
+        let client = ChatClient::from_provider(&provider).unwrap();
 
         let request = ChatCompletionRequest::new("m", vec![Message::user("hi")])
             .with_session_id("session-nonstream-1");

@@ -34,3 +34,8 @@ chrono.workspace = true
 # 正常运行依赖图（D2-2「插件之间零互赖」针对的是实现协作）。更干净的形态是把
 # 这 4 个运维脚本搬进独立的 `tools-ops` bin 包——见 ADR-049 序 3/序 4 的「遗留」。
 tianyan-storage-sqlite = { path = "../storage-sqlite" }
+# 同一理由：`ModelServices` 容器随 ADR-049 期 2 序 6 搬到 server 装配层后，运维脚本改用
+# provider 插件的能力集合（嵌入 / 聊天）。仍是**只服务 examples/ 的 dev 边**——生产
+# 依赖图（`cargo tree -p tianyan-storage-vector --edges normal`）不受影响。
+tianyan-provider-embed = { path = "../provider-embed" }
+tianyan-provider-llm = { path = "../provider-llm" }

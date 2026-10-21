@@ -45,6 +45,12 @@ tianyan-policy-context = { path = "../plugins/policy-context" }
 # 评审策略实现（ADR-049 期 3-T3）：任务结果自审 + 技能使用复审搬出 core 后由本包注入
 # （改判定提示词 / 评分标准 / 截断预算只重编插件 + 本包，内核与通道层不动）。
 tianyan-policy-review = { path = "../plugins/policy-review" }
+# provider 实现（ADR-049 期 2 序 6）：聊天/视觉与嵌入搬出 core 后由本包注入
+# （客户端构造 / 按能力解析 / 路由池 / 连通性探针 / 宽容 usage 解析全在插件里，
+# server 库只认 core 的 `ProviderLlmServices` / `ProviderEmbedServices` 与
+# `ConnectionProbe` 契约）。
+tianyan-provider-llm = { path = "../plugins/provider-llm" }
+tianyan-provider-embed = { path = "../plugins/provider-embed" }
 tokio.workspace = true
 
 [lints]

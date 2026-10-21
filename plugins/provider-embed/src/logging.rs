@@ -1,82 +1,22 @@
+//! 嵌入服务的日志 + 用量上报 + 查询缓存装饰（原 `middleware.rs` 的下半部分）。
+//!
+//! 三件事，逐字保留迁移前的行为：
+//!
+//! 1. **日志**（`embed` / `embed_single` / `embed_single_with_dimensions` / `embed_batch`
+//!    / `embed_image` 的 called / succeeded / failed，字段与文案未改）；
+//! 2. **用量上报**（`EmbeddingUsageSink`，契约在 core 的 `model::usage`）：嵌入不走
+//!    AgentLoop，其 token 用量必须单独入账；
+//! 3. **查询缓存**（`QUERY_EMBED_CACHE_CAPACITY = 256`，FIFO 淘汰，键
+//!    `model|dimensions|text`）：日志实测同一 query 在一次检索里被嵌入 2 次。
+
 use async_trait::async_trait;
-use tokio::sync::mpsc;
 use tracing::{error, info};
 
-use crate::common::error::{Result, TianyanError};
-use crate::common::types::{Embedding, Message, TokenUsage};
-use crate::model::traits::{ChatService, EmbeddingService, VlmService};
-use crate::model::types::{
-    ChatCompletionChunk, ChatCompletionRequest, ChatCompletionResponse, EmbeddingRequest,
-    EmbeddingResponse, VisionRequest, VisionResponse,
-};
-
-/// 带日志记录的聊天服务包装。
-pub struct LoggedService<T: ChatService>(pub T);
-
-#[async_trait]
-impl<T: ChatService> ChatService for LoggedService<T> {
-    async fn chat_completion(
-        &self,
-        request: ChatCompletionRequest,
-    ) -> Result<ChatCompletionResponse> {
-        info!(
-            model = %request.model,
-            "chat_completion called"
-        );
-        let result = self.0.chat_completion(request).await;
-        match &result {
-            Ok(resp) => info!(
-                model = %resp.model,
-                choices = resp.choices.len(),
-                "chat_completion succeeded"
-            ),
-            Err(e) => error!(
-                error = %e,
-                "chat_completion failed"
-            ),
-        }
-        result
-    }
-
-    async fn chat_completion_stream(
-        &self,
-        request: ChatCompletionRequest,
-    ) -> Result<mpsc::Receiver<Result<ChatCompletionChunk>>> {
-        info!(
-            model = %request.model,
-            "chat_completion_stream called"
-        );
-        self.0.chat_completion_stream(request).await
-    }
-
-    async fn chat(&self, model: &str, messages: Vec<Message>) -> Result<String> {
-        info!(
-            model = %model,
-            "chat called"
-        );
-        self.0.chat(model, messages).await
-    }
-}
-
-/// 嵌入用量上报槽位类型（装配层后置注入的可选句柄）。
-///
-/// 用共享 `Arc<Mutex<Option<...>>>` 而不是构造期参数：装配层（server）在
-/// 创建模型服务之后才拿到 `UsageLog`，后置注入不必改 `from_config` 签名。
-pub type EmbeddingUsageHandle =
-    std::sync::Arc<std::sync::Mutex<Option<std::sync::Arc<dyn EmbeddingUsageSink>>>>;
-
-/// 嵌入调用用量上报契约（model 层定义契约，实现由装配层注入）。
-///
-/// 为什么需要：嵌入调用**不走 AgentLoop**，其 token 用量此前完全不入账
-/// （`usage_logs` 只有 chat provider）——账单与应用内用量统计都看不到嵌入消耗。
-///
-/// 实现必须**非阻塞**（例如 `tokio::spawn` 异步落库）：本方法在检索热路径上
-/// 被调用，不得等待 I/O。
-pub trait EmbeddingUsageSink: Send + Sync {
-    /// 记录一次嵌入调用；`calls` 为本次文本条数（批量 > 1）。
-    fn record(&self, model: &str, usage: &TokenUsage, calls: usize);
-}
-
+use tianyan::common::error::{Result, TianyanError};
+use tianyan::common::types::{Embedding, TokenUsage};
+use tianyan::model::types::{EmbeddingRequest, EmbeddingResponse};
+use tianyan::model::EmbeddingService;
+use tianyan::model::EmbeddingUsageHandle;
 /// 查询嵌入缓存容量。
 ///
 /// 实测（日志）：同一 query 在一次检索里被嵌入 2 次（链路多处调用点），
@@ -278,38 +218,13 @@ impl<T: EmbeddingService> EmbeddingService for LoggedEmbeddingService<T> {
     }
 }
 
-/// 带日志记录的 VLM 服务包装。
-pub struct LoggedVlmService<T: VlmService>(pub T);
-
-#[async_trait]
-impl<T: VlmService> VlmService for LoggedVlmService<T> {
-    async fn analyze_image(&self, request: VisionRequest) -> Result<VisionResponse> {
-        info!(
-            model = %request.model,
-            "analyze_image called"
-        );
-        let result = self.0.analyze_image(request).await;
-        match &result {
-            Ok(resp) => info!(
-                model = %resp.model,
-                choices = resp.choices.len(),
-                "analyze_image succeeded"
-            ),
-            Err(e) => error!(
-                error = %e,
-                "analyze_image failed"
-            ),
-        }
-        result
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::types::EmbeddingData;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
+    use tianyan::model::types::EmbeddingData;
+    use tianyan::model::EmbeddingUsageSink;
 
     /// 计数 Mock：记录 embed 被真实调用的次数（验证缓存是否省掉重复调用）。
     struct CountingEmbedding {

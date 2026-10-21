@@ -9237,6 +9237,8 @@ dependencies = [
  "tianyan-policy-approval",
  "tianyan-policy-context",
  "tianyan-policy-review",
+ "tianyan-provider-embed",
+ "tianyan-provider-llm",
  "tianyan-server",
  "tianyan-storage-sqlite",
  "tianyan-storage-vector",
@@ -9253,7 +9255,6 @@ dependencies = [
 name = "tianyan-core"
 version = "0.7.0"
 dependencies = [
- "async-openai",
  "async-trait",
  "base64 0.22.1",
  "calamine",
@@ -9342,6 +9343,47 @@ dependencies = [
 ]
 
 [[package]]
+name = "tianyan-provider-client"
+version = "0.7.0"
+dependencies = [
+ "async-openai",
+ "reqwest 0.12.28",
+ "serde_json",
+ "tianyan-core",
+]
+
+[[package]]
+name = "tianyan-provider-embed"
+version = "0.7.0"
+dependencies = [
+ "async-openai",
+ "async-trait",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "tianyan-core",
+ "tianyan-provider-client",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "tianyan-provider-llm"
+version = "0.7.0"
+dependencies = [
+ "async-openai",
+ "async-trait",
+ "futures",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "tianyan-core",
+ "tianyan-provider-client",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "tianyan-server"
 version = "0.7.0"
 dependencies = [
@@ -9363,6 +9405,8 @@ dependencies = [
  "tianyan-policy-approval",
  "tianyan-policy-context",
  "tianyan-policy-review",
+ "tianyan-provider-embed",
+ "tianyan-provider-llm",
  "tianyan-storage-sqlite",
  "tianyan-task-builtin",
  "tianyan-task-evolution",
@@ -9400,6 +9444,8 @@ dependencies = [
  "serde_json",
  "tempfile",
  "tianyan-core",
+ "tianyan-provider-embed",
+ "tianyan-provider-llm",
  "tianyan-storage-sqlite",
  "tokio",
  "tracing",
@@ -9456,6 +9502,8 @@ dependencies = [
  "tianyan-policy-approval",
  "tianyan-policy-context",
  "tianyan-policy-review",
+ "tianyan-provider-embed",
+ "tianyan-provider-llm",
  "tianyan-server",
  "tianyan-storage-sqlite",
  "tianyan-storage-vector",

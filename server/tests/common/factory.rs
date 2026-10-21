@@ -208,6 +208,17 @@ pub fn test_assembly() -> tianyan_server::AssemblyServices {
         },
     );
 
+    // provider 实现（ADR-049 期 2 序 6）：与 `app` / `tauri` 同一份插件实现。客户端构造、
+    // 按能力解析、每 provider 的聊天路由池、连通性探针全在插件里
+    // （`tianyan_provider_llm::services` / `tianyan_provider_embed::services`），这里只做
+    // 类型擦除包装。**不注入**就会落到 core 的「未配置」降级服务（任何模型调用都报
+    // “应用未配置”），集成测试从此测不到真实的能力解析与请求构造（与序 4「不要用
+    // `AssemblyServices::default()` 驱动集成测试」同一条纪律）。
+    let provider_llm_factory: tianyan_server::ProviderLlmFactory =
+        Arc::new(|config: &ModelsConfig| tianyan_provider_llm::services(config));
+    let provider_embed_factory: tianyan_server::ProviderEmbedFactory =
+        Arc::new(|config: &ModelsConfig| tianyan_provider_embed::services(config));
+
     tianyan_server::AssemblyServices::new()
         .with_storage_factory(factory)
         .with_task_factory(task_factory)
@@ -215,4 +226,6 @@ pub fn test_assembly() -> tianyan_server::AssemblyServices {
         .with_context_factory(context_factory)
         .with_task_reviewer_factory(task_reviewer_factory)
         .with_skill_review_factory(skill_review_factory)
+        .with_provider_llm_factory(provider_llm_factory)
+        .with_provider_embed_factory(provider_embed_factory)
 }

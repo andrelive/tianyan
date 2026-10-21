@@ -40,8 +40,8 @@ use std::sync::Arc;
 use tianyan::vfs::{StorageBackend, VectorStorage};
 use tianyan_server::{
     start_server_with_assembly, ApprovalGateFactory, AssemblyServices, ContextFactory,
-    SkillReviewFactory, StorageBackendFactory, TaskFactory, TaskReviewerFactory, ToolPluginFactory,
-    VectorStorageFactory,
+    ProviderEmbedFactory, ProviderLlmFactory, SkillReviewFactory, StorageBackendFactory,
+    TaskFactory, TaskReviewerFactory, ToolPluginFactory, VectorStorageFactory,
 };
 use tianyan_storage_sqlite::{LocalFileBackend, SqliteBackend};
 use tianyan_storage_vector::LanceDbVectorStore;
@@ -198,8 +198,27 @@ fn skill_review_factory() -> SkillReviewFactory {
     )
 }
 
+/// 聊天 / 视觉 provider 工厂（`plugins/provider-llm`，ADR-049 期 2 序 6）。
+///
+/// 同款类型擦除：server 库只认 [`ProviderLlmFactory`]（`Arc<dyn Fn>`），`AsyncOpenAIClient`
+/// 与流式解析只在本包（间接经插件）出现。客户端构造 + 按能力解析 + 每 provider 的聊天
+/// 路由池 + 连通性探针全在插件里（`tianyan_provider_llm::services`），三处装配各写一行。
+///
+/// 同步工厂：客户端构造（UA / 方言 / 双预算超时 / 动态会话头 / 重试策略）不发任何请求。
+fn provider_llm_factory() -> ProviderLlmFactory {
+    Arc::new(|config: &tianyan::config::ModelsConfig| tianyan_provider_llm::services(config))
+}
+
+/// 嵌入 provider 工厂（`plugins/provider-embed`，ADR-049 期 2 序 6）。
+///
+/// 产出里带**用量上报槽位**：server 拿到 `UsageLog` 后后置注入（嵌入不走 AgentLoop，
+/// 其 token 用量必须单独入账）。
+fn provider_embed_factory() -> ProviderEmbedFactory {
+    Arc::new(|config: &tianyan::config::ModelsConfig| tianyan_provider_embed::services(config))
+}
+
 /// 完整装配（插件工具清单 + 向量存储 + 结构化存储 + 内置任务 + 审批门控 + 上下文策略
-/// + 任务自审 + 技能复审）。
+/// + 任务自审 + 技能复审 + 聊天/视觉 provider + 嵌入 provider）。
 fn assembly() -> AssemblyServices {
     AssemblyServices::new()
         .with_plugin_factory(plugin_factory())
@@ -210,6 +229,8 @@ fn assembly() -> AssemblyServices {
         .with_context_factory(context_factory())
         .with_task_reviewer_factory(task_reviewer_factory())
         .with_skill_review_factory(skill_review_factory())
+        .with_provider_llm_factory(provider_llm_factory())
+        .with_provider_embed_factory(provider_embed_factory())
 }
 
 #[tokio::main]

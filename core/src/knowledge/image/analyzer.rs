@@ -127,7 +127,7 @@ async fn analyze_image_base64(
     use base64::{engine::general_purpose::STANDARD, Engine as _};
 
     let base64_data = STANDARD.encode(image_data);
-    let mime_type = crate::model::provider::vision::infer_mime_type(image_data);
+    let mime_type = infer_mime_type(image_data);
     let data_url = format!("data:{};base64,{}", mime_type, base64_data);
 
     let message = VisionMessage {
@@ -163,4 +163,27 @@ async fn analyze_image_base64(
                 .join("\n"),
         })
         .unwrap_or_default())
+}
+
+/// 根据图片字节数据推断 MIME 类型。
+///
+/// 位置说明（ADR-049 期 2 序 6）：本函数原在 `model::provider::vision`（视觉 provider
+/// 实现文件里），但**唯一消费者是本模块**（知识导入的图片分析）——provider 侧从不调用
+/// 它。视觉实现整体搬进 `plugins/provider-llm` 后，若继续留在那里，内核（knowledge）
+/// 就得反向 `use tianyan_provider_llm::…`（破 D2-1），所以它跟着**消费者**留在 core。
+/// 函数体与分支顺序逐字未改（快照回退仍是 `image/png`）。
+fn infer_mime_type(data: &[u8]) -> &'static str {
+    if data.len() >= 3 && &data[0..3] == b"\xFF\xD8\xFF" {
+        "image/jpeg"
+    } else if data.len() >= 8 && &data[0..8] == b"\x89PNG\r\n\x1A\n" {
+        "image/png"
+    } else if data.len() >= 6 && (&data[0..6] == b"GIF87a" || &data[0..6] == b"GIF89a") {
+        "image/gif"
+    } else if data.len() >= 2 && &data[0..2] == b"BM" {
+        "image/bmp"
+    } else if data.len() >= 12 && &data[0..4] == b"RIFF" && &data[8..12] == b"WEBP" {
+        "image/webp"
+    } else {
+        "image/png" // safe fallback
+    }
 }

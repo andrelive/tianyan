@@ -74,11 +74,15 @@ cargo test -p tianyan-core vfs::backend::local -- --nocapture  # 指定测试模
 | `plugins/policy-approval/` | `tianyan-policy-approval` | 插件：**审批策略**（`ApprovalWorkflow`：风险定级 / 自动规则引擎（Deny 优先）/ `ApprovalMode` 三态短路 / 「总是询问」命令 / 人工审批挂起通道 / 审计，含 23 个迁移测试）；契约 `ApprovalGate` 与全部领域类型留 core（期 3-T1） |
 | `plugins/policy-context/` | `tianyan-policy-context` | 插件：**上下文策略**（注入管线 / 双层检索 RRF / 意图分类 / 分层压缩，1,729 生产行 + 65 个迁移测试）；`assembler.rs` 留 core（K1 组装机制）——ADR-049 期 3-T2，**期 3 的主体收益** |
 | `plugins/policy-review/` | `tianyan-policy-review` | 插件：**评审策略**（`LlmTaskReviewer` 后台任务结果自审 / `SkillReviewer` 技能使用复审，475 生产行 + 11 个迁移测试 + 3 个装配门禁）；契约 `TaskReviewer` / `SkillReviewPort` / `SkillReview` 留 core（期 3-T3） |
+| `plugins/provider-client/` | `tianyan-provider-client` | **provider 基底 crate**（不是能力插件、无插槽）：`AsyncOpenAIClient`（UA 单点 / 方言解析 / 双预算超时 / 动态会话头 / 重试策略一次构造）+ `RetryableFailure` / `classify_http_status`；被下面两个 provider 插件共用（孤儿规则不允许把 `impl EmbeddingService for 外部类型` 写在第三方 crate，故共用的客户端必须独立成 crate） |
+| `plugins/provider-llm/` | `tianyan-provider-llm` | 插件：**聊天 + 视觉 provider**（`chat` / `vision` / `discovery` / 日志装饰，约 2,450 行 + 39 个迁移测试）+ 连通性探针（配置页「测试连接」）；`async-openai` 随之离开 core（ADR-049 期 2 序 6） |
+| `plugins/provider-embed/` | `tianyan-provider-embed` | 插件：**文本嵌入 provider**（宽容 usage 解析 / 用量上报 / 查询缓存 FIFO 256，约 700 行 + 10 个迁移测试）；用量上报**契约** `EmbeddingUsageSink` 留 core（实现方在通道层）（期 2 序 6） |
 
 **依赖铁律**（破一条拆包收益全部回吐）：插件只依赖 `core`（kernel-api）；插件之间零互赖；
 `core`/`server` 不认识任何插件 crate。装配经 `server/src/assembly.rs` 的类型擦除插槽
 （`ToolPluginFactory` / `VectorStorageFactory` / `StorageBackendFactory` / `TaskFactory` /
-`ApprovalGateFactory` / `ContextFactory` / `TaskReviewerFactory` / `SkillReviewFactory`；
+`ApprovalGateFactory` / `ContextFactory` / `TaskReviewerFactory` / `SkillReviewFactory` /
+`ProviderLlmFactory` / `ProviderEmbedFactory`，共 10 个；
 `TaskFactory` 由装配层把 `task-builtin::tasks()` 与 `task-evolution::tasks()` 拼接成一份
 清单——`splice(1..1, …)` 让演化任务紧跟 `summary_generation`，跨插件顺序只有装配清单知道；
 `ApprovalGateFactory` 把 `policy-approval::gate()` 包成 `Arc<dyn ApprovalGate>`——
@@ -95,6 +99,14 @@ agent 没有 system 前缀、上下文只增不减，服务起得来但行为已
 没搬）——**未装配 = 不自审**（`background_self_review` 为真时也直接投递通知 + `warn!`）
 与 **技能统计 `reviews` 为空数组**（响应结构不变，与「有评审器但无记录」不可区分）。
 「是否自审」这个**成本开关**仍由内核判；提示词 / 解析口径 / 评分标准 / 截断预算全在插件。
+`ProviderLlmFactory` / `ProviderEmbedFactory` 把 `provider-llm::services()` /
+`provider-embed::services()` 包成能力集合（`ProviderLlmServices` / `ProviderEmbedServices`，
+**定义在 core** 的 `model::assembly`，三方共用），本库再用它们拼 `ModelServices`
+（容器已从 core 搬到 `server/src/model_services.rs`：core 内零生产使用者 + D5 装配职责）——
+**未装配 = core 的「未配置」降级服务**（`Unconfigured{Chat,Embedding,Vlm}Service`，
+调用即报“应用未配置”）+ `warn!`，服务端照常启动（前端显示配置向导）。
+连通性探针（`ConnectionProbe` 契约在 core）随 provider-llm 的能力集合一起产出：
+「测试连接」用用户**当场输入**的 endpoint/key 造临时客户端，必须复用同一套构造语义。
 任务的清单项与能力集合（`TaskRegistration` / `TaskServices`）**定义在 core**
 （`core/src/scheduler/task_assembly.rs`，server 侧 re-export）：若住在 server，任务插件
 就得依赖 server 库（破第一条铁律）。
@@ -180,7 +192,7 @@ Harness 工程 → [`docs/harness核心思路/harness-engineering-overview.md`](
 | `knowledge` | `core/src/knowledge/` | 知识库导入管道 | ❌ **不建独立检索管道**，导入→VFS→SummaryEngine |
 | `skills` | `core/src/skills/` | 技能 = VFS 方法论文档（发现/读取；无执行语义）：`SkillManager`（发现/读取）+ 复审**契约**（`SkillReviewPort` 只读 `latest_review` / `SkillReview` 记录形状 / `REVIEWS_PREFIX`——它同时是插件的落盘路径与技能发现时的过滤条件）。**复审实现已出 core**（ADR-049 期 3-T3）：会话证据提取 / 评分提示词 / JSONL 落盘 → `plugins/policy-review`；`SkillManager` 因 3a 业务复用（`api/skills/services.rs` 直接持具体类型）留 core | ❌ **不全量加载**，L0 发现→L2 按需 |
 | `session` | `core/src/session/` | `SessionStore`（SQLite 权威存储，ADR-018；SQL 收敛本模块，经 db 单连接）+ `PersistentSessionManager` + `SessionRecall`（FTS 回忆） | ⚠️ 例外：会话内容不经 VFS（ADR-018）；`tianyan://session/{id}` 仅作逻辑标识 |
-| `model` | `core/src/model/` | `ModelServices` 容器（不路由、不重试） | — |
+| `model` | `core/src/model/` | 模型服务**契约 + 数据**：`ChatService`/`EmbeddingService`/`VlmService`/`ServiceDiscovery`（S 级）、载荷（`types/`）、模型规格（`spec`）、重试策略（`retry`）、装配原语（`assembly`：`ProviderLlmServices`/`ProviderEmbedServices`/`ConnectionProbe`）、降级服务（`unconfigured`）、用量上报契约（`usage`）。**实现已全部出 core**（ADR-049 期 2 序 6）：聊天/视觉 → `plugins/provider-llm`，嵌入 → `plugins/provider-embed`，共享客户端 → `plugins/provider-client`；容器 `ModelServices` → `server/src/model_services.rs` | — |
 | `scheduler` | `core/src/scheduler/` | 定时任务**机制 + 装配原语**：`TaskScheduler`（间隔+补跑）、`TaskHandler`/`TaskContext`/`TaskDefinition`、`TaskRegistration`/`TaskServices`、`EvolutionReviewExecutor`（综述执行器契约）；**core 已无任何具体任务实现**（5 个内置任务 → `plugins/task-builtin` 序 5a，演化任务 → `plugins/task-evolution` 序 5b） | 定时任务产物写入 VFS |
 | `observability` | `core/src/observability/` | `AgentMetrics`/`UsageStats`/`TraceCollector`/`ExecutionLog`/`UsageLog`/`RuleRecorder`；SQL 经 db Repository 收敛 | — |
 | `executor` | `core/src/executor/` | 工具执行支撑（Action、审批**门控契约**、任务自审**契约** `review::TaskReviewer`、验证门控）+ 语义化编辑（内容匹配 edit / patch）、文件浏览（fs/search）、代码智能（symbols/repo_map/project/test_discovery）。**审批与自审的实现均已出 core**（→ `plugins/policy-approval` 期 3-T1 / `plugins/policy-review` 期 3-T3） | — |
@@ -202,6 +214,8 @@ Harness 工程 → [`docs/harness核心思路/harness-engineering-overview.md`](
 
 - `tianyan` 和 `tianyan-core` 是同一个包（lib name: `tianyan`），导入用 `tianyan::...`
 - **`plugins/storage-sqlite/src/{sqlite,local}.rs`、`plugins/policy-approval/src/workflow.rs`、`plugins/policy-context/src/context/**` 内禁止 `crate::…`**（只允许 `tianyan::…`；`policy-context` 额外允许 `crate::context::…`——它自己的模块树，详见其 crate 文档）：core 单测以 `#[cfg(test)] #[path]` **同源包含**这些文件（dev-dep 会让 core 编译两份 → `StorageBackend`/`ApprovalGate`/`ContextPort` 等 trait 出现两个不兼容实例，实测 22 处 E0308/E0277）。写 `crate::` 时它解析到 core 而非插件，报错位置完全不相干。改文件布局须同步 `core/src/vfs/backend/mod.rs`、`core/src/executor/approval/mod.rs` 与 `core/src/context/mod.rs` 的 `#[path]`
+  （provider 三件套**不在此列**：它们的测试随文件整体迁移，core 里没有残留的单测需要同源包含——见 ADR-049 期 2 序 6）
+- **provider 域是三个 crate，不是两个**：`tianyan-provider-client`（共享客户端 + 状态码语义分类，无插槽）← `tianyan-provider-llm` / `tianyan-provider-embed`（能力插件，互相零依赖）。原因是孤儿规则：`impl EmbeddingService for AsyncOpenAIClient` 只能写在定义该类型的 crate 里，而客户端被聊天/嵌入共用，构造语义（UA/方言/双预算超时/动态会话头/重试）必须只有一份。两个能力插件各用一个 **newtype + `Deref`**（`ChatClient` / `EmbeddingClient`）满足孤儿规则——`Deref` 让字段与方法访问**逐字保持**（`self.base_url` / `self.send_chat_request(...)` 不改），改动只有类型名
 - **插件测试要用 core 的测试替身（`MockVfs` / `MockChatService`）时开 `test-utils` 特性**：`core/src/test_utils` 与 `model::MockChatService` 的 `cfg` 是 `any(test, feature = "test-utils")`，插件侧写 `[dev-dependencies] tianyan = { path = "../../core", package = "tianyan-core", features = ["test-utils"] }`（`mockall` 因此是 core 的**可选**依赖，默认构建不含）。不这么做只能把替身复制进插件——两份实现同时漂移，测试随即失去意义（ADR-049 序 5a）
 - `ServiceDiscovery::is_available()` 是 `async` —— 别忘了 `await`
 - 配置文件固定为 `~/.tianyan/tianyan.toml`（`TIANYAN_CONFIG` 环境变量可覆盖，e2e 用）；数据目录由配置 `storage.data_dir` 决定（默认 `%LOCALAPPDATA%/tianyan`），两者分离、搬迁只动数据（ADR-023）

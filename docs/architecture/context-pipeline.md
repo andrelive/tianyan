@@ -382,7 +382,7 @@ WHERE session_id = :sid;
   - `run_turns` 对空响应**同轮内重试一次**（`core/src/agent/loop.rs:696-713`）；
     重试仍空则按正常结束（空输出 = completed，对齐 DSH）。
   - 非标准 `finish_reason`（如网关 `network_error`）在 provider 层**显式上抛**为错误而非静默丢弃
-    （`core/src/model/provider/chat.rs:556-567`）。
+    （`plugins/provider-llm/src/chat.rs`）。
   - `finish_reason` 随 assistant 消息**持久化**到 `StructuredMessage.finish`
     （`loop.rs:992-993`；`agent_core.rs:718-744`）。
 - **排查入口**：按失败会话的 `message_id` 查 `session_messages` 该条 `content_parts` 的

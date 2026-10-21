@@ -73,6 +73,12 @@ tianyan-policy-context = { path = "../plugins/policy-context" }
 # ——否则 `/api/v1/skills/stats` 的 reviews 永远为空（读端口未装配），测的就不是生产形态。
 # 与上下文策略同一条纪律：只用 dev-dep，生产图里没有插件（无循环）。
 tianyan-policy-review = { path = "../plugins/policy-review" }
+# provider 实现（ADR-049 期 2 序 6）：集成测试的 `test_assembly()` 注入**真实**的聊天 /
+# 视觉 / 嵌入实现——否则 `ModelServices` 落到 core 的「未配置」降级服务，任何模型调用
+# 都报“应用未配置”，配置解析 / 路由池 / 连通性探针在集成测试里就成了未测试代码（与
+# 上下文策略、评审器同一条纪律）。无循环（两个插件只依赖 core）。
+tianyan-provider-llm = { path = "../plugins/provider-llm" }
+tianyan-provider-embed = { path = "../plugins/provider-embed" }
 # core 的测试替身（`MockVfs` / `MockChatService`）作为**特性构建**打开：本库的插槽
 # 测试要构造 `ContextServices`（含 `Arc<dyn VirtualFileSystem>`），不打开就只能
 # 复制一份替身（两份实现同时漂移）。仅测试构建生效，`cargo tree -p tianyan-server`

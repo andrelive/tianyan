@@ -39,6 +39,10 @@ tianyan-policy-approval = { path = "../plugins/policy-approval" }
 tianyan-policy-context = { path = "../plugins/policy-context" }
 # 评审策略实现（ADR-049 期 3-T3）：与 `app/src/main.rs` 的两个评审工厂同形同源。
 tianyan-policy-review = { path = "../plugins/policy-review" }
+# provider 实现（ADR-049 期 2 序 6）：与 `app/src/main.rs` 的两个 provider 工厂同形同源
+# （聊天/视觉 + 嵌入；server 库只认 core 的能力集合与 `ConnectionProbe` 契约）。
+tianyan-provider-llm = { path = "../plugins/provider-llm" }
+tianyan-provider-embed = { path = "../plugins/provider-embed" }
 
 # Tauri framework
 tauri = { version = "2.2", features = ["tray-icon", "devtools"] }

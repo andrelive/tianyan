@@ -76,10 +76,16 @@ tianyan/
 │   ├── context/    # 上下文工程契约 + 组装机制（assembler、port.rs、assembly.rs）；策略实现 → plugins/policy-context
 │   ├── executor/   # [已废弃] 独立执行函数 + 审批工作流 + 验证门控
 │   ├── knowledge/  # 知识库导入和解析（parser、image、ingestor/）
-│   ├── model/      # 模型服务容器 + provider/
-│   │   ├── traits.rs    # ChatService/EmbeddingService/VlmService trait
-│   │   ├── services.rs  # ModelServices（替代 ModelRouter 的容器）
-│   │   └── provider/    # AsyncOpenAIClient 等统一客户端
+│   ├── model/      # 模型服务契约 + 数据（实现已出 core，ADR-049 期 2 序 6）
+│   │   ├── traits.rs    # ChatService/EmbeddingService/VlmService/ServiceDiscovery（S 级）
+│   │   ├── types/       # 请求/响应/工具载荷
+│   │   ├── spec.rs      # 模型规格 + 上下文窗口（内核动态 max_tokens / 压缩窗口联动）
+│   │   ├── retry.rs     # 重试策略与可重试谓词（两个 provider 插件共用）
+│   │   ├── assembly.rs  # 装配原语：ProviderLlmServices / ProviderEmbedServices / ConnectionProbe
+│   │   ├── unconfigured.rs # 「能力未配置」降级服务
+│   │   └── usage.rs     # EmbeddingUsageSink 契约（实现方在 server）
+│   │   （客户端 → plugins/provider-client；聊天/视觉 → plugins/provider-llm；
+│   │     嵌入 → plugins/provider-embed；容器 ModelServices → server/src/model_services.rs）
 │   ├── observability/ # AgentMetrics 可观测性存储和自省接口
 │   ├── scheduler/  # 定时任务调度机制（TaskHandler/TaskContext/TaskScheduler + 装配原语 + EvolutionReviewExecutor 契约）；core 无具体任务实现（→ plugins/task-builtin、plugins/task-evolution）
 │   ├── session/    # 会话管理（SessionStore SQLite 权威存储 + PersistentSessionManager + SessionRecall）

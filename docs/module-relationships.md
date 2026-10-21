@@ -60,7 +60,7 @@ core/src/
 ├── db/          (统一写入门面：Database 门面 + SqliteDb + stats/trace/execution/usage Repository；只依赖 common)
 ├── executor/    (工具执行：Action、审批门控契约、任务自审契约 review::TaskReviewer、验证门控)
 ├── knowledge/   (parser, image/, ingestor/, types)
-├── model/       (traits, services.rs, provider/)
+├── model/       (traits, types/, spec.rs, retry.rs, assembly.rs, unconfigured.rs, usage.rs；实现 → plugins/provider-{client,llm,embed}，容器 → server/src/model_services.rs)
 ├── observability/ (AgentMetrics, usage_stats/trace/execution_log/usage_log/rule_recorder；SQL 经 db 收敛)
 ├── roles/       (角色基础类型：AgentRole/RoleSource/RoleStatus 等，纯类型层)
 ├── role_store.rs (角色 VFS 存储，独立存储层)
@@ -349,10 +349,12 @@ TaskScheduler 触发
 | Trait | 定义位置 | 实现者 | 消费者 |
 |-------|---------|--------|--------|
 | `AgentCoordinator` | `core/src/agent/coordinator.rs` | `Agent` | `server/state.rs`, `server/api/chat/services.rs` |
-| `ChatService` | `core/src/model/traits.rs` | `AsyncOpenAIClient`（经 `LoggedService` 装饰） | `agent/coordinator.rs`, `agent/loop.rs` |
-| `EmbeddingService` | `core/src/model/traits.rs` | `AsyncOpenAIClient`（经 `LoggedEmbeddingService` 装饰） | `vfs/vfs_impl.rs`, `plugins/policy-context`（`context/retrieval/`） |
-| `VlmService` | `core/src/model/traits.rs` | `AsyncOpenAIClient`（经 `LoggedVlmService` 装饰） | `knowledge/image/` |
-| `ServiceDiscovery` | `core/src/model/traits.rs` | `AsyncOpenAIClient` | `server/state.rs`（健康检查） |
+| `ChatService` | `core/src/model/traits.rs` | `ChatClient`（`plugins/provider-llm`，newtype 包装 `AsyncOpenAIClient`，经 `LoggedService` 装饰；装配层经 `ProviderLlmFactory` 注入） | `agent/coordinator.rs`, `agent/loop.rs` |
+| `EmbeddingService` | `core/src/model/traits.rs` | `EmbeddingClient`（`plugins/provider-embed`，同款 newtype + `LoggedEmbeddingService`；装配层经 `ProviderEmbedFactory` 注入） | `vfs/vfs_impl.rs`, `plugins/policy-context`（`context/retrieval/`） |
+| `VlmService` | `core/src/model/traits.rs` | `ChatClient`（`plugins/provider-llm`，经 `LoggedVlmService` 装饰） | `knowledge/image/` |
+| `ServiceDiscovery` | `core/src/model/traits.rs` | `ChatClient`（`plugins/provider-llm`） | `server/state.rs`（健康检查） |
+| `ConnectionProbe` | `core/src/model/assembly.rs` | `ProviderConnectionProbe`（`plugins/provider-llm`，随 `ProviderLlmServices::probe` 产出；**未装配 → `None`，配置页返回「连接测试不可用」**） | `server/src/api/config/handlers.rs`（`POST /api/config/test-connection`） |
+| `EmbeddingUsageSink` | `core/src/model/usage.rs` | `UsageLogEmbeddingSink`（`server/src/embedding_usage.rs`，后置注入槽位） | `plugins/provider-embed`（`LoggedEmbeddingService` 每次嵌入后上报） |
 | `VfsCore` | `core/src/vfs/traits.rs` | `VfsImpl` | `vfs/vfs_impl.rs`, `plugins/policy-context`（`context/pipeline.rs`） |
 | `ContentStore` | `core/src/vfs/traits.rs` | `VfsImpl` | `vfs/vfs_impl.rs`, `plugins/task-builtin/`, `plugins/task-evolution/` |
 | `EvolutionReviewExecutor` | `core/src/scheduler/evolution_executor.rs` | `AgentEvolutionExecutor`（`server/src/evolution_executor.rs`，经 `TaskServices.evolution_executor` 注入） | `plugins/task-evolution/` |
@@ -367,7 +369,7 @@ TaskScheduler 触发
 | `TaskReviewer` | `core/src/executor/review.rs` | `LlmTaskReviewer`（`plugins/policy-review`，装配层经 `TaskReviewerFactory` 注入；**未装配 → 不自审（通知直接投递）+ `warn!`**） | `agent/background.rs`（`task_reviewer` 字段 / `with_task_reviewer`）、`agent/tool_registry/mod.rs`、`AgentBuilder::with_task_reviewer` |
 | `SkillReviewPort` | `core/src/skills/review.rs` | `SkillReviewer`（`plugins/policy-review`，装配层经 `SkillReviewFactory` 注入；**未装配 → `None`，技能统计 `reviews` 为空数组**） | `server/src/api/skills/handlers.rs`（`latest_review`，技能统计面板） |
 
-> **注意**：`ModelServices` 不是 trait，是 `core/src/model/services.rs` 中的 struct，聚合 `Arc<dyn ChatService>` + `Arc<dyn EmbeddingService>` + `Arc<dyn VlmService>`。
+> **注意**：`ModelServices` 不是 trait，是 **`server/src/model_services.rs`** 中的 struct（ADR-049 期 2 序 6 从 core 搬来：core 内零生产使用者 + D5 装配职责），聚合 `Arc<dyn ChatService>` + `Arc<dyn EmbeddingService>` + `Arc<dyn VlmService>` + 每 provider 的聊天路由池 + 连通性探针。它由装配层注入的两个工厂产出（`ProviderLlmServices` / `ProviderEmbedServices`，契约在 `core/src/model/assembly.rs`）拼装。
 
 ### 5.2 HTTP API 契约
 

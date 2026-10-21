@@ -99,6 +99,7 @@ pub async fn get_config_status() -> Json<Value> {
 
 /// POST /api/config/test-connection — test a model service connection.
 pub async fn test_connection(
+    State(state): State<Arc<AppState>>,
     Json(request): Json<tianyan::config::TestConnectionRequest>,
 ) -> Json<tianyan::config::TestConnectionResponse> {
     use tianyan::config::TestConnectionResponse;
@@ -113,36 +114,41 @@ pub async fn test_connection(
     if request.model.is_empty() {
         return Json(TestConnectionResponse::error("模型名称不能为空"));
     }
-    match test_model_connection(&request.endpoint, &request.api_key, &request.model).await {
+    match test_model_connection(&state, &request.endpoint, &request.api_key, &request.model).await {
         Ok(models) => Json(TestConnectionResponse::success("连接成功", models)),
         Err(e) => Json(TestConnectionResponse::error(format!("连接失败: {}", e))),
     }
 }
 
-/// 测试模型连接：创建临时客户端并发送一个简单的聊天请求验证连接。
+/// 测试模型连接：用**临时**凭据发一次最小聊天请求验证连接。
 ///
-/// 错误分类用**语义谓词**（ADR-014：分类契约在 core 单点——上游错误已在
-/// `model::provider::chat` 映射为 KIND 前缀），消费端不再做消息文本匹配。
+/// 实现已出 core（ADR-049 期 2 序 6）：具体客户端（`AsyncOpenAIClient`）现在住在
+/// `plugins/provider-llm`，通道层只认 `tianyan::model::ConnectionProbe` 契约。探测用的
+/// endpoint / api_key 是用户在配置页**当场输入**的（不是已配置的 provider 实例），所以
+/// 由插件用**同一套**客户端构造语义造临时客户端（UA / 方言 / 双预算超时 / 动态会话头 /
+/// 重试策略全路径一致），而不是在通道层复制一份构造逻辑。
+///
+/// 错误分类仍在本层用**语义谓词**（ADR-014：分类契约单点——上游错误已由 provider 实现
+/// 映射为带 KIND 前缀的 `TianyanError`），消费端不做消息文本匹配。
 async fn test_model_connection(
+    state: &Arc<AppState>,
     endpoint: &str,
     api_key: &str,
     model: &str,
 ) -> Result<Vec<String>, String> {
-    let client =
-        tianyan::model::AsyncOpenAIClient::new("test-connection", endpoint, api_key, 30, 300)
-            .map_err(|e| format!("创建客户端失败: {}", e))?;
-
-    let request = tianyan::model::types::ChatCompletionRequest::new(
-        model.to_string(),
-        vec![tianyan::Message::system("You are a helpful assistant.")],
-    )
-    .with_temperature(0.7)
-    .with_max_tokens(10)
-    .with_stream(false);
-
-    use tianyan::model::ChatService;
-    match client.chat_completion(request).await {
-        Ok(_) => Ok(vec![model.to_string()]),
+    let services = state
+        .shared_model_services()
+        .await
+        .map_err(|e| format!("模型服务不可用: {}", e))?;
+    let probe = services.probe().ok_or_else(|| {
+        "连接测试不可用：未装配 provider-llm 工厂（生产装配请用 create_app_with_assembly / \
+         start_server_with_assembly）"
+            .to_string()
+    })?;
+    match probe.probe(endpoint, api_key, model).await {
+        // `probe` 已按契约返回可用的模型名列表（今天恒为 `vec![model]`，与迁移前
+        // `test_model_connection` 的返回值逐字一致）；这里不再二次拼装。
+        Ok(models) => Ok(models),
         Err(e) => Err(classify_connection_error(&e)),
     }
 }

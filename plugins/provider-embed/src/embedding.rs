@@ -2,14 +2,14 @@ use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::Value;
 
-use crate::common::error::{Result, TianyanError};
-use crate::common::types::TokenUsage;
-use crate::config::EmbeddingUsageShape;
-use crate::model::traits::EmbeddingService;
-use crate::model::types::{EmbeddingData, EmbeddingInput, EmbeddingRequest, EmbeddingResponse};
+use tianyan::common::error::{Result, TianyanError};
+use tianyan::common::types::TokenUsage;
+use tianyan::config::{EmbeddingUsageShape, ProviderConfig};
+use tianyan::model::types::{EmbeddingData, EmbeddingInput, EmbeddingRequest, EmbeddingResponse};
+use tianyan::model::EmbeddingService;
 
-use super::chat::{classify_http_status, RetryableFailure};
-use super::client::AsyncOpenAIClient;
+use tianyan_provider_client::AsyncOpenAIClient;
+use tianyan_provider_client::{classify_http_status, RetryableFailure};
 
 /// 上游嵌入响应的原始形状（**宽容**反序列化）。
 ///
@@ -85,7 +85,33 @@ fn embedding_usage(raw: &RawEmbeddingUsage, shape: EmbeddingUsageShape) -> Token
     usage
 }
 
-impl AsyncOpenAIClient {
+/// 嵌入能力的客户端（[`AsyncOpenAIClient`] 的 newtype 包装）。
+///
+/// **为什么需要 newtype**（不是审美选择）：`impl EmbeddingService for …` 必须写在
+/// 「类型或 trait 属于本 crate」的位置（Rust 孤儿规则）。`EmbeddingService` 在 core、
+/// `AsyncOpenAIClient` 在 `tianyan-provider-client`——两者对本 crate 都是外部类型，
+/// 直接 `impl` 会被编译器拒绝（`E0117`/`E0116`）。
+///
+/// 包装一层**不复制任何构造逻辑**：`new` 直接调用
+/// [`AsyncOpenAIClient::from_provider`]，因此 UA 单点（ADR-046）、方言解析一次
+/// （ADR-038）、双预算超时（ADR-044）、动态会话头、`RetryPolicy` 全部仍是同一份实现；
+/// 嵌入能力与聊天能力也保持**零依赖**（D2-2：插件之间不互相 import）。
+pub struct EmbeddingClient(AsyncOpenAIClient);
+
+impl std::ops::Deref for EmbeddingClient {
+    type Target = AsyncOpenAIClient;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl EmbeddingClient {
+    /// 从 provider 配置构造（构造语义完全复用 [`AsyncOpenAIClient::from_provider`]）。
+    pub fn new(config: &ProviderConfig) -> Result<Self> {
+        Ok(Self(AsyncOpenAIClient::from_provider(config)?))
+    }
+
     /// 发送一次嵌入请求（供重试循环调用）。
     ///
     /// 与 chat 共用同一套请求层单点：同一个 reqwest 客户端、同一组额外请求头、
@@ -105,7 +131,7 @@ impl AsyncOpenAIClient {
         }
 
         let response = req.send().await.map_err(|e| {
-            let retryable = crate::model::retry::should_retry_transport(&e);
+            let retryable = tianyan::model::retry::should_retry_transport(&e);
             let raw = format!("嵌入服务错误：嵌入请求失败：{e}");
             let message = if e.is_timeout() {
                 TianyanError::timeout(raw).to_string()
@@ -119,7 +145,7 @@ impl AsyncOpenAIClient {
         if !status.is_success() {
             let detail = response.text().await.unwrap_or_default();
             let detail: String = detail.chars().take(300).collect();
-            let retryable = crate::model::retry::should_retry_http(status);
+            let retryable = tianyan::model::retry::should_retry_http(status);
             let raw = format!("嵌入服务错误：嵌入请求失败（HTTP {status}）：{detail}");
             return Err(RetryableFailure {
                 retryable,
@@ -131,7 +157,7 @@ impl AsyncOpenAIClient {
 }
 
 #[async_trait]
-impl EmbeddingService for AsyncOpenAIClient {
+impl EmbeddingService for EmbeddingClient {
     async fn embed(&self, request: EmbeddingRequest) -> Result<EmbeddingResponse> {
         let url = format!("{}/embeddings", self.base_url.trim_end_matches('/'));
 
@@ -151,7 +177,7 @@ impl EmbeddingService for AsyncOpenAIClient {
         }
 
         // 重试复用请求层单点（全局 RetryPolicy，与 chat 同款）。
-        let response = crate::model::retry::with_retry(
+        let response = tianyan::model::retry::with_retry(
             &self.retry_policy,
             |e: &RetryableFailure| e.retryable,
             || self.send_embedding_request(&url, &body),
@@ -183,7 +209,7 @@ impl EmbeddingService for AsyncOpenAIClient {
     }
 
     fn embedding_dimension(&self, model: &str) -> usize {
-        crate::model::types::embedding_dimension(model)
+        tianyan::model::types::embedding_dimension(model)
     }
 }
 
@@ -234,8 +260,8 @@ mod tests {
     }
 
     /// 构造指向 mock 的客户端（provider 名决定方言：dashscope → DashScope 预设）。
-    fn client(name: &str, addr: std::net::SocketAddr) -> AsyncOpenAIClient {
-        let provider = crate::config::ProviderConfig {
+    fn client(name: &str, addr: std::net::SocketAddr) -> EmbeddingClient {
+        let provider = ProviderConfig {
             name: name.to_string(),
             endpoint: format!("http://{addr}/v1"),
             api_key: Some("k".to_string()),
@@ -248,7 +274,7 @@ mod tests {
             dialect: None,
             ..Default::default()
         };
-        AsyncOpenAIClient::from_provider(&provider).unwrap()
+        EmbeddingClient::new(&provider).unwrap()
     }
 
     /// 事故回归：DashScope 只回 `usage.total_tokens`（无 `prompt_tokens`）。
@@ -359,6 +385,8 @@ mod tests {
         builder.input(OaInput::String("你好".to_string()));
         let request = builder.build().unwrap();
 
+        // newtype 的内层就是 `AsyncOpenAIClient`：这里刻意穿透到 async-openai 的类型化
+        // 客户端，把「上游库在 DashScope 形状上必然失败」固化为可验证事实。
         let err = client
             .client
             .embeddings()
@@ -382,7 +410,7 @@ mod tests {
     /// 本测试必红。
     #[tokio::test]
     async fn test_ocp_hypothetical_provider_zero_code_adoption() {
-        use crate::config::{DialectPreset, ModelEntry, ProviderConfig, ThinkingParam};
+        use tianyan::config::{DialectPreset, ModelEntry, ProviderConfig, ThinkingParam};
 
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let captured = Arc::new(Mutex::new(String::new()));
@@ -408,7 +436,7 @@ mod tests {
             dialect: Some(DialectPreset::DashScope),
             ..Default::default()
         };
-        let client = AsyncOpenAIClient::from_provider(&provider).unwrap();
+        let client = EmbeddingClient::new(&provider).unwrap();
 
         // 响应侧：非标准 usage 形状可解析（方言声明 + 宽容解析）
         let resp = client
@@ -429,7 +457,7 @@ mod tests {
         // provider 级方言声明生效（缓存字段来自 DashScope 预设）
         assert_eq!(
             client.dialect.cache_field,
-            crate::config::CacheField::DashScopeTop
+            tianyan::config::CacheField::DashScopeTop
         );
     }
 }

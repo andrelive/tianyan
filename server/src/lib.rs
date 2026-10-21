@@ -18,7 +18,6 @@ use tianyan::observability::usage_log::UsageLog;
 use tianyan::scheduler::{TaskContext, TaskDefinition, TaskScheduler};
 use tianyan::vfs::VirtualFileSystem;
 
-use crate::agent_builder::create_model_services;
 use crate::api::events::processor as event_processor;
 use crate::embedding_usage::attach_embedding_usage_sink;
 use crate::evolution_executor::AgentEvolutionExecutor;
@@ -35,6 +34,7 @@ pub mod event_push;
 pub mod evolution_executor;
 pub mod mcp_bridge;
 pub mod migration;
+mod model_services;
 pub mod notification;
 pub mod scheduled_tasks;
 pub mod session_leases;
@@ -45,9 +45,11 @@ use state::AppState;
 
 pub use assembly::{
     ApprovalGateFactory, AssemblyServices, ContextFactory, ContextPort, ContextServices,
+    ProviderEmbedFactory, ProviderEmbedServices, ProviderLlmFactory, ProviderLlmServices,
     SkillReviewFactory, StorageBackendFactory, TaskFactory, TaskRegistration, TaskReviewerFactory,
     TaskServices, VectorStorageFactory,
 };
+pub use model_services::{create_model_services, ModelServices};
 
 /// Server configuration
 #[derive(Debug, Clone)]
@@ -202,7 +204,7 @@ async fn initialize_vfs_for_app(
         .with_vector_storage(vector_storage)
         .with_config(config.storage.clone());
     {
-        let model_services = create_model_services(config).await;
+        let model_services = create_model_services(config, assembly);
         match model_services {
             Ok(ms) => {
                 let emb_model = config
@@ -478,6 +480,8 @@ async fn create_app_inner(
         assembly.context_factory(),
         assembly.skill_review_factory(),
         assembly.task_reviewer_factory(),
+        assembly.provider_llm_factory(),
+        assembly.provider_embed_factory(),
     )
     .await?;
 

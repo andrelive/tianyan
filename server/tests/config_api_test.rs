@@ -107,3 +107,37 @@ async fn test_unknown_api_route_returns_404() {
 
     server.shutdown();
 }
+
+/// 连通性探测走**契约**（ADR-049 期 2 序 6）：`test_assembly()` 注入了真实的
+/// provider-llm 工厂，因此探针存在——参数校验在**发起请求之前**完成，非法端点直接
+/// 返回校验文案（不触网、不依赖外部服务）。
+///
+/// 判别力：若 `test_assembly()` 漏注入 provider 工厂，`state.shared_model_services()`
+/// 的探针为 `None`，下面的响应会变成「连接测试不可用：未装配 provider-llm 工厂」——
+/// 断言必红（这正是「不要用 `AssemblyServices::default()` 驱动集成测试」那条纪律）。
+#[tokio::test]
+async fn test_connection_probe_rejects_invalid_endpoint_before_reaching_provider() {
+    let (server, _dir) = make_router().await;
+
+    let resp = server
+        .post(
+            "/api/v1/config/test-connection",
+            &serde_json::json!({
+                "endpoint": "ftp://example.com/v1",
+                "api_key": "sk-test",
+                "model": "gpt-test",
+            }),
+        )
+        .await;
+    assert_eq!(resp.status(), 200);
+
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["success"], false, "非法端点应失败: {body}");
+    let message = body["message"].as_str().unwrap_or_default();
+    assert!(
+        message.contains("API 端点 URL 格式无效"),
+        "应在发起请求前被端点校验拦下，实际：{message}"
+    );
+
+    server.shutdown();
+}

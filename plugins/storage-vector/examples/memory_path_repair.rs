@@ -43,8 +43,10 @@ use chrono::{DateTime, Utc};
 use tianyan::common::types::{ContentLevel, ContextNamespace, MemoryCategory, TianyanUri};
 use tianyan::config::{ModelCapability, TianyanConfig};
 use tianyan::db::Database;
-use tianyan::model::ModelServices;
+// ADR-049 期 2 序 6：ModelServices 容器已搬到 server 装配层；运维脚本直接用 provider
+// 插件的能力集合（	ianyan-provider-embed / 	ianyan-provider-llm）——它们只依赖 core。
 use tianyan::vfs::{StorageBackend, VfsCore, VirtualFileSystem, VirtualFileSystemBuilder};
+use tianyan_provider_embed::services as embedding_services;
 use tianyan_storage_sqlite::SqliteBackend;
 use tianyan_storage_vector::LanceDbVectorStore;
 
@@ -271,7 +273,7 @@ async fn run(apply: bool) -> Result<(), Box<dyn std::error::Error>> {
         .with_config(config.storage.clone())
         .with_storage(storage)
         .with_vector_storage(vector_storage);
-    match ModelServices::from_config(&config.models).await {
+    match embedding_services(&config.models) {
         Ok(ms) => {
             let emb_model = config
                 .models

@@ -32,7 +32,7 @@ Core 是天演的核心库，提供 AI Agent 的全部基础能力。4 crate wor
 | `snapshot` | 工作区快照（回退/撤销回退；gzip 压缩 + GC + similar diff） | mod.rs | ✅ 正常使用 |
 | `knowledge` | 知识库管理（解析、图像、导入） | parser.rs, image/, types.rs, ingestor/ | ✅ 已集成（Server 层通过 KnowledgeIngestor 真实处理导入与检索） |
 | `memory` | 长期记忆提取 | extractor.rs | ✅ 已集成 |
-| `model` | 模型服务（provider 实现 + 服务容器） | traits.rs, types/, provider/, services.rs | ✅ 已集成 |
+| `model` | 模型服务**契约 + 数据**（provider 实现与容器已出 core） | traits.rs, types/, spec.rs, retry.rs, assembly.rs, unconfigured.rs, usage.rs | ✅ 已集成（实现在 `plugins/provider-{client,llm,embed}`；容器在 `server/src/model_services.rs`） |
 | `observability` | 可观测性存储（AgentMetrics，Agent 自省）+ 使用统计 | mod.rs, usage_stats.rs（SQLite 连接复用 `vfs/backend/sqlite_db.rs`） | ✅ 已集成 |
 | `scheduler` | 定时任务调度器 + 任务实现 | task_scheduler.rs, tasks/ | ✅ 已集成 |
 | `session` | 会话管理（创建、持久化、消息记录）；截断常量单点 | manager.rs, types.rs（常量在 mod.rs） | ✅ 已集成 |
@@ -81,8 +81,15 @@ Core 是天演的核心库，提供 AI Agent 的全部基础能力。4 crate wor
 **模块组织**：
 - `model/traits.rs` — 核心服务 trait（ChatService, EmbeddingService, VlmService）
 - `model/types/` — 请求、响应和配置的类型定义
-- `model/provider/` — OpenAI 兼容 API 客户端实现，`pub(crate)` 访问，外部通过 `ModelServices` 使用
-- `model/services.rs` — `ModelServices`，从配置构建一组已包装（日志）服务的容器，替代旧 `ModelRouter`
+- `model/spec.rs` — 模型规格与内置规格表（上下文窗口；内核动态 `max_tokens` 与压缩窗口联动源）
+- `model/retry.rs` — 请求重试策略与可重试谓词（429/5xx/网络/超时；两个 provider 插件共用）
+- `model/assembly.rs` — **装配原语**：`ProviderLlmServices` / `ProviderEmbedServices`（能力集合）+ `ConnectionProbe`（连通性探测契约）
+- `model/unconfigured.rs` — 「能力未配置」降级服务（未装配插件 / 配置缺能力共用同一句文案）
+- `model/usage.rs` — `EmbeddingUsageSink` 契约（实现方在通道层 `server/src/embedding_usage.rs`）
+
+**实现去向**（ADR-049 期 2 序 6）：OpenAI 兼容客户端 → `plugins/provider-client`；聊天 / 视觉 /
+模型目录 → `plugins/provider-llm`；嵌入 → `plugins/provider-embed`；容器 `ModelServices` →
+`server/src/model_services.rs`（装配职责，D5）。core 因此不再依赖 `async-openai`。
 
 **核心类型**：
 
@@ -91,13 +98,13 @@ Core 是天演的核心库，提供 AI Agent 的全部基础能力。4 crate wor
 | `ChatService` (trait) | 聊天补全服务接口（1 生产 + 5 测试 mock → 真实 seam） |
 | `EmbeddingService` (trait) | 文本嵌入服务接口（1 生产 + 1 测试 mock → 真实 seam） |
 | `VlmService` (trait) | 视觉语言模型服务接口（1 生产 + 0 测试 mock → 假设性 seam） |
-| `ModelServices` | 服务容器，打包 chat/embedding/vision 三种服务 |
-| `AsyncOpenAIClient` | OpenAI 兼容 API 客户端 |
+| `ModelServices` | 服务容器，打包 chat/embedding/vision 三种服务 —— **已搬到 `server/src/model_services.rs`**（ADR-049 期 2 序 6：core 内零生产使用者 + D5 装配职责） |
+| `AsyncOpenAIClient` | OpenAI 兼容 API 客户端 —— **已搬到 `plugins/provider-client`**（同上；聊天/嵌入两个插件共用） |
 | `ChatCompletionRequest/Response` | 聊天补全请求和响应类型 |
 | `EmbeddingRequest/Response` | 嵌入请求和响应类型 |
 | `SharedChatService` | `Arc<dyn ChatService>` 类型别名 |
 
-**多模态序列化**（ADR-010）：`model/provider/chat.rs::user_content` 在用户消息携带 `content_parts`（图片）时输出 OpenAI 数组格式（text + image_url content parts，detail 映射 low/high/auto）；无图片保持纯文本（行为零变化）。`ContentPart`/`ImageUrl` 类型已上移 `common/types/content_part.rs`（`model::types` re-export 兼容）。
+**多模态序列化**（ADR-010）：`plugins/provider-llm/src/chat.rs::user_content` 在用户消息携带 `content_parts`（图片）时输出 OpenAI 数组格式（text + image_url content parts，detail 映射 low/high/auto）；无图片保持纯文本（行为零变化）。`ContentPart`/`ImageUrl` 类型已上移 `common/types/content_part.rs`（`model::types` re-export 兼容）。
 
 ### 1.4 vfs 子模块
 

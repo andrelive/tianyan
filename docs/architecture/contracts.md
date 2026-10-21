@@ -68,16 +68,18 @@ Rust 下「契约 = 成本」：契约变更会穿透依赖图，改动成本随
 | 29 | `ApprovalPendingNotifier` | `plugins/policy-approval/src/workflow.rs:33`（随实现迁出 core，ADR-049 期 3-T1） | 审批策略插件内部 |
 | 30 | `TaskReviewer` | `core/src/executor/review.rs`（模块原名 `judge.rs`，ADR-049 期 3-T3 实现迁出后改名） | 评审策略插件内部（单消费者：子代理自审）；实现 `LlmTaskReviewer` 在 `plugins/policy-review`，装配层经 `TaskReviewerFactory` 注入 |
 | 31 | `EvolutionReviewExecutor` | `core/src/scheduler/evolution_executor.rs` | 演化任务插件的唯一外部能力（ADR-049 期 2 序 5b 已提入 core：实现 `AgentEvolutionExecutor` 在 server，经 `TaskServices.evolution_executor` 注入——若留在插件里，server 就得依赖插件，破 D2-1） |
-| 32 | `EmbeddingUsageSink` | `core/src/model/provider/middleware.rs:75` | provider 适配器内部（用量回传） |
+| 32 | `EmbeddingUsageSink` | `core/src/model/usage.rs`（ADR-049 期 2 序 6 从 `model/provider/middleware.rs` 提到 `model` 根） | 嵌入用量回传：**实现方是通道层**（`UsageLogEmbeddingSink` 写 `usage_logs`）、**消费方是插件**（`plugins/provider-embed` 的 `LoggedEmbeddingService`）——契约必须住在两者之上的 core，否则通道层要 `use tianyan_provider_embed::…`（破 D2-1） |
 | 33 | `ServiceDiscovery` | `core/src/model/traits.rs:73` | 适配器内部（模型列表探测） |
 | 34 | `SummaryService` | `core/src/vfs/summary/engine.rs:51` | 摘要策略插件内部 |
 | 35 | `ApprovalGate` | `core/src/executor/approval/gate.rs:44` | 审批门控 seam（**ADR-049 期 3-T1 新增**）：内核只认 `Arc<dyn ApprovalGate>`，实现在 `plugins/policy-approval`。按 B 级管理的理由——只有一个消费者面（内核的 4 个审批调用点）与一个实现（`ApprovalWorkflow`），属「插件自有的小契约」而非跨插件公共协议；方法集按**调用点证据**最小化到 4 个（`authorize` / `status` / `respond_to_approval` / `record_user_confirmation_by_fingerprint`），冻结时点（期 3 结束）再评估升不升 A 级 |
 | 36 | `ContextPort` | `core/src/context/port.rs` | 上下文工程 seam（**ADR-049 期 3-T2 新增**）：内核只认 `Arc<dyn ContextPort>`，实现在 `plugins/policy-context`（`ContextPipeline`）。按 B 级管理的理由——一个消费者面（内核 3 个调用点：`agent_core.rs:478` 加载注入 / `:783` 会话压缩 / `:751` 压缩点摘要提取）+ 一个实现，属「插件自有的小契约」；方法集按调用点证据最小化到 3 个，**没有** `run()` / `compress_if_needed()` / `compressor()` 之类无生产调用点的方法。**顺序契约 `compress_for_session` → 落库成功 → `ws.reshape_after_compression()`（ADR-035 §2）留在内核执行**，不进本 trait——插件只产出压缩结果。未装配时内核用 `NullContextPort` 兜底（`start_server*` 另有启动期硬守卫）。冻结时点（期 3 结束）再评估升不升 A 级 |
 | 37 | `SkillReviewPort` | `core/src/skills/review.rs` | 技能复审 seam（**ADR-049 期 3-T3 新增**）：通道层只认 `Arc<dyn SkillReviewPort>`，实现在 `plugins/policy-review`（`SkillReviewer`），装配层经 `SkillReviewFactory` 注入。按 B 级管理的理由——一个消费者（`server/src/api/skills/handlers.rs` 的技能统计）+ 一个实现；方法集按调用点证据最小化到 **1 个**（只读的 `latest_review`）。**产生评审的 `review_conversation` 不进契约**：它今天零生产调用者（属「未接线」而非死代码），留在插件的具体类型上，接线后才考虑以 `record_review` 之类的方法进契约。伴随类型 `SkillReview`（记录形状）与常量 `REVIEWS_PREFIX`（插件落盘路径 = 内核技能发现过滤条件，**一处定义两处用**）同留 core。未装配时 `create_skill_reviewer` 返回 `None`（技能统计 `reviews` 为空数组）。冻结时点（期 3 结束）再评估升不升 A 级 |
+| 38 | `ConnectionProbe` | `core/src/model/assembly.rs` | 连通性探测 seam（**ADR-049 期 2 序 6 新增，期 2 唯一新增 trait**）：通道层只认 `Arc<dyn ConnectionProbe>`，实现 `ProviderConnectionProbe` 在 `plugins/provider-llm`，随 `ProviderLlmServices::probe` 由工厂产出。方法集 **1 个**（`probe(endpoint, api_key, model) -> Result<Vec<String>>`）。**为什么不给探针单开插槽**：探测用用户当场输入的 endpoint/key 造**临时**客户端，必须复用插件那套构造语义（UA 单点 / 方言解析 / 双预算超时 / 动态会话头 / 重试策略）；独立插槽会让装配层多一个必填项，或让第二个工厂复制这套语义。**错误分类不进契约**：`is_permission` / `is_not_found` / `is_timeout` → 用户文案仍是通道层的事（ADR-014 消费端）。未装配 provider 工厂时探针为 `None` → `POST /api/config/test-connection` 返回「连接测试不可用」 |
 
-> 小计：S 14 / A 11 / B 12 = **37**（含期 3-T1 新增的 `ApprovalGate`、期 3-T2 新增的
-> `ContextPort` 与期 3-T3 新增的 `SkillReviewPort`）。反指标「每期净增 pub trait ≤ 3」：
-> 期 3 至今净增 **3**（T1 一个、T2 一个、T3 一个——正好用满，期 4 起不得再增）。
+> 小计：S 14 / A 11 / B 13 = **38**（含期 3-T1 新增的 `ApprovalGate`、期 3-T2 新增的
+> `ContextPort`、期 3-T3 新增的 `SkillReviewPort`、期 2 序 6 补做的 `ConnectionProbe`）。
+> 反指标「每期净增 pub trait ≤ 3」：期 3 净增 **3**（T1 / T2 / T3 各一——正好用满）；
+> 期 2 序 6（补做）净增 **1**。期 4 起不得再增。
 
 ---
 

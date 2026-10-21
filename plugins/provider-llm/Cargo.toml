@@ -1,0 +1,23 @@
+[package]
+name = "tianyan-provider-llm"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "天演 provider-llm 插件：OpenAI 兼容 provider 的聊天与视觉实现（SSE 手写解析 / 方言驱动思考参数 / reasoning 回传 / 连通性探针）"
+
+[dependencies]
+tianyan = { path = "../../core", package = "tianyan-core" }
+tianyan-provider-client = { path = "../provider-client", package = "tianyan-provider-client" }
+async-openai.workspace = true
+async-trait.workspace = true
+futures.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+
+[lints]
+workspace = true

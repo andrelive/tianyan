@@ -29,7 +29,7 @@ use tianyan::todos::TodoStore;
 use tianyan::vfs::{SummaryEngine, VirtualFileSystemImpl};
 use tianyan::{Result as TianyanResult, TianyanError};
 
-use crate::agent_builder::{create_model_services, AgentBuilderFactory};
+use crate::agent_builder::AgentBuilderFactory;
 use crate::api::clipboard::tool::ClipboardWriteTool;
 use crate::api::clipboard::types::PendingCapture;
 use crate::mcp_bridge::McpToolManager;
@@ -207,7 +207,7 @@ pub(crate) fn resolve_vision_model(config: &TianyanConfig) -> String {
 /// 构造知识导入器（唯一构造点：state.rs 工厂与 agent_builder 共用）。
 pub(crate) fn build_knowledge_ingestor(
     config: &TianyanConfig,
-    model_services: &tianyan::model::ModelServices,
+    model_services: &crate::model_services::ModelServices,
     vfs: Arc<dyn tianyan::vfs::VirtualFileSystem>,
 ) -> KnowledgeIngestor {
     let chat_model = resolve_chat_model(config);
@@ -305,6 +305,16 @@ pub struct AppState {
     /// 供 [`Self::create_skill_reviewer`] 逐次构造读端口（旧实现也是逐次 `new`，语义等同）。
     /// `None` = 未装配 → 该函数返回 `None`，技能统计的 `reviews` 为空数组。
     skill_review_factory: Option<crate::SkillReviewFactory>,
+    /// 聊天 / 视觉 provider 工厂（ADR-049 期 2 序 6：实现已出 core，`plugins/provider-llm`）。
+    ///
+    /// 存下来供 [`Self::reload_agent`] 复用：配置热重载会重建模型服务，模型 / API Key /
+    /// 方言 / 头绑定都可能已改，客户端池必须跟着**新配置**走（不能沿用旧实例）。
+    /// `None` = 未装配（`ModelServices` 用 core 的「未配置」降级服务 + 装配期告警）。
+    provider_llm_factory: Option<crate::ProviderLlmFactory>,
+    /// 嵌入 provider 工厂（ADR-049 期 2 序 6：实现已出 core，`plugins/provider-embed`）。
+    ///
+    /// 与 [`Self::provider_llm_factory`] 同一理由（嵌入模型切换后 VFS 检索必须立即生效）。
+    provider_embed_factory: Option<crate::ProviderEmbedFactory>,
     usage_log: Arc<UsageLog>,
     /// 工作区快照管理器（配置了 working_directory 时启用）
     /// 工作区快照管理器（配置了 working_directory 时启用）。
@@ -314,7 +324,10 @@ pub struct AppState {
     /// 热重载必须换成**新工作目录**的实例，不能沿用启动期实例）。
     snapshot_manager: Arc<std::sync::RwLock<Option<Arc<SnapshotManager>>>>,
     /// 模型服务（chat/embedding/vision，全组件共享；配置热更新时重建）
-    model_services: Arc<RwLock<tianyan::model::ModelServices>>,
+    ///
+    /// 容器类型自 ADR-049 期 2 序 6 起属于装配层（`crate::model_services`）：core 不再有
+    /// 「容器 + 构造器」，只有契约与载荷。
+    model_services: Arc<RwLock<crate::model_services::ModelServices>>,
     /// MCP 客户端生命周期管理器（跨 agent reload 保持连接一致）
     mcp_tools: Arc<McpToolManager>,
     /// 定时任务调度器（无启用的模型 Provider 时为 None，在 `start_server` 中装配）
@@ -379,6 +392,12 @@ impl AppState {
     /// * 配置验证失败时返回 InvalidConfig 错误
     /// * 模型服务注册失败时返回 ModelService 错误
     /// * Agent 构建失败时返回 AgentCreation 错误
+    ///
+    /// `#[allow(clippy::too_many_arguments)]`：五个 `Option<Factory>` 参数是**装配插槽的
+    /// 平铺表**（ADR-049 期 3-T3 遗留 3：期 4 清单收敛时应按插件分组）。这里保持与
+    /// 其余启动入口同形的显式传参，而不是把整个 `AssemblyServices` 塞进组合根——后者
+    /// 会让「组合根到底用了哪些能力」变得不可见。
+    #[allow(clippy::too_many_arguments)]
     pub async fn new(
         config: TianyanConfig,
         vfs: Arc<VirtualFileSystemImpl>,
@@ -387,6 +406,8 @@ impl AppState {
         context_factory: Option<crate::ContextFactory>,
         skill_review_factory: Option<crate::SkillReviewFactory>,
         task_reviewer_factory: Option<crate::TaskReviewerFactory>,
+        provider_llm_factory: Option<crate::ProviderLlmFactory>,
+        provider_embed_factory: Option<crate::ProviderEmbedFactory>,
     ) -> TianyanResult<Self> {
         // VFS 技能管理器（技能 = VFS 方法论文档；列表/详情/执行 API 数据源）
         let skill_manager = Arc::new(SkillManager::new(vfs.clone()));
@@ -439,9 +460,12 @@ impl AppState {
 
         // 构建 Agent（传入 vfs + 技能组件 + 共享模型服务 + MCP 动态工具；
         // session_manager / trace_collector 与 API 层共享同一实例——组合根收敛）
-        let model_services = create_model_services(&config)
-            .await
-            .map_err(model_services_error)?;
+        let model_services = crate::model_services::ModelServices::from_factories(
+            &config.models,
+            provider_llm_factory.as_ref(),
+            provider_embed_factory.as_ref(),
+        )
+        .map_err(model_services_error)?;
         // 嵌入用量入账（Agent 侧实例：摘要任务/角色路由等也调嵌入）。
         // provider 名由全量 config 解析（与 VFS 侧同策略、同表）。
         crate::embedding_usage::attach_embedding_usage_sink(
@@ -591,6 +615,8 @@ impl AppState {
             context_factory,
             task_reviewer_factory,
             skill_review_factory,
+            provider_llm_factory,
+            provider_embed_factory,
             session_leases: crate::session_leases::SessionLeases::new(),
             shutdown_tx: Arc::new(Mutex::new(None)),
         })
@@ -723,10 +749,14 @@ impl AppState {
         // `todo` / `goal` 的实现已迁至 `plugins/tools-todo`（ADR-049 期 1）——
         // 它们由**插件清单**注入，本清单不再包含。
         dynamic_tools.extend(self.component_dynamic_tools().await);
-        // 配置可能已变化（模型/API Key），重建共享模型服务
-        let model_services = create_model_services(&config)
-            .await
-            .map_err(model_services_error)?;
+        // 配置可能已变化（模型/API Key/方言/头绑定），重建共享模型服务
+        // （经存下来的两个 provider 工厂：客户端池必须跟着新配置走）
+        let model_services = crate::model_services::ModelServices::from_factories(
+            &config.models,
+            self.provider_llm_factory.as_ref(),
+            self.provider_embed_factory.as_ref(),
+        )
+        .map_err(model_services_error)?;
         // 嵌入用量入账（Agent 侧实例：摘要任务/角色路由等也调嵌入）。
         // provider 名由全量 config 解析（与 VFS 侧同策略、同表）。
         crate::embedding_usage::attach_embedding_usage_sink(
@@ -1020,9 +1050,9 @@ impl AppState {
     }
 
     /// 获取共享模型服务（配置热更新后自动指向新实例）。
-    pub(crate) async fn shared_model_services(
-        &self,
-    ) -> TianyanResult<tianyan::model::ModelServices> {
+    ///
+    /// 容器类型自 ADR-049 期 2 序 6 起属于装配层（`crate::model_services::ModelServices`）。
+    pub(crate) async fn shared_model_services(&self) -> TianyanResult<crate::ModelServices> {
         Ok(self.model_services.read().await.clone())
     }
 
