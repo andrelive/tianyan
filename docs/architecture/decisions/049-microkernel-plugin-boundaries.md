@@ -241,6 +241,63 @@ apply_edit / apply_patch / glob / list_dir 六个工具一起走），并在同�
 （读取 / 列举算法）仍全量。原判据"改一行工具 ≤3.5K"里的"一行工具"应落到前一类，后一类待期 3
 重新测量。
 
+**实施记录（期 1 收尾 + 闸门 A 复测，2026-10-20）**：`tools-code`（`symbol_outline` /
+`repo_map` / `grep`）整域迁移完成——代码智能域 **server 侧零复用**（普查确认），所以实现
+可以整体搬走：`symbols`(14.6K) + `repo_map`(18.8K) + `search_engine`(11.1K) + `search`(3.8K)
+及测试一并迁入 `plugins/tools-code`，tree-sitter 与 ignore/regex 随之离开 core。
+
+参数契约按先例留 core：新增 `executor/search_types.rs`（`OutputMode` / `SearchOptions` /
+分页常量）；`RepoMapCache` 随实现进插件并由工具实例自持（照 `RepoMapCache` 的处理——它此前
+挂在 `ToolContext` 上，是 core 反向依赖插件的入口）。
+
+**闸门 A 复测（装配已接入，数据可信）**：改 `plugins/tools-code/src/repo_map.rs` 一行 →
+
+| 指标 | 数值 |
+|---|---|
+| 重编 crate | `tianyan-tools-code` + `tianyan-tauri` + `tianyan-app` |
+| **`tianyan-server`(13.4K) + `tianyan-core`(49K)** | **零重编** |
+| 重编源码 | **2,655 行 / 4.1%** |
+| 墙钟 | **5.87s** |
+
+对照期 0 基线（63,999 行 / 100% / 106.7s）：**降 24×（行数）/ 18×（墙钟）**，判据 ≤3,500 行达标。
+（此前的 512 行是「插件未接装配」的乐观值，不可引用。）
+
+**序 0（零代码收益）**：迁移 tools-code 时只搬了代码、漏了清 core 的依赖声明——`tree-sitter`×6 /
+`ignore` / `regex` / `cargo_metadata` 在 `core/src` **零引用**却仍在编译链上，ADR 宣称的
+「tree-sitter 只进 tools-code」当时并未兑现。已删除这 9 个死依赖。
+
+> 坑：`kamadak-exif` 的 **crate 名是 `exif`**（package ≠ lib name），`knowledge/image` 在用；
+> 按 package 名 grep `exif` 会漏判为死依赖，删掉后编译报 `cannot find module or crate exif`。
+
+### 期 2 普查结论（迁移判据修正 + 顺序）
+
+**判据 3 必须二分**（本轮普查的关键修正——混为一谈会得出「整个 core 都不可搬」的错误结论）：
+
+| 类型 | 含义 | 处置 |
+|---|---|---|
+| **3a 业务复用** | HTTP handler 直接调实现干活（`api/workspace/services.rs` 用 `execute_read_file` / `apply_edit_action`） | 真阻塞，**实现不可搬** |
+| **3b 装配接线** | `server/{lib,state}.rs` 构造 / 存字段 | 按 D5 **本应搬到 bin**，属可解成本，不是边界 |
+
+tauri 全域只引 `tianyan::{config,common,agent,notification}`，对候选模块复用为 0。
+
+**迁移顺序（自包含度 × 收益，先易后难）**：
+
+| 序 | 目标 | 关键理由 |
+|---|---|---|
+| 0 | 清 core 死依赖（已完成） | 零代码，兑现依赖面收窄 |
+| 1 | `tools-todo` + `tools-goal`（1 crate，834 行） | 工具实现**住在 server**（`api/todos/tool.rs` 631 + `goals/tool.rs` 203），core 对 store 零引用 → 唯一「零前置改造」簇；今天改一行 todo 要重编 server 13.4K |
+| 2 | `tools-web`（`executor/web.rs` 1258） | server 零复用；前置仅 `ToolRegistry.web_client` 字段改为插件自持 |
+| 3 | `storage-vector`（lancedb，收益最大） | `VectorStorage` trait 已在 core；箭头族依赖随之离开 |
+| 4 | `storage-sqlite`（sqlite 518 + local 414） | rusqlite 仍留 core（db/session/observability 共用）→ 收窄的是重编面积而非依赖面 |
+| 5 | `task-evolution` + `task-builtin`（3627，2 crate） | 前置：`EvolutionReviewExecutor` trait 提到 core |
+| 6 | `provider-llm` + `provider-embed`（3185，最难） | 前置：`ModelServices` 容器外移 assembly；连通性探测改走契约 |
+
+**隐性耦合（迁移前必须先解，照 `RepoMapCache` 先例）**：`ToolRegistry.web_client`、
+`ToolContext.knowledge_ingestor`、`ToolRegistry.usage_stats` / `rule_recorder`（observability）、
+`EvolutionReviewExecutor`（trait 定义在待搬文件、实现在 server → 必须先提到 core）、
+`ModelServices`（容器 + 构造器，须整体外移 assembly）、
+`knowledge/image → model::provider::vision::infer_mime_type`（两域都搬会形成**插件间依赖**，违 D2-2）。
+
 ---
 
 ## 分期与闸门
@@ -250,7 +307,7 @@ apply_edit / apply_patch / glob / list_dir 六个工具一起走），并在同�
 | **0** | 地基与基线（零行为改动）✅ **已完成** | incremental 实验（**3× 加速 / 185MB 每会话**，建议开启 + GC 3 天/20GB）；`scripts/measure-rebuild.ps1`；`contracts.md`（34 trait 分级 + common 二分）；`microkernel-baseline.md` | 三场景基线齐全（**均 100% 全量重编**）；lint/unit 绿；无行为改动 ✅ |
 | **0.5** | 工具契约与注册形状 + 装配器二分（**工具侧已完成**） | ✅ 元数据表承载执行入口 + 协议工具独立成表（28 分支 match → 一次查表，内核零工具名字面量）；✅ `ToolContext` 承载六个工具域（`impl ToolContext` + 注册表 `Deref`），依赖边界实测：工具域 executor 引用仅 16 处（随插件搬走）。待办：`thin-channel` + `assembly-manifest`；`AppState` 20 字段契约化 | 工具目录 freshness ✅；工具行为零变化 ✅（1431 单测全绿）；clippy 零警告 ✅ |
 | **1** | 工具插件试点（**装配器二分 + tools-fs 骨架已完成**） | ✅ `tianyan-app` bin 包（**清单住 bin**）+ `ToolPluginFactory` 类型擦除 + `create_app_with_plugins` / `start_server_with_plugins*`；✅ `plugins/tools-fs` 独立 crate（`executor::fs` 实现整体迁入）。待续：**整域迁移**——`read_file` 目录模式反向依赖 `executor::fs::execute_list_dir`，故 fs 域必须 6 工具一起搬（read/write/edit/patch/glob/list_dir）才能删 core 侧 | 闸门 A **首测 512 行 ✅**（判据 ≤3.5K）；core 侧暂留（双路径过渡，重名注册自动跳过） |
-| **2** | 适配器与任务插件 | `provider-llm` / `provider-embed` / `provider-search` / `storage-vector`（唯一 lancedb）/ `storage-sqlite` / 6 个 `task-*` | 各领域 ≤ 2K；全量 release 不劣化 >10% |
+| **2** | 适配器与任务插件（**清单已普查，按序推进**） | 迁移顺序（按 自包含度×收益）：**0 清 core 死依赖** → 1 `tools-todo`+`tools-goal` → 2 `tools-web` → 3 `storage-vector` → 4 `storage-sqlite` → 5 `task-*`（2 crate）→ 6 `provider-llm`+`provider-embed`。详见下方「期 2 普查结论」 | 各领域 ≤ 2K；全量 release 不劣化 >10% |
 | **3** | 策略分离（最难一刀） | 抽 `kernel-impl`（loop/cancel/rollback/stream_forward/working_set）；`context`→`policy-context`；审批→`policy-approval`；`role_learning`→`policy-learning`；`judge`→`policy-review` | **闸门 B**：api ≤ 6K && impl ≤ 15K（或配置外移后 16.1K）；改策略不重编内核；S 级零变更 |
 | **4** | 清单收敛与发行版 | 清单完整化、跨插件顺序断言、desktop/headless/minimal 三份清单 | 装配清单 1 页可查；headless 可构建 |
 
