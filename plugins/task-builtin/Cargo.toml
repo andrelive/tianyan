@@ -1,0 +1,27 @@
+[package]
+name = "tianyan-task-builtin"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "天演任务插件：5 个内置定时任务实现（摘要生成 / 垃圾回收 / 统计刷盘 / 快照 GC / 主动提醒）"
+
+[dependencies]
+tianyan = { path = "../../core", package = "tianyan-core" }
+async-trait.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+chrono.workspace = true
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+# 单元测试**原样复用 core 的测试替身**（MockVfs / MockChatService）：5 个任务的
+# 内联测试迁移前全部基于 MockVfs，重写成真实 VFS 会丢掉判别力（`move_calls`
+# 记录归档动作、`set_summary_vector_error` 注入向量失败——这些故障面只有 mock 有）。
+# `test-utils` 是 core 的**可选特性**，仅在测试构建打开：生产构建（`cargo build`）
+# 里 core 不编译 mockall。
+tianyan = { path = "../../core", package = "tianyan-core", features = ["test-utils"] }
+tempfile.workspace = true

@@ -300,7 +300,7 @@ soul → rules+memories → history(from compression_marker，含当前用户输
 | `role_store` | `RoleStore` | 角色 VFS 存储（独立存储层，依赖 vfs + roles）：保存/加载/删除角色，维护配置签名；scheduler 演化任务与 agent 共用（ADR-021 分层） |
 | `session` | `Session`, `SessionManager` (trait), `PersistentSessionManager`, `SessionStore`, `SessionRecall` | 会话管理，⚠️ ADR-018 VFS 例外：`SessionStore`（SQLite 权威存储，`session_messages` 完整消息 + `session_meta` 会话级状态，单事务原子取号 `MAX(seq)+1`，失败上抛；**SQL 收敛于本模块**——会话专属存储经 `db::Database` 单连接直接实现，不依赖 db 层通用仓储）；`PersistentSessionManager::load_session_from_store()` 返回**完整时序链**（ADR-027：存储层不截断，压缩点截断只发生在组装层视图）；`session_meta.header_json` 承载注入上下文快照（ADR-012）+ 会话元数据（created_at/title/ended_at，重启恢复；`list_sessions` 轻量元数据 + message_count，无幽灵会话） |
 | `knowledge` | `KnowledgeIngestor`, `KnowledgeIngestorBuilder`, `CompositeParser`, `ImageProcessor` | 知识库导入（已通过 `knowledge_ingest` 工具集成到 Agent 流程）。ingestor/ 拆分为 mod + builder；`image/` 拆分为 types/processor/analyzer |
-| `scheduler` | `TaskScheduler`, `TaskHandler` (trait), `TaskContext`, `EvolutionTask`, `GcTask`, `SummaryTask`, `ReminderTask`, `SnapshotGcTask`, `UsageStatsFlushTask` | 定时任务调度框架 + 任务实现，位于 `scheduler/tasks/`（memory_task/rule_task/rule_suggester 已删除——ADR-017 后演化统一由 EvolutionTask 承担）；`TaskResult.error: Option<TianyanError>`（结构化错误）；GcTask 职责为规则归档 + 记忆 TTL 清理；UsageStatsFlushTask 定期把使用统计内存计数器刷入 SQLite（构造器注入，同 SnapshotGcTask 模式） |
+| `scheduler` | `TaskScheduler`, `TaskHandler` (trait), `TaskContext`, `TaskRegistration`, `TaskServices`, `EvolutionTask` | 定时任务调度**框架 + 装配原语**（契约与机制留 core）。5 个内置任务（`SummaryTask` / `GcTask` / `SnapshotGcTask` / `ReminderTask` / `UsageStatsFlushTask`）已迁至 `plugins/task-builtin`（ADR-049 序 5a：任务名/显示名/间隔/启用条件全在插件，`TaskRegistration` 是唯一清单类型）；`EvolutionTask` 仍在 core（序 5b 迁）；memory_task/rule_task/rule_suggester 已删除（ADR-017 后演化统一由 EvolutionTask 承担）；`TaskResult.error: Option<TianyanError>`（结构化错误）；GcTask 职责为规则归档 + 记忆 TTL 清理；UsageStatsFlushTask 定期把使用统计内存计数器刷入 SQLite |
 
 ---
 
@@ -313,7 +313,7 @@ soul → rules+memories → history(from compression_marker，含当前用户输
 | context | ✅ 完整集成 | ContextPipeline + DualLayerRetriever + ContextAssembler 在 Agent 中完整集成 |
 | skills | ✅ 完整集成 | 含 GEPA 进化引擎，通过 call_skill 工具桥接 |
 | vfs | ✅ 完整集成 | VirtualFileSystemImpl + `StorageBackend` / `VectorStorage` 契约（SQLite·本地文件实现在 `plugins/storage-sqlite`、LanceDB 在 `plugins/storage-vector`，均经装配层注入）；双层摘要索引 |
-| scheduler | ✅ 完整集成 | TaskScheduler + SummaryTask + EvolutionTask + GcTask + SnapshotGcTask + ReminderTask + UsageStatsFlushTask |
+| scheduler | ✅ 完整集成 | TaskScheduler（机制）+ 内置任务在 `plugins/task-builtin`（摘要 / GC / 快照 GC / 提醒 / 统计刷盘）+ EvolutionTask（仍在 core） |
 | config | ✅ 完整集成 | 配置加载器和验证器 |
 | common | ✅ 完整集成 | 错误类型和通用工具 |
 | session | ✅ 已集成 | `PersistentSessionManager` 基于 `SessionStore`（SQLite 权威存储，ADR-018）；回忆检索 `SessionRecall`（FTS5） |

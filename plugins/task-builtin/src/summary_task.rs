@@ -7,11 +7,11 @@ use std::collections::VecDeque;
 use async_trait::async_trait;
 use tokio::sync::RwLock;
 
-use crate::common::token_estimator::estimate_tokens;
-use crate::common::types::system_paths;
-use crate::common::types::{ContentLevel, ContextNamespace, TianyanUri};
-use crate::scheduler::{TaskContext, TaskHandler, TaskResult};
-use crate::vfs::{ContextEntry, ABSTRACT_TOKEN_LIMIT};
+use tianyan::common::token_estimator::estimate_tokens;
+use tianyan::common::types::system_paths;
+use tianyan::common::types::{ContentLevel, ContextNamespace, TianyanUri};
+use tianyan::scheduler::{TaskContext, TaskHandler, TaskResult};
+use tianyan::vfs::{ContextEntry, ABSTRACT_TOKEN_LIMIT};
 
 /// 已处理 URI 缓存的最大容量，超过后清理最旧的记录防止内存泄漏。
 const PROCESSED_CACHE_LIMIT: usize = 10000;
@@ -60,7 +60,7 @@ impl SummaryTask {
     async fn scan_missing_summaries(
         &self,
         ctx: &TaskContext,
-    ) -> crate::common::error::Result<Vec<TianyanUri>> {
+    ) -> tianyan::common::error::Result<Vec<TianyanUri>> {
         let mut missing = Vec::new();
         for &category in ContextNamespace::ALL {
             // ADR-017：会话回忆改 FTS5 倒排索引，会话命名空间不再生成 L0/L1
@@ -81,7 +81,7 @@ impl SummaryTask {
         ctx: &TaskContext,
         uri: &TianyanUri,
         missing: &mut Vec<TianyanUri>,
-    ) -> crate::common::error::Result<()> {
+    ) -> tianyan::common::error::Result<()> {
         let entries = ctx.vfs.list(uri).await?;
 
         for entry in entries {
@@ -111,7 +111,7 @@ impl SummaryTask {
         &self,
         ctx: &TaskContext,
         entry: &ContextEntry,
-    ) -> crate::common::error::Result<bool> {
+    ) -> tianyan::common::error::Result<bool> {
         // 检查元数据
         let metadata = ctx
             .vfs
@@ -159,14 +159,14 @@ impl SummaryTask {
         &self,
         ctx: &TaskContext,
         uri: &TianyanUri,
-    ) -> crate::common::error::Result<()> {
+    ) -> tianyan::common::error::Result<()> {
         // 读取 Detail 内容
         let detail_content = ctx
             .vfs
             .read_content(uri, ContentLevel::Detail)
             .await
             .map_err(|_| {
-                crate::common::error::TianyanError::Custom(format!(
+                tianyan::common::error::TianyanError::Custom(format!(
                     "摘要生成错误：无法读取 Detail：{}",
                     uri
                 ))
@@ -224,7 +224,7 @@ impl TaskHandler for SummaryTask {
         let missing = match self.scan_missing_summaries(ctx).await {
             Ok(uris) => uris,
             Err(e) => {
-                return TaskResult::failed(crate::common::error::TianyanError::Custom(format!(
+                return TaskResult::failed(tianyan::common::error::TianyanError::Custom(format!(
                     "摘要生成任务：扫描失败：{}",
                     e
                 )));
@@ -279,12 +279,12 @@ mod tests {
     use super::*;
     use std::sync::Arc;
 
-    use crate::common::token_estimator::estimate_tokens;
-    use crate::common::types::TokenUsage;
-    use crate::model::types::{ChatChoice, ChatCompletionResponse};
-    use crate::model::{ChatService, MockChatService};
-    use crate::test_utils::MockVfs;
-    use crate::vfs::SummaryEngine;
+    use tianyan::common::token_estimator::estimate_tokens;
+    use tianyan::common::types::TokenUsage;
+    use tianyan::model::types::{ChatChoice, ChatCompletionResponse};
+    use tianyan::model::{ChatService, MockChatService};
+    use tianyan::test_utils::MockVfs;
+    use tianyan::vfs::SummaryEngine;
 
     /// 构造测试用的 ChatCompletionResponse。
     fn mock_chat_response(content: &str) -> ChatCompletionResponse {
@@ -295,7 +295,7 @@ mod tests {
             model: "test".to_string(),
             choices: vec![ChatChoice {
                 index: 0,
-                message: crate::common::types::Message::assistant(content),
+                message: tianyan::common::types::Message::assistant(content),
                 finish_reason: Some("stop".to_string()),
             }],
             usage: TokenUsage::default(),
@@ -306,7 +306,7 @@ mod tests {
     fn make_context(vfs: Arc<MockVfs>, chat: MockChatService) -> TaskContext {
         let chat: Arc<dyn ChatService> = Arc::new(chat);
         let summary_engine = Arc::new(SummaryEngine::new(chat.clone(), "test-model"));
-        let config = Arc::new(crate::config::TianyanConfig::default());
+        let config = Arc::new(tianyan::config::TianyanConfig::default());
         TaskContext::new(vfs, summary_engine, None, config)
     }
 

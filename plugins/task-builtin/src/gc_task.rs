@@ -8,10 +8,10 @@ use std::time::Duration;
 use async_trait::async_trait;
 use chrono::Utc;
 
-use crate::common::error::{Result, TianyanError};
-use crate::common::types::{AgentPath, ContextNamespace, TianyanUri};
-use crate::config::StorageConfig;
-use crate::scheduler::{TaskContext, TaskHandler, TaskResult};
+use tianyan::common::error::{Result, TianyanError};
+use tianyan::common::types::{AgentPath, ContextNamespace, TianyanUri};
+use tianyan::config::StorageConfig;
+use tianyan::scheduler::{TaskContext, TaskHandler, TaskResult};
 
 /// 规则过时的默认天数阈值。
 const DEFAULT_RULE_STALE_DAYS: u32 = 30;
@@ -258,16 +258,16 @@ mod tests {
     use chrono::{Duration as ChronoDuration, Utc};
     use std::sync::Arc;
 
-    use crate::common::types::ContextNamespace;
-    use crate::model::ChatService;
-    use crate::test_utils::{MockChatService, MockVfs};
-    use crate::vfs::{SummaryEngine, VfsCore};
+    use tianyan::common::types::ContextNamespace;
+    use tianyan::model::ChatService;
+    use tianyan::test_utils::{MockChatService, MockVfs};
+    use tianyan::vfs::{SummaryEngine, VfsCore};
 
     /// 构造 GC 测试上下文（MockVfs + mock 服务，GC 仅使用 vfs）。
     fn make_context(vfs: Arc<MockVfs>) -> TaskContext {
         let chat: Arc<dyn ChatService> = Arc::new(MockChatService::new());
         let summary_engine = Arc::new(SummaryEngine::new(chat.clone(), "test-model"));
-        let config = Arc::new(crate::config::TianyanConfig::default());
+        let config = Arc::new(tianyan::config::TianyanConfig::default());
         TaskContext::new(vfs, summary_engine, None, config)
     }
 

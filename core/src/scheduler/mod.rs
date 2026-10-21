@@ -20,11 +20,15 @@
 //! - [`TaskDefinition`][]: 任务定义，包含任务的元数据和处理。
 //! - [`TaskPriority`][]: 任务优先级枚举。
 //! - [`TaskResult`][]: 任务执行结果。
+//! - [`TaskRegistration`][]: 一条任务注册（装配原语：任务插件交给调度器的清单项）。
+//! - [`TaskServices`][]: 任务装配时注入的能力集合（统计/快照/会话/通知/模型/工作集）。
 
+mod task_assembly;
 mod task_scheduler;
 mod task_state;
 pub mod tasks;
 
+pub use task_assembly::{TaskRegistration, TaskServices};
 pub use task_scheduler::{
     interval_from_cron, next_due_at, TaskContext, TaskDefinition, TaskHandler, TaskPriority,
     TaskResult, TaskScheduler,

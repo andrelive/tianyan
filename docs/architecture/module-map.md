@@ -48,7 +48,7 @@
 | `observability` | `core/src/observability/` | 可观测性 + 使用统计（`AgentMetrics`、`UsageStats`、`TraceCollector`、`ExecutionLog`、`UsageLog`、`RuleRecorder`；SQL 经 `db` 门面/Repository 收敛，组件保留内存热路径） | `mod.rs`, `usage_stats.rs`, `trace.rs`, `execution_log.rs`, `usage_log.rs`, `rule_recorder.rs`, `execution_history.rs` |
 | `roles` | `core/src/roles/` | 角色基础类型（ADR-016 纯类型层：`AgentRole`/`RoleSource`/`RoleStatus`/`RoleUsage`/`DelegationRecord`）——config/agent/scheduler 共用，不依赖领域模块 | `mod.rs` |
 | `role_store` | `core/src/role_store.rs` | 角色 VFS 存储（独立存储层，依赖 vfs + roles；scheduler 演化任务与 agent 共用）。**唯一路径**：`crate::role_store`——`agent/role_store.rs` 的历史 re-export 兼容层已删除（2026-09） | `role_store.rs` |
-| `scheduler` | `core/src/scheduler/` | 定时任务调度器 + 任务实现 | `task_scheduler.rs`, `tasks/` |
+| `scheduler` | `core/src/scheduler/` | 定时任务**机制 + 装配原语**：调度器（间隔 + 宕机补跑）、执行契约（`TaskHandler`/`TaskContext`/`TaskResult`）、注册机制（`TaskDefinition`）、装配原语（`TaskRegistration`/`TaskServices`）；任务实现只剩 `EvolutionTask` —— 5 个内置任务已迁 `plugins/task-builtin`（ADR-049 期 2 序 5a） | `task_scheduler.rs`, `task_assembly.rs`, `tasks/` |
 | `session` | `core/src/session/` | 会话管理（⚠️ ADR-018 VFS 例外：`SessionStore` SQLite 权威存储，原子取号 + 失败上抛；**SQL 收敛于本模块**（会话专属存储，经 `db::Database` 单连接直接实现）；`PersistentSessionManager` 业务语义；`SessionRecall` FTS 回忆；`session_meta` 存 SessionHeader/injectable 快照）；存储层返回完整链（ADR-027），压缩点截断发生在组装层 | `store.rs`, `manager.rs`, `search.rs`, `types.rs` |
 | `skills` | `core/src/skills/` | 技能 = VFS 方法论文档（发现/读取 + GEPA 进化 + 使用复审；**无执行语义**） | `manager.rs`, `reviewer.rs`, `learning/` |
 | `snapshot` | `core/src/snapshot/` | 工作区快照（回退/撤销回退，⚠️ ADR-006 VFS 例外）；重做子系统独立（`redo.rs`，与 capture/restore/diff/gc 正交） | `mod.rs`, `redo.rs` |

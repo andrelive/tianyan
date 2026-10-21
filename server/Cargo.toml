@@ -53,6 +53,10 @@ criterion = { version = "0.5", features = ["async_tokio"] }
 # 注入真实 SqliteBackend / LocalFileBackend。无循环依赖（插件只依赖 core，不依赖
 # server），因此不会出现 core 那种「同一 crate 两个编译单元」问题。
 tianyan-storage-sqlite = { path = "../plugins/storage-sqlite" }
+# 内置定时任务实现（ADR-049 期 2 序 5a）：集成测试的 `test_assembly()` 注入真实
+# 任务清单，保住「`start_server*` 会注册 5 个内置任务」这条可观测行为。
+# 同样无循环（插件只依赖 core，不依赖 server）。
+tianyan-task-builtin = { path = "../plugins/task-builtin" }
 
 [[bench]]
 name = "api_benchmarks"

@@ -15,9 +15,7 @@ use tower_http::trace::TraceLayer;
 use tracing::{error, info, warn};
 
 use tianyan::observability::usage_log::UsageLog;
-use tianyan::scheduler::tasks::{
-    EvolutionTask, GcTask, SnapshotGcTask, SummaryTask, UsageStatsFlushTask,
-};
+use tianyan::scheduler::tasks::EvolutionTask;
 use tianyan::scheduler::{TaskContext, TaskDefinition, TaskScheduler};
 use tianyan::vfs::VirtualFileSystem;
 
@@ -46,7 +44,10 @@ pub mod state;
 use api::create_api_router;
 use state::AppState;
 
-pub use assembly::{AssemblyServices, StorageBackendFactory, VectorStorageFactory};
+pub use assembly::{
+    AssemblyServices, StorageBackendFactory, TaskFactory, TaskRegistration, TaskServices,
+    VectorStorageFactory,
+};
 
 /// Server configuration
 #[derive(Debug, Clone)]
@@ -685,6 +686,9 @@ async fn start_server_inner(
     assembly: AssemblyServices,
 ) -> tianyan::common::error::Result<()> {
     let has_providers = tianyan_config.models.providers.iter().any(|p| p.enabled);
+    // clone：`AssemblyServices` 是 4 个 `Arc`（克隆只加引用计数），而任务清单工厂
+    // 在应用构造之后才用到（见下方「内置定时任务」块）。
+    let task_assembly = assembly.clone();
     let (app, state) = create_app_inner(tianyan_config, assembly).await?;
     let task_scheduler: Option<Arc<TaskScheduler>> = if has_providers {
         // last_run 持久化（ADR-024）：宕机错过的事件任务重启后自动补跑
@@ -717,113 +721,80 @@ async fn start_server_inner(
             }
         });
 
-        // 注册摘要任务（ADR-017：降频每 6 小时；知识导入同步摘要，本任务仅兜底；
-        // 范围排除 Session 命名空间——会话回忆改 FTS5）
-        scheduler
-            .register_task(TaskDefinition::new(
-                "summary_generation",
-                "摘要生成",
-                6 * 3600,
-                Arc::new(SummaryTask::new()),
-            ))
-            .await?;
-
-        // 注册自演化任务（ADR-017：每日一次；移除 memory_extraction / rule_extraction，
-        // 记忆/技能/规则/组织形态的演化统一由演化智能体综述驱动）
+        // 内置定时任务（ADR-049 期 2 序 5a）：5 个任务的**实现与注册清单**已搬到
+        // `plugins/task-builtin`。本库只做两件事——把能力集合（[`TaskServices`]）递
+        // 过去、按返回顺序逐条 `register_task`；任务名 / 显示名 / 间隔 / 启用条件
+        // （摘要 6h、GC 6h、统计刷盘 60s、快照 GC 12h、提醒 `interval_min*60`）全在
+        // 插件里，server 不认识任何具体任务（D2-3）。
+        //
+        // 顺序纪律：注册顺序 = 调度器扫描顺序 = 同一轮到期任务的执行顺序
+        // （`RegisteredTask`：「注册顺序 = 扫描顺序」）。插件清单顺序与迁移前那 5 段
+        // `register_task` 逐字一致；`evolution` 仍在本库（序 5b 才迁），迁移前它排在
+        // `summary_generation` 之后——故按「清单第 1 项之后」插入（用位置而非任务名，
+        // 免去 server 对具体任务名的依赖；序 5b 迁走后这段插入自然消失）。
         {
-            let cfg = state.config().read().await.clone();
-            if cfg.evolution.enabled {
-                let executor = Arc::new(AgentEvolutionExecutor::new(
-                    state.agent_lock(),
-                    state.working_sets(),
-                    state::resolve_chat_model(&cfg),
-                    cfg.evolution.review_role.clone(),
-                ));
-                // 旧 cron 配置自动换算为间隔（ADR-024 迁移）；换算不了回退每日一次
-                let evolution_interval = match tianyan::scheduler::interval_from_cron(
-                    &cfg.evolution.cron,
-                ) {
-                    Some(secs) => secs,
-                    None => {
-                        tracing::warn!(
-                            old = %cfg.evolution.cron,
-                            fallback_secs = 24 * 3600,
-                            "evolution.cron 无法换算为间隔（ADR-024 已弃用 cron），回退每日一次；可从配置中删除该字段"
-                        );
-                        24 * 3600
-                    }
-                };
-                scheduler
-                    .register_task(TaskDefinition::new(
-                        "evolution",
-                        "自演化综述",
-                        evolution_interval,
-                        Arc::new(EvolutionTask::new(
-                            executor,
-                            cfg.evolution.max_items_per_run,
-                        )),
-                    ))
-                    .await?;
-            }
-        }
-
-        // 注册垃圾回收任务（每 6 小时；auto_cleanup 来自存储配置）
-        scheduler
-            .register_task(TaskDefinition::new(
-                "garbage_collection",
-                "垃圾回收",
-                6 * 3600,
-                Arc::new(GcTask::new(&app_config.storage)),
-            ))
-            .await?;
-
-        // 注册使用统计刷盘任务（每 1 分钟；内存计数器 → SQLite，
-        // 保证 /api/v1/stats 数据时效与内存有界，退出前由 shutdown 兜底）
-        scheduler
-            .register_task(TaskDefinition::new(
-                "usage_stats_flush",
-                "使用统计刷盘",
-                60,
-                Arc::new(UsageStatsFlushTask::new(state.usage_stats())),
-            ))
-            .await?;
-
-        // 注册快照垃圾回收任务（每 12 小时；未配置工作区时 snapshot_manager 为 None，跳过）
-        if let Some(sm) = state.snapshot_manager() {
-            scheduler
-                .register_task(TaskDefinition::new(
-                    "snapshot_gc",
-                    "快照垃圾回收",
-                    12 * 3600,
-                    Arc::new(SnapshotGcTask::new(sm)),
-                ))
-                .await?;
-        }
-
-        // 注册主动提醒任务（reminder.enabled 时；间隔取整分钟，至少 1 分钟）
-        {
-            let cfg = state.config().read().await.clone();
-            if cfg.reminder.enabled {
-                let interval_min = (cfg.reminder.interval_secs.max(60) / 60) as u64;
+            let task_services = TaskServices {
+                // 注册期配置快照（提醒的 enabled/interval/max_per_run、存储的 GC 阈值）
+                config: app_config.as_ref().clone(),
+                usage_stats: state.usage_stats(),
+                snapshot_manager: state.snapshot_manager(),
+                session_manager: state.session_manager(),
+                notification_sink: notification::global_notification_sink(),
                 // 复用共享 ModelServices（不重复创建 HTTP client 池）
-                let model_services = state.shared_model_services().await?;
-                let model_name = state::resolve_chat_model(&cfg);
+                chat: state.shared_model_services().await?.chat,
+                chat_model: state::resolve_chat_model(&app_config),
+                working_sets: Some(state.working_sets()),
+            };
+            let mut registrations = task_assembly.tasks(&task_services);
+
+            // 注册自演化任务（ADR-017：每日一次；移除 memory_extraction / rule_extraction，
+            // 记忆/技能/规则/组织形态的演化统一由演化智能体综述驱动）
+            {
+                let cfg = state.config().read().await.clone();
+                if cfg.evolution.enabled {
+                    let executor = Arc::new(AgentEvolutionExecutor::new(
+                        state.agent_lock(),
+                        state.working_sets(),
+                        state::resolve_chat_model(&cfg),
+                        cfg.evolution.review_role.clone(),
+                    ));
+                    // 旧 cron 配置自动换算为间隔（ADR-024 迁移）；换算不了回退每日一次
+                    let evolution_interval = match tianyan::scheduler::interval_from_cron(
+                        &cfg.evolution.cron,
+                    ) {
+                        Some(secs) => secs,
+                        None => {
+                            tracing::warn!(
+                                old = %cfg.evolution.cron,
+                                fallback_secs = 24 * 3600,
+                                "evolution.cron 无法换算为间隔（ADR-024 已弃用 cron），回退每日一次；可从配置中删除该字段"
+                            );
+                            24 * 3600
+                        }
+                    };
+                    let at = 1.min(registrations.len());
+                    registrations.insert(
+                        at,
+                        TaskRegistration {
+                            name: "evolution".to_string(),
+                            display_name: "自演化综述".to_string(),
+                            interval_secs: evolution_interval,
+                            handler: Arc::new(EvolutionTask::new(
+                                executor,
+                                cfg.evolution.max_items_per_run,
+                            )),
+                        },
+                    );
+                }
+            }
+
+            for registration in registrations {
                 scheduler
                     .register_task(TaskDefinition::new(
-                        "reminder",
-                        "主动提醒",
-                        interval_min * 60,
-                        Arc::new(
-                            tianyan::scheduler::tasks::ReminderTask::new(
-                                model_services.chat,
-                                model_name,
-                                notification::global_notification_sink(),
-                                state.session_manager(),
-                                cfg.reminder.max_per_run,
-                                cfg.reminder.inject_to_session,
-                            )
-                            .with_working_sets(Some(state.working_sets())),
-                        ),
+                        registration.name,
+                        registration.display_name,
+                        registration.interval_secs,
+                        registration.handler,
                     ))
                     .await?;
             }

@@ -9,9 +9,9 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 
-use crate::common::error::TianyanError;
-use crate::scheduler::{TaskContext, TaskHandler, TaskResult};
-use crate::snapshot::SnapshotManager;
+use tianyan::common::error::TianyanError;
+use tianyan::scheduler::{TaskContext, TaskHandler, TaskResult};
+use tianyan::snapshot::SnapshotManager;
 
 /// 快照垃圾回收任务。
 pub struct SnapshotGcTask {
@@ -65,15 +65,15 @@ mod tests {
     use super::*;
     use tempfile::tempdir;
 
-    use crate::model::ChatService;
-    use crate::test_utils::{MockChatService, MockVfs};
-    use crate::vfs::SummaryEngine;
+    use tianyan::model::ChatService;
+    use tianyan::test_utils::{MockChatService, MockVfs};
+    use tianyan::vfs::SummaryEngine;
 
     /// 构造快照 GC 测试上下文（MockVfs + mock 服务；任务本身不读取上下文）。
     fn make_context(vfs: Arc<MockVfs>) -> TaskContext {
         let chat: Arc<dyn ChatService> = Arc::new(MockChatService::new());
         let summary_engine = Arc::new(SummaryEngine::new(chat.clone(), "test-model"));
-        let config = Arc::new(crate::config::TianyanConfig::default());
+        let config = Arc::new(tianyan::config::TianyanConfig::default());
         TaskContext::new(vfs, summary_engine, None, config)
     }
 

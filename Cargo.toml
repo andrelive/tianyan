@@ -11,6 +11,7 @@ members = [
     "plugins/tools-web",
     "plugins/storage-vector",
     "plugins/storage-sqlite",
+    "plugins/task-builtin",
 ]
 resolver = "2"
 

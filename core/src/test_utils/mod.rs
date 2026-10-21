@@ -1,4 +1,4 @@
-//! 测试工具（仅在 `cfg(test)` 时编译）。
+//! 测试工具（`cfg(test)` 或 `test-utils` 特性时编译，见 `crate::test_utils` 的说明）。
 //!
 //! 提供共享的 Mock 实现，避免在各个测试模块中重复定义。
 
@@ -8,15 +8,12 @@ use std::sync::{Arc, RwLock};
 use async_trait::async_trait;
 
 use crate::common::error::{Result, TianyanError};
-use crate::common::types::{
-    ContentLevel, ContextNamespace, EntryMetadata, SearchResult, TianyanUri,
-};
+use crate::common::types::{ContentLevel, ContextNamespace, SearchResult, TianyanUri};
 use crate::model::types::{EmbeddingData, EmbeddingRequest, EmbeddingResponse};
 use crate::model::EmbeddingService;
 use crate::vfs::{
     ContentMetadata, ContentStore, ContextEntry, VectorPoint, VectorSearchQuery,
     VectorSearchResult, VectorStorage, VectorType, VfsCore, VfsSearch, VirtualFileSystem,
-    CURRENT_SCHEMA_VERSION,
 };
 
 // ── MockVfs ───────────────────────────────────────────────────────────────
@@ -727,6 +724,10 @@ pub async fn create_test_retriever() -> DualLayerRetriever {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // 仅为本测试模块所用（`test-utils` 特性构建里 `super::*` 不带它们，
+    // 否则主 import 列表会出现「特性构建下未使用」的告警）。
+    use crate::common::types::EntryMetadata;
+    use crate::vfs::CURRENT_SCHEMA_VERSION;
 
     /// `search_fused` 必须返回真实融合结果（不再静默返回空——见 VectorStorage trait）。
     #[tokio::test]

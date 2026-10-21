@@ -3,13 +3,13 @@
 //! 定时评估记忆与规则：命中"当前值得告知用户"的内容时，经
 //! [`NotificationSink`] 推送系统通知，并可注入最新会话（ADR-013 消息通路）。
 //! 评估失败静默（下一次调度自然重试，不重试、不堆积）。
-use crate::common::types::{ContentLevel, ContextNamespace, TianyanUri};
-use crate::model::ChatService;
-use crate::notification::SharedNotificationSink;
-use crate::scheduler::{TaskContext, TaskHandler, TaskResult};
-use crate::session::SessionManager;
 use async_trait::async_trait;
 use std::sync::Arc;
+use tianyan::common::types::{ContentLevel, ContextNamespace, TianyanUri};
+use tianyan::model::ChatService;
+use tianyan::notification::SharedNotificationSink;
+use tianyan::scheduler::{TaskContext, TaskHandler, TaskResult};
+use tianyan::session::SessionManager;
 /// 每次评估采样的记忆条目数上限。
 const MAX_MEMORY_SAMPLES: usize = 10;
 /// 单条记忆文本截断字符数。
@@ -37,7 +37,7 @@ pub struct ReminderTask {
     /// 会话管理器（提醒注入最新会话；读路径：选最新会话）。
     session_manager: Arc<dyn SessionManager>,
     /// 会话工作集（ADR-039：提醒注入的唯一写入口；未装配 = 不注入，仅告警）。
-    working_sets: Option<Arc<crate::agent::working_set::WorkingSetRegistry>>,
+    working_sets: Option<Arc<tianyan::agent::working_set::WorkingSetRegistry>>,
     /// 每次运行最多提醒条数。
     max_per_run: usize,
     /// 是否注入到最新会话。
@@ -67,7 +67,7 @@ impl ReminderTask {
     /// 注入会话工作集（ADR-039：写路径装配；未装配时提醒不落库，由单点告警）。
     pub fn with_working_sets(
         mut self,
-        working_sets: Option<Arc<crate::agent::working_set::WorkingSetRegistry>>,
+        working_sets: Option<Arc<tianyan::agent::working_set::WorkingSetRegistry>>,
     ) -> Self {
         self.working_sets = working_sets;
         self
@@ -106,7 +106,7 @@ impl ReminderTask {
     async fn evaluate(
         &self,
         memories: &[String],
-    ) -> Result<Vec<String>, crate::common::error::TianyanError> {
+    ) -> Result<Vec<String>, tianyan::common::error::TianyanError> {
         if memories.is_empty() {
             return Ok(Vec::new());
         }
@@ -114,11 +114,11 @@ impl ReminderTask {
         let system_prompt = EVAL_SYSTEM_PROMPT
             .replace("{context}", &context)
             .replace("{max_per_run}", &self.max_per_run.to_string());
-        let request = crate::model::types::ChatCompletionRequest::new(
+        let request = tianyan::model::types::ChatCompletionRequest::new(
             &self.model_name,
             vec![
-                crate::common::types::Message::system(system_prompt),
-                crate::common::types::Message::user("请评估上述记忆，输出提醒或 EMPTY。"),
+                tianyan::common::types::Message::system(system_prompt),
+                tianyan::common::types::Message::user("请评估上述记忆，输出提醒或 EMPTY。"),
             ],
         );
         let response = self
@@ -126,7 +126,10 @@ impl ReminderTask {
             .chat_completion(request)
             .await
             .map_err(|e| {
-                crate::common::error::TianyanError::Custom(format!("reminder: LLM 评估失败：{}", e))
+                tianyan::common::error::TianyanError::Custom(format!(
+                    "reminder: LLM 评估失败：{}",
+                    e
+                ))
             })?;
         let content = response
             .choices
@@ -154,7 +157,7 @@ impl ReminderTask {
             return;
         };
         // ADR-039 收口 ①：唯一写入口（未装配 = 不注入，由单点告警）
-        crate::agent::background::persist_system_message(
+        tianyan::agent::background::persist_system_message(
             self.working_sets.as_ref(),
             &latest.session_id,
             format!("[主动提醒]\n{}", text),
@@ -203,17 +206,17 @@ impl TaskHandler for ReminderTask {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::common::types::Message;
-    use crate::model::MockChatService;
-    use crate::session::Session;
-    use crate::test_utils::MockVfs;
-    use crate::vfs::{ContentStore, VfsCore, VirtualFileSystem};
     use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
+    use tianyan::common::types::Message;
+    use tianyan::model::MockChatService;
+    use tianyan::session::Session;
+    use tianyan::test_utils::MockVfs;
+    use tianyan::vfs::{ContentStore, VfsCore, VirtualFileSystem};
     /// 记录通知次数的测试通知器。
     struct RecordingSink {
         calls: Arc<AtomicUsize>,
     }
-    impl crate::notification::NotificationSink for RecordingSink {
+    impl tianyan::notification::NotificationSink for RecordingSink {
         fn notify(&self, _title: &str, _body: &str) {
             self.calls.fetch_add(1, AtomicOrdering::SeqCst);
         }
@@ -230,24 +233,26 @@ mod tests {
             &self,
             _id: &str,
             _m: Message,
-        ) -> Result<Session, crate::common::error::TianyanError> {
+        ) -> Result<Session, tianyan::common::error::TianyanError> {
             Ok(Session::new(_id))
         }
         async fn get_session(
             &self,
             _id: &str,
-        ) -> Result<Option<Session>, crate::common::error::TianyanError> {
+        ) -> Result<Option<Session>, tianyan::common::error::TianyanError> {
             Ok(self.sessions.iter().find(|s| s.session_id == _id).cloned())
         }
-        async fn list_sessions(&self) -> Result<Vec<Session>, crate::common::error::TianyanError> {
+        async fn list_sessions(
+            &self,
+        ) -> Result<Vec<Session>, tianyan::common::error::TianyanError> {
             Ok(self.sessions.clone())
         }
     }
     fn make_ctx(vfs: Arc<dyn VirtualFileSystem>) -> TaskContext {
-        let mut config = crate::config::TianyanConfig::default();
+        let mut config = tianyan::config::TianyanConfig::default();
         config.reminder.enabled = true;
         let model_mock = Arc::new(MockChatService::new());
-        let engine = Arc::new(crate::vfs::SummaryEngine::new(model_mock.clone(), "test"));
+        let engine = Arc::new(tianyan::vfs::SummaryEngine::new(model_mock.clone(), "test"));
         TaskContext::new(vfs, engine, None, Arc::new(config))
     }
     async fn seed_memory(vfs: &MockVfs) {
@@ -268,15 +273,17 @@ mod tests {
         vfs.add_entry(&dir, &uri);
     }
     /// 内存 store + 会话的工作集注册表（ADR-039：写路径唯一入口的测试装配）。
-    async fn test_registry(session_id: &str) -> Arc<crate::agent::working_set::WorkingSetRegistry> {
-        let db = crate::db::Database::open_in_memory().unwrap();
+    async fn test_registry(
+        session_id: &str,
+    ) -> Arc<tianyan::agent::working_set::WorkingSetRegistry> {
+        let db = tianyan::db::Database::open_in_memory().unwrap();
         db.init_schemas().await.unwrap();
-        let store = crate::session::store::SessionStore::new(db).unwrap();
+        let store = tianyan::session::store::SessionStore::new(db).unwrap();
         store
-            .create(session_id, &crate::session::SessionHeader::default())
+            .create(session_id, &tianyan::session::SessionHeader::default())
             .await
             .unwrap();
-        crate::agent::working_set::WorkingSetRegistry::new(Some(store))
+        tianyan::agent::working_set::WorkingSetRegistry::new(Some(store))
     }
     fn task(notification: SharedNotificationSink, _sessions: Arc<AtomicUsize>) -> ReminderTask {
         ReminderTask::new(
@@ -295,17 +302,17 @@ mod tests {
         let calls = Arc::new(AtomicUsize::new(0));
         let mut mock = MockChatService::new();
         mock.expect_chat_completion().times(1).returning(|_| {
-            Ok(crate::model::types::ChatCompletionResponse {
+            Ok(tianyan::model::types::ChatCompletionResponse {
                 id: "r".into(),
                 object: "chat.completion".into(),
                 created: 0,
                 model: "test".into(),
-                choices: vec![crate::model::types::ChatChoice {
+                choices: vec![tianyan::model::types::ChatChoice {
                     index: 0,
                     message: Message::assistant("EMPTY"),
                     finish_reason: Some("stop".into()),
                 }],
-                usage: crate::common::types::TokenUsage::default(),
+                usage: tianyan::common::types::TokenUsage::default(),
             })
         });
         let reg = test_registry("s1").await;
@@ -335,17 +342,17 @@ mod tests {
         let calls = Arc::new(AtomicUsize::new(0));
         let mut mock = MockChatService::new();
         mock.expect_chat_completion().times(1).returning(|_| {
-            Ok(crate::model::types::ChatCompletionResponse {
+            Ok(tianyan::model::types::ChatCompletionResponse {
                 id: "r".into(),
                 object: "chat.completion".into(),
                 created: 0,
                 model: "test".into(),
-                choices: vec![crate::model::types::ChatChoice {
+                choices: vec![tianyan::model::types::ChatChoice {
                     index: 0,
                     message: Message::assistant("提醒：检查项目进度"),
                     finish_reason: Some("stop".into()),
                 }],
-                usage: crate::common::types::TokenUsage::default(),
+                usage: tianyan::common::types::TokenUsage::default(),
             })
         });
         let reg = test_registry("s1").await;
@@ -375,7 +382,7 @@ mod tests {
         let calls = Arc::new(AtomicUsize::new(0));
         let mut mock = MockChatService::new();
         mock.expect_chat_completion().times(1).returning(|_| {
-            Err(crate::common::error::TianyanError::Custom(
+            Err(tianyan::common::error::TianyanError::Custom(
                 "mock 失败".into(),
             ))
         });

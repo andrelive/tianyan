@@ -121,11 +121,16 @@ pub fn test_tianyan_config_with_data_dir(data_dir: std::path::PathBuf) -> Tianya
     }
 }
 
-/// 集成测试用的**真实装配**（ADR-049，期 2 序 4）。
+/// 集成测试用的**真实装配**（ADR-049，期 2 序 4 / 序 5a）。
 ///
 /// 存储后端按 `config.storage.backend` 分发到真实的 `SqliteBackend` /
 /// `LocalFileBackend`——与生产装配器（`app` bin / `tauri`）同一份选择逻辑，
 /// 只是把「哪个 adapter」的 match 从 server 库搬到了装配侧（D5）。
+///
+/// 内置任务清单同样注入真实实现（序 5a）：迁移前 `start_server*` **会**注册那 5 个
+/// 任务，若集成测试走「未装配 → 不注册」的降级路径，测的就不是生产的形态
+/// （与序 4 的「兜底后端」同一条纪律：**不要用 `AssemblyServices::default()` 驱动
+/// 集成测试**）。`create_app` 路径本就不注册任务，因此那里的行为不受影响。
 ///
 /// **不要用 `AssemblyServices::default()` 驱动集成测试**：那会落到内存兜底后端
 /// （`EphemeralStorageBackend`），测试虽然能过，却不再覆盖真实 SQL 语句、表结构
@@ -152,5 +157,12 @@ pub fn test_assembly() -> tianyan_server::AssemblyServices {
         };
         Ok(storage)
     });
-    tianyan_server::AssemblyServices::new().with_storage_factory(factory)
+
+    // 内置任务清单：与 `app` / `tauri` 同一份插件实现（任务名/间隔/启用条件全在插件里）
+    let task_factory: tianyan_server::TaskFactory =
+        Arc::new(|services: &tianyan_server::TaskServices| tianyan_task_builtin::tasks(services));
+
+    tianyan_server::AssemblyServices::new()
+        .with_storage_factory(factory)
+        .with_task_factory(task_factory)
 }

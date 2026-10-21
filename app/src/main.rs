@@ -17,13 +17,17 @@
 //! `LocalFileBackend`）搬进 `plugins/storage-sqlite`，本包把两者包成
 //! `StorageBackendFactory` 注入——`config.storage.backend` 选哪个 adapter 也在这里
 //! 决定（server 库只递配置与共享连接）。
+//!
+//! 期 2 序 5a 扩第四插槽：**内置定时任务**（摘要 / GC / 统计刷盘 / 快照 GC / 提醒）
+//! 搬进 `plugins/task-builtin`，本包把插件的 `tasks()` 包成 `TaskFactory` 注入
+//! （server 库只认清单项类型，不认识任何具体任务）。
 
 use std::sync::Arc;
 
 use tianyan::vfs::{StorageBackend, VectorStorage};
 use tianyan_server::{
-    start_server_with_assembly, AssemblyServices, StorageBackendFactory, ToolPluginFactory,
-    VectorStorageFactory,
+    start_server_with_assembly, AssemblyServices, StorageBackendFactory, TaskFactory,
+    ToolPluginFactory, VectorStorageFactory,
 };
 use tianyan_storage_sqlite::{LocalFileBackend, SqliteBackend};
 use tianyan_storage_vector::LanceDbVectorStore;
@@ -88,12 +92,26 @@ fn storage_factory() -> StorageBackendFactory {
     )
 }
 
-/// 完整装配（插件工具清单 + 向量存储 + 结构化存储）。
+/// 内置任务工厂（`plugins/task-builtin`；ADR-049 期 2 序 5a）。
+///
+/// 5 个内置任务（摘要生成 / 垃圾回收 / 统计刷盘 / 快照 GC / 主动提醒）的实现与
+/// **注册清单**（名字 / 显示名 / 间隔 / 启用条件）都在插件里；本包只把
+/// `tasks()` 包成类型擦除的 [`TaskFactory`]——server 库因此不认识任何具体任务。
+///
+/// **同步**工厂：能力集合（`TaskServices`）由 server 在调用前 await 好（聊天模型
+/// 服务是 `AppState` 里共享 `ModelServices` 的克隆，不重复建 HTTP client 池），
+/// 插件里只做「按配置构造处理器 + 判启用条件」。
+fn task_factory() -> TaskFactory {
+    Arc::new(|services: &tianyan_server::TaskServices| tianyan_task_builtin::tasks(services))
+}
+
+/// 完整装配（插件工具清单 + 向量存储 + 结构化存储 + 内置任务）。
 fn assembly() -> AssemblyServices {
     AssemblyServices::new()
         .with_plugin_factory(plugin_factory())
         .with_vector_factory(vector_factory())
         .with_storage_factory(storage_factory())
+        .with_task_factory(task_factory())
 }
 
 #[tokio::main]

@@ -44,7 +44,9 @@ pub trait ChatService: Send + Sync {
     }
 }
 
-#[cfg(test)]
+// 测试替身：`cfg(test)`（core 单测）或 `test-utils` 特性（插件 crate 的单元测试，
+// 见 `crate::test_utils` 的说明）。
+#[cfg(any(test, feature = "test-utils"))]
 mockall::mock! {
     /// ChatService 的 mockall 自动生成 mock。
     /// 使用 `MockChatService::new()` 创建，`expect_*().returning()` 配置行为。

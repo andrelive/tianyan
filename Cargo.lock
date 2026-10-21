@@ -9237,6 +9237,7 @@ dependencies = [
  "tianyan-server",
  "tianyan-storage-sqlite",
  "tianyan-storage-vector",
+ "tianyan-task-builtin",
  "tianyan-tools-code",
  "tianyan-tools-fs",
  "tianyan-tools-todo",
@@ -9318,6 +9319,7 @@ dependencies = [
  "tianyan-core",
  "tianyan-mcp",
  "tianyan-storage-sqlite",
+ "tianyan-task-builtin",
  "tokio",
  "tokio-stream",
  "tower",
@@ -9358,6 +9360,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "tianyan-task-builtin"
+version = "0.7.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "tempfile",
+ "tianyan-core",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "tianyan-tauri"
 version = "0.7.0"
 dependencies = [
@@ -9382,6 +9396,7 @@ dependencies = [
  "tianyan-server",
  "tianyan-storage-sqlite",
  "tianyan-storage-vector",
+ "tianyan-task-builtin",
  "tianyan-tools-code",
  "tianyan-tools-fs",
  "tianyan-tools-todo",

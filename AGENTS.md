@@ -69,10 +69,14 @@ cargo test -p tianyan-core vfs::backend::local -- --nocapture  # 指定测试模
 | `plugins/tools-web/` | `tianyan-tools-web` | 插件：web_search / web_fetch（含实现，`scraper` 在此） |
 | `plugins/storage-vector/` | `tianyan-storage-vector` | 插件：`LanceDbVectorStore`（`lancedb`/`arrow`/`datafusion` 链只在此） |
 | `plugins/storage-sqlite/` | `tianyan-storage-sqlite` | 插件：`SqliteBackend` + `LocalFileBackend`（VFS `StorageBackend` 的两个 adapter；`rusqlite` 仍在 core——本插件收窄的是重编面积，不是依赖面） |
+| `plugins/task-builtin/` | `tianyan-task-builtin` | 插件：5 个内置定时任务实现（摘要生成 / 垃圾回收 / 统计刷盘 / 快照 GC / 主动提醒，含各自内联测试）；`evolution_task` 暂留 core（ADR-049 序 5b） |
 
 **依赖铁律**（破一条拆包收益全部回吐）：插件只依赖 `core`（kernel-api）；插件之间零互赖；
 `core`/`server` 不认识任何插件 crate。装配经 `server/src/assembly.rs` 的类型擦除插槽
-（`ToolPluginFactory` / `VectorStorageFactory` / `StorageBackendFactory`）。
+（`ToolPluginFactory` / `VectorStorageFactory` / `StorageBackendFactory` / `TaskFactory`）。
+任务的清单项与能力集合（`TaskRegistration` / `TaskServices`）**定义在 core**
+（`core/src/scheduler/task_assembly.rs`，server 侧 re-export）：若住在 server，任务插件
+就得依赖 server 库（破第一条铁律）。
 
 ## 代码规范
 
@@ -156,7 +160,7 @@ Harness 工程 → [`docs/harness核心思路/harness-engineering-overview.md`](
 | `skills` | `core/src/skills/` | 技能 = VFS 方法论文档（发现/读取 + GEPA 进化引擎 + 使用复审；无执行语义） | ❌ **不全量加载**，L0 发现→L2 按需 |
 | `session` | `core/src/session/` | `SessionStore`（SQLite 权威存储，ADR-018；SQL 收敛本模块，经 db 单连接）+ `PersistentSessionManager` + `SessionRecall`（FTS 回忆） | ⚠️ 例外：会话内容不经 VFS（ADR-018）；`tianyan://session/{id}` 仅作逻辑标识 |
 | `model` | `core/src/model/` | `ModelServices` 容器（不路由、不重试） | — |
-| `scheduler` | `core/src/scheduler/` | 定时任务（SummaryTask、EvolutionTask、GcTask、SnapshotGcTask、ReminderTask、UsageStatsFlushTask） | 定时任务产物写入 VFS |
+| `scheduler` | `core/src/scheduler/` | 定时任务**机制 + 装配原语**：`TaskScheduler`（间隔+补跑）、`TaskHandler`/`TaskContext`/`TaskDefinition`、`TaskRegistration`/`TaskServices`；实现只剩 `EvolutionTask`（5 个内置任务已迁 `plugins/task-builtin`，ADR-049 序 5a） | 定时任务产物写入 VFS |
 | `observability` | `core/src/observability/` | `AgentMetrics`/`UsageStats`/`TraceCollector`/`ExecutionLog`/`UsageLog`/`RuleRecorder`；SQL 经 db Repository 收敛 | — |
 | `executor` | `core/src/executor/` | 工具执行支撑（Action、审批、LLM-as-Judge、验证门控）+ 语义化编辑（内容匹配 edit / patch）、文件浏览（fs/search）、代码智能（symbols/repo_map/project/test_discovery） | — |
 | `snapshot` | `core/src/snapshot/` | 工作区快照（回退/撤销回退；gzip 压缩 + GC + similar diff） | ⚠️ **ADR-006 例外**：独立文件存储于 `{data_dir}/snapshots/`，不经 VFS |
@@ -177,6 +181,7 @@ Harness 工程 → [`docs/harness核心思路/harness-engineering-overview.md`](
 
 - `tianyan` 和 `tianyan-core` 是同一个包（lib name: `tianyan`），导入用 `tianyan::...`
 - **`plugins/storage-sqlite/src/{sqlite,local}.rs` 内禁止 `crate::…`**（只允许 `tianyan::…`）：core 单测以 `#[cfg(test)] #[path]` **同源包含**这两个文件（dev-dep 会让 core 编译两份 → `StorageBackend`/`StorageConfig` 出现两个不兼容实例，实测 22 处 E0308/E0277）。写 `crate::` 时它解析到 core 而非插件，报错位置完全不相干。改文件布局须同步 `core/src/vfs/backend/mod.rs` 的 `#[path]`
+- **插件测试要用 core 的测试替身（`MockVfs` / `MockChatService`）时开 `test-utils` 特性**：`core/src/test_utils` 与 `model::MockChatService` 的 `cfg` 是 `any(test, feature = "test-utils")`，插件侧写 `[dev-dependencies] tianyan = { path = "../../core", package = "tianyan-core", features = ["test-utils"] }`（`mockall` 因此是 core 的**可选**依赖，默认构建不含）。不这么做只能把替身复制进插件——两份实现同时漂移，测试随即失去意义（ADR-049 序 5a）
 - `ServiceDiscovery::is_available()` 是 `async` —— 别忘了 `await`
 - 配置文件固定为 `~/.tianyan/tianyan.toml`（`TIANYAN_CONFIG` 环境变量可覆盖，e2e 用）；数据目录由配置 `storage.data_dir` 决定（默认 `%LOCALAPPDATA%/tianyan`），两者分离、搬迁只动数据（ADR-023）
 - 测试不依赖外部服务，用 `MockVectorStorage` 和 temp dir 隔离

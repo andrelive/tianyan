@@ -397,7 +397,7 @@ Harness Engineering 不是凭空出现的。它是智能体开发方法的第三
 | 上下文工程 | `ContextPipeline` | `core/src/context/pipeline.rs` | ✅ 已实现 |
 | Sensors（反馈控制） | `VerificationGate` + `LlmJudge` | `core/src/executor/` | ✅ 已实现 |
 | 技能定义 + 学习 | `skills/` (含 GEPA 引擎) | `core/src/skills/` | ✅ 已实现 |
-| GC / 熵减 | `GcTask` | `core/src/scheduler/tasks/gc_task.rs` | ✅ 已实现 |
+| GC / 熵减 | `GcTask` | `plugins/task-builtin/src/gc_task.rs`（ADR-049 序 5a 迁出 core） | ✅ 已实现 |
 | 架构约束 | 待实现（linter + 结构测试） | — | ❌ 未实现 |
 
 > **注意**：`AgentHarness` 和 `AgentSkills` wrapper 结构体已删除，功能由 `Agent` 直接持有。规则记录经工具执行管线内联写入（`RuleRecorder`）；规则提炼/记忆/技能/组织形态的演化统一由 `EvolutionTask`（ADR-017，每日）承担——`RuleTask`/`RuleSuggester`/`MemoryTask` 均已删除（ADR-018 落实）。详见 [module-map.md](../architecture/module-map.md) 中的"已删除/废弃组件"。

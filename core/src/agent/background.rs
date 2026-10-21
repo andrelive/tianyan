@@ -1102,7 +1102,11 @@ impl SessionTaskNotifier {
 ///
 /// **唯一写入口**（ADR-039 §4）：未装配工作集 = 无写路径，仅告警，不再回退
 /// `SessionManager` 直写（那会绕过单写者，正是缓存分叉的来源）。
-pub(crate) async fn persist_system_message(
+///
+/// `pub`（ADR-049 期 2 序 5a）：提醒任务已迁至 `plugins/task-builtin`，它是本函数
+/// 的第三个调用方——「唯一写入口」若只在本 crate 可见，插件要么复制一份写入逻辑
+/// （两份单写者，正是本收口要消灭的东西），要么退回 `SessionManager` 直写（更糟）。
+pub async fn persist_system_message(
     working_sets: Option<&Arc<crate::agent::working_set::WorkingSetRegistry>>,
     session_id: &str,
     text: String,

@@ -421,6 +421,84 @@ tauri 全域只引 `tianyan::{config,common,agent,notification}`，对候选模�
   3. 4 个运维 examples 的归属（`tools-ops` bin 包），以及 `app`/`tauri` 里重复的
      `vector_factory()` / `storage_factory()`（要彻底去重需引入「装配辅助 crate」）
 
+**实施记录（序 5a：task-builtin，2026-10-21）**：5 个内置定时任务**整文件**迁入
+`plugins/task-builtin`（crate `tianyan-task-builtin`）——`summary_task.rs` 616、
+`gc_task.rs` 435、`reminder_task.rs` 415、`snapshot_gc_task.rs` 130、
+`usage_stats_flush_task.rs` 98（含各自的内联测试）；`evolution_task.rs`（1909 行 +
+需前置提取的 `EvolutionReviewExecutor` trait）**不动**，留给序 5b。
+
+- **core 侧零生产引用**（全仓普查确认）：`core/src/scheduler/tasks/mod.rs` 只剩
+  evolution 的导出，`scheduler` 模块因此从「5 实现 + 机制」变成「机制 + 装配原语」。
+  残留的两处只是注释（`agent/builder.rs` / `vfs/traits.rs`）
+- **契约与机制留 core**：`TaskHandler`（执行契约）、`TaskContext`（运行时世界）、
+  `TaskScheduler`（间隔扫描 + 补跑）、`TaskDefinition`（注册机制）
+- **★ 装配原语 `TaskRegistration` / `TaskServices` 定义在 core
+  （`core/src/scheduler/task_assembly.rs`），不是 `server/src/assembly.rs`**
+  ——与任务书初稿的偏差，理由是硬的：这两个类型被**三方**同时引用（server 消费清单、
+  装配包包工厂、插件生产清单）。若住在 server，`plugins/task-builtin` 就必须依赖
+  `tianyan-server`——破 **D2-1「插件只依赖 kernel-api」**的第一条铁律，也与
+  `ToolContext` 住在 core 的先例不一致（内核定义能力集合、插件消费）。
+  server 侧**re-export** 成插槽契约（`tianyan_server::{TaskFactory, TaskRegistration,
+  TaskServices}`），对装配层而言 API 面与初稿一致
+- **装配：`AssemblyServices` 第四个插槽 [`TaskFactory`]**
+  （`Arc<dyn Fn(&TaskServices) -> Vec<TaskRegistration> + Send + Sync>`，**同步**）：
+  `TaskServices` 由 server 在调用工厂前 **await 好**（聊天模型服务取
+  `AppState::shared_model_services()` 的**共享实例克隆**，不重复建 HTTP client 池），
+  工厂里只做「按配置构造处理器 + 判启用条件」。字段：`config`（注册期配置快照）、
+  `usage_stats`、`snapshot_manager: Option<_>`、`session_manager`、
+  `notification_sink`、`chat` + `chat_model`、`working_sets: Option<_>`。
+  `app` / `tauri` / 集成测试的 `test_assembly()` 均注入
+  `Arc::new(|s| tianyan_task_builtin::tasks(s))`
+- **注册顺序 / 名字 / 显示名 / 间隔逐字保持**：插件 `tasks()` 返回
+  `summary_generation`(6h) → `garbage_collection`(6h) → `usage_stats_flush`(60s) →
+  `snapshot_gc`(12h, 仅 `snapshot_manager` 为 `Some`) → `reminder`(`interval_min*60`,
+  仅 `reminder.enabled`)，server 逐条 `register_task`。`evolution` 仍在本库，
+  迁移前它排在 `summary_generation` 之后 → 按「清单第 1 项之后」**插入**
+  （用位置而非任务名，序 5b 迁走后这段插入自然消失）。顺序不是审美问题：
+  `RegisteredTask` 的注释写明「注册顺序 = 扫描顺序」= 同一轮到期任务的执行顺序
+- **降级语义**：未装配工厂 → **不注册任何内置任务** + `warn!` 一次指路（不静默、
+  不 `Err`）。**与迁移前的唯一行为差**：`start_server*`（不带装配的公开入口）
+  迁移前会注册这 5 个任务，现在不会——生产装配（`app`/`tauri`）与集成测试
+  （`test_assembly()`）都已注入，覆盖的是生产形态。`create_app` 路径迁移前后都不注册
+  任务（注册在 `start_server_inner` 里），47 处 `create_app` 单测的可观测行为不变
+- **★ 测试替身必须跨 crate 可见：core 新增 `test-utils` 特性**（本序唯一新增的
+  公开面）。这 5 个文件的测试全部基于 `MockVfs` / `MockChatService`（`MockVfs`
+  能注入 `move_calls` / `summary_vector_error` 等故障面，重写成真实 VFS 会丢判别力），
+  而 `core::test_utils` 原本只在 `cfg(test)` 存在——插件测试拿不到。做法：
+  `core/Cargo.toml` 的 `mockall` 改为**可选依赖** + `test-utils = ["dep:mockall"]`
+  （默认构建仍不含 mockall，`cargo tree -p tianyan-core --edges normal` 无此项），
+  `test_utils` / `MockChatService` 的 `cfg(test)` 放宽为
+  `cfg(any(test, feature = "test-utils"))`，插件以
+  `[dev-dependencies] tianyan = { …, features = ["test-utils"] }` 打开。
+  **一份替身、零复制、零漂移**；生产构建的依赖图不受影响
+- **最小 pub 面提公（1 处）**：`agent::background::persist_system_message` 由
+  `pub(crate)` → `pub`。提醒任务是它的第三个调用方（ADR-039 §4 唯一写入口），
+  不提公就只能复制一份写入逻辑（两个单写者）或退回 `SessionManager` 直写（更糟）
+- **逐行比对证据**：`git diff --no-index`（HEAD 原文件 vs 插件文件）——
+  `summary_task` 19 行 / `gc_task` 9 / `snapshot_gc_task` 7 /
+  `usage_stats_flush_task` 8 / `reminder_task` 43 行改动，**全部是 `crate::` →
+  `tianyan::` 的路径前缀**；`reminder_task` 多出的 7 行是 `cargo fmt` 对 3 处
+  （`format!` / 两个函数签名）因路径变长（+2 字符/处）超过 100 列后的换行，无语义
+  改动。唯一的行为改写是 `(interval_secs.max(60) / 60) as u64` 去掉恒等 `as u64`
+  （clippy `unnecessary_cast`；`interval_secs` 本就是 `u64`）
+- **门禁**：`cargo fmt --all -- --check` 干净；`cargo clippy --workspace
+  --all-targets` **零 warning**；`tianyan-core --lib` **1230 passed**（= 基线 1261 − 31
+  搬走的测试）；`tianyan-core --lib scheduler` 45 passed（调度器机制仍绿）；
+  `tianyan-server --lib` **186 passed / 1 ignored**（183 + 3 条新插槽测试）；
+  `tianyan-task-builtin` **37 passed**（31 迁移 + 6 新清单门禁）；
+  `tianyan-app` assembly 7 / server 集成 e2e 14 / config_api 5 / shutdown 1 /
+  snapshot_reload 2 全绿；`cargo catalog-check` OK
+- **测试守恒**：HEAD core 1261 = 现在 core 1230 + 插件 37（其中 31 条为迁移，
+  逐条同名同断言；6 条为新增的**清单门禁**——顺序/名字/显示名/间隔/启用条件/可重复
+  调用）。**零放弃**
+- **遗留**：
+  1. `evolution_task.rs` 与 `EvolutionReviewExecutor` 仍在 core（序 5b：先提 trait
+     到 core，再迁实现）
+  2. 任务清单的**跨插件顺序断言**仍缺：今天只有插件内测试锁顺序，装配层没有
+     「清单顺序 = 执行顺序」的断言（期 4 清单收敛时补）
+  3. `TaskServices` 是全量能力集合（8 字段），序 5b 的演化任务可能需要
+     `session_recall` 之外的东西（它在 `TaskContext` 里，不需要动）
+
 ---
 
 ## 分期与闸门

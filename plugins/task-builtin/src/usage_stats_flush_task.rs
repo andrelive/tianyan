@@ -9,9 +9,9 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 
-use crate::common::error::TianyanError;
-use crate::observability::usage_stats::UsageStats;
-use crate::scheduler::{TaskContext, TaskHandler, TaskResult};
+use tianyan::common::error::TianyanError;
+use tianyan::observability::usage_stats::UsageStats;
+use tianyan::scheduler::{TaskContext, TaskHandler, TaskResult};
 
 /// 使用统计刷盘任务。
 pub struct UsageStatsFlushTask {
@@ -55,16 +55,16 @@ impl TaskHandler for UsageStatsFlushTask {
 mod tests {
     use super::*;
 
-    use crate::db::Database;
-    use crate::model::ChatService;
-    use crate::test_utils::{MockChatService, MockVfs};
-    use crate::vfs::SummaryEngine;
+    use tianyan::db::Database;
+    use tianyan::model::ChatService;
+    use tianyan::test_utils::{MockChatService, MockVfs};
+    use tianyan::vfs::SummaryEngine;
 
     /// 构造任务执行上下文（MockVfs + mock 服务；任务本身不读取上下文）。
     fn make_context(vfs: Arc<MockVfs>) -> TaskContext {
         let chat: Arc<dyn ChatService> = Arc::new(MockChatService::new());
         let summary_engine = Arc::new(SummaryEngine::new(chat.clone(), "test-model"));
-        let config = Arc::new(crate::config::TianyanConfig::default());
+        let config = Arc::new(tianyan::config::TianyanConfig::default());
         TaskContext::new(vfs, summary_engine, None, config)
     }
 

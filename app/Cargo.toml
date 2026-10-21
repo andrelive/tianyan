@@ -30,6 +30,9 @@ tianyan-storage-vector = { path = "../plugins/storage-vector" }
 # 结构化存储实现（ADR-049 期 2 序 4）：SqliteBackend / LocalFileBackend 搬出 core
 # 后由本包注入（`config.storage.backend` 的 adapter 选择也在装配层）。
 tianyan-storage-sqlite = { path = "../plugins/storage-sqlite" }
+# 内置定时任务实现（ADR-049 期 2 序 5a）：5 个任务搬出 core 后由本包注入
+# （任务名/显示名/间隔/启用条件全在插件里，server 库不认识任何具体任务）。
+tianyan-task-builtin = { path = "../plugins/task-builtin" }
 tokio.workspace = true
 
 [lints]

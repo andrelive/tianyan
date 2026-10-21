@@ -7,7 +7,7 @@ use std::sync::Arc;
 use tianyan::vfs::{StorageBackend, VectorStorage};
 use tianyan_server::{
     start_server_with_shutdown_signal_and_assembly, AssemblyServices, PluginServices,
-    StorageBackendFactory, ToolPluginFactory, VectorStorageFactory,
+    StorageBackendFactory, TaskFactory, ToolPluginFactory, VectorStorageFactory,
 };
 use tianyan_storage_sqlite::{LocalFileBackend, SqliteBackend};
 use tianyan_storage_vector::LanceDbVectorStore;
@@ -65,6 +65,16 @@ fn storage_factory() -> StorageBackendFactory {
     )
 }
 
+/// 内置任务工厂（`plugins/task-builtin`；ADR-049 期 2 序 5a）。
+///
+/// 与 `app/src/main.rs::task_factory` **同形同源**：5 个内置任务的实现与注册清单
+/// （名字 / 显示名 / 间隔 / 启用条件）都在插件里，server 库不认识任何具体任务。
+/// 同步工厂——`TaskServices` 由 server 在调用前 await 好（共享 `ModelServices`，
+/// 不重复建 HTTP client 池）。
+fn task_factory() -> TaskFactory {
+    Arc::new(|services: &tianyan_server::TaskServices| tianyan_task_builtin::tasks(services))
+}
+
 /// 启动 Axum 服务
 ///
 /// 此函数在后台任务中启动 Axum HTTP 服务器，
@@ -115,11 +125,12 @@ pub async fn start_axum_server(
             tools
         },
     );
-    // 完整装配（ADR-049 期 2 序 3/4）：工具清单 + 向量存储 + 结构化存储
+    // 完整装配（ADR-049 期 2 序 3/4/5a）：工具清单 + 向量存储 + 结构化存储 + 内置任务
     let assembly = AssemblyServices::new()
         .with_plugin_factory(plugin_factory)
         .with_vector_factory(vector_factory())
-        .with_storage_factory(storage_factory());
+        .with_storage_factory(storage_factory())
+        .with_task_factory(task_factory());
     if let Err(e) = start_server_with_shutdown_signal_and_assembly(
         listener,
         tianyan_config,

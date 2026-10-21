@@ -71,7 +71,9 @@ pub use provider::AsyncOpenAIClient;
 /// 聊天服务的共享引用类型别名。
 pub type SharedChatService = std::sync::Arc<dyn ChatService>;
 
-#[cfg(test)]
+// 测试替身：`cfg(test)`（core 单测）或 `test-utils` 特性（插件 crate 的单元测试，
+// 见 `crate::test_utils` 的说明）。
+#[cfg(any(test, feature = "test-utils"))]
 pub use traits::MockChatService;
 
 #[cfg(test)]

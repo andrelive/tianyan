@@ -85,8 +85,19 @@ pub mod snapshot;
 pub mod todos;
 pub mod vfs;
 
-/// 测试工具（仅在 cfg(test) 时编译）。
-#[cfg(test)]
+/// 测试工具（`cfg(test)` 或 `test-utils` 特性下编译）。
+///
+/// 除了 core 自己的单测，**插件 crate 的单元测试**也要用它（`MockVfs` /
+/// `MockChatService`）：ADR-049 期 2 序 5a 把 5 个内置任务搬进
+/// `plugins/task-builtin` 时，那些测试的写法与判别力必须原样保留——若替身不可达，
+/// 只能复制一份进插件（两份实现同时漂移，测试也就失去意义）。
+///
+/// `test-utils` 特性由插件的 `[dev-dependencies]` 打开，**默认构建不编译**
+/// （`cargo tree -p tianyan-core` 无 mockall）。测试替身里大量 `.unwrap()`
+/// 是刻意的（失败即 panic 即测试失败），故模块级豁免 clippy 的 unwrap 组——
+/// 特性构建不是 `cfg(test)`，拿不到 crate 级的 `cfg_attr(test, allow(..))`。
+#[cfg(any(test, feature = "test-utils"))]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::unwrap_in_result)]
 pub mod test_utils;
 
 // 重新导出常用类型

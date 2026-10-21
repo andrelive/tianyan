@@ -81,7 +81,7 @@ tianyan/
 │   │   ├── services.rs  # ModelServices（替代 ModelRouter 的容器）
 │   │   └── provider/    # AsyncOpenAIClient 等统一客户端
 │   ├── observability/ # AgentMetrics 可观测性存储和自省接口
-│   ├── scheduler/  # 定时任务调度器 + tasks/（SummaryTask、EvolutionTask、GcTask 等）
+│   ├── scheduler/  # 定时任务调度机制（TaskHandler/TaskContext/TaskScheduler + 装配原语）；内置任务实现在 plugins/task-builtin，EvolutionTask 暂留 core
 │   ├── session/    # 会话管理（SessionStore SQLite 权威存储 + PersistentSessionManager + SessionRecall）
 │   ├── skills/     # 技能系统（definition、executor、handlers/、learning/）
 │   └── vfs/        # 虚拟文件系统（traits、vfs_impl、backend/、vector/、summary/）
@@ -282,6 +282,11 @@ Scheduler 定时触发
   ├─ SummaryTask: SummaryEngine.generate() → VFS 三级摘要 (L0/L1)
   └─ GcTask / SnapshotGcTask / ReminderTask / UsageStatsFlushTask
 ```
+
+> **任务实现的归属**（ADR-049 期 2 序 5a）：上面 5 个任务（Summary / GC / SnapshotGC /
+> Reminder / UsageStatsFlush）已迁至 `plugins/task-builtin`，经 `TaskFactory` 插槽注入；
+> core 只留调度机制（`TaskHandler` / `TaskContext` / `TaskScheduler`）与清单类型
+> `TaskRegistration`。`EvolutionTask` 仍在 core（序 5b 迁）。
 
 ### 5.3 VFS 数据流
 

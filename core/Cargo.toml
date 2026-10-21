@@ -91,6 +91,12 @@ flate2 = { workspace = true }
 # 文件系统事件监听（事件驱动触发，T1 路线）
 notify = "8"
 
+# 测试替身（ADR-049 期 2 序 5a）：`test_utils`（MockVfs / MockChatService）默认
+# **不编译**，只在 `test-utils` 特性下作为公开 API 出现——插件 crate 的单元测试
+# 要复用它（否则搬走的测试无处可取替身，只能复制一份 → 两份实现同时漂移）。
+# 可选依赖：`cargo tree -p tianyan-core`（默认特性）里没有 mockall。
+mockall = { workspace = true, optional = true }
+
 [lints]
 workspace = true
 
@@ -100,6 +106,11 @@ mockall = { workspace = true }
 
 [features]
 default = []
+# 把 `test_utils` 作为公开 API 编译（默认构建不含）。消费者写法：
+# `[dev-dependencies] tianyan = { path = "../../core", package = "tianyan-core",
+#  features = ["test-utils"] }`——插件自身的测试构建因此能拿到 MockVfs /
+# MockChatService，而**生产构建**（`cargo build`）不受影响。
+test-utils = ["dep:mockall"]
 
 [[test]]
 name = "structural"

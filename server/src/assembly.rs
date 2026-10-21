@@ -1,11 +1,11 @@
-//! 装配扩展点（ADR-049）：插件工具清单 + 向量存储实现 + 结构化存储实现。
+//! 装配扩展点（ADR-049）：插件工具清单 + 向量存储实现 + 结构化存储实现 + 内置任务清单。
 //!
-//! server 库**不认识任何具体插件 crate**：本模块只定义两根**类型擦除**的插槽
+//! server 库**不认识任何具体插件 crate**：本模块只定义四根**类型擦除**的插槽
 //! （以及没有插槽时的降级实现），由装配层（`app` bin / `tauri` 桌面端）在启动
 //! 时注入。这样改一行插件实现只重编插件 + 装配包，server 库（13.4K 源码）不动
 //! ——闸门 A 的前提。
 //!
-//! 三个插槽：
+//! 四个插槽：
 //! - [`ToolPluginFactory`]（`crate::ToolPluginFactory`）：工具清单，**可重复调用**
 //!   （agent 会因配置热重载 / 模型切换反复重建，每次都要重新注入插件工具）。
 //! - [`VectorStorageFactory`]：向量存储实现（`tianyan-storage-vector` 的
@@ -15,6 +15,10 @@
 //!   `SqliteBackend` / `LocalFileBackend`）。**同步**：两个后端的构造都不做 IO
 //!   （建表/建目录发生在 `StorageBackend::initialize`）。`config.storage.backend`
 //!   的**选择语义**也在工厂里（装配层决定哪个 adapter）——server 库只递配置。
+//! - [`TaskFactory`]：内置定时任务清单（`tianyan-task-builtin` 的 5 个任务，
+//!   ADR-049 期 2 序 5a）。**同步**：调用前本库已把 [`TaskServices`] **await 好**
+//!   （聊天模型服务是 `AppState` 里共享实例的克隆，工厂里无处可等），工厂只做
+//!   「按当前配置构造处理器 + 判定启用条件」。
 
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -30,6 +34,12 @@ use tianyan::vfs::{
 };
 
 use crate::ToolPluginFactory;
+
+// 任务清单的**契约面**（ADR-049 期 2 序 5a）：定义在 core 的
+// `scheduler::task_assembly`，此处 re-export —— 插件、装配层、本库三方都要引用它，
+// 因此不能住在 server（否则任务插件必须依赖 server 库，违反 D2-1「插件只依赖
+// kernel-api」，也与 `ToolContext` 住在 core 的先例不一致）。
+pub use tianyan::scheduler::{TaskRegistration, TaskServices};
 
 /// 向量存储工厂（**装配层注入**，期 2 序 3）。
 ///
@@ -66,18 +76,35 @@ pub type StorageBackendFactory = Arc<
         + Sync,
 >;
 
+/// 内置定时任务工厂（**装配层注入**，期 2 序 5a）。
+///
+/// `Arc<dyn Fn(&TaskServices) -> Vec<TaskRegistration>>`：参数是**已 await 好**的
+/// 能力集合（[`TaskServices`]：配置快照 + 统计/快照/会话/通知/模型/工作集），返回
+/// 按注册顺序排好的任务清单。
+///
+/// **同步**（与 [`StorageBackendFactory`] 同理，与 [`VectorStorageFactory`] 相反）：
+/// 工厂里没有需要等的事——聊天模型服务是 `AppState` 里 `ModelServices` 的克隆
+/// （共享实例，**不重复建 HTTP client 池**），本库在调工厂前已经取好；工厂只做
+/// 「按配置构造处理器 + 判定启用条件」。若把工厂做成 async，调用方就得在
+/// `register_task` 的循环里 await 一个纯内存操作，收益为零。
+///
+/// 用 `Arc<dyn Fn>` 而非 `Box<dyn FnOnce>`：数据目录搬迁后以新配置重启会再次装配。
+pub type TaskFactory = Arc<dyn Fn(&TaskServices) -> Vec<TaskRegistration> + Send + Sync>;
+
 /// 启装配所需的外部能力集合（`None` = 该扩展点未装配，走降级路径）。
 ///
-/// 目前三个插槽：插件工具清单（[`ToolPluginFactory`]）、向量存储
-/// （[`VectorStorageFactory`]）、结构化存储（[`StorageBackendFactory`]）。用
+/// 目前四个插槽：插件工具清单（[`ToolPluginFactory`]）、向量存储
+/// （[`VectorStorageFactory`]）、结构化存储（[`StorageBackendFactory`]）、
+/// 内置任务清单（[`TaskFactory`]）。用
 /// **一个结构**而不是给每个启动入口再加一个参数：入口变体的数量是组合爆炸
-/// （listener × 关闭信号 × 插件 × 向量 × 存储），打包后只需「默认装配」与
+/// （listener × 关闭信号 × 插件 × 向量 × 存储 × 任务），打包后只需「默认装配」与
 /// 「装配齐全」两类入口。
 #[derive(Clone, Default)]
 pub struct AssemblyServices {
     plugin_factory: Option<ToolPluginFactory>,
     vector_factory: Option<VectorStorageFactory>,
     storage_factory: Option<StorageBackendFactory>,
+    task_factory: Option<TaskFactory>,
 }
 
 impl AssemblyServices {
@@ -100,6 +127,12 @@ impl AssemblyServices {
     /// 装配结构化存储工厂（`app` / `tauri` 用：SQLite / 本地文件系统）。
     pub fn with_storage_factory(mut self, factory: StorageBackendFactory) -> Self {
         self.storage_factory = Some(factory);
+        self
+    }
+
+    /// 装配内置任务工厂（`app` / `tauri` 用：`tianyan-task-builtin`）。
+    pub fn with_task_factory(mut self, factory: TaskFactory) -> Self {
+        self.task_factory = Some(factory);
         self
     }
 
@@ -162,6 +195,38 @@ impl AssemblyServices {
                      生产装配请用 create_app_with_assembly / start_server_with_assembly"
                 );
                 Ok(Arc::new(NoopVectorStorage::new(config)))
+            }
+        }
+    }
+
+    /// 构造内置定时任务清单（**唯一的任务实现选择点**）。
+    ///
+    /// 未装配工厂时返回**空清单**（不注册任何内置任务）+ `warn!` 一次指路。
+    /// 为什么是「空清单」而不是 `Err`：
+    ///
+    /// 1. **旧入口不能坏**：`start_server*` 这组不带装配的公开入口是「保留且语义
+    ///    等价」的 API 面（序 3 的纪律），`Err` 会让这批入口在任何构建里都起不来；
+    /// 2. **任务不是启动硬依赖**：它们是周期后台维护（摘要 / GC / 统计刷盘 /
+    ///    快照 GC / 提醒），缺了服务照常收发消息——只是维护动作不跑。对比序 4 的
+    ///    存储降级（`error!`，「重启即丢数据」），这里的代价低一个量级，用 `warn!`；
+    /// 3. **必须留痕**（ADR-038 可见失败）：静默不注册会让生产误配的唯一症状变成
+    ///    「摘要永远不补、统计数据不落库」，看不出是降级还是数据缺失。
+    ///
+    /// 语义差异须知（迁移前后唯一的行为差）：迁移前 `start_server*`（不带装配）
+    /// **会**注册这 5 个任务；现在只有注入 [`TaskFactory`] 的装配（`app` / `tauri` /
+    /// 集成测试的 `test_assembly()`）才注册。`create_app` 路径迁移前后都**不**注册
+    /// 任务（任务注册在 `start_server_inner` 里），因此 47 处 `create_app` 单测的
+    /// 可观测行为不变。
+    pub(crate) fn tasks(&self, services: &TaskServices) -> Vec<TaskRegistration> {
+        match self.task_factory.as_ref() {
+            Some(factory) => factory(services),
+            None => {
+                warn!(
+                    "未装配任务工厂：不注册任何内置定时任务（摘要生成 / 垃圾回收 / 统计刷盘 / \
+                     快照 GC / 主动提醒）——生产装配请用 create_app_with_assembly / \
+                     start_server_with_assembly"
+                );
+                Vec::new()
             }
         }
     }
@@ -653,6 +718,155 @@ mod tests {
         assert!(
             backend.exists(&sibling).await.expect("存在性"),
             "同前缀兄弟条目（ab vs abc）不应被误删"
+        );
+    }
+
+    // ── 内置任务插槽（ADR-049 期 2 序 5a）────────────────────────────────
+
+    /// 只用于装配测试的聊天服务桩（本库的测试不发起任何真实请求）。
+    struct StubChatService;
+
+    #[async_trait]
+    impl tianyan::model::ChatService for StubChatService {
+        async fn chat_completion(
+            &self,
+            _request: tianyan::model::types::ChatCompletionRequest,
+        ) -> tianyan::Result<tianyan::model::types::ChatCompletionResponse> {
+            Err(tianyan::TianyanError::Custom(
+                "测试桩：不发起聊天请求".to_string(),
+            ))
+        }
+
+        async fn chat_completion_stream(
+            &self,
+            _request: tianyan::model::types::ChatCompletionRequest,
+        ) -> tianyan::Result<
+            tokio::sync::mpsc::Receiver<
+                tianyan::Result<tianyan::model::types::ChatCompletionChunk>,
+            >,
+        > {
+            Err(tianyan::TianyanError::Custom(
+                "测试桩：不发起流式聊天请求".to_string(),
+            ))
+        }
+    }
+
+    /// 只用于装配测试的会话管理器桩（任务清单判定不读会话）。
+    struct StubSessionManager;
+
+    #[async_trait]
+    impl tianyan::session::SessionManager for StubSessionManager {
+        async fn create_session(
+            &self,
+            id: &str,
+            _message: tianyan::Message,
+        ) -> tianyan::Result<tianyan::session::Session> {
+            Ok(tianyan::session::Session::new(id))
+        }
+
+        async fn get_session(
+            &self,
+            _id: &str,
+        ) -> tianyan::Result<Option<tianyan::session::Session>> {
+            Ok(None)
+        }
+
+        async fn list_sessions(&self) -> tianyan::Result<Vec<tianyan::session::Session>> {
+            Ok(Vec::new())
+        }
+    }
+
+    /// 只用于装配测试的任务处理器（自报名字由工厂给定）。
+    struct StubTask(&'static str);
+
+    #[async_trait]
+    impl tianyan::scheduler::TaskHandler for StubTask {
+        async fn execute(
+            &self,
+            _ctx: &tianyan::scheduler::TaskContext,
+        ) -> tianyan::scheduler::TaskResult {
+            tianyan::scheduler::TaskResult::success(0)
+        }
+
+        fn name(&self) -> &str {
+            self.0
+        }
+    }
+
+    /// 构造任务装配能力集合（`snapshot_manager` 固定 `None`：本库的插槽测试不关心它）。
+    async fn make_task_services() -> TaskServices {
+        let database = tianyan::db::Database::open_in_memory().expect("内存库");
+        database.init_schemas().await.expect("建表");
+        let usage_stats =
+            tianyan::observability::usage_stats::UsageStats::new(database).expect("统计");
+        TaskServices {
+            config: tianyan::config::TianyanConfig::default(),
+            usage_stats,
+            snapshot_manager: None,
+            session_manager: Arc::new(StubSessionManager),
+            notification_sink: Arc::new(tianyan::notification::NoopNotificationSink),
+            chat: Arc::new(StubChatService),
+            chat_model: "stub-model".to_string(),
+            working_sets: None,
+        }
+    }
+
+    /// 未装配工厂时**不注册任何任务**（空清单），且不 panic、不报错。
+    ///
+    /// 判别力：若把降级改成 `Err`，`start_server*` 这组不带装配的公开入口在所有构建里
+    /// 都起不来（序 3/4 的同类取舍）；若改成「兜底注册一份内置清单」，本库就得知道
+    /// 具体任务（D2-3 破）。
+    #[tokio::test]
+    async fn test_default_assembly_yields_no_tasks() {
+        let services = make_task_services().await;
+        let registrations = AssemblyServices::new().tasks(&services);
+        assert!(
+            registrations.is_empty(),
+            "未装配任务工厂时应返回空清单（不注册内置任务），实际 {} 条",
+            registrations.len()
+        );
+    }
+
+    /// 装配了工厂时**只用工厂**（空清单不得抢占）。
+    #[tokio::test]
+    async fn test_assembly_uses_injected_task_factory() {
+        let factory: TaskFactory = Arc::new(|_services| {
+            vec![TaskRegistration::new(
+                "injected_task",
+                "注入的测试任务",
+                42,
+                Arc::new(StubTask("injected_task")),
+            )]
+        });
+        let services = make_task_services().await;
+        let registrations = AssemblyServices::new()
+            .with_task_factory(factory)
+            .tasks(&services);
+
+        assert_eq!(registrations.len(), 1, "应返回工厂给的清单");
+        assert_eq!(registrations[0].name, "injected_task");
+        assert_eq!(registrations[0].display_name, "注入的测试任务");
+        assert_eq!(registrations[0].interval_secs, 42);
+        assert_eq!(registrations[0].handler.name(), "injected_task");
+    }
+
+    /// 工厂必须可重复调用（数据目录搬迁后的重启会再次装配）。
+    #[tokio::test]
+    async fn test_task_factory_is_repeatable() {
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counter = calls.clone();
+        let factory: TaskFactory = Arc::new(move |_services| {
+            counter.fetch_add(1, Ordering::SeqCst);
+            Vec::new()
+        });
+        let assembly = AssemblyServices::new().with_task_factory(factory);
+        let services = make_task_services().await;
+        let _ = assembly.tasks(&services);
+        let _ = assembly.tasks(&services);
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            2,
+            "工厂应可重复调用（不是 FnOnce）"
         );
     }
 }
