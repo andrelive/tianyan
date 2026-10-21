@@ -7,7 +7,7 @@ mod common;
 
 use tempfile::tempdir;
 
-use common::factory::test_tianyan_config_with_data_dir;
+use common::factory::{test_assembly, test_tianyan_config_with_data_dir};
 use common::harness::TestServer;
 
 /// 使用独立临时数据目录构建真实应用路由（完整 VFS + AppState 初始化）。
@@ -15,7 +15,7 @@ async fn start_real_server() -> (TestServer, tempfile::TempDir) {
     let dir = tempdir().expect("创建临时目录失败");
     let config = test_tianyan_config_with_data_dir(dir.path().to_path_buf());
 
-    let (router, _state) = tianyan_server::create_app(config)
+    let (router, _state) = tianyan_server::create_app_with_assembly(config, test_assembly())
         .await
         .expect("create_app 失败");
     let server = TestServer::start(router).await.expect("启动测试服务器失败");
@@ -372,7 +372,7 @@ async fn test_e2e_knowledge_delete_entry_endpoint() {
 async fn test_e2e_unified_event_push_message() {
     let dir = tempdir().expect("创建临时目录失败");
     let config = test_tianyan_config_with_data_dir(dir.path().to_path_buf());
-    let (router, state) = tianyan_server::create_app(config)
+    let (router, state) = tianyan_server::create_app_with_assembly(config, test_assembly())
         .await
         .expect("create_app 失败");
     let server = TestServer::start(router).await.expect("启动测试服务器失败");
@@ -476,7 +476,7 @@ async fn test_e2e_unified_event_push_message() {
 async fn test_e2e_messages_default_is_latest_page() {
     let dir = tempdir().expect("创建临时目录失败");
     let config = test_tianyan_config_with_data_dir(dir.path().to_path_buf());
-    let (router, state) = tianyan_server::create_app(config)
+    let (router, state) = tianyan_server::create_app_with_assembly(config, test_assembly())
         .await
         .expect("create_app 失败");
     let server = TestServer::start(router).await.expect("启动测试服务器失败");

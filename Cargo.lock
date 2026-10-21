@@ -9317,6 +9317,7 @@ dependencies = [
  "tempfile",
  "tianyan-core",
  "tianyan-mcp",
+ "tianyan-storage-sqlite",
  "tokio",
  "tokio-stream",
  "tower",

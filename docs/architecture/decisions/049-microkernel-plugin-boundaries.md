@@ -405,8 +405,16 @@ tauri 全域只引 `tianyan::{config,common,agent,notification}`，对候选模�
 - **测试守恒**：HEAD 1261（core `--lib`）= 现在 core 1261（其中 14 个来自 `#[path]`
   同源包含）+ 插件 14（同源重跑，非新增）。**零放弃、零降级**
 - **遗留**：
-  1. `server/tests/*` 的集成测试仍走兜底内存后端（不再覆盖真实 adapter，与序 3 的 e2e
-     走 `NoopVectorStorage` 同型）。要覆盖需给 `tianyan-server` 加 dev-dep + 测试装配器
+  1. ~~`server/tests/*` 的集成测试仍走兜底内存后端~~ **已修（同一提交内）**：迁移初版
+     让 22 个集成测试从真实 `SqliteBackend` 退化为内存兜底（`StorageBackendType` 的
+     默认值就是 `Sqlite`，所以这是**判别力回退**而非等价替换）。修法：`tianyan-server`
+     加 `[dev-dependencies] tianyan-storage-sqlite`（**无环**——插件只依赖 core，不依赖
+     server，因此不会出现 core 那种「同一 crate 两个编译单元」），`server/tests/common/
+     factory.rs::test_assembly()` 按 `config.storage.backend` 分发到真实
+     `SqliteBackend` / `LocalFileBackend`（与 `app`/`tauri` 同一份选择逻辑），6 处
+     `create_app` + 1 处 `start_server_with_shutdown_signal` 改用 `*_assembly` 入口。
+     **口径**：`AssemblyServices::default()` 只服务「不想配后端」的嵌入式/单测路径，
+     **集成测试一律用 `test_assembly()`**——否则测的是生产不存在的配置
   2. `StorageBackend` trait 仍在 core，是「跨 `cfg(test)` 类型同一性」问题的**根源**：
      期 3 若把契约提到独立 `kernel-api` 包，core 单测就能干净地用 dev-dep（届时可删
      `#[path]` 手法）

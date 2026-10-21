@@ -10,7 +10,7 @@ mod common;
 
 use std::time::Duration;
 
-use common::factory::test_tianyan_config_with_data_dir;
+use common::factory::{test_assembly, test_tianyan_config_with_data_dir};
 use tempfile::tempdir;
 
 #[tokio::test]
@@ -25,11 +25,14 @@ async fn external_shutdown_signal_triggers_graceful_shutdown() {
     let port = listener.local_addr().expect("读取端口").port();
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
 
-    let handle = tokio::spawn(tianyan_server::start_server_with_shutdown_signal(
-        listener,
-        config,
-        shutdown_rx,
-    ));
+    let handle = tokio::spawn(
+        tianyan_server::start_server_with_shutdown_signal_and_assembly(
+            listener,
+            config,
+            shutdown_rx,
+            test_assembly(),
+        ),
+    );
 
     // 轮询 /health 直到服务器就绪（create_app + 调度器装配耗时不定）
     let client = reqwest::Client::new();

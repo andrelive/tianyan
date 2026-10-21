@@ -16,7 +16,7 @@ mod common;
 
 use tempfile::tempdir;
 
-use common::factory::test_tianyan_config_with_data_dir;
+use common::factory::{test_assembly, test_tianyan_config_with_data_dir};
 
 /// 改工作目录热重载 → 快照管理器必须指向**新**目录。
 #[tokio::test]
@@ -29,7 +29,7 @@ async fn test_reload_agent_rebuilds_snapshot_manager_for_new_workdir() {
 
     let mut config = test_tianyan_config_with_data_dir(dir.path().join("data"));
     config.agent.working_directory = Some(ws_a.to_string_lossy().into_owned());
-    let (_router, state) = tianyan_server::create_app(config)
+    let (_router, state) = tianyan_server::create_app_with_assembly(config, test_assembly())
         .await
         .expect("create_app 失败");
 
@@ -60,7 +60,7 @@ async fn test_reload_agent_enables_snapshot_manager_when_workdir_added() {
 
     let mut config = test_tianyan_config_with_data_dir(dir.path().join("data"));
     config.agent.working_directory = None;
-    let (_router, state) = tianyan_server::create_app(config)
+    let (_router, state) = tianyan_server::create_app_with_assembly(config, test_assembly())
         .await
         .expect("create_app 失败");
     assert!(

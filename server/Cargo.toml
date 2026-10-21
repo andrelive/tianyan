@@ -49,6 +49,10 @@ doctest = false
 reqwest = { workspace = true, features = ["blocking"] }
 tempfile = { workspace = true }
 criterion = { version = "0.5", features = ["async_tokio"] }
+# 集成测试的**真实装配**（ADR-049 序 4）：`tests/common/factory.rs::test_assembly()`
+# 注入真实 SqliteBackend / LocalFileBackend。无循环依赖（插件只依赖 core，不依赖
+# server），因此不会出现 core 那种「同一 crate 两个编译单元」问题。
+tianyan-storage-sqlite = { path = "../plugins/storage-sqlite" }
 
 [[bench]]
 name = "api_benchmarks"

@@ -120,3 +120,37 @@ pub fn test_tianyan_config_with_data_dir(data_dir: std::path::PathBuf) -> Tianya
         tool_output: Default::default(),
     }
 }
+
+/// 集成测试用的**真实装配**（ADR-049，期 2 序 4）。
+///
+/// 存储后端按 `config.storage.backend` 分发到真实的 `SqliteBackend` /
+/// `LocalFileBackend`——与生产装配器（`app` bin / `tauri`）同一份选择逻辑，
+/// 只是把「哪个 adapter」的 match 从 server 库搬到了装配侧（D5）。
+///
+/// **不要用 `AssemblyServices::default()` 驱动集成测试**：那会落到内存兜底后端
+/// （`EphemeralStorageBackend`），测试虽然能过，却不再覆盖真实 SQL 语句、表结构
+/// 与文件目录语义——而 `StorageBackendType` 的默认值就是 `Sqlite`，也就是说退化
+/// 成兜底等于**判别力回退**（序 4 迁移时一度如此，已在本函数修正）。
+///
+/// 注意：本函数能成立的前提是 `tianyan-storage-sqlite` 只是 server 的 dev-dep
+/// 且**不被 server 依赖**（无环）；core 的同类需求不能照抄——core 若这样做会被
+/// 编译两份，trait 与类型出现两个不兼容实例（见 `core/src/vfs/backend/mod.rs`）。
+pub fn test_assembly() -> tianyan_server::AssemblyServices {
+    use std::sync::Arc;
+
+    use tianyan::config::StorageBackendType;
+    use tianyan::vfs::StorageBackend;
+
+    let factory: tianyan_server::StorageBackendFactory = Arc::new(|config, database| {
+        let storage: Arc<dyn StorageBackend> = match config.backend {
+            StorageBackendType::Local => Arc::new(tianyan_storage_sqlite::LocalFileBackend::new(
+                config.clone(),
+            )),
+            StorageBackendType::Sqlite => {
+                Arc::new(tianyan_storage_sqlite::SqliteBackend::new(database))
+            }
+        };
+        Ok(storage)
+    });
+    tianyan_server::AssemblyServices::new().with_storage_factory(factory)
+}
