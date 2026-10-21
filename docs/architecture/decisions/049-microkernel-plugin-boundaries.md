@@ -616,6 +616,72 @@ tauri 全域只引 `tianyan::{config,common,agent,notification}`，对候选模�
 
 ---
 
+### 期 3 普查结论（2026-10-21，实测 42,382 生产行；**推翻两处 D7 前提**）
+
+口径与期 0 的 `scripts/measure-rebuild.ps1::Get-SourceLines` 一致（排除
+`*_tests.rs` / `/tests/` / `test_utils`，内联测试只算 `#[cfg(test)] mod` 之前）。
+
+**规模**：`core/src` 193 文件 / 72,821 行 = **生产 42,382（58.2%）+ 测试 30,439
+（41.8%）**。最大模块 `agent/` 22,919（生产 12,444 / 测试 10,475）——与§待决问题 3
+记的「`agent` 22,994 行中 10.5K 是测试」吻合，口径自洽。
+
+**闸门 B 测算（文件级归属，可复核）**：
+
+| 判据 | 实测 | 结论 |
+|---|---|---|
+| api（trait + 纯类型）≤ 6K | **4,552** | ✅ 余 1,448 —— **契约面不紧张** |
+| impl ≤ 15K | **16,067** | ❌ 超 1,067 |
+| impl（config 只搬 loader 753 后） | 15,314 | ❌ **仍超 314** |
+| impl（config 二分：loader 753 外移 + 模型方言 950 随 `provider-llm`） | **14,364** | ✅ 余 636 |
+
+**口径复原验证**（本次普查可信度的关键证据）：api 4,552 + impl（不含
+`background.rs` 1,300）14,767 = **19,319** ≈ §D4 目标 19.4K；再减 config 3,011 =
+**16,308** ≈ §D4「配置外移后 16.1K」。**两处误差 < 1.2%** → 文件级归属与 D4 的隐含
+口径同一套，数字可直接用于设计。
+
+**★ 推翻前提 1：`context` 不是「干净的策略簇」**。`context/assembler.rs`（341 生产行）
+是 K1 的**组装机制**：`loop.rs:13` 与 `agent_core.rs:26` 直接持有 `ContextAssembler`
+（纯静态函数 `assemble` / `message_to_structured` / `normalize_tool_pairs` /
+`structured_to_messages`，零 I/O），生产调用点 `agent_core.rs:655/762/764/1215`、
+`loop.rs:1452`。它承载 ADR-043「工具对连续性规范化留内核」与「前缀零漂移」。
+→ 正确切法：`assembler.rs` **留 kernel-impl**，其余 **1,729** 行才是 policy-context。
+（原 D7 写「`context` 3.4K 可直接成为插件、不必动内核」）
+
+**★ 推翻前提 2：`skills/` 里的 GEPA 进化引擎已不存在**。`skills/mod.rs:7-10` 记录其
+已删除（原因：`apply_evaluation` 的 Deprecate 分支用 `write_content` 覆盖写，会把技能
+正文替换成弃用标记）。期 3 表里「`role_learning`→`policy-learning`（含 skills 里的
+GEPA）」的 **GEPA 部分作废**；`role_learning.rs`（573 生产）仍在，但全仓**零生产
+消费者**（只有自身 + 导出 + 测试；server/tauri/app 无构造点）→ 搬它是「搬死代码」，
+**应先裁决「接线还是删除」，不宜为迁移而迁移**。
+
+**五条硬结（都有 file:line 证据）**：
+
+1. **`AgentLoop.tool_registry: ToolRegistry` 按值持有具体类型**（`loop.rs:196`，
+   1,343 行）。`ToolRegistry` 同时是 approval / command / security / role_router /
+   working_sets 的宿主 → **K1「可搬」的真正前提是先把宿主拆成契约注入**，而不是
+   搬 `loop.rs` 文件本身。
+2. **`WorkingSetRegistry` 重演 fs 域阻塞（3a 业务复用）**：
+   `server/src/api/sessions/services.rs:56/81/247-249/398` 直接调 `reg.ensure()` /
+   `ws.delete()` / `reg.remove()`；`state.rs:284/386/738` 持有，`:459` 注入
+   `set_boundary_push` 回调；它还是 `pub struct`（无 trait）→ 必须先抽
+   `WorkingSetPort`（约 6 方法），否则搬了就破 D5。
+3. **`context/retrieval/retriever.rs:42` 持 `Option<Arc<UsageStats>>` 具体类型**
+   （写 SQLite 的 261 生产行）→ 抽 `policy-context` 需先给 kernel-api 一个
+   `UsageReporter` trait，否则插件将依赖 kernel-impl（违 D2-1）。
+4. **`common/llm_judge.rs` 不能进 `policy-review`**：它只有 3 个纯函数，**6 个消费者
+   里 4 个非评审**（含内核 `vfs/summary/engine.rs:119`）→ 移进 policy-review 会让
+   内核反向依赖策略。正确处置：**留 kernel-impl 工具面**（与 `contracts.md` 附录 A 一致）。
+5. **`rollback.rs` 不可文件级独立**：`:24 use agent::agent_core::Agent` + `:59 impl Agent`
+   —— 它与 `agent_core.rs:128 impl Agent` 是同一类型的扩展 impl 块。切 crate 时
+   必须与 `agent_core` 同单元，**不要按文件切**。
+
+**好消息两条**：`context/compression` 与 `WorkingSet` **编译期零耦合**（`grep` 0 命中；
+真正的耦合是 `agent_core.rs:807-818` 的「摘要落库成功后才
+`reshape_after_compression`」顺序契约，位置在协调器而非 `context/`）；
+`agent/cancel.rs` **完全自包含**（零 `crate::` 引用，68 生产行），是最干净的 K1 切入口。
+
+---
+
 ## 分期与闸门
 
 | 期 | 目标 | 动作要点 | 闸门（硬数） |
