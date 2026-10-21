@@ -415,7 +415,13 @@ fn is_meaningless_blocked_dir(_dir: &std::path::Path) -> bool {
 /// `echo "a | rm -rf /`）退化为“全部按分隔符切”，宁可误伤不漏检。
 ///
 /// 返回各段原始切片（含前后空白，调用方自行 trim）；空段被剔除。
-pub(crate) fn split_command_segments(command: &str) -> Vec<&str> {
+///
+/// 公开面（ADR-049 期 3-T1）：审批实现已迁入 `plugins/policy-approval`，而本函数
+/// 是**执行层（[`SecurityPolicy::check_command`]）与审批层共用的分段口径**——
+/// 复制一份进插件等于让"哪段算一条命令"两侧漂移，正是 T0-2 修的那个漏洞
+/// （`git status && rm -rf /` 被低估）。因此提为公开 API
+/// （`tianyan::executor::split_command_segments`），仍只有一份实现。
+pub fn split_command_segments(command: &str) -> Vec<&str> {
     let bytes = command.as_bytes();
     let quote_aware = command.matches('\'').count().is_multiple_of(2)
         && command.matches('"').count().is_multiple_of(2);

@@ -32,6 +32,15 @@ pub use actions::{
 };
 pub use command::CancelSource;
 pub use security::DEFAULT_BLOCKED_COMMANDS;
+/// 命令风险定级与分段（**审批层与执行层共用的单一事实源**；B 级契约，ADR-049 期 3-T1）。
+///
+/// 审批实现已迁入 `plugins/policy-approval`，但这两件东西不能跟着搬：
+/// 内置风险清单（`DANGEROUS_COMMANDS` / `MODERATE_COMMANDS` /
+/// `DEFAULT_BLOCKED_COMMANDS`）与分段口径同时被执行层的 [`SecurityPolicy`]
+/// 与审批层的风险定级使用，复制一份进插件就是两份清单同时漂移
+/// （T0-2 修的正是"只按首词定级"导致的绕过）。`security` 模块本身仍是
+/// `pub(crate)`，只有下面三个符号跨 crate，公开面收窄到实际需要。
+pub use security::{classify_command_risk, split_command_segments, CommandRisk};
 pub use shell::{ShellKind, ShellSpec};
 pub use types::Action;
 /// 测试共享设施（`#[cfg(test)]` 单点）。

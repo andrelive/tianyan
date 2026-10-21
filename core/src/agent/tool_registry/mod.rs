@@ -7,7 +7,7 @@ use tokio::sync::Mutex;
 
 use crate::agent::RoleRegistry;
 use crate::common::error::TianyanError;
-use crate::executor::approval::ApprovalWorkflow;
+use crate::executor::approval::ApprovalGate;
 use crate::executor::SecurityPolicy;
 use crate::knowledge::KnowledgeIngestor;
 use crate::model::types::{ToolCall, ToolDefinition, ToolPresentation};
@@ -529,10 +529,13 @@ impl ToolRegistry {
         self
     }
 
-    /// 设置审批工作流（write_file / apply_edit / apply_patch / execute_command
+    /// 设置审批门控（write_file / apply_edit / apply_patch / execute_command
     /// 危险操作门控，统一经 [`Self::ensure_approved`]）。
-    pub fn with_approval_workflow(mut self, workflow: Arc<ApprovalWorkflow>) -> Self {
-        self.ctx.approval_workflow = Some(workflow);
+    ///
+    /// 参数是契约对象：实现（`plugins/policy-approval`）由装配层构造后注入
+    /// （ADR-049 期 3-T1）。
+    pub fn with_approval_gate(mut self, gate: Arc<dyn ApprovalGate>) -> Self {
+        self.ctx.approval_gate = Some(gate);
         self
     }
 
@@ -549,7 +552,7 @@ impl ToolRegistry {
             return false;
         }
         if approved {
-            if let Some(ref approval) = self.approval_workflow {
+            if let Some(ref approval) = self.approval_gate {
                 for fp in &fingerprints {
                     approval.record_user_confirmation_by_fingerprint(fp).await;
                 }
@@ -561,10 +564,10 @@ impl ToolRegistry {
         true
     }
 
-    /// 获取审批工作流（write_file / apply_edit / apply_patch / execute_command
+    /// 获取审批门控（write_file / apply_edit / apply_patch / execute_command
     /// 危险操作门控）。
-    pub fn approval_workflow(&self) -> Option<Arc<ApprovalWorkflow>> {
-        self.approval_workflow.clone()
+    pub fn approval_gate(&self) -> Option<Arc<dyn ApprovalGate>> {
+        self.approval_gate.clone()
     }
 
     /// 设置规则记录器（工具执行失败时自动学习规则；委托给内置可观测性监听器）。

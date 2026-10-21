@@ -13,10 +13,7 @@ use crate::config::SecurityConfig;
 use crate::context::compression::{CompressionConfig, ContextCompressor};
 use crate::context::pipeline::ContextPipeline;
 use crate::context::DualLayerRetriever;
-use crate::executor::approval::{
-    ActionPattern, ApprovalCondition, ApprovalDecision, ApprovalWorkflow, ApprovalWorkflowConfig,
-    AutoApprovalRule, SessionApprovalNotifier,
-};
+use crate::executor::approval::ApprovalGate;
 use crate::executor::SecurityPolicy;
 use crate::knowledge::KnowledgeIngestor;
 use crate::model::spec::ModelSpec;
@@ -52,6 +49,11 @@ pub struct AgentBuilder {
     background_task_db: Option<Arc<crate::db::Database>>,
     /// 系统通知通道（后台任务完成 / 审批挂起的桌面通知；None 时静默）。
     notification_sink: Option<crate::notification::SharedNotificationSink>,
+    /// 审批门控（危险操作门控；ADR-049 期 3-T1：实现已出 core，由装配层注入）。
+    ///
+    /// `None` = 未装配 → 工具放行分支（`ToolContext::ensure_approved` 的
+    /// 「未装配直接放行」）+ 装配期告警，见 [`Self::with_approval_gate`]。
+    approval_gate: Option<Arc<dyn ApprovalGate>>,
     /// 子 Agent 角色配置（delegate_to_agent role 参数；None 时使用内置角色）。
     agent_roles: Option<AgentRolesConfig>,
     /// 注入的角色注册表（ADR-016：VFS 加载的持久化注册表；优先于 [agent_roles] 合成）。
@@ -106,6 +108,7 @@ impl AgentBuilder {
             default_working_directory: None,
             background_task_db: None,
             notification_sink: None,
+            approval_gate: None,
             agent_roles: None,
             trace_collector: None,
             execution_log: None,
@@ -245,6 +248,25 @@ impl AgentBuilder {
         self
     }
 
+    /// 注入审批门控（危险操作门控；ADR-049 期 3-T1）。
+    ///
+    /// 审批**策略**实现已出 core（`plugins/policy-approval`）：风险定级、自动规则
+    /// 引擎、`ApprovalMode` 三态短路、人工审批挂起通道都在插件里，装配层先用
+    /// `ApprovalGateFactory` 把它构造成 `Arc<dyn ApprovalGate>` 再经本方法交给
+    /// builder（与 `ToolPluginFactory` / `VectorStorageFactory` 同一套类型擦除手法）。
+    ///
+    /// **未注入（`None`）的语义**：不装配审批门控——`ToolContext::ensure_approved`
+    /// 走既有的「未装配直接放行」分支（工具照常执行），并在 `build` 里 `warn!` 一条
+    /// 指路。为什么允许降级而不硬失败：默认配置就是 `ApprovalMode::Autonomous`
+    /// （黑名单外全放行，ADR-033），且命令黑名单在 `SecurityPolicy` 守卫层**另有**
+    /// 一份拦截；而 `create_app` 这组测试/嵌入式入口靠「构造对象图不要求装配」才能
+    /// 起实例。可见性由装配期告警兜底（ADR-038：静默降级的症状会是「审批面板永远
+    /// 空的 + 黑名单少一层复核」，看不出是降级还是没触发）。
+    pub fn with_approval_gate(mut self, gate: Arc<dyn ApprovalGate>) -> Self {
+        self.approval_gate = Some(gate);
+        self
+    }
+
     /// 设置子 Agent 角色配置（delegate_to_agent role 参数）。
     ///
     /// 同名角色覆盖内置定义，新名字新增角色；未设置时使用内置角色。
@@ -380,38 +402,6 @@ impl AgentBuilder {
         let security_config = self.security_config.clone().unwrap_or_default();
         let security_policy = SecurityPolicy::from_config(&security_config);
 
-        // 构建审批工作流（write_file / execute_command 危险操作门控）
-        // wait_for_approval 开启时：危险操作挂起等待 GUI 审批面板人工响应；
-        // 默认关闭：走"询问用户 → 指纹确认"降级链路
-        // 安全配置注入（T2-6 命令级审批策略）：
-        //   blocked_commands → Deny 规则（强制拒绝，评估时 deny 优先，
-        //                       无视自动放行规则）；
-        //   allowed_commands → Approve 规则（自动放行）；
-        //   prompt_commands  → 总是询问（强制走人工审批，不被自动放行）。
-        let mut approval_config = ApprovalWorkflowConfig {
-            // ADR-033：审批行为模式（默认全自主；黑名单 Deny 仍最优先）。
-            mode: security_config.approval_mode,
-            ..Default::default()
-        };
-        approval_config.prompt_commands = security_config.prompt_commands.clone();
-        for cmd in &security_config.blocked_commands {
-            approval_config.auto_approval_rules.push(AutoApprovalRule {
-                name: format!("security_blocked_{cmd}"),
-                action_pattern: ActionPattern::CommandPattern(cmd.clone()),
-                condition: ApprovalCondition::Always,
-                decision: ApprovalDecision::Deny,
-                enabled: true,
-            });
-        }
-        for cmd in &security_config.allowed_commands {
-            approval_config.auto_approval_rules.push(AutoApprovalRule {
-                name: format!("security_allowed_{cmd}"),
-                action_pattern: ActionPattern::CommandPattern(cmd.clone()),
-                condition: ApprovalCondition::Always,
-                decision: ApprovalDecision::Approve,
-                enabled: true,
-            });
-        }
         // 会话工作集（ADR-039：物化缓存 + 轮边界增量注入 + **写侧唯一入口**）。
         // 与 ToolRegistry/Agent/通知器共享**同一 Arc**（状态唯一）；外部注入
         // （server 侧）优先，未注入时自建。未装配会话存储时注册表仍在
@@ -419,14 +409,21 @@ impl AgentBuilder {
         let working_sets = self.working_sets.clone().unwrap_or_else(|| {
             crate::agent::working_set::WorkingSetRegistry::new(self.session_store.clone())
         });
-        let mut approval_notifier = SessionApprovalNotifier::new(working_sets.clone());
-        if let Some(ref sink) = self.notification_sink {
-            approval_notifier = approval_notifier.with_notification_sink(sink.clone());
+        // 审批门控（write_file / apply_edit / apply_patch / execute_command
+        // 危险操作门控）：**实现已出 core**（ADR-049 期 3-T1，`plugins/policy-approval`）。
+        // 装配层先用 `ApprovalGateFactory` 把 `SecurityConfig` 的审批面
+        // （`approval_mode` / `blocked_commands` / `allowed_commands` /
+        // `prompt_commands`）+ 会话工作集 + 通知通道翻成实例，再经
+        // `with_approval_gate` 注入——「配置 → 规则」的映射因此是插件里的单一事实源，
+        // 内核不认识审批策略。
+        let approval = self.approval_gate.clone();
+        if approval.is_none() {
+            tracing::warn!(
+                "未装配审批门控（ApprovalGateFactory）：危险操作（write_file / apply_edit / \
+                 apply_patch / execute_command）不经过审批门控直接放行——生产装配请用 \
+                 create_app_with_assembly / start_server_with_assembly"
+            );
         }
-        let approval = Arc::new(
-            ApprovalWorkflow::new(approval_config)
-                .with_pending_notifier(Arc::new(approval_notifier)),
-        );
 
         let chat_model = self.model.clone().unwrap_or_else(|| "default".to_string());
 
@@ -438,9 +435,13 @@ impl AgentBuilder {
             .with_model_service(model_service.clone())
             .with_model(&chat_model)
             .with_metrics(metrics.clone())
-            .with_approval_workflow(approval)
             .with_rule_recorder(rule_recorder)
             .with_session_manager(session_manager.clone());
+        // 审批门控只在装配了就注入（未装配 → `ToolContext.approval_gate` 保持 None，
+        // `ensure_approved` 走「未装配直接放行」分支；见上方告警）
+        if let Some(gate) = approval {
+            tool_registry = tool_registry.with_approval_gate(gate);
+        }
         // 后台命令日志目录（execute_command(background) 日志落盘）
         if let Some(dir) = self.command_logs_dir {
             tool_registry = tool_registry.with_command_logs_dir(dir);

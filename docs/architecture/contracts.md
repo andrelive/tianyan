@@ -65,14 +65,15 @@ Rust 下「契约 = 成本」：契约变更会穿透依赖图，改动成本随
 | 26 | `CommandNotifier` | `core/src/executor/command.rs:60` | 命令执行插件内部 |
 | 27 | `CommandWaker` | `core/src/executor/command.rs:72` | 同上 |
 | 28 | `CommandEventSink` | `core/src/executor/command.rs:82` | 同上 |
-| 29 | `ApprovalPendingNotifier` | `core/src/executor/approval/workflow.rs:22` | 审批策略插件内部 |
+| 29 | `ApprovalPendingNotifier` | `plugins/policy-approval/src/workflow.rs:33`（随实现迁出 core，ADR-049 期 3-T1） | 审批策略插件内部 |
 | 30 | `TaskReviewer` | `core/src/executor/judge.rs:49` | 评审策略插件内部（单消费者：子代理自审） |
 | 31 | `EvolutionReviewExecutor` | `core/src/scheduler/evolution_executor.rs` | 演化任务插件的唯一外部能力（ADR-049 期 2 序 5b 已提入 core：实现 `AgentEvolutionExecutor` 在 server，经 `TaskServices.evolution_executor` 注入——若留在插件里，server 就得依赖插件，破 D2-1） |
 | 32 | `EmbeddingUsageSink` | `core/src/model/provider/middleware.rs:75` | provider 适配器内部（用量回传） |
 | 33 | `ServiceDiscovery` | `core/src/model/traits.rs:73` | 适配器内部（模型列表探测） |
 | 34 | `SummaryService` | `core/src/vfs/summary/engine.rs:51` | 摘要策略插件内部 |
+| 35 | `ApprovalGate` | `core/src/executor/approval/gate.rs:44` | 审批门控 seam（**ADR-049 期 3-T1 新增**）：内核只认 `Arc<dyn ApprovalGate>`，实现在 `plugins/policy-approval`。按 B 级管理的理由——只有一个消费者面（内核的 4 个审批调用点）与一个实现（`ApprovalWorkflow`），属「插件自有的小契约」而非跨插件公共协议；方法集按**调用点证据**最小化到 4 个（`authorize` / `status` / `respond_to_approval` / `record_user_confirmation_by_fingerprint`），冻结时点（期 3 结束）再评估升不升 A 级 |
 
-> 小计：S 14 / A 11 / B 9 = **34**。
+> 小计：S 14 / A 11 / B 10 = **35**（含期 3-T1 新增的 `ApprovalGate`）。
 
 ---
 

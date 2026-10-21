@@ -44,8 +44,8 @@ use api::create_api_router;
 use state::AppState;
 
 pub use assembly::{
-    AssemblyServices, StorageBackendFactory, TaskFactory, TaskRegistration, TaskServices,
-    VectorStorageFactory,
+    ApprovalGateFactory, AssemblyServices, StorageBackendFactory, TaskFactory, TaskRegistration,
+    TaskServices, VectorStorageFactory,
 };
 
 /// Server configuration
@@ -459,8 +459,13 @@ async fn create_app_inner(
     );
     tianyan::executor::shell::install(shell_spec);
 
-    // Create shared application state（传入 VFS + 共享 SqliteDb）
-    let state = AppState::new(config, vfs, database).await?;
+    // Create shared application state（传入 VFS + 共享 SqliteDb + 审批门控工厂）
+    //
+    // 审批门控（ADR-049 期 3-T1）：工厂交给组合根 `AppState::new`——门控要绑定
+    // **与 Agent 同一个**会话工作集（ADR-039 单写入口）与通知通道，而工作集是
+    // `AppState::new` 内部创建的；在本函数里另建一份会让审批提示写进另一份状态。
+    // 工厂同时存进 `AppState` 供 `reload_agent`（配置热重载）重建时复用。
+    let state = AppState::new(config, vfs, database, assembly.approval_factory()).await?;
 
     // 插件工具注入（ADR-049 期 1）：agent 就绪 → 取 ctx + services → 工厂构造
     // → 注册。失败语义：ctx 不可得时静默跳过（插件是可选增强，不是启动硬依赖）。

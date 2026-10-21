@@ -1,0 +1,25 @@
+[package]
+name = "tianyan-policy-approval"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "天演审批策略插件：工具执行审批工作流（状态机 + 自动规则 + 人工审批通道 + 审计）"
+
+[dependencies]
+tianyan = { path = "../../core", package = "tianyan-core" }
+async-trait.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+chrono.workspace = true
+uuid.workspace = true
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
+# 测试期需要**真实** `WorkingSetRegistry`（挂起通知落库路径）。它住在 core，
+# 不是替身，无需额外依赖；此处只补 `serde_json`（测试构造 `Action::CallSkill`
+# 的 parameters）。

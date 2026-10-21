@@ -282,6 +282,12 @@ pub struct AppState {
     /// 会话工作集注册表（ADR-035：读侧缓存 + **写侧收口**——API 会话写路径
     /// 唯一通道；与 Agent 共享同一 Arc）。
     working_sets: Arc<tianyan::agent::working_set::WorkingSetRegistry>,
+    /// 审批门控工厂（ADR-049 期 3-T1：实现已出 core，`plugins/policy-approval`）。
+    ///
+    /// 存下来供 [`Self::reload_agent`] 复用：配置热重载会重建 agent，审批规则
+    /// （`approval_mode` / 黑名单 / 白名单 / 总是询问）必须跟着**新配置**走，
+    /// 不能沿用旧实例。`None` = 未装配（工具走「未装配直接放行」分支）。
+    approval_factory: Option<crate::ApprovalGateFactory>,
     usage_log: Arc<UsageLog>,
     /// 工作区快照管理器（配置了 working_directory 时启用）
     /// 工作区快照管理器（配置了 working_directory 时启用）。
@@ -360,6 +366,7 @@ impl AppState {
         config: TianyanConfig,
         vfs: Arc<VirtualFileSystemImpl>,
         database: Arc<Database>,
+        approval_factory: Option<crate::ApprovalGateFactory>,
     ) -> TianyanResult<Self> {
         // VFS 技能管理器（技能 = VFS 方法论文档；列表/详情/执行 API 数据源）
         let skill_manager = Arc::new(SkillManager::new(vfs.clone()));
@@ -462,6 +469,20 @@ impl AppState {
                 },
             ));
         }
+        // 审批门控（ADR-049 期 3-T1）：**实现已出 core**（`plugins/policy-approval`），
+        // 组合根经 `ApprovalGateFactory` 建实例。必须在构造 Agent 之前建：
+        // 门控要绑定与 Agent **同一个**工作集（ADR-039：审批挂起通知的唯一写入口）
+        // 与通知通道。`None`（未装配）→ builder 打 `warn!`，工具走
+        // 「未装配直接放行」分支（默认配置本就是 `ApprovalMode::Autonomous`，
+        // 且命令黑名单在 `SecurityPolicy` 守卫层另有拦截——降级代价比存储低一个量级）。
+        let notification_sink = crate::notification::global_notification_sink();
+        let approval_gate = approval_factory.as_ref().map(|factory| {
+            factory(
+                &config.security,
+                working_sets.clone(),
+                notification_sink.clone(),
+            )
+        });
         let agent = AgentBuilderFactory::build_agent_or_wizard(
             &config,
             model_services.clone(),
@@ -470,7 +491,7 @@ impl AppState {
             snapshot_manager.clone(),
             dynamic_tools,
             Some(database.clone()),
-            crate::notification::global_notification_sink(),
+            notification_sink.clone(),
             session_manager.clone(),
             Some(trace_collector.clone()),
             execution_log.clone(),
@@ -483,6 +504,7 @@ impl AppState {
             task_event_sink,
             task_event_tx.clone(),
             working_sets.clone(),
+            approval_gate.clone(),
         )
         .await?;
 
@@ -518,6 +540,7 @@ impl AppState {
             clipboard_pending: Arc::new(RwLock::new(None)),
             user_questions,
             plugin_factory: Arc::new(RwLock::new(None)),
+            approval_factory,
             session_leases: crate::session_leases::SessionLeases::new(),
             shutdown_tx: Arc::new(Mutex::new(None)),
         })
@@ -677,6 +700,17 @@ impl AppState {
             resolve_embedding_model(&config),
         ));
         let new_snapshot_manager = build_snapshot_manager(&config);
+        // 审批门控随新配置重建（ADR-049 期 3-T1）：规则必须跟着 `config.security`
+        // 走（`approval_mode` / 黑名单 / 白名单 / 总是询问都可能已改）。工作集复用
+        // **同一** Arc（状态不能在 reload 时分裂；与下方传参同一份）。
+        let notification_sink = crate::notification::global_notification_sink();
+        let approval_gate = self.approval_factory.as_ref().map(|factory| {
+            factory(
+                &config.security,
+                self.working_sets.clone(),
+                notification_sink.clone(),
+            )
+        });
         let new_agent = AgentBuilderFactory::build_agent_or_wizard(
             &config,
             model_services.clone(),
@@ -685,7 +719,7 @@ impl AppState {
             new_snapshot_manager.clone(),
             dynamic_tools,
             Some(self.sqlite_db.clone()),
-            crate::notification::global_notification_sink(),
+            notification_sink.clone(),
             self.session_manager.clone(),
             Some(self.trace_collector.clone()),
             self.execution_log.clone(),
@@ -702,6 +736,7 @@ impl AppState {
             // 热重载复用**同一**工作集（状态不能在 reload 时分裂：新 Agent
             // 必须看到旧 Agent 已物化的会话缓存）
             self.working_sets.clone(),
+            approval_gate,
         )
         .await?;
 

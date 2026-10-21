@@ -1,11 +1,12 @@
-//! 装配扩展点（ADR-049）：插件工具清单 + 向量存储实现 + 结构化存储实现 + 内置任务清单。
+//! 装配扩展点（ADR-049）：插件工具清单 + 向量存储实现 + 结构化存储实现 + 内置任务清单
+//! + 审批门控实现。
 //!
-//! server 库**不认识任何具体插件 crate**：本模块只定义四根**类型擦除**的插槽
+//! server 库**不认识任何具体插件 crate**：本模块只定义五根**类型擦除**的插槽
 //! （以及没有插槽时的降级实现），由装配层（`app` bin / `tauri` 桌面端）在启动
 //! 时注入。这样改一行插件实现只重编插件 + 装配包，server 库（13.4K 源码）不动
 //! ——闸门 A 的前提。
 //!
-//! 四个插槽：
+//! 五个插槽：
 //! - [`ToolPluginFactory`]（`crate::ToolPluginFactory`）：工具清单，**可重复调用**
 //!   （agent 会因配置热重载 / 模型切换反复重建，每次都要重新注入插件工具）。
 //! - [`VectorStorageFactory`]：向量存储实现（`tianyan-storage-vector` 的
@@ -19,6 +20,9 @@
 //!   的自演化综述，ADR-049 期 2 序 5a / 5b）。**同步**：调用前本库已把 [`TaskServices`]
 //!   **await 好**（聊天模型服务是 `AppState` 里共享实例的克隆，工厂里无处可等），
 //!   工厂只做「按当前配置构造处理器 + 判定启用条件」。
+//! - [`ApprovalGateFactory`]：审批门控实现（`tianyan-policy-approval`，
+//!   ADR-049 期 3-T1）。**同步**：`ApprovalWorkflow::new` 只存字段、通知器也只是存
+//!   句柄；「`SecurityConfig` → 自动审批规则」的映射随之进插件（单一事实源）。
 
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -28,6 +32,7 @@ use async_trait::async_trait;
 use tracing::{error, warn};
 
 use tianyan::config::StorageConfig;
+use tianyan::executor::approval::ApprovalGate;
 use tianyan::vfs::{
     ContextEntry, StorageBackend, VectorPoint, VectorSearchQuery, VectorSearchResult,
     VectorStorage, VectorType,
@@ -95,11 +100,39 @@ pub type StorageBackendFactory = Arc<
 /// 用 `Arc<dyn Fn>` 而非 `Box<dyn FnOnce>`：数据目录搬迁后以新配置重启会再次装配。
 pub type TaskFactory = Arc<dyn Fn(&TaskServices) -> Vec<TaskRegistration> + Send + Sync>;
 
+/// 审批门控工厂（**装配层注入**，ADR-049 期 3-T1）。
+///
+/// `Arc<dyn Fn(&SecurityConfig, Arc<WorkingSetRegistry>, SharedNotificationSink)
+///   -> Arc<dyn ApprovalGate>>`：
+/// - 第一个参数是 `&SecurityConfig`（借用）：`approval_mode` / `blocked_commands` /
+///   `allowed_commands` / `prompt_commands` → 自动审批规则 + 「总是询问」列表的映射
+///   在**插件**里（`tianyan_policy_approval::gate`），本库只递配置——这样「配置项怎么
+///   变成规则」只有一个事实源，三处装配不必各抄一份；
+/// - 第二个参数是**会话工作集**（ADR-039：审批挂起通知落库的唯一写入口）——必须是
+///   `Agent` 用的**同一个** `Arc`，否则审批提示会写进另一份状态（`AppState` 组合根
+///   保证是同一实例）；
+/// - 第三个参数是系统通知通道（挂起时发桌面通知；无人值守场景即时提醒）。
+///
+/// **同步**（与 [`StorageBackendFactory`] / [`TaskFactory`] 同理）：构造只存字段与
+/// 句柄，没有任何 IO，做成 async 只会让调用方多 await 一个纯内存操作。
+///
+/// 用 `Arc<dyn Fn>` 而非 `Box<dyn FnOnce>`：配置热重载会重建 agent（`reload_agent`），
+/// 审批门控随之重建——规则必须跟着**新配置**走，不能沿用旧实例。
+pub type ApprovalGateFactory = Arc<
+    dyn Fn(
+            &tianyan::config::SecurityConfig,
+            Arc<tianyan::agent::working_set::WorkingSetRegistry>,
+            tianyan::notification::SharedNotificationSink,
+        ) -> Arc<dyn ApprovalGate>
+        + Send
+        + Sync,
+>;
+
 /// 启装配所需的外部能力集合（`None` = 该扩展点未装配，走降级路径）。
 ///
-/// 目前四个插槽：插件工具清单（[`ToolPluginFactory`]）、向量存储
+/// 目前五个插槽：插件工具清单（[`ToolPluginFactory`]）、向量存储
 /// （[`VectorStorageFactory`]）、结构化存储（[`StorageBackendFactory`]）、
-/// 内置任务清单（[`TaskFactory`]）。用
+/// 内置任务清单（[`TaskFactory`]）、审批门控（[`ApprovalGateFactory`]）。用
 /// **一个结构**而不是给每个启动入口再加一个参数：入口变体的数量是组合爆炸
 /// （listener × 关闭信号 × 插件 × 向量 × 存储 × 任务），打包后只需「默认装配」与
 /// 「装配齐全」两类入口。
@@ -109,6 +142,7 @@ pub struct AssemblyServices {
     vector_factory: Option<VectorStorageFactory>,
     storage_factory: Option<StorageBackendFactory>,
     task_factory: Option<TaskFactory>,
+    approval_factory: Option<ApprovalGateFactory>,
 }
 
 impl AssemblyServices {
@@ -140,9 +174,30 @@ impl AssemblyServices {
         self
     }
 
+    /// 装配审批门控工厂（`app` / `tauri` 用：`tianyan-policy-approval`）。
+    pub fn with_approval_factory(mut self, factory: ApprovalGateFactory) -> Self {
+        self.approval_factory = Some(factory);
+        self
+    }
+
     /// 插件工具清单工厂（`None` = 不注入插件工具）。
     pub(crate) fn plugin_factory(&self) -> Option<ToolPluginFactory> {
         self.plugin_factory.clone()
+    }
+    /// 审批门控工厂（`None` = 不装配审批门控）。
+    ///
+    /// 与其余插槽的 `pub(crate)` 访问器同处：工厂只由本库的组合根（`AppState::new` /
+    /// `reload_agent`）取用——装配层负责**注入**，不负责调用。
+    ///
+    /// **未装配时的降级语义**（`None` 继续往下传）：不装配审批门控，
+    /// `ToolContext::ensure_approved` 走既有的「未装配直接放行」分支，
+    /// `AgentBuilder::build` 打一条 `warn!` 指路。这比存储降级（`error!`，
+    /// 「重启即丢数据」）轻一个量级：默认配置就是 `ApprovalMode::Autonomous`
+    /// （黑名单外全放行，ADR-033），且命令黑名单在 `SecurityPolicy` 守卫层**另有**
+    /// 一份拦截；而 `create_app`（构造对象图，47 处 lib 单测/嵌入式）不要求装配，
+    /// 硬失败等于删入口。
+    pub(crate) fn approval_factory(&self) -> Option<ApprovalGateFactory> {
+        self.approval_factory.clone()
     }
 
     /// 是否装配了结构化存储工厂（**启动服务的硬前置**，见 `start_server_inner`）。
@@ -885,5 +940,118 @@ mod tests {
             2,
             "工厂应可重复调用（不是 FnOnce）"
         );
+    }
+
+    // ── 审批门控插槽（ADR-049 期 3-T1）──────────────────────────────────
+
+    /// 只用于装配测试的审批门控桩（本库的插槽测试只关心「工厂是否被使用」）。
+    struct StubApprovalGate {
+        /// 判别标记：装配层注入的是哪个实例（与「未装配」区分）。
+        marker: &'static str,
+    }
+
+    #[async_trait]
+    impl ApprovalGate for StubApprovalGate {
+        async fn authorize(
+            &self,
+            _session_id: &str,
+            _action: &tianyan::executor::Action,
+            _allow_human_wait: bool,
+        ) -> tianyan::Result<tianyan::executor::approval::ApprovalResponse> {
+            Ok(tianyan::executor::approval::ApprovalResponse {
+                request_id: self.marker.to_string(),
+                decision: tianyan::executor::approval::ApprovalDecision::Deny,
+                reason: None,
+                responded_at: chrono::Utc::now(),
+                approved_by: "stub".to_string(),
+                edited_command: None,
+            })
+        }
+
+        async fn status(&self) -> tianyan::executor::approval::ApprovalStatusSnapshot {
+            tianyan::executor::approval::ApprovalStatusSnapshot {
+                config: tianyan::executor::approval::ApprovalWorkflowConfig::default(),
+                pending_approvals: Vec::new(),
+                pending_confirmations: Vec::new(),
+                recent_records: Vec::new(),
+                confirmed_action_count: 0,
+            }
+        }
+
+        async fn respond_to_approval(
+            &self,
+            _request_id: &str,
+            _decision: tianyan::executor::approval::ApprovalDecision,
+            _reason: Option<String>,
+            _approved_by: &str,
+            _edited_command: Option<String>,
+        ) -> tianyan::Result<()> {
+            Ok(())
+        }
+
+        async fn record_user_confirmation_by_fingerprint(&self, _fingerprint: &str) {}
+    }
+
+    /// 未装配工厂时插槽为空：`AgentBuilder` 因此拿到 `None`，工具走「未装配直接放行」
+    /// 分支 + 启动期告警。
+    ///
+    /// 判别力：若把 `AssemblyServices::default()` 改成「兜底造一个放行门控」，本断言
+    /// 必红——而兜底门控会让「未装配」与「装配了全自主模式」在日志与状态查询上
+    /// **无法区分**（ADR-038 可见失败的反面）。
+    #[test]
+    fn test_default_assembly_has_no_approval_factory() {
+        assert!(
+            AssemblyServices::new().approval_factory().is_none(),
+            "未装配时插槽必须为空（降级由 AgentBuilder 的 None 分支承担）"
+        );
+    }
+
+    /// 装配了工厂时**只用工厂**，且工厂可重复调用（配置热重载会重建 agent，
+    /// 审批规则必须跟着新配置走）。
+    ///
+    /// 判别力：桩返回 `approved_by = "stub"`（工厂内的判别标记）——若插槽没被使用
+    /// （例如 `approval_factory()` 恒返回 `None`），`expect` 直接 panic。
+    #[tokio::test]
+    async fn test_approval_factory_is_injected_and_repeatable() {
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counter = calls.clone();
+        let factory: ApprovalGateFactory = Arc::new(
+            move |_security: &tianyan::config::SecurityConfig,
+                  _working_sets: Arc<tianyan::agent::working_set::WorkingSetRegistry>,
+                  _sink: tianyan::notification::SharedNotificationSink| {
+                counter.fetch_add(1, Ordering::SeqCst);
+                Arc::new(StubApprovalGate { marker: "injected" }) as Arc<dyn ApprovalGate>
+            },
+        );
+        let assembly = AssemblyServices::new().with_approval_factory(factory);
+        let security = tianyan::config::SecurityConfig::default();
+        let working_sets = tianyan::agent::working_set::WorkingSetRegistry::new(None);
+        let sink: tianyan::notification::SharedNotificationSink =
+            Arc::new(tianyan::notification::NoopNotificationSink);
+
+        let gate = assembly.approval_factory().expect("装配后必须有工厂")(
+            &security,
+            working_sets.clone(),
+            sink.clone(),
+        );
+        let _ = assembly.approval_factory().expect("装配后必须有工厂")(
+            &security,
+            working_sets,
+            sink,
+        );
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            2,
+            "工厂应可重复调用（不是 FnOnce）"
+        );
+
+        let action = tianyan::executor::Action::ReadFile {
+            path: "probe".to_string(),
+        };
+        let resp = gate
+            .authorize("s1", &action, false)
+            .await
+            .expect("桩不该失败");
+        assert_eq!(resp.approved_by, "stub", "应使用注入的实例");
     }
 }

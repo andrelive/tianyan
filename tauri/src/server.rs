@@ -6,8 +6,8 @@ use std::sync::Arc;
 
 use tianyan::vfs::{StorageBackend, VectorStorage};
 use tianyan_server::{
-    start_server_with_shutdown_signal_and_assembly, AssemblyServices, PluginServices,
-    StorageBackendFactory, TaskFactory, ToolPluginFactory, VectorStorageFactory,
+    start_server_with_shutdown_signal_and_assembly, ApprovalGateFactory, AssemblyServices,
+    PluginServices, StorageBackendFactory, TaskFactory, ToolPluginFactory, VectorStorageFactory,
 };
 use tianyan_storage_sqlite::{LocalFileBackend, SqliteBackend};
 use tianyan_storage_vector::LanceDbVectorStore;
@@ -86,6 +86,21 @@ fn task_factory() -> TaskFactory {
     })
 }
 
+/// 审批门控工厂（`plugins/policy-approval`，ADR-049 期 3-T1）。
+///
+/// 与 `app/src/main.rs::approval_factory` **同形同源**：审批工作流（风险定级 / 自动
+/// 规则 / 模式短路 / 挂起通道 / 审计）搬出 core 后由装配层注入，server 库只认
+/// `Arc<dyn ApprovalGate>`。「配置 → 规则」的映射住插件里，这里只做类型擦除包装。
+fn approval_factory() -> ApprovalGateFactory {
+    Arc::new(
+        |security: &tianyan::config::SecurityConfig,
+         working_sets: Arc<tianyan::agent::working_set::WorkingSetRegistry>,
+         sink: tianyan::notification::SharedNotificationSink| {
+            tianyan_policy_approval::gate(security, working_sets, sink)
+        },
+    )
+}
+
 /// 启动 Axum 服务
 ///
 /// 此函数在后台任务中启动 Axum HTTP 服务器，
@@ -136,12 +151,14 @@ pub async fn start_axum_server(
             tools
         },
     );
-    // 完整装配（ADR-049 期 2 序 3/4/5a）：工具清单 + 向量存储 + 结构化存储 + 内置任务
+    // 完整装配（ADR-049 期 2 序 3/4/5a、期 3-T1）：
+    // 工具清单 + 向量存储 + 结构化存储 + 内置任务 + 审批门控
     let assembly = AssemblyServices::new()
         .with_plugin_factory(plugin_factory)
         .with_vector_factory(vector_factory())
         .with_storage_factory(storage_factory())
-        .with_task_factory(task_factory());
+        .with_task_factory(task_factory())
+        .with_approval_factory(approval_factory());
     if let Err(e) = start_server_with_shutdown_signal_and_assembly(
         listener,
         tianyan_config,

@@ -1295,7 +1295,12 @@ pub(crate) fn unwrap_command_wrapper(segment: &str) -> String {
 /// （`bash script.sh` 这类脚本调用）时**回退原始段首词**——回退而非 fail-closed
 /// 的理由：脚本内容无法静态判定，判 Blocked 会误拦大量正常用法（含天演自身的
 /// `bash scripts/*.sh`），原始口径至少保持既有行为不变。
-pub(crate) fn judged_command_name(segment: &str) -> String {
+///
+/// 公开面（ADR-049 期 3-T1）：审批实现已迁入 `plugins/policy-approval`，而取词口径
+/// 是**黑名单 / 风险分级 / 白名单 / 审批「总是询问」四处共用**的同一个事实源
+/// （`sudo git push` 这类包装形态必须四处口径一致才不被绕过）。复制一份进插件就是
+/// 两份口径同时漂移，因此提为公开 API（`tianyan::executor::command::judged_command_name`）。
+pub fn judged_command_name(segment: &str) -> String {
     let inner = unwrap_command_wrapper(segment);
     if inner.trim().is_empty() {
         return extract_command_base(segment);

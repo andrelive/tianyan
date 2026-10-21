@@ -359,6 +359,7 @@ TaskScheduler 触发
 | `VirtualFileSystem` | `core/src/vfs/traits.rs` | 实现 VfsCore+ContentStore+VfsSearch 的类型自动获得 | `server/state.rs`, `agent/coordinator.rs`（session/manager 已迁出 VFS，见 ADR-018） |
 | `StorageBackend` | `core/src/vfs/backend/mod.rs` | `SqliteBackend` / `LocalFileBackend`（`plugins/storage-sqlite`，装配层经 `StorageBackendFactory` 注入） | `vfs/vfs_impl.rs` |
 | `VectorStorage` | `core/src/vfs/vector/traits.rs` | `LanceDbVectorStore`（`plugins/storage-vector`，装配层经 `VectorStorageFactory` 注入） | `vfs/vfs_impl.rs`, `context/retrieval/` |
+| `ApprovalGate` | `core/src/executor/approval/gate.rs` | `ApprovalWorkflow`（`plugins/policy-approval`，装配层经 `ApprovalGateFactory` 注入；**未装配 → `None`，工具走「未装配直接放行」+ 告警**） | `agent/tool_context.rs`（`ensure_approved`）、`agent/coordinator.rs`（`approval_status` / `respond_approval`）、`agent/tool_registry/mod.rs`（`confirm_pending_approval`） |
 | `SessionManager` | `core/src/session/manager.rs` | `PersistentSessionManager`（基于 `SessionStore`，ADR-018） | `server/state.rs`, `agent/coordinator.rs` |
 | `SkillManager` | `core/src/skills/manager.rs` | `SkillManager` | `server/state.rs`, `server/api/skills/`（VFS 技能发现/读取） |
 

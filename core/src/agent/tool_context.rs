@@ -30,7 +30,7 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 
 use crate::common::error::TianyanError;
-use crate::executor::approval::{ApprovalDecision, ApprovalWorkflow};
+use crate::executor::approval::{ApprovalDecision, ApprovalGate};
 use crate::executor::{Action, SecurityPolicy};
 use crate::knowledge::KnowledgeIngestor;
 use crate::observability::execution_log::ExecutionLog;
@@ -57,9 +57,12 @@ pub struct ToolContext {
     pub execution_log: Option<Arc<ExecutionLog>>,
     /// 会话回忆服务（ADR-017 决策 6：session_recall 依赖）。
     pub session_recall: Option<Arc<SessionRecall>>,
-    /// 审批工作流（write_file / apply_edit / apply_patch / execute_command
+    /// 审批门控（write_file / apply_edit / apply_patch / execute_command
     /// 危险操作门控，统一经 [`Self::ensure_approved`]）。
-    pub approval_workflow: Option<Arc<ApprovalWorkflow>>,
+    ///
+    /// 具体实现已出 core（`plugins/policy-approval`，ADR-049 期 3-T1）：
+    /// 这里只持契约对象，内核不认识审批策略。
+    pub approval_gate: Option<Arc<dyn ApprovalGate>>,
     /// 待用户确认的操作指纹（审批拒绝 → 询问用户 → 用户回答后确认/放弃）。
     pub pending_approval_fingerprints: Arc<Mutex<Vec<String>>>,
 }
@@ -75,7 +78,7 @@ impl ToolContext {
             knowledge_ingestor: None,
             execution_log: None,
             session_recall: None,
-            approval_workflow: None,
+            approval_gate: None,
             pending_approval_fingerprints: Arc::new(Mutex::new(Vec::new())),
         }
     }
@@ -134,7 +137,7 @@ impl ToolContext {
     /// `Agent` 轮末读取 [`Self::pending_approval_fingerprints`] 生成追问；
     /// 用户回答后经注册表的 `confirm_pending_approval` 决定是否放行。
     pub async fn remember_pending_approval(&self, action: &Action) {
-        let fp = ApprovalWorkflow::action_fingerprint(action);
+        let fp = crate::executor::approval::action_fingerprint(action);
         self.pending_approval_fingerprints.lock().await.push(fp);
         tracing::info!(action = ?action, "操作已进入待用户确认队列");
     }
@@ -143,24 +146,25 @@ impl ToolContext {
     ///
     /// 统一 4 个危险工具（write_file / apply_edit / apply_patch / execute_command）
     /// 的审批序列，消除各执行器内的逐字复制：
-    /// 1. `approval_workflow` 未装配（None）时直接放行；
+    /// 1. `approval_gate` 未装配（None）时直接放行；
     /// 2. 子任务（subagent）非交互审批——未授权操作立即拒绝（ADR-011）；
     /// 3. 拒绝 → 记录待确认指纹（用户经"询问用户"链路批准后放行）并返回
     ///    统一"操作需要用户确认"错误。
+    ///
+    /// 审批**策略**（风险定级 / 规则引擎 / 模式短路 / 挂起通道）在插件里
+    /// （`plugins/policy-approval`）；本方法只负责「问一次 → 拒绝时记指纹 →
+    /// 统一错误文案」这段核心侧编排。
     pub async fn ensure_approved(
         &self,
         session_id: &str,
         subagent: bool,
         action: &Action,
     ) -> Result<(), TianyanError> {
-        let Some(ref approval) = self.approval_workflow else {
+        let Some(ref approval) = self.approval_gate else {
             return Ok(());
         };
-        let approval_result = if subagent {
-            approval.request_approval_no_wait(session_id, action).await
-        } else {
-            approval.request_approval(session_id, action).await
-        };
+        // 子任务 = 不允许挂起等待人工（ADR-011）
+        let approval_result = approval.authorize(session_id, action, !subagent).await;
         let resp = approval_result
             .map_err(|e| TianyanError::Custom(format!("tool: 执行失败：审批工作流错误: {}", e)))?;
         if resp.decision != ApprovalDecision::Approve {

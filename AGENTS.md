@@ -71,12 +71,18 @@ cargo test -p tianyan-core vfs::backend::local -- --nocapture  # 指定测试模
 | `plugins/storage-sqlite/` | `tianyan-storage-sqlite` | 插件：`SqliteBackend` + `LocalFileBackend`（VFS `StorageBackend` 的两个 adapter；`rusqlite` 仍在 core——本插件收窄的是重编面积，不是依赖面） |
 | `plugins/task-builtin/` | `tianyan-task-builtin` | 插件：5 个内置定时任务实现（摘要生成 / 垃圾回收 / 统计刷盘 / 快照 GC / 主动提醒，含各自内联测试） |
 | `plugins/task-evolution/` | `tianyan-task-evolution` | 插件：自演化综述任务（ADR-017 三阶段编排，含 29 个内联测试）；契约 `EvolutionReviewExecutor` 留 core，实现 `AgentEvolutionExecutor` 留 server（ADR-049 序 5b） |
+| `plugins/policy-approval/` | `tianyan-policy-approval` | 插件：**审批策略**（`ApprovalWorkflow`：风险定级 / 自动规则引擎（Deny 优先）/ `ApprovalMode` 三态短路 / 「总是询问」命令 / 人工审批挂起通道 / 审计，含 23 个迁移测试）；契约 `ApprovalGate` 与全部领域类型留 core（期 3-T1） |
 
 **依赖铁律**（破一条拆包收益全部回吐）：插件只依赖 `core`（kernel-api）；插件之间零互赖；
 `core`/`server` 不认识任何插件 crate。装配经 `server/src/assembly.rs` 的类型擦除插槽
-（`ToolPluginFactory` / `VectorStorageFactory` / `StorageBackendFactory` / `TaskFactory`；
+（`ToolPluginFactory` / `VectorStorageFactory` / `StorageBackendFactory` / `TaskFactory` /
+`ApprovalGateFactory`；
 `TaskFactory` 由装配层把 `task-builtin::tasks()` 与 `task-evolution::tasks()` 拼接成一份
-清单——`splice(1..1, …)` 让演化任务紧跟 `summary_generation`，跨插件顺序只有装配清单知道）。
+清单——`splice(1..1, …)` 让演化任务紧跟 `summary_generation`，跨插件顺序只有装配清单知道；
+`ApprovalGateFactory` 把 `policy-approval::gate()` 包成 `Arc<dyn ApprovalGate>`——
+**未装配 = 不装配审批门控**，工具走「未装配直接放行」分支 + 启动期 `warn!`，
+比存储降级（`error!`，「重启即丢数据」）轻一个量级：默认配置本就是 `ApprovalMode::Autonomous`，
+且命令黑名单在 `SecurityPolicy` 守卫层另有拦截）。
 任务的清单项与能力集合（`TaskRegistration` / `TaskServices`）**定义在 core**
 （`core/src/scheduler/task_assembly.rs`，server 侧 re-export）：若住在 server，任务插件
 就得依赖 server 库（破第一条铁律）。
@@ -183,7 +189,7 @@ Harness 工程 → [`docs/harness核心思路/harness-engineering-overview.md`](
 ## 常见陷阱
 
 - `tianyan` 和 `tianyan-core` 是同一个包（lib name: `tianyan`），导入用 `tianyan::...`
-- **`plugins/storage-sqlite/src/{sqlite,local}.rs` 内禁止 `crate::…`**（只允许 `tianyan::…`）：core 单测以 `#[cfg(test)] #[path]` **同源包含**这两个文件（dev-dep 会让 core 编译两份 → `StorageBackend`/`StorageConfig` 出现两个不兼容实例，实测 22 处 E0308/E0277）。写 `crate::` 时它解析到 core 而非插件，报错位置完全不相干。改文件布局须同步 `core/src/vfs/backend/mod.rs` 的 `#[path]`
+- **`plugins/storage-sqlite/src/{sqlite,local}.rs` 与 `plugins/policy-approval/src/workflow.rs` 内禁止 `crate::…`**（只允许 `tianyan::…`）：core 单测以 `#[cfg(test)] #[path]` **同源包含**这些文件（dev-dep 会让 core 编译两份 → `StorageBackend`/`ApprovalGate` 等 trait 出现两个不兼容实例，实测 22 处 E0308/E0277）。写 `crate::` 时它解析到 core 而非插件，报错位置完全不相干。改文件布局须同步 `core/src/vfs/backend/mod.rs` 与 `core/src/executor/approval/mod.rs` 的 `#[path]`
 - **插件测试要用 core 的测试替身（`MockVfs` / `MockChatService`）时开 `test-utils` 特性**：`core/src/test_utils` 与 `model::MockChatService` 的 `cfg` 是 `any(test, feature = "test-utils")`，插件侧写 `[dev-dependencies] tianyan = { path = "../../core", package = "tianyan-core", features = ["test-utils"] }`（`mockall` 因此是 core 的**可选**依赖，默认构建不含）。不这么做只能把替身复制进插件——两份实现同时漂移，测试随即失去意义（ADR-049 序 5a）
 - `ServiceDiscovery::is_available()` 是 `async` —— 别忘了 `await`
 - 配置文件固定为 `~/.tianyan/tianyan.toml`（`TIANYAN_CONFIG` 环境变量可覆盖，e2e 用）；数据目录由配置 `storage.data_dir` 决定（默认 `%LOCALAPPDATA%/tianyan`），两者分离、搬迁只动数据（ADR-023）

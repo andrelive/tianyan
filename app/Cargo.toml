@@ -36,6 +36,9 @@ tianyan-task-builtin = { path = "../plugins/task-builtin" }
 # 自演化综述任务实现（ADR-049 期 2 序 5b）：演化任务搬出 core 后由本包注入。
 # 清单顺序跨插件，**合并也在这里**（`splice(1..1, …)`：紧跟 summary_generation）。
 tianyan-task-evolution = { path = "../plugins/task-evolution" }
+# 审批策略实现（ADR-049 期 3-T1）：审批工作流搬出 core 后由本包注入
+# （风险定级/规则引擎/模式短路/挂起通道全在插件里，server 库不认识审批策略）。
+tianyan-policy-approval = { path = "../plugins/policy-approval" }
 tokio.workspace = true
 
 [lints]

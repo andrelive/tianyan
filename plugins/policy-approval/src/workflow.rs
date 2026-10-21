@@ -1,7 +1,12 @@
 //! 审批工作流管理器。
 //!
 //! 状态机（待审批/已确认）+ 自动规则匹配 + 人工审批通道 + 审计记录。
-//! 数据类型定义见 [`super::types`]。
+//! 数据类型定义见 `tianyan::executor::approval`（**留 core**，
+//! 见 crate 文档「为什么 `types` 留 core」）。
+//!
+//! 本文件的**唯一**语义改写是末尾的 [`impl ApprovalGate for ApprovalWorkflow`]
+//! （ADR-049 期 3-T1 新增的契约实现，逐方法委托给下方既有的固有方法）；
+//! 其余内容与迁移前逐字一致，只有 `crate::…` → `tianyan::…` 的路径前缀差异。
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -9,10 +14,16 @@ use std::time::Duration;
 
 use tokio::sync::{oneshot, RwLock};
 
-use super::types::*;
-use crate::config::ApprovalMode;
-use crate::executor::Action;
-use crate::notification::SharedNotificationSink;
+use tianyan::executor::approval::{
+    action_fingerprint, ActionPattern, ApprovalCondition, ApprovalDecision, ApprovalGate,
+    ApprovalRecord, ApprovalRequest, ApprovalResponse, ApprovalStatusSnapshot,
+    ApprovalWorkflowConfig, RiskLevel,
+};
+use tianyan::executor::Action;
+
+use tianyan::agent::working_set::WorkingSetRegistry;
+use tianyan::config::ApprovalMode;
+use tianyan::notification::SharedNotificationSink;
 
 /// 审批挂起通知器。
 ///
@@ -32,13 +43,13 @@ pub trait ApprovalPendingNotifier: Send + Sync {
 /// 可选注入系统通知通道：挂起时同时发出桌面通知（无人值守场景即时提醒）。
 pub struct SessionApprovalNotifier {
     /// 会话工作集（ADR-039：审批挂起通知落库的唯一写入口）。
-    working_sets: Arc<crate::agent::working_set::WorkingSetRegistry>,
+    working_sets: Arc<WorkingSetRegistry>,
     notification: Option<SharedNotificationSink>,
 }
 
 impl SessionApprovalNotifier {
     /// 创建通知器。
-    pub fn new(working_sets: Arc<crate::agent::working_set::WorkingSetRegistry>) -> Self {
+    pub fn new(working_sets: Arc<WorkingSetRegistry>) -> Self {
         Self {
             working_sets,
             notification: None,
@@ -64,7 +75,7 @@ pub fn build_approval_pending_text(request: &ApprovalRequest) -> String {
 impl ApprovalPendingNotifier for SessionApprovalNotifier {
     async fn on_approval_pending(&self, request: &ApprovalRequest) {
         // ADR-039 收口 ①：单点落库（唯一写入口；未装配/加载失败由单点告警）
-        crate::agent::background::persist_system_message(
+        tianyan::agent::background::persist_system_message(
             Some(&self.working_sets),
             &request.session_id,
             build_approval_pending_text(request),
@@ -206,7 +217,7 @@ impl ApprovalWorkflow {
         }
     }
 
-    /// 设置审批挂起通知器（Agent 装配层注入）。
+    /// 设置审批挂起通知器（装配层注入）。
     pub fn with_pending_notifier(mut self, notifier: Arc<dyn ApprovalPendingNotifier>) -> Self {
         self.pending_notifier = Some(notifier);
         self
@@ -222,19 +233,14 @@ impl ApprovalWorkflow {
         self.confirmed_actions.read().await.len()
     }
 
-    /// 计算操作的稳定指纹（用于"用户已确认"的去重判定）。
-    pub fn action_fingerprint(action: &Action) -> String {
-        serde_json::to_string(action).unwrap_or_else(|e| format!("{:?}-{e}", action))
-    }
-
     /// 记录用户对该操作的确认（来自"询问用户"降级链路）。
     pub async fn record_user_confirmation(&self, action: &Action) {
-        let fp = Self::action_fingerprint(action);
+        let fp = action_fingerprint(action);
         self.confirmed_actions.write().await.insert(fp);
         tracing::info!(action = ?action, "用户已确认执行该操作");
     }
 
-    /// 记录用户对指定指纹操作的确认（指纹由 [`Self::action_fingerprint`] 生成）。
+    /// 记录用户对指定指纹操作的确认（指纹由 [`action_fingerprint`] 生成）。
     pub async fn record_user_confirmation_by_fingerprint(&self, fingerprint: &str) {
         self.confirmed_actions
             .write()
@@ -244,7 +250,7 @@ impl ApprovalWorkflow {
 
     /// 检查操作是否已被用户确认。
     pub async fn is_action_confirmed(&self, action: &Action) -> bool {
-        let fp = Self::action_fingerprint(action);
+        let fp = action_fingerprint(action);
         self.confirmed_actions.read().await.contains(&fp)
     }
 
@@ -270,13 +276,13 @@ impl ApprovalWorkflow {
                 // rm -rf /` 被低估为 Medium，危险命令确认门被绕过）；命令名经
                 // extract_command_base 归一（小写、无路径/后缀），与 check_command
                 // 同一匹配语义（此前为 contains 子串匹配，会误伤 rmdir→rm 等边缘命令名）。
-                use crate::executor::security::CommandRisk;
-                let risk = crate::executor::security::split_command_segments(command)
+                use tianyan::executor::CommandRisk;
+                let risk = tianyan::executor::split_command_segments(command)
                     .iter()
                     .map(|seg| {
                         // 取词口径与黑名单一致：剥壳后的内层命令（`sudo dd …` → `dd`）
-                        let name = crate::executor::command::judged_command_name(seg);
-                        crate::executor::security::classify_command_risk(&name)
+                        let name = tianyan::executor::command::judged_command_name(seg);
+                        tianyan::executor::classify_command_risk(&name)
                     })
                     .max_by_key(|r| match r {
                         CommandRisk::Low => 0,
@@ -318,7 +324,7 @@ impl ApprovalWorkflow {
         &self,
         session_id: &str,
         action: &Action,
-    ) -> crate::common::error::Result<ApprovalResponse> {
+    ) -> tianyan::common::error::Result<ApprovalResponse> {
         self.request_approval_internal(session_id, action, true)
             .await
     }
@@ -332,7 +338,7 @@ impl ApprovalWorkflow {
         &self,
         session_id: &str,
         action: &Action,
-    ) -> crate::common::error::Result<ApprovalResponse> {
+    ) -> tianyan::common::error::Result<ApprovalResponse> {
         self.request_approval_internal(session_id, action, false)
             .await
     }
@@ -342,7 +348,7 @@ impl ApprovalWorkflow {
         session_id: &str,
         action: &Action,
         allow_human_wait: bool,
-    ) -> crate::common::error::Result<ApprovalResponse> {
+    ) -> tianyan::common::error::Result<ApprovalResponse> {
         let risk_level = self.assess_risk(action);
 
         // "总是询问"命令：强制走人工审批/询问，不被任何自动放行路径放行
@@ -466,7 +472,7 @@ impl ApprovalWorkflow {
         session_id: &str,
         action: &Action,
         risk_level: RiskLevel,
-    ) -> crate::common::error::Result<ApprovalResponse> {
+    ) -> tianyan::common::error::Result<ApprovalResponse> {
         let request_id = uuid::Uuid::new_v4().to_string();
         let (tx, rx) = oneshot::channel();
 
@@ -483,7 +489,7 @@ impl ApprovalWorkflow {
         {
             let mut pending = self.pending_approvals.write().await;
             if pending.len() >= self.config.max_pending_approvals {
-                return Err(crate::common::error::TianyanError::Custom(
+                return Err(tianyan::common::error::TianyanError::Custom(
                     "内部错误：待处理审批数量超过上限".to_string(),
                 ));
             }
@@ -565,7 +571,7 @@ impl ApprovalWorkflow {
         reason: Option<String>,
         approved_by: &str,
         edited_command: Option<String>,
-    ) -> crate::common::error::Result<()> {
+    ) -> tianyan::common::error::Result<()> {
         let mut pending = self.pending_approvals.write().await;
 
         if let Some(pending_approval) = pending.remove(request_id) {
@@ -596,7 +602,7 @@ impl ApprovalWorkflow {
             }
             Ok(())
         } else {
-            Err(crate::common::error::TianyanError::not_found(
+            Err(tianyan::common::error::TianyanError::not_found(
                 "审批请求不存在或已超时",
             ))
         }
@@ -608,8 +614,8 @@ impl ApprovalWorkflow {
     /// 无视 Approve 规则的配置顺序），再匹配放行规则（Approve /
     /// RequestMoreInfo），保证黑名单命令不被白名单规则覆盖。
     ///
-    /// `pub(super)`：审批模块内部（含模块测试）可访问，不对外暴露。
-    pub(super) fn check_auto_approval(
+    /// `pub(crate)`：审批模块内部（含模块测试）可访问，不对外暴露。
+    pub(crate) fn check_auto_approval(
         &self,
         action: &Action,
         risk_level: RiskLevel,
@@ -653,7 +659,7 @@ impl ApprovalWorkflow {
         };
         // 取词口径与黑名单/风险分级一致（剥壳后的内层命令）：否则 `sudo git push`
         // 这类包装形态会绕过"总是询问"（`prompt_commands = ["git"]`）。
-        let cmd = crate::executor::command::judged_command_name(command);
+        let cmd = tianyan::executor::command::judged_command_name(command);
         self.config
             .prompt_commands
             .iter()
@@ -721,5 +727,66 @@ impl ApprovalWorkflow {
     pub async fn get_approval_records(&self) -> Vec<ApprovalRecord> {
         let records = self.records.read().await;
         records.clone()
+    }
+}
+
+/// 审批门控契约实现（ADR-049 期 3-T1）。
+///
+/// 逐方法**只做委托**，无语义改写：审批决策顺序、审计记录、`ApprovalMode`
+/// 三态语义全部由上方固有方法决定（迁移前后逐字一致）。
+///
+/// 注意两处同名方法：`respond_to_approval` 与
+/// `record_user_confirmation_by_fingerprint` 在固有 `impl` 里有同名同签名方法，
+/// 因此这里用**完全限定**的固有调用（`<ApprovalWorkflow>::…`）明确指向固有
+/// 实现——不依赖「固有方法优先于 trait 方法」的解析规则，读代码不必推理是否递归。
+#[async_trait::async_trait]
+impl ApprovalGate for ApprovalWorkflow {
+    async fn authorize(
+        &self,
+        session_id: &str,
+        action: &Action,
+        allow_human_wait: bool,
+    ) -> tianyan::common::error::Result<ApprovalResponse> {
+        self.request_approval_internal(session_id, action, allow_human_wait)
+            .await
+    }
+
+    async fn status(&self) -> ApprovalStatusSnapshot {
+        // 与迁移前 `Agent::approval_status` 的组装逻辑逐字一致（倒序 + 截断 50）。
+        // `pending_confirmations` 属**核心侧**状态（`Agent::pending_approval_fingerprints`），
+        // 插件不拥有它，恒填空数组，由协调器覆写。
+        let mut records = self.get_approval_records().await;
+        records.reverse();
+        records.truncate(50);
+        ApprovalStatusSnapshot {
+            config: self.config(),
+            pending_approvals: self.get_pending_approvals().await,
+            pending_confirmations: Vec::new(),
+            recent_records: records,
+            confirmed_action_count: self.confirmed_action_count().await,
+        }
+    }
+
+    async fn respond_to_approval(
+        &self,
+        request_id: &str,
+        decision: ApprovalDecision,
+        reason: Option<String>,
+        approved_by: &str,
+        edited_command: Option<String>,
+    ) -> tianyan::common::error::Result<()> {
+        <ApprovalWorkflow>::respond_to_approval(
+            self,
+            request_id,
+            decision,
+            reason,
+            approved_by,
+            edited_command,
+        )
+        .await
+    }
+
+    async fn record_user_confirmation_by_fingerprint(&self, fingerprint: &str) {
+        <ApprovalWorkflow>::record_user_confirmation_by_fingerprint(self, fingerprint).await
     }
 }

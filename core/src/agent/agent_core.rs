@@ -24,7 +24,7 @@ use crate::common::types::{
     InjectableContext, Message, MessageRole, StructuredMessage, TokenUsage,
 };
 use crate::context::{ContextAssembler, ContextPipeline};
-use crate::executor::approval::ApprovalWorkflow;
+use crate::executor::approval::ApprovalGate;
 use crate::observability::AgentMetrics;
 use crate::observability::TokenRecord;
 use crate::session::{Session, SessionManager};
@@ -117,9 +117,9 @@ pub struct Agent {
     pub(crate) background_tasks: Arc<BackgroundTaskManager>,
     /// 后台命令管理器（execute_command(background) 状态机；与 ToolRegistry 共享同一 Arc）。
     pub(crate) command_tasks: Arc<crate::executor::CommandManager>,
-    /// 审批工作流（危险操作门控）。协调器响应/状态查询直接持有
-    /// （与 ToolRegistry 共享同一 Arc）。
-    pub(crate) approval_workflow: Option<Arc<ApprovalWorkflow>>,
+    /// 审批门控（危险操作门控）。协调器响应/状态查询直接持有
+    /// （与 ToolRegistry 共享同一 Arc；实现已出 core，ADR-049 期 3-T1）。
+    pub(crate) approval_gate: Option<Arc<dyn ApprovalGate>>,
     /// 待用户确认的操作指纹队列（与 ToolRegistry 共享同一 Arc；
     /// 状态展示直读，不经穿透）。
     pub(crate) pending_approval_fingerprints: Arc<TokioMutex<Vec<String>>>,
@@ -145,7 +145,7 @@ impl Agent {
         let tool_registry = agent_loop.tool_registry();
         let background_tasks = tool_registry.background_tasks.clone();
         let command_tasks = tool_registry.command_tasks.clone();
-        let approval_workflow = tool_registry.approval_workflow.clone();
+        let approval_gate = tool_registry.approval_gate.clone();
         let pending_approval_fingerprints = tool_registry.pending_approval_fingerprints.clone();
         Self {
             default_model,
@@ -159,7 +159,7 @@ impl Agent {
             working_sets,
             background_tasks,
             command_tasks,
-            approval_workflow,
+            approval_gate,
             pending_approval_fingerprints,
         }
     }

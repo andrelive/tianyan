@@ -402,13 +402,12 @@ async fn test_run_approval_denied_returns_tool_error() {
     });
 
     let mut registry = ToolRegistry::new(SecurityPolicy::default());
-    registry = registry.with_approval_workflow(StdArc::new(ApprovalWorkflow::new(
-        ApprovalWorkflowConfig {
+    registry =
+        registry.with_approval_gate(StdArc::new(ApprovalWorkflow::new(ApprovalWorkflowConfig {
             // 确认模式（ADR-033）：Medium 风险无确认时拒绝（工具错误入史）。
             mode: ApprovalMode::Confirm,
             ..Default::default()
-        },
-    )));
+        })));
     let agent_loop = AgentLoop::new(
         Arc::new(mock),
         registry,

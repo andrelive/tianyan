@@ -386,8 +386,7 @@ async fn test_subagent_command_denied_without_hang() {
         mode: ApprovalMode::Interactive,
         ..Default::default()
     }));
-    let registry =
-        ToolRegistry::new(default_strict_policy()).with_approval_workflow(workflow.clone());
+    let registry = ToolRegistry::new(default_strict_policy()).with_approval_gate(workflow.clone());
 
     let fut =
         registry.execute_execute_command(r#"{"command":"cargo --version"}"#, "session-1", true);
@@ -423,7 +422,7 @@ async fn test_subagent_command_approved_via_shared_fingerprint() {
     };
     workflow.record_user_confirmation(&action).await;
 
-    let registry = ToolRegistry::new(default_strict_policy()).with_approval_workflow(workflow);
+    let registry = ToolRegistry::new(default_strict_policy()).with_approval_gate(workflow);
 
     let result = registry
         .execute_execute_command(r#"{"command":"cargo --version"}"#, "session-1", true)

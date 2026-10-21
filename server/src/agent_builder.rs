@@ -96,6 +96,7 @@ impl AgentBuilderFactory {
         task_event_sink: Arc<dyn tianyan::agent::background::TaskEventSink>,
         event_tx: tokio::sync::broadcast::Sender<String>,
         working_sets: Arc<tianyan::agent::working_set::WorkingSetRegistry>,
+        approval_gate: Option<Arc<dyn tianyan::executor::approval::ApprovalGate>>,
     ) -> TianyanResult<Arc<Agent>> {
         Self::validate_config(config)?;
 
@@ -175,6 +176,14 @@ impl AgentBuilderFactory {
             Some(sm) => agent.with_snapshot_manager(sm),
             None => agent,
         };
+        // 审批门控（ADR-049 期 3-T1）：实现已出 core（`plugins/policy-approval`），
+        // 组合根（`AppState::new` / `reload_agent`）经 `ApprovalGateFactory` 建好实例
+        // 传进来。`None` = 未装配 → 不注入，`ToolContext::ensure_approved` 走
+        // 「未装配直接放行」分支，`AgentBuilder::build` 打一条 `warn!` 指路。
+        let agent = match approval_gate {
+            Some(gate) => agent.with_approval_gate(gate),
+            None => agent,
+        };
         let mut builder = agent;
         if let Some(trace) = trace_collector {
             // G6：结构化 Trace（与 AppState 共享同一收集器，单一写入路径）
@@ -250,6 +259,7 @@ impl AgentBuilderFactory {
         task_event_sink: Arc<dyn tianyan::agent::background::TaskEventSink>,
         event_tx: tokio::sync::broadcast::Sender<String>,
         working_sets: Arc<tianyan::agent::working_set::WorkingSetRegistry>,
+        approval_gate: Option<Arc<dyn tianyan::executor::approval::ApprovalGate>>,
     ) -> TianyanResult<Arc<dyn AgentCoordinator>> {
         match Self::build_agent(
             config,
@@ -272,6 +282,7 @@ impl AgentBuilderFactory {
             task_event_sink,
             event_tx,
             working_sets,
+            approval_gate,
         )
         .await
         {

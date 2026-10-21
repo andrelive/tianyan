@@ -25,13 +25,17 @@
 //! 期 2 序 5b 该插槽收尾：**演化任务**搬进 `plugins/task-evolution`；两个插件的清单
 //! 在 `task_factory()` 里**拼接**（`splice(1..1, …)`：演化任务紧跟 `summary_generation`）
 //! ——跨插件顺序只有装配清单知道，插件之间不互相 `import`（D2-2）。
+//!
+//! 期 3-T1 扩第五插槽：**审批策略**（风险定级 / 自动规则 / 模式短路 / 人工审批挂起 /
+//! 审计）搬进 `plugins/policy-approval`，本包把插件的 `gate()` 包成
+//! `ApprovalGateFactory` 注入——server 库只认 `Arc<dyn ApprovalGate>`，不认识审批策略。
 
 use std::sync::Arc;
 
 use tianyan::vfs::{StorageBackend, VectorStorage};
 use tianyan_server::{
-    start_server_with_assembly, AssemblyServices, StorageBackendFactory, TaskFactory,
-    ToolPluginFactory, VectorStorageFactory,
+    start_server_with_assembly, ApprovalGateFactory, AssemblyServices, StorageBackendFactory,
+    TaskFactory, ToolPluginFactory, VectorStorageFactory,
 };
 use tianyan_storage_sqlite::{LocalFileBackend, SqliteBackend};
 use tianyan_storage_vector::LanceDbVectorStore;
@@ -125,13 +129,32 @@ fn task_factory() -> TaskFactory {
     })
 }
 
-/// 完整装配（插件工具清单 + 向量存储 + 结构化存储 + 内置任务）。
+/// 审批门控工厂（`plugins/policy-approval`，ADR-049 期 3-T1）。
+///
+/// 同款类型擦除：server 库只认 [`ApprovalGateFactory`]（`Arc<dyn Fn>`），审批工作流
+/// 只在本包出现。「`SecurityConfig`（模式 / 黑名单 / 白名单 / 总是询问）→ 自动审批规则」
+/// 的映射住**插件**里（`tianyan_policy_approval::gate`），三处装配因此只各写一行包装，
+/// 不会各抄一份映射逻辑（那是两份口径同时漂移的经典来源）。
+///
+/// 同步工厂：`ApprovalWorkflow::new` 只存字段、通知器只存句柄，没有任何 IO。
+fn approval_factory() -> ApprovalGateFactory {
+    Arc::new(
+        |security: &tianyan::config::SecurityConfig,
+         working_sets: Arc<tianyan::agent::working_set::WorkingSetRegistry>,
+         sink: tianyan::notification::SharedNotificationSink| {
+            tianyan_policy_approval::gate(security, working_sets, sink)
+        },
+    )
+}
+
+/// 完整装配（插件工具清单 + 向量存储 + 结构化存储 + 内置任务 + 审批门控）。
 fn assembly() -> AssemblyServices {
     AssemblyServices::new()
         .with_plugin_factory(plugin_factory())
         .with_vector_factory(vector_factory())
         .with_storage_factory(storage_factory())
         .with_task_factory(task_factory())
+        .with_approval_factory(approval_factory())
 }
 
 #[tokio::main]

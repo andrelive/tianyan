@@ -28,7 +28,7 @@ Core 是天演的核心库，提供 AI Agent 的全部基础能力。4 crate wor
 | `common` | 通用类型（按领域拆分）、错误处理、日志配置、token 估算 | error.rs, logging.rs, token_estimator.rs, types/ | ✅ 已集成 |
 | `config` | 配置管理（TOML + 环境变量 + 向导） | mod.rs, wizard.rs, validation.rs, agent.rs, model.rs | ✅ 已集成 |
 | `context` | 上下文工程（检索 + 压缩 + 管线 + 组装） | pipeline.rs, retrieval/, compression/, assembler.rs | ✅ 已集成 |
-| `executor` | 工具执行支撑（Action、审批工作流、LLM-as-Judge、验证门控）+ 编程助手执行原语（内容匹配编辑、patch、文件浏览、搜索、符号、仓库地图、测试发现） | actions.rs, security.rs, command.rs, output_parse.rs, approval/, types.rs, judge.rs, verification.rs, truncate.rs, edit.rs, patch.rs, fs.rs, search.rs, symbols.rs, project.rs, test_discovery.rs | ✅ 正常使用 |
+| `executor` | 工具执行支撑（Action、审批**门控契约**、LLM-as-Judge、验证门控）+ 编程助手执行原语（内容匹配编辑、patch、文件浏览、搜索、符号、仓库地图、测试发现）。审批**实现**已迁 `plugins/policy-approval`（ADR-049 期 3-T1） | actions.rs, security.rs, command.rs, output_parse.rs, approval/, types.rs, judge.rs, verification.rs, truncate.rs, edit.rs, patch.rs, fs.rs, search.rs, symbols.rs, project.rs, test_discovery.rs | ✅ 正常使用 |
 | `snapshot` | 工作区快照（回退/撤销回退；gzip 压缩 + GC + similar diff） | mod.rs | ✅ 正常使用 |
 | `knowledge` | 知识库管理（解析、图像、导入） | parser.rs, image/, types.rs, ingestor/ | ✅ 已集成（Server 层通过 KnowledgeIngestor 真实处理导入与检索） |
 | `memory` | 长期记忆提取 | extractor.rs | ✅ 已集成 |
@@ -158,7 +158,10 @@ Core 是天演的核心库，提供 AI Agent 的全部基础能力。4 crate wor
 - `executor/command.rs` — 命令执行（`execute_command_action`、`DEFAULT_COMMAND_TIMEOUT_SECS`）
 - `executor/output_parse.rs` — 命令输出解析统一实现（`extract_build_errors` / `count_test_passed` / `extract_test_failures`：大小写不敏感匹配、单行 200 字符截断、50 条上限）
 - `executor/types.rs` — `Action` 枚举（ReadFile / WriteFile / ExecuteCommand / SearchCode / ApplyEdit / ApplyPatch）和 `ExecutorError`
-- `executor/approval/` — 审批工作流（`types.rs` 领域类型 + `workflow.rs` 状态机）
+- `executor/approval/` — 审批**契约**（`types.rs` 领域类型 + `gate.rs` 门控 trait `ApprovalGate`）。
+  实现（状态机 / 自动规则引擎 / 模式短路 / 人工审批挂起通道 / 审计）已迁 `plugins/policy-approval`
+  （ADR-049 期 3-T1）：`types.rs` 留 core 是因为它们出现在 A 级 trait `AgentCoordinator` 的签名里
+  （`approval_status` / `respond_approval`），搬走会让内核反向依赖插件
 - `executor/verification.rs` — 验证门控 + 结构化诊断（`StructuredDiagnostic` / `parse_json_diagnostics`，解析 `cargo check --message-format=json-render-diagnostics`）
 - `executor/judge.rs` — LLM-as-Judge 语义验证
 - `executor/truncate.rs` — 统一截断层（`truncate_head` / `truncate_tail` / `truncate_spill`，`MAX_LINES = 2000` / `MAX_BYTES = 50KB`；单行截断 `truncate_line` / `MAX_LINE_CHARS = 2000` / `TRUNCATED_MARKER`，UTF-8 安全）；字节级前缀截断单点在 `common/truncate.rs`（`truncate_utf8_boundary`，session 存储与可观测性共用）
@@ -179,7 +182,7 @@ Core 是天演的核心库，提供 AI Agent 的全部基础能力。4 crate wor
 | `Action` | 动作定义（ReadFile / WriteFile / ExecuteCommand / SearchCode / ApplyEdit / ApplyPatch） |
 | `ExecutorError` | 执行器错误类型 |
 | `SecurityPolicy` | 安全策略（命令白名单/黑名单、目录限制、command_timeout） |
-| `ApprovalWorkflow` | 审批工作流（Safe/Low/Medium/High/Critical 五级风险） |
+| `ApprovalGate` | 审批门控**契约**（core；实现 `ApprovalWorkflow` 在 `plugins/policy-approval`）。风险等级 Safe/Low/Medium/High/Critical 五级、规则/请求/响应/状态快照类型仍留 core（A 级 trait 签名） |
 | `VerificationGate` | 验证门控（执行后自动运行 cargo check/测试验证产出） |
 | `LlmJudge` | LLM-as-Judge（语义判断，解析 `-- JUDGMENT: PASS/FAIL/NEEDS_CHANGES`） |
 | `StructuredDiagnostic` | 结构化编译诊断（file/line/column/level/code/message/suggestion） |

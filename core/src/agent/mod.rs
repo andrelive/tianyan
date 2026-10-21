@@ -42,9 +42,7 @@ pub use builder::AgentBuilder;
 pub use coordinator::AgentCoordinator;
 pub use r#loop::{AgentLoop, AgentLoopConfig, AgentLoopResult};
 pub use role_router::{RoleMatch, RoleRouter};
-pub use roles::{
-    categorize_task_by_keyword, AgentRole, RoleRegistry, RoleSource, RoleStatus,
-};
+pub use roles::{categorize_task_by_keyword, AgentRole, RoleRegistry, RoleSource, RoleStatus};
 pub use rollback::{RedoOutcome, RollbackOutcome};
 pub use session_state::SessionState;
 pub use stream_forward::{

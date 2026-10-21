@@ -1,12 +1,30 @@
 //! 审批领域数据类型。
 //!
 //! 风险等级、审批请求/响应/记录、自动审批规则与工作流配置。
-//! 工作流逻辑见 [`super::workflow`]。
+//!
+//! **本文件留 core（ADR-049 期 3-T1）**：这些类型出现在 A 级 trait
+//! [`crate::agent::coordinator::AgentCoordinator`] 的签名里
+//! （`approval_status` / `respond_approval`），搬进插件会让内核反向依赖插件（D2）。
+//! 工作流**实现**已出 core（`plugins/policy-approval`）。
 
 use serde::{Deserialize, Serialize};
 
 use crate::config::ApprovalMode;
 use crate::executor::Action;
+
+/// 计算操作的稳定指纹（用于"用户已确认"的去重判定）。
+///
+/// 序列化失败的退路是 `Debug` 形态 + 错误文本——与迁移前
+/// `ApprovalWorkflow::action_fingerprint` 逐字一致（含退路）。
+///
+/// **为什么是自由函数而不是插件的关联函数**：指纹生成必须由**两侧共用同一份实现**
+/// ——core 的"待确认队列"（`ToolContext::remember_pending_approval`）写指纹，
+/// 审批插件的"已确认集合"（`record_user_confirmation_by_fingerprint` /
+/// `is_action_confirmed`）读同一形态的指纹；两份实现一旦漂移，"用户确认了却没被
+/// 认账"会静默发生。函数本体零 I/O、零状态，与 `is_user_confirmation` 同类。
+pub fn action_fingerprint(action: &Action) -> String {
+    serde_json::to_string(action).unwrap_or_else(|e| format!("{:?}-{e}", action))
+}
 
 /// 判断用户对审批追问的回答是否为"允许执行"语义。
 ///

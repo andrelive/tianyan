@@ -693,6 +693,106 @@ GEPA）」的 **GEPA 部分作废**；`role_learning.rs`（573 生产）仍在�
   （按模块名 grep 会漏掉 `categorize_task_by_keyword` 这类不含模块名前缀的导出）。
   core 测试 1201 → 1199（−2）。
 
+**实施记录（期 3-T1：policy-approval，2026-10-21）**：`core/src/executor/approval/workflow.rs`
+（725 生产行）**整文件**迁入 `plugins/policy-approval`（crate `tianyan-policy-approval`，
+导出 `ApprovalWorkflow` / `SessionApprovalNotifier` / `ApprovalPendingNotifier` /
+`build_approval_pending_text` / `gate()`，5 个公开符号）。**`types.rs` 与纯函数
+`is_user_confirmation` 留 core**——理由不是"顺手"，而是它们出现在 **A 级 trait
+`AgentCoordinator` 的签名**里（`coordinator.rs:169` `approval_status` /
+`:180` `respond_approval`）：搬走就得让内核 `use tianyan_policy_approval::…`，
+破 D2-1/D2-3（与 `vfs::StorageBackend` / `vfs::VectorStorage` 同一条边界）。
+
+- **★ 新增 1 个 pub trait `ApprovalGate`**（`core/src/executor/approval/gate.rs`），
+  全批**只此一个**（反指标：每期净增 pub trait ≤ 3）。4 个方法，每个都有调用点证据：
+
+  | 方法 | 内核侧调用点 | 说明 |
+  |---|---|---|
+  | `authorize(session_id, action, allow_human_wait)` | `agent/tool_context.rs:150` `ensure_approved`（内部 `:162`/`:164` 两个入口合一）→ `write_file` / `apply_edit` / `apply_patch` / `execute_command` 四个危险工具域 | 唯一的判定入口；`allow_human_wait = !subagent`（ADR-011 子任务边界） |
+  | `status() -> ApprovalStatusSnapshot` | `agent/coordinator.rs:474` `approval_status` | 配置 / 待处理 / 最近 50 条审计 / 已确认指纹数；`pending_confirmations` 属核心侧状态（`Agent::pending_approval_fingerprints`），由协调器**覆写** |
+  | `respond_to_approval(...)` | `agent/coordinator.rs:502` `respond_approval`（GUI 审批面板） | 同名同签名委托给固有方法（用 `<ApprovalWorkflow>::…` 完全限定，不依赖"固有优先"规则） |
+  | `record_user_confirmation_by_fingerprint(fp)` | `agent/tool_registry/mod.rs:552` `confirm_pending_approval`（"询问用户"降级链路） | 指纹由 **core** 的 `action_fingerprint`（从 `workflow.rs` 提到 `types.rs`）生成——两侧共用一份算法，否则"用户确认了却没被认账"会静默发生 |
+
+  为什么**不**把 `ensure_approved` 整体搬进 trait：它除了"问审批"，还要在拒绝时写
+  `ToolContext::pending_approval_fingerprints`（`Agent` 轮末读它生成追问）并把拒绝翻成
+  统一错误文案——那份状态在 core。契约切在**真正跨 crate 的那条线**上：`authorize`
+  只回答"准不准"，拒绝后的降级动作留 core。
+- **装配：`AssemblyServices` 第五个插槽 `ApprovalGateFactory`**
+  （`Arc<dyn Fn(&SecurityConfig, Arc<WorkingSetRegistry>, SharedNotificationSink)
+  -> Arc<dyn ApprovalGate> + Send + Sync>`，**同步**，形态照 `StorageBackendFactory` /
+  `TaskFactory`）。工厂里有 `WorkingSetRegistry` 一参（与初稿的差异，理由是硬的）：
+  审批挂起通知必须经 ADR-039 的**唯一写入口**落成会话 System 消息，且必须是 `Agent`
+  用的**同一个 Arc**；而工作集是 `AppState::new` 内部创建的，所以门控在
+  `AppState::new` / `reload_agent`（组合根）里构造，而不是在 `lib.rs`。
+  「`SecurityConfig` → 自动审批规则」的映射（`blocked_commands` → Deny、`allowed_commands`
+  → Approve、`prompt_commands` → 总是询问、`approval_mode` → `mode`）从
+  `AgentBuilder::build` 搬进插件的 `gate()`——单一事实源在插件内，三处装配各写一行包装。
+- **降级语义（本序的取舍）**：未装配工厂 → `AgentBuilder` 得到 `None` → **不装配审批门控**，
+  `ToolContext::ensure_approved` 走既有的「未装配直接放行」分支（该分支本来就在），
+  `build()` 里 `warn!` 一条指路。**为什么允许降级**：① 后果比存储降级轻一个量级——
+  默认配置本就是 `ApprovalMode::Autonomous`（黑名单外全放行，ADR-033），且命令黑名单在
+  `SecurityPolicy` 守卫层**另有**一份拦截；② `create_app`（构造对象图，47 处 lib 单测 +
+  嵌入式）靠"不要求装配"才能起实例，`Err` 等于删入口。可见性由装配期 `warn!` 兜底
+  （ADR-038：静默降级的唯一症状会是"审批面板永远空的 + 黑名单少一层复核"）。
+  `create_app` 路径的可观测差异仅"`approval_status` 返回默认配置而非 `security.approval_mode`
+  派生的配置"，`test_assembly()`（集成测试）已注入真实现，测的是生产形态。
+- **顺序与语义逐字保持**：`workflow.rs:353` always-ask → `:372` `Autonomous` 短路 →
+  `:398` `Safe`→Approve → `:409` `Critical`→Deny → `:427` `is_action_confirmed` →
+  `:440` `Interactive` 等人工 → `:450` 兜底 Deny；`default_timeout_secs = 300`、
+  `max_pending_approvals = 100`、`persist_records = true`、默认规则 `safe_operations`
+  全部逐字未动。
+- **★ 两处 core 侧最小提公（跨 crate 后不可省，B 级）**：
+  1. `executor::classify_command_risk` / `CommandRisk` / `split_command_segments`
+     （后者的 `pub(crate)` → `pub`）与 `executor::command::judged_command_name`
+     （`pub(crate)` → `pub`）经 `core/src/executor/mod.rs` 暴露。理由：这些是
+     **执行层（`SecurityPolicy`）与审批层共用**的风险/取词/分段单一事实源
+     （T0-2 修的正是"只按首词定级"的绕过），搬一份进插件＝两份口径同时漂移。
+     `security` 模块本身仍是 `pub(crate)`：经 `executor` 根只开 3 个符号
+     （`classify_command_risk` / `CommandRisk` / `split_command_segments`），
+     外加 `command::judged_command_name` 一个，公开面收窄到实际需要。
+  2. `action_fingerprint` 从 `ApprovalWorkflow` 的关联函数提为 `types.rs` 的自由函数
+     （零 I/O、零状态），core（`remember_pending_approval`）与插件（确认集合）共用。
+- **★ core 单测的「同源包含」**：3 个 core 用例必须用**真实**实现
+  （`loop_tests::test_run_approval_denied_returns_tool_error` 的 Confirm 短路、
+  `agent_ops_tests` 两条子任务审批用例的 Interactive 不挂起 / 指纹共享——用替身会把
+  这些语义抹平），而 core 的 `[dev-dependencies] tianyan-policy-approval` 行不通
+  （core 编译两份 → `ApprovalGate` / `ApprovalWorkflowConfig` 两个不兼容实例，
+  同序 4）。因此照 `storage-sqlite` 先例：`core/src/executor/approval/mod.rs` 在
+  `#[cfg(test)]` 下用 `#[path]` 同源包含 `plugins/policy-approval/src/workflow.rs`。
+  **一份源码、零复制、零漂移**，生产构建完全不参与（`cargo tree -p tianyan-core`
+  无该插件）。代价：被包含文件只许 `tianyan::…` 绝对路径（已写进 crate 文档 + AGENTS.md）。
+- **逐行比对证据**（`git diff --no-index`，HEAD `workflow.rs` vs 插件 `workflow.rs`）：
+  **98 增 / 31 删**，逐行归类——① `crate::…` → `tianyan::…` 路径前缀 **18 处**
+  （`grep -c crate::`：HEAD 18 → 插件 1，剩下的那 1 处是本文件头文档里的文字示例）；
+  ② `use super::types::*`（1 行）展开为显式清单（9 行，名字与 glob 提供的完全相同，
+  因插件 crate 根没有 `types` 模块可 glob）；③ `action_fingerprint` 关联函数 5 行移出 +
+  2 处 `Self::action_fingerprint` → `action_fingerprint` + 1 处文档链接；
+  ④ `check_auto_approval` 的 `pub(super)` → `pub(crate)`（插件里 `workflow` 是 crate 根的子
+  模块，`tests` 是兄弟模块，`pub(super)` 语义会变窄；模块本身私有，无公开面影响）；
+  ⑤ 3 行文档措辞（"Agent 装配层注入" → "装配层注入" 等）；⑥ **末尾新增 50 行**
+  `impl ApprovalGate for ApprovalWorkflow`（4 个方法，逐方法委托）。
+  **无一处 `assess_risk` / 规则引擎 / 短路顺序 / 审计 / 超时默认值的语义改动。**
+  测试文件同理：`git diff --no-index` HEAD `approval_tests.rs` vs 插件 `approval_tests.rs`
+  = **6 增 / 16 删**，只有 import 头（2→6 行）与 `test_is_user_confirmation`（留 core，10 行）
+  两处；**23 个用例的函数体逐字未动**。
+- **门禁**：`cargo fmt --all -- --check` 干净；`cargo clippy --workspace --all-targets`
+  **零 warning**；`tianyan-core --lib` **1176 passed**（= 基线 1199 − 23 搬走的用例）；
+  `tianyan-policy-approval` **23 passed**；`tianyan-server --lib` **189 passed / 1 ignored**
+  （187 + 2 条新插槽测试）、`--tests` 5 / 14 / 1 / 2 全绿；`tianyan-app` 7 passed；
+  `cargo catalog-check` OK；`cargo tree -p tianyan-policy-approval --edges normal --depth 1`
+  = core / async-trait / chrono / tokio / tracing / uuid，**无 `tianyan-server`**。
+- **测试守恒**：HEAD core 1199 = 现在 core 1176 + 插件 23（其中 23 条为迁移，逐个同名同断言；
+  另 1 条 `test_is_user_confirmation` 测的是 core 的纯函数，留在 core）。**零放弃、零降级**。
+- **遗留**：
+  1. `ApprovalGate` 的 4 个方法里有 2 个（`status` / `record_user_confirmation_by_fingerprint`）
+     只是把既有固有方法原样暴露——期 3 结束时若确认"审批状态快照"该由协调器自己组装，
+     可把 `status()` 收回成 3 个方法的更窄契约（先按实际调用面留着，别提前抽象）；
+  2. `AgentStatus` 里的 `pending_confirmations` 由协调器覆写，等于插件返回的该字段恒空——
+     属"契约里有一个字段实现不拥有"的小瑕疵，若要消除需引入单独的数据结构
+     （目前只有一个消费者，不值当）；
+  3. `plugins/policy-approval` 与 `core` 的 `workflow.rs` 存在**文件级耦合**（`#[path]` 的
+     路径硬编码在 `core/src/executor/approval/mod.rs`）：改插件文件布局须同步，否则 core
+     测试直接编译失败——这条既是守卫也是负担（与序 4 同型）。
+
 ---
 
 ## 分期与闸门
@@ -703,7 +803,7 @@ GEPA）」的 **GEPA 部分作废**；`role_learning.rs`（573 生产）仍在�
 | **0.5** | 工具契约与注册形状 + 装配器二分（**工具侧已完成**） | ✅ 元数据表承载执行入口 + 协议工具独立成表（28 分支 match → 一次查表，内核零工具名字面量）；✅ `ToolContext` 承载六个工具域（`impl ToolContext` + 注册表 `Deref`），依赖边界实测：工具域 executor 引用仅 16 处（随插件搬走）。待办：`thin-channel` + `assembly-manifest`；`AppState` 20 字段契约化 | 工具目录 freshness ✅；工具行为零变化 ✅（1431 单测全绿）；clippy 零警告 ✅ |
 | **1** | 工具插件试点（**装配器二分 + tools-fs 骨架已完成**） | ✅ `tianyan-app` bin 包（**清单住 bin**）+ `ToolPluginFactory` 类型擦除 + `create_app_with_plugins` / `start_server_with_plugins*`；✅ `plugins/tools-fs` 独立 crate（`executor::fs` 实现整体迁入）。待续：**整域迁移**——`read_file` 目录模式反向依赖 `executor::fs::execute_list_dir`，故 fs 域必须 6 工具一起搬（read/write/edit/patch/glob/list_dir）才能删 core 侧 | 闸门 A **首测 512 行 ✅**（判据 ≤3.5K）；core 侧暂留（双路径过渡，重名注册自动跳过） |
 | **2** | 适配器与任务插件（**期 2 完成**） | 迁移顺序（按 自包含度×收益）：**0 清 core 死依赖** → 1 `tools-todo`+`tools-goal` → 2 `tools-web` → 3 `storage-vector` → 4 `storage-sqlite` → 5 `task-*`（2 crate）→ 6 `provider-llm`+`provider-embed`。详见下方「期 2 普查结论」 | 各领域 ≤ 2K；全量 release 不劣化 >10% |
-| **3** | 策略分离（最难一刀） | 抽 `kernel-impl`（loop/cancel/rollback/stream_forward/working_set）；`context`→`policy-context`；审批→`policy-approval`；`role_learning`→`policy-learning`；`judge`→`policy-review` | **闸门 B**：api ≤ 6K && impl ≤ 15K（或配置外移后 16.1K）；改策略不重编内核；S 级零变更 |
+| **3** | 策略分离（最难一刀） | 抽 `kernel-impl`（loop/cancel/rollback/stream_forward/working_set）；`context`→`policy-context`；**审批→`policy-approval`（T1 ✅ 2026-10-21，见下方实施记录）**；`role_learning`→已删除（零消费者，2026-10-21 裁决）；`judge`→`policy-review` | **闸门 B**：api ≤ 6K && impl ≤ 15K（或配置外移后 16.1K）；改策略不重编内核；S 级零变更 |
 | **4** | 清单收敛与发行版 | 清单完整化、跨插件顺序断言、desktop/headless/minimal 三份清单 | 装配清单 1 页可查；headless 可构建 |
 
 **反指标**（防拆过头）：每 crate ≥ 300 行且至少 2 个真实消费者；每期净增 pub trait ≤ 3；

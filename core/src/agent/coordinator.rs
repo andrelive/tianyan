@@ -475,7 +475,7 @@ impl AgentCoordinator for Agent {
         use crate::executor::approval::{ApprovalStatusSnapshot, ApprovalWorkflowConfig};
 
         let pending_confirmations = self.pending_approval_fingerprints.lock().await.clone();
-        let Some(workflow) = &self.approval_workflow else {
+        let Some(gate) = &self.approval_gate else {
             return Ok(ApprovalStatusSnapshot {
                 config: ApprovalWorkflowConfig::default(),
                 pending_approvals: Vec::new(),
@@ -484,16 +484,13 @@ impl AgentCoordinator for Agent {
                 confirmed_action_count: 0,
             });
         };
-        let mut records = workflow.get_approval_records().await;
-        records.reverse();
-        records.truncate(50);
-        Ok(ApprovalStatusSnapshot {
-            config: workflow.config(),
-            pending_approvals: workflow.get_pending_approvals().await,
-            pending_confirmations,
-            recent_records: records,
-            confirmed_action_count: workflow.confirmed_action_count().await,
-        })
+        // 工作流侧的四项（配置 / 待处理 / 最近 50 条审计 / 已确认指纹数）由实现
+        // 组装（迁出 core 后仍在插件里逐字保持倒序 + 截断 50）；`pending_confirmations`
+        // 属**核心侧**状态（`Agent::pending_approval_fingerprints`），在此覆写——
+        // 实现不拥有它，`status()` 返回的该字段恒为空。
+        let mut snapshot = gate.status().await;
+        snapshot.pending_confirmations = pending_confirmations;
+        Ok(snapshot)
     }
 
     async fn respond_approval(
@@ -503,14 +500,13 @@ impl AgentCoordinator for Agent {
         reason: Option<String>,
         edited_command: Option<String>,
     ) -> Result<()> {
-        let Some(workflow) = &self.approval_workflow else {
+        let Some(gate) = &self.approval_gate else {
             return Err(crate::TianyanError::Custom(
                 "审批流程未装配（审批工作流不可用）".to_string(),
             ));
         };
         // GUI 人工响应：approved_by 固定为 "user"
-        workflow
-            .respond_to_approval(request_id, decision, reason, "user", edited_command)
+        gate.respond_to_approval(request_id, decision, reason, "user", edited_command)
             .await
     }
 

@@ -167,7 +167,20 @@ pub fn test_assembly() -> tianyan_server::AssemblyServices {
             registrations
         });
 
+    // 审批门控（ADR-049 期 3-T1）：与 `app` / `tauri` 同一份插件实现。「配置 → 自动
+    // 审批规则」的映射住插件里（`tianyan_policy_approval::gate`），这里只做类型擦除
+    // 包装。**不注入**就会落到「未装配 → 工具直接放行」的降级路径，测的就不是生产
+    // 形态（与序 4「不要用 `AssemblyServices::default()` 驱动集成测试」同一条纪律）。
+    let approval_factory: tianyan_server::ApprovalGateFactory = Arc::new(
+        |security: &SecurityConfig,
+         working_sets: Arc<tianyan::agent::working_set::WorkingSetRegistry>,
+         sink: tianyan::notification::SharedNotificationSink| {
+            tianyan_policy_approval::gate(security, working_sets, sink)
+        },
+    );
+
     tianyan_server::AssemblyServices::new()
         .with_storage_factory(factory)
         .with_task_factory(task_factory)
+        .with_approval_factory(approval_factory)
 }
