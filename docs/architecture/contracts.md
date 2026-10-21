@@ -67,7 +67,7 @@ Rust 下「契约 = 成本」：契约变更会穿透依赖图，改动成本随
 | 28 | `CommandEventSink` | `core/src/executor/command.rs:82` | 同上 |
 | 29 | `ApprovalPendingNotifier` | `core/src/executor/approval/workflow.rs:22` | 审批策略插件内部 |
 | 30 | `TaskReviewer` | `core/src/executor/judge.rs:49` | 评审策略插件内部（单消费者：子代理自审） |
-| 31 | `EvolutionReviewExecutor` | `core/src/scheduler/tasks/evolution_task.rs:53` | 演化任务插件内部 |
+| 31 | `EvolutionReviewExecutor` | `core/src/scheduler/evolution_executor.rs` | 演化任务插件的唯一外部能力（ADR-049 期 2 序 5b 已提入 core：实现 `AgentEvolutionExecutor` 在 server，经 `TaskServices.evolution_executor` 注入——若留在插件里，server 就得依赖插件，破 D2-1） |
 | 32 | `EmbeddingUsageSink` | `core/src/model/provider/middleware.rs:75` | provider 适配器内部（用量回传） |
 | 33 | `ServiceDiscovery` | `core/src/model/traits.rs:73` | 适配器内部（模型列表探测） |
 | 34 | `SummaryService` | `core/src/vfs/summary/engine.rs:51` | 摘要策略插件内部 |

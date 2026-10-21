@@ -12,6 +12,7 @@ members = [
     "plugins/storage-vector",
     "plugins/storage-sqlite",
     "plugins/task-builtin",
+    "plugins/task-evolution",
 ]
 resolver = "2"
 

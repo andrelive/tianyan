@@ -65,14 +65,25 @@ fn storage_factory() -> StorageBackendFactory {
     )
 }
 
-/// 内置任务工厂（`plugins/task-builtin`；ADR-049 期 2 序 5a）。
+/// 定时任务工厂（`plugins/task-builtin` 序 5a + `plugins/task-evolution` 序 5b）。
 ///
-/// 与 `app/src/main.rs::task_factory` **同形同源**：5 个内置任务的实现与注册清单
-/// （名字 / 显示名 / 间隔 / 启用条件）都在插件里，server 库不认识任何具体任务。
+/// 与 `app/src/main.rs::task_factory` **同形同源**：5 个内置任务与自演化综述任务的
+/// 实现与注册清单（名字 / 显示名 / 间隔 / 启用条件）都在插件里，server 库不认识任何
+/// 具体任务。
+///
+/// **顺序拼接在装配层**（D2-2）：注册顺序 = 扫描顺序 = 执行顺序，而「演化任务排第 2
+/// 位（紧跟 `summary_generation`）」是跨插件属性——插件之间不互相 import，只有装配
+/// 清单知道「哪个插件该排在哪」。`splice(1..1, …)` = 在 index 1 之前插入。
+///
 /// 同步工厂——`TaskServices` 由 server 在调用前 await 好（共享 `ModelServices`，
 /// 不重复建 HTTP client 池）。
 fn task_factory() -> TaskFactory {
-    Arc::new(|services: &tianyan_server::TaskServices| tianyan_task_builtin::tasks(services))
+    Arc::new(|services: &tianyan_server::TaskServices| {
+        let mut registrations = tianyan_task_builtin::tasks(services);
+        // 顺序纪律：evolution 紧跟 summary_generation（清单第 2 位，与迁移前一致）
+        registrations.splice(1..1, tianyan_task_evolution::tasks(services));
+        registrations
+    })
 }
 
 /// 启动 Axum 服务

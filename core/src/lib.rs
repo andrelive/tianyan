@@ -88,9 +88,10 @@ pub mod vfs;
 /// 测试工具（`cfg(test)` 或 `test-utils` 特性下编译）。
 ///
 /// 除了 core 自己的单测，**插件 crate 的单元测试**也要用它（`MockVfs` /
-/// `MockChatService`）：ADR-049 期 2 序 5a 把 5 个内置任务搬进
-/// `plugins/task-builtin` 时，那些测试的写法与判别力必须原样保留——若替身不可达，
-/// 只能复制一份进插件（两份实现同时漂移，测试也就失去意义）。
+/// `MockChatService` / `InMemoryVectorStorage`）：ADR-049 期 2 把内置任务搬进
+/// `plugins/task-builtin`（序 5a）、演化任务搬进 `plugins/task-evolution`（序 5b）时，
+/// 那些测试的写法与判别力必须原样保留——若替身不可达，只能复制一份进插件（两份
+/// 实现同时漂移，测试也就失去意义）。
 ///
 /// `test-utils` 特性由插件的 `[dev-dependencies]` 打开，**默认构建不编译**
 /// （`cargo tree -p tianyan-core` 无 mockall）。测试替身里大量 `.unwrap()`

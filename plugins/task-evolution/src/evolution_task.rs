@@ -8,21 +8,24 @@
 //!
 //! 提议/提交分离：综述智能体的工具白名单只读（执行统计/会话回忆/VFS 只读），
 //! 无法直接修改注册表——增删改必须经本任务应用（架构上强制，ADR-017 决策 2）。
+//!
+//! 契约 [`EvolutionReviewExecutor`] 在 core（`tianyan::scheduler`，ADR-049 期 2 序 5b）：
+//! 实现是 server 侧业务，本 crate 只消费契约——见 crate 文档。
 
 use std::sync::Arc;
 
 use async_trait::async_trait;
 
-use crate::common::error::{Result, TianyanError};
-use crate::common::llm_judge::parse_llm_json;
-use crate::common::types::{
+use tianyan::common::error::{Result, TianyanError};
+use tianyan::common::llm_judge::parse_llm_json;
+use tianyan::common::types::{
     memory_paths, AgentPath, ContentLevel, ContextNamespace, MemoryCategory, MemoryEntry,
     TianyanUri,
 };
-use crate::role_store::RoleStore;
-use crate::roles::{AgentRole, RoleSource, RoleStatus};
-use crate::scheduler::{TaskContext, TaskHandler, TaskResult};
-use crate::session::types::RecallMessage;
+use tianyan::role_store::RoleStore;
+use tianyan::roles::{AgentRole, RoleSource, RoleStatus};
+use tianyan::scheduler::{EvolutionReviewExecutor, TaskContext, TaskHandler, TaskResult};
+use tianyan::session::types::RecallMessage;
 
 /// 近期会话增量材料：候选拉取上限（跨会话、最近优先；SQL 层）。
 const DIGEST_CANDIDATE_LIMIT: usize = 2000;
@@ -47,16 +50,6 @@ const DIGEST_MAX_SUMMARY_CHARS: usize = 1200;
 const DIGEST_MAX_TOTAL_CHARS: usize = 12000;
 /// 无水位线（首次运行）时的增量回看窗口（小时）。
 const DIGEST_INITIAL_WINDOW_HOURS: i64 = 72;
-
-/// 演化综述执行器（server 提供实现：委托 evolution_reviewer 角色 / 唤醒主 agent）。
-#[async_trait]
-pub trait EvolutionReviewExecutor: Send + Sync {
-    /// 执行一次演化综述。
-    ///
-    /// input 为任务采集的输入包（上次运行时间 + 注册表清单 + 指令）；
-    /// 返回智能体产出的 diff 计划（JSON 文本）。
-    async fn review(&self, input: &str) -> std::result::Result<String, TianyanError>;
-}
 
 /// 记忆 diff 计划项。
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -1102,8 +1095,8 @@ async fn find_entry(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_utils::MockVfs;
-    use crate::vfs::{ContentStore, SummaryEngine, VfsCore, VirtualFileSystem};
+    use tianyan::test_utils::MockVfs;
+    use tianyan::vfs::{ContentStore, SummaryEngine, VfsCore, VirtualFileSystem};
 
     struct FakeExecutor {
         response: String,
@@ -1117,15 +1110,15 @@ mod tests {
     }
 
     fn make_context(vfs: Arc<MockVfs>) -> TaskContext {
-        make_context_with_config(vfs, crate::config::TianyanConfig::default())
+        make_context_with_config(vfs, tianyan::config::TianyanConfig::default())
     }
 
     fn make_context_with_config(
         vfs: Arc<dyn VirtualFileSystem>,
-        config: crate::config::TianyanConfig,
+        config: tianyan::config::TianyanConfig,
     ) -> TaskContext {
-        let chat: Arc<dyn crate::model::ChatService> =
-            Arc::new(crate::test_utils::MockChatService::new());
+        let chat: Arc<dyn tianyan::model::ChatService> =
+            Arc::new(tianyan::test_utils::MockChatService::new());
         let summary_engine = Arc::new(SummaryEngine::new(chat.clone(), "test-model"));
         let config = Arc::new(config);
         TaskContext::new(vfs, summary_engine, None, config)
@@ -1134,18 +1127,21 @@ mod tests {
     // find_entry 缺陷的教训：旧测试以"目录形态"Mock 条目掩盖了与生产
     // 数据形态（文件条目）的差异。以下测试在真实存储后端上锁定删除/合并链。
 
-    /// 构造真实后端 VFS（SqliteBackend + 内存 DB + Mock 向量）。
+    /// 构造真实后端 VFS（SqliteBackend + 内存 DB + 内存向量）。
     async fn real_vfs() -> Arc<dyn VirtualFileSystem> {
-        use crate::db::Database;
-        // 真实后端实现已迁至插件（ADR-049 期 2 序 4），测试期同源包含于
-        // `vfs::backend`；**必须**继续用 SqliteBackend——下面的测试正是在真实条目
-        // 形态上锁定删除/合并链，换成本地文件/桩会把「Mock 形态掩盖缺陷」这条教训
-        // 重新引入。
-        use crate::vfs::backend::SqliteBackend;
-        use crate::vfs::{MockVectorStorage, StorageBackend, VirtualFileSystemBuilder};
+        use tianyan::db::Database;
+        // 真实后端实现住在 `plugins/storage-sqlite`（ADR-049 期 2 序 4），本 crate 以
+        // **测试期 dev-dependency** 引入（生产依赖图里没有这条边）；**必须**继续用
+        // SqliteBackend——下面的测试正是在真实条目形态上锁定删除/合并链，换成本地
+        // 文件/桩会把「Mock 形态掩盖缺陷」这条教训重新引入。
+        use tianyan::test_utils::InMemoryVectorStorage;
+        use tianyan::vfs::{StorageBackend, VirtualFileSystemBuilder};
+        use tianyan_storage_sqlite::SqliteBackend;
         let database = Database::open_in_memory().unwrap();
         let storage: Arc<dyn StorageBackend> = Arc::new(SqliteBackend::new(database));
-        let vector: Arc<dyn crate::vfs::VectorStorage> = Arc::new(MockVectorStorage::new());
+        // 向量存储只是脚手架（被锁定的链路是结构化条目）：`InMemoryVectorStorage`
+        // 与 core 测试里的 `MockVectorStorage` 同为 8 维空实现，语义等价。
+        let vector: Arc<dyn tianyan::vfs::VectorStorage> = Arc::new(InMemoryVectorStorage::new());
         let vfs = VirtualFileSystemBuilder::new()
             .with_storage(storage)
             .with_vector_storage(vector)
@@ -1159,7 +1155,7 @@ mod tests {
     async fn test_apply_deletion_real_backend_hits_nested_file() {
         // 真实后端形态：深层文件（cases/failed_tasks/{id}）必须命中并归档
         let vfs = real_vfs().await;
-        let ctx = make_context_with_config(vfs.clone(), crate::config::TianyanConfig::default());
+        let ctx = make_context_with_config(vfs.clone(), tianyan::config::TianyanConfig::default());
         let task = EvolutionTask::new(
             Arc::new(FakeExecutor {
                 response: "{}".to_string(),
@@ -1224,7 +1220,7 @@ mod tests {
     async fn test_apply_memory_normalizes_path_style_id() {
         // 路径式 id（LLM 回传 vfs_read 结果）必须落到归一化路径，不得产生畸形副本
         let vfs = real_vfs().await;
-        let ctx = make_context_with_config(vfs.clone(), crate::config::TianyanConfig::default());
+        let ctx = make_context_with_config(vfs.clone(), tianyan::config::TianyanConfig::default());
         let task = EvolutionTask::new(
             Arc::new(FakeExecutor {
                 response: "{}".to_string(),
@@ -1268,7 +1264,7 @@ mod tests {
     async fn test_same_run_memories_get_distinct_ids() {
         // 同一次运行（同一秒）的多条无 id 记忆必须消歧（时间戳 + 序号）
         let vfs = real_vfs().await;
-        let ctx = make_context_with_config(vfs.clone(), crate::config::TianyanConfig::default());
+        let ctx = make_context_with_config(vfs.clone(), tianyan::config::TianyanConfig::default());
         let task = EvolutionTask::new(
             Arc::new(FakeExecutor {
                 response: "{}".to_string(),
@@ -1301,7 +1297,7 @@ mod tests {
     async fn test_merge_normalizes_path_style_target_id() {
         // merge 的 target_id 为路径式/URI 式时须命中既有条目并原地重写
         let vfs = real_vfs().await;
-        let ctx = make_context_with_config(vfs.clone(), crate::config::TianyanConfig::default());
+        let ctx = make_context_with_config(vfs.clone(), tianyan::config::TianyanConfig::default());
         let task = EvolutionTask::new(
             Arc::new(FakeExecutor {
                 response: "{}".to_string(),
@@ -1342,7 +1338,7 @@ mod tests {
     async fn test_deletion_normalizes_path_style_id() {
         // 删除通道：路径式 id 必须命中并归档（不得静默跳过）
         let vfs = real_vfs().await;
-        let ctx = make_context_with_config(vfs.clone(), crate::config::TianyanConfig::default());
+        let ctx = make_context_with_config(vfs.clone(), tianyan::config::TianyanConfig::default());
         let task = EvolutionTask::new(
             Arc::new(FakeExecutor {
                 response: "{}".to_string(),
@@ -1385,7 +1381,7 @@ mod tests {
     async fn test_apply_memory_merge_real_backend() {
         // 真实后端：目标原地重写 + 源归档删除（全链路）
         let vfs = real_vfs().await;
-        let ctx = make_context_with_config(vfs.clone(), crate::config::TianyanConfig::default());
+        let ctx = make_context_with_config(vfs.clone(), tianyan::config::TianyanConfig::default());
         let task = EvolutionTask::new(
             Arc::new(FakeExecutor {
                 response: "{}".to_string(),
@@ -1677,7 +1673,7 @@ mod tests {
     #[tokio::test]
     async fn test_merge_skipped_when_consolidation_disabled() {
         let vfs = Arc::new(MockVfs::new());
-        let mut config = crate::config::TianyanConfig::default();
+        let mut config = tianyan::config::TianyanConfig::default();
         config.memory.auto_consolidation = false;
         let ctx = make_context_with_config(vfs.clone(), config);
         let task = EvolutionTask::new(

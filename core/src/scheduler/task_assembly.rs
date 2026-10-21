@@ -21,8 +21,8 @@
 //! - [`TaskContext`]：任务**运行时**看到的世界（vfs / summary_engine / session_recall /
 //!   config / task_state），由调度器在执行时提供；
 //! - [`TaskServices`]：任务**装配时**需要的外部能力（统计、快照、会话、通知、模型、
-//!   工作集）——`TaskContext` 不携带这些（它们不是「所有任务都需要的世界」，而是
-//!   「装配期一次性注入的依赖」），所以任务实现把它们**存在自己的字段里**；
+//!   工作集、演化综述执行器）——`TaskContext` 不携带这些（它们不是「所有任务都需要的
+//!   世界」，而是「装配期一次性注入的依赖」），所以任务实现把它们**存在自己的字段里**；
 //! - [`TaskRegistration`]：插件交给调度器的**一条注册**（名字 / 显示名 / 间隔 / 处理器）。
 //!
 //! 这一层不做任何决策：注册顺序、启用条件、间隔常量全部由插件给出——server 只按
@@ -36,7 +36,7 @@ use crate::config::TianyanConfig;
 use crate::model::ChatService;
 use crate::notification::SharedNotificationSink;
 use crate::observability::usage_stats::UsageStats;
-use crate::scheduler::TaskHandler;
+use crate::scheduler::{EvolutionReviewExecutor, TaskHandler};
 use crate::session::SessionManager;
 use crate::snapshot::SnapshotManager;
 
@@ -104,6 +104,13 @@ impl TaskRegistration {
 ///   不重复建 HTTP client 池——迁移前就是这么写的，这里只是把同一份引用递进来；
 /// - [`working_sets`](Self::working_sets)：提醒注入的唯一写入口（ADR-039 §4）。
 ///   `None` = 未装配 → 不注入（由 `persist_system_message` 单点告警）。
+/// - [`evolution_executor`](Self::evolution_executor)：演化任务的**唯一外部能力**
+///   （ADR-049 期 2 序 5b）。实现是 server 侧业务（`AgentEvolutionExecutor`：跑一轮主
+///   agent 产出 diff 计划），**必须留在 server**——它要 `AgentCoordinator` 与工作集
+///   注册表，是通道层的东西；插件只认识 [`EvolutionReviewExecutor`] 契约。接线方式
+///   因此是「server 构造实现 → 放进能力集合 → 插件用它构造 `EvolutionTask`」，正是
+///   D2 的形状（装配期注入 `Arc<dyn Trait>`），插件之间零互赖。
+///   `None` = 没有实现（未启用 / 非 server 装配）→ 插件**不注册**演化任务。
 #[derive(Clone)]
 pub struct TaskServices {
     /// 配置快照（注册期判启用条件与间隔；只读）。
@@ -122,4 +129,10 @@ pub struct TaskServices {
     pub chat_model: String,
     /// 会话工作集注册表（提醒注入的唯一写入口；`None` = 不注入）。
     pub working_sets: Option<Arc<WorkingSetRegistry>>,
+    /// 演化综述执行器（`None` = 未构造实现 → 不注册演化任务）。
+    ///
+    /// 与 [`snapshot_manager`](Self::snapshot_manager) 的 `None` 语义不同：那是
+    /// 「世界缺一块（没配工作区）→ 跳过该任务」，这里是「**能力**未提供 → 任务无从
+    /// 构造」。两者都只在插件里判定，内核这一层不做决策。
+    pub evolution_executor: Option<Arc<dyn EvolutionReviewExecutor>>,
 }

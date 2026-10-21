@@ -21,6 +21,10 @@
 //! 期 2 序 5a 扩第四插槽：**内置定时任务**（摘要 / GC / 统计刷盘 / 快照 GC / 提醒）
 //! 搬进 `plugins/task-builtin`，本包把插件的 `tasks()` 包成 `TaskFactory` 注入
 //! （server 库只认清单项类型，不认识任何具体任务）。
+//!
+//! 期 2 序 5b 该插槽收尾：**演化任务**搬进 `plugins/task-evolution`；两个插件的清单
+//! 在 `task_factory()` 里**拼接**（`splice(1..1, …)`：演化任务紧跟 `summary_generation`）
+//! ——跨插件顺序只有装配清单知道，插件之间不互相 `import`（D2-2）。
 
 use std::sync::Arc;
 
@@ -92,17 +96,33 @@ fn storage_factory() -> StorageBackendFactory {
     )
 }
 
-/// 内置任务工厂（`plugins/task-builtin`；ADR-049 期 2 序 5a）。
+/// 定时任务工厂（`plugins/task-builtin` 序 5a + `plugins/task-evolution` 序 5b）。
 ///
-/// 5 个内置任务（摘要生成 / 垃圾回收 / 统计刷盘 / 快照 GC / 主动提醒）的实现与
-/// **注册清单**（名字 / 显示名 / 间隔 / 启用条件）都在插件里；本包只把
-/// `tasks()` 包成类型擦除的 [`TaskFactory`]——server 库因此不认识任何具体任务。
+/// 5 个内置任务（摘要生成 / 垃圾回收 / 统计刷盘 / 快照 GC / 主动提醒）与自演化综述
+/// 任务的实现与**注册清单**（名字 / 显示名 / 间隔 / 启用条件）都在插件里；本包只做
+/// 「拼接两个插件的清单 + 包成类型擦除的 [`TaskFactory`]」——server 库因此不认识任何
+/// 具体任务。
+///
+/// **★ 顺序拼接为什么在装配层**：注册顺序 = 扫描顺序 = 同一轮到期任务的执行顺序，
+/// 而「演化任务排第 2 位（紧跟 `summary_generation`）」是**跨插件属性**：
+/// `task-builtin` 不知道演化任务存在，演化插件也不知道别人排在哪，只有装配清单知道
+/// 「哪个插件该排在哪」。让插件互相 import 来拼接会破 D2-2（插件之间零互赖）。
+/// 因此三个角色各守其位：`tianyan_task_builtin::tasks()` 保持既有 5 项的相对顺序
+/// （不为位置妥协）、`tianyan_task_evolution::tasks()` 返回 0/1 项且不关心绝对位置、
+/// 合并用 `splice(1..1, …)`（**在 index 1 之前插入** = 紧跟 `summary_generation`）。
+/// 用 splice 而不是 `insert` 循环，是为了让这条纪律在一行里可见，也让「演化插件未
+/// 启用」时自然退化为「只有 5 项」。
 ///
 /// **同步**工厂：能力集合（`TaskServices`）由 server 在调用前 await 好（聊天模型
 /// 服务是 `AppState` 里共享 `ModelServices` 的克隆，不重复建 HTTP client 池），
 /// 插件里只做「按配置构造处理器 + 判启用条件」。
 fn task_factory() -> TaskFactory {
-    Arc::new(|services: &tianyan_server::TaskServices| tianyan_task_builtin::tasks(services))
+    Arc::new(|services: &tianyan_server::TaskServices| {
+        let mut registrations = tianyan_task_builtin::tasks(services);
+        // 顺序纪律：evolution 紧跟 summary_generation（清单第 2 位，与迁移前一致）
+        registrations.splice(1..1, tianyan_task_evolution::tasks(services));
+        registrations
+    })
 }
 
 /// 完整装配（插件工具清单 + 向量存储 + 结构化存储 + 内置任务）。

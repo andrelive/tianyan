@@ -165,9 +165,9 @@ Tauri App 启动
     │     │         ├─ DualLayerRetriever::new()
     │     │         └─ AgentBuilder::build()
     │     │
-    │     ├─ 3.3 TaskScheduler 启动
-    │     │     ├─ SummaryTask（每 6 小时；ADR-017 降频）
-    │     │     ├─ EvolutionTask（每日；ADR-017 统一演化）
+    │     ├─ 3.3 TaskScheduler 启动（清单由装配层拼接：builtin 5 项 + evolution）
+    │     │     ├─ SummaryTask（每 6 小时；ADR-017 降频）      [plugins/task-builtin]
+    │     │     ├─ EvolutionTask（每日；ADR-017 统一演化）      [plugins/task-evolution]
     │     │     └─ GcTask / SnapshotGcTask / ReminderTask / UsageStatsFlushTask
     │     │
     │     └─ 3.4 axum::serve()              [监听 127.0.0.1:3000]
@@ -276,9 +276,10 @@ React Frontend：增量按 chunk_type 渲染；历史/流式共用服务端 segm
 ```
 TaskScheduler 触发
     │
-    ├─ EvolutionTask::handle()            [core/src/scheduler/tasks/evolution_task.rs]
+    ├─ EvolutionTask::execute()           [plugins/task-evolution/src/evolution_task.rs]
     │     ├─ 采集：注册表清单 + 会话回忆（session_recall，FTS5）
-    │     ├─ 综述：演化智能体（delegate 到 evolution_reviewer）产出 diff 计划
+    │     ├─ 综述：EvolutionReviewExecutor（core 契约；server 实现 = 主 agent
+    │     │        delegate 到 evolution_reviewer）产出 diff 计划
     │     └─ 记账提交：记忆/技能/规则/角色增删改 → VFS 写入
     │
     └─ SummaryTask::handle()              [plugins/task-builtin/src/summary_task.rs]
@@ -352,7 +353,8 @@ TaskScheduler 触发
 | `VlmService` | `core/src/model/traits.rs` | `AsyncOpenAIClient`（经 `LoggedVlmService` 装饰） | `knowledge/image/` |
 | `ServiceDiscovery` | `core/src/model/traits.rs` | `AsyncOpenAIClient` | `server/state.rs`（健康检查） |
 | `VfsCore` | `core/src/vfs/traits.rs` | `VfsImpl` | `vfs/vfs_impl.rs`, `context/pipeline.rs` |
-| `ContentStore` | `core/src/vfs/traits.rs` | `VfsImpl` | `vfs/vfs_impl.rs`, `scheduler/tasks/` |
+| `ContentStore` | `core/src/vfs/traits.rs` | `VfsImpl` | `vfs/vfs_impl.rs`, `plugins/task-builtin/`, `plugins/task-evolution/` |
+| `EvolutionReviewExecutor` | `core/src/scheduler/evolution_executor.rs` | `AgentEvolutionExecutor`（`server/src/evolution_executor.rs`，经 `TaskServices.evolution_executor` 注入） | `plugins/task-evolution/` |
 | `VfsSearch` | `core/src/vfs/traits.rs` | `VfsImpl` | `context/retrieval/retriever.rs` |
 | `VirtualFileSystem` | `core/src/vfs/traits.rs` | 实现 VfsCore+ContentStore+VfsSearch 的类型自动获得 | `server/state.rs`, `agent/coordinator.rs`（session/manager 已迁出 VFS，见 ADR-018） |
 | `StorageBackend` | `core/src/vfs/backend/mod.rs` | `SqliteBackend` / `LocalFileBackend`（`plugins/storage-sqlite`，装配层经 `StorageBackendFactory` 注入） | `vfs/vfs_impl.rs` |
@@ -440,7 +442,7 @@ SSE 事件（`server/src/api/chat/types.rs`，逐行 `data:` JSON），完整字
 | L1 Overview | ~2K | `overview_vector` | 内容导航、重排序 |
 | L2 Detail | 无限制 | — | 完整内容，按需加载 |
 
-**模块影响**：`context/retrieval/` 依赖 `vfs::VfsSearch` 做双层检索；`scheduler/tasks/summary_task.rs`（ADR-049 序 5a 已迁 `plugins/task-builtin`，逻辑未变）定时生成 L0/L1 摘要（短内容判断用 `common::token_estimator::estimate_tokens`，非字节数）。`SummaryEngine` 构造仅依赖 `model::ChatService`（2 参数），构成 vfs→model 的残留单向依赖（非环，已接受）。
+**模块影响**：`context/retrieval/` 依赖 `vfs::VfsSearch` 做双层检索；`plugins/task-builtin/src/summary_task.rs`（ADR-049 序 5a 从 core 迁出，逻辑未变）定时生成 L0/L1 摘要（短内容判断用 `common::token_estimator::estimate_tokens`，非字节数）。`SummaryEngine` 构造仅依赖 `model::ChatService`（2 参数），构成 vfs→model 的残留单向依赖（非环，已接受）。
 
 ### 决策 2：StructuredMessage — 单一真相源
 

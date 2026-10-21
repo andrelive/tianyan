@@ -15,10 +15,10 @@
 //!   `SqliteBackend` / `LocalFileBackend`）。**同步**：两个后端的构造都不做 IO
 //!   （建表/建目录发生在 `StorageBackend::initialize`）。`config.storage.backend`
 //!   的**选择语义**也在工厂里（装配层决定哪个 adapter）——server 库只递配置。
-//! - [`TaskFactory`]：内置定时任务清单（`tianyan-task-builtin` 的 5 个任务，
-//!   ADR-049 期 2 序 5a）。**同步**：调用前本库已把 [`TaskServices`] **await 好**
-//!   （聊天模型服务是 `AppState` 里共享实例的克隆，工厂里无处可等），工厂只做
-//!   「按当前配置构造处理器 + 判定启用条件」。
+//! - [`TaskFactory`]：定时任务清单（`tianyan-task-builtin` 的 5 个任务 + `tianyan-task-evolution`
+//!   的自演化综述，ADR-049 期 2 序 5a / 5b）。**同步**：调用前本库已把 [`TaskServices`]
+//!   **await 好**（聊天模型服务是 `AppState` 里共享实例的克隆，工厂里无处可等），
+//!   工厂只做「按当前配置构造处理器 + 判定启用条件」。
 
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -76,11 +76,15 @@ pub type StorageBackendFactory = Arc<
         + Sync,
 >;
 
-/// 内置定时任务工厂（**装配层注入**，期 2 序 5a）。
+/// 定时任务工厂（**装配层注入**，期 2 序 5a / 5b）。
 ///
 /// `Arc<dyn Fn(&TaskServices) -> Vec<TaskRegistration>>`：参数是**已 await 好**的
-/// 能力集合（[`TaskServices`]：配置快照 + 统计/快照/会话/通知/模型/工作集），返回
-/// 按注册顺序排好的任务清单。
+/// 能力集合（[`TaskServices`]：配置快照 + 统计/快照/会话/通知/模型/工作集/演化执行器），
+/// 返回按注册顺序排好的任务清单。
+///
+/// **顺序是清单的属性**：多个任务插件各自的 `tasks()` 只保证自己的内部顺序，**跨插件
+/// 的相对位置由装配层拼接决定**（插件之间不互相 import，D2-2）——例如演化任务用
+/// `splice(1..1, …)` 紧跟 `summary_generation`。本库只按返回顺序注册。
 ///
 /// **同步**（与 [`StorageBackendFactory`] 同理，与 [`VectorStorageFactory`] 相反）：
 /// 工厂里没有需要等的事——聊天模型服务是 `AppState` 里 `ModelServices` 的克隆
@@ -130,7 +134,7 @@ impl AssemblyServices {
         self
     }
 
-    /// 装配内置任务工厂（`app` / `tauri` 用：`tianyan-task-builtin`）。
+    /// 装配定时任务工厂（`app` / `tauri` 用：`tianyan-task-builtin` + `tianyan-task-evolution`）。
     pub fn with_task_factory(mut self, factory: TaskFactory) -> Self {
         self.task_factory = Some(factory);
         self
@@ -210,7 +214,7 @@ impl AssemblyServices {
         }
     }
 
-    /// 构造内置定时任务清单（**唯一的任务实现选择点**）。
+    /// 构造定时任务清单（**唯一的任务实现选择点**）。
     ///
     /// 未装配工厂时返回**空清单**（不注册任何内置任务）+ `warn!` 一次指路。
     /// 为什么是「空清单」而不是 `Err`：
@@ -224,8 +228,8 @@ impl AssemblyServices {
     ///    「摘要永远不补、统计数据不落库」，看不出是降级还是数据缺失。
     ///
     /// 语义差异须知（迁移前后唯一的行为差）：迁移前 `start_server*`（不带装配）
-    /// **会**注册这 5 个任务；现在只有注入 [`TaskFactory`] 的装配（`app` / `tauri` /
-    /// 集成测试的 `test_assembly()`）才注册。`create_app` 路径迁移前后都**不**注册
+    /// **会**注册这些任务（5 个内置 + 演化）；现在只有注入 [`TaskFactory`] 的装配
+    /// （`app` / `tauri` / 集成测试的 `test_assembly()`）才注册。`create_app` 路径迁移前后都**不**注册
     /// 任务（任务注册在 `start_server_inner` 里），因此 47 处 `create_app` 单测的
     /// 可观测行为不变。
     pub(crate) fn tasks(&self, services: &TaskServices) -> Vec<TaskRegistration> {
@@ -233,9 +237,9 @@ impl AssemblyServices {
             Some(factory) => factory(services),
             None => {
                 warn!(
-                    "未装配任务工厂：不注册任何内置定时任务（摘要生成 / 垃圾回收 / 统计刷盘 / \
-                     快照 GC / 主动提醒）——生产装配请用 create_app_with_assembly / \
-                     start_server_with_assembly"
+                    "未装配任务工厂：不注册任何定时任务（摘要生成 / 垃圾回收 / 统计刷盘 / \
+                     快照 GC / 主动提醒 / 自演化综述）——生产装配请用 \
+                     create_app_with_assembly / start_server_with_assembly"
                 );
                 Vec::new()
             }
@@ -804,7 +808,8 @@ mod tests {
         }
     }
 
-    /// 构造任务装配能力集合（`snapshot_manager` 固定 `None`：本库的插槽测试不关心它）。
+    /// 构造任务装配能力集合（`snapshot_manager` 固定 `None`：本库的插槽测试不关心它；
+    /// `evolution_executor` 同理，清单判定只用到它是否为 `Some`）。
     async fn make_task_services() -> TaskServices {
         let database = tianyan::db::Database::open_in_memory().expect("内存库");
         database.init_schemas().await.expect("建表");
@@ -819,6 +824,7 @@ mod tests {
             chat: Arc::new(StubChatService),
             chat_model: "stub-model".to_string(),
             working_sets: None,
+            evolution_executor: None,
         }
     }
 

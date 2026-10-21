@@ -45,7 +45,7 @@
 //!
 //! ## ⚠️ 源码纪律：只用 `tianyan::…` 绝对路径，禁止 `crate::…`
 //!
-//! core 的单元测试需要构造**真实后端**（`evolution_task::real_vfs()` 刻意用
+//! core 的单元测试需要构造**真实后端**（`vfs_tests` 的「生产同构后端」用例刻意用
 //! `SqliteBackend` 锁定生产条目形态——退化成文件后端/桩会重演「Mock 形态掩盖
 //! 缺陷」的事故）。而「core 的 `[dev-dependencies]` 指向本 crate」**行不通**：
 //! core 会被编译两份（`cfg(test)` 的测试单元 + 本 crate 依赖的普通 lib），
@@ -62,6 +62,11 @@
 //! 同源包含时 `crate::` 会解析到 **core**（而非本 crate），编译错误会指向
 //! 完全不相干的位置，极难定位。`#[path]` 的路径也硬编码在 core 侧，改动本 crate
 //! 的文件布局须同步（否则 core 测试直接编译失败——这就是守卫）。
+//!
+//! 另一面：演化任务的同类用例（`real_vfs()`，用 `SqliteBackend` 锁定生产条目形态）
+//! 已随任务迁到 `plugins/task-evolution`（ADR-049 期 2 序 5b）——它是**独立 crate**，
+//! 那里直接 `[dev-dependencies] tianyan-storage-sqlite` 即可（无上述两编译单元问题）。
+//! 本节描述的同源包含手法只服务 core 自己的单测。
 
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 

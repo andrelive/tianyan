@@ -523,6 +523,97 @@ tauri 全域只引 `tianyan::{config,common,agent,notification}`，对候选模�
 这也是两条路径严格度不同的正当理由。降级路径的 `error!`/`warn!` 与「首次写入再告警一次」
 保留，作为最后一道可观测性兜底（ADR-038 可见失败）。
 
+**实施记录（序 5b：task-evolution，2026-10-21）**：`core/src/scheduler/tasks/`（`mod.rs` +
+`evolution_task.rs` 2,035 行 / 29 测试）**整目录删除**，演化任务整文件迁入
+`plugins/task-evolution`（crate `tianyan-task-evolution`，导出 `EvolutionTask` +
+`pub fn tasks(&TaskServices) -> Vec<TaskRegistration>`）。**core 从此没有任何具体任务
+实现**——5a 之后剩下的最后一份也走了。
+
+- **trait 提取（本序的硬前置）**：`EvolutionReviewExecutor` 原样提到
+  `core/src/scheduler/evolution_executor.rs`，公开路径
+  `tianyan::scheduler::EvolutionReviewExecutor`（`scheduler` 模块加 `mod` + `pub use`）。
+  签名唯一差异：`std::result::Result<String, TianyanError>` → 别名 `Result<String>`
+  （clippy `unused_qualifications`；`Result<T>` 就是那个类型的别名，**类型同一、行为
+  零变化**，与 core 其余代码写法一致）。
+- **`TaskServices` 新增一字段**：`pub evolution_executor: Option<Arc<dyn
+  EvolutionReviewExecutor>>`（core `scheduler/task_assembly.rs`）。理由：
+  `AgentEvolutionExecutor` 是 **server 侧业务实现**（它要 `AgentCoordinator` 与工作集
+  注册表，在专用演化会话里委托 `evolution_reviewer` 角色跑一轮主 agent），必须留在
+  server；插件只认识 core 的契约。接线因此正好是 D2 的形状——**server 构造实现 → 放进
+  能力集合 → 插件用它构造 `EvolutionTask`**，插件之间零互赖。该字段的 `None` 语义与
+  `snapshot_manager: None` 不同（后者是「世界缺一块 → 跳过该任务」，前者是「**能力**
+  未提供 → 任务无从构造」），已在字段文档里写明。
+- **装配**：`server/src/lib.rs` 的「内置定时任务」块删掉 `let at = 1.min(registrations.len());
+  registrations.insert(at, …)` 整段过渡代码（5a 的位置 hack 如期消失）；
+  `AgentEvolutionExecutor::new(...)` 的构造移进 `TaskServices` 的组装处：
+  `evolution_executor: if app_config.evolution.enabled { Some(Arc::new(...)) } else { None }`
+  （参数照旧：`state.agent_lock()` / `state.working_sets()` /
+  `state::resolve_chat_model(&app_config)` / `cfg.evolution.review_role`）。server 库现在
+  只做「递能力集合 + 按返回顺序 `register_task`」。`server/src/evolution_executor.rs`
+  只改一行 import（`scheduler::tasks::EvolutionReviewExecutor` →
+  `scheduler::EvolutionReviewExecutor`），实现逻辑零改动。
+- **★ 顺序（本序唯一需要设计的部分）**：注册顺序 = 扫描顺序 = 执行顺序，演化任务必须
+  保持**清单第 2 位**（`summary_generation` 之后）。但「第 2 位」是**跨插件属性**：
+  `task-builtin` 不知道演化任务存在，演化插件也不知道别人排在哪，只有装配清单知道
+  「哪个插件该排在哪」；让插件互相 import 来拼接会破 **D2-2**。因此选「方案 (ii)」：
+  两个插件各返回自己的（相对）顺序，**装配层显式拼接**，且用 `splice` 而非 `insert`
+  循环，让纪律在一行里可见：
+
+  ```rust
+  let mut registrations = tianyan_task_builtin::tasks(services);
+  // 顺序纪律：evolution 紧跟 summary_generation（清单第 2 位，与迁移前一致）
+  registrations.splice(1..1, tianyan_task_evolution::tasks(services));
+  registrations
+  ```
+
+  三处装配（`app/src/main.rs` / `tauri/src/server.rs` / `server/tests/common/factory.rs`
+  的 `test_assembly()`）同形同源；`tianyan_task_builtin::tasks()` 因此**保持既有 5 项
+  不动**（不再有任何位置妥协）。
+- **降级语义（逐字保持）**：`config.evolution.enabled == false` → 不注册；
+  `evolution_executor == None` → 不注册 + `warn!` 一次（能力缺失却已启用＝装配缺陷，
+  静默不注册的症状是「演化永远不跑」——ADR-038；生产里 server 用同一个 `enabled` 判
+  是否构造实现，故这条分支只在嵌入式/测试装配出现）；`interval_from_cron(&cron)` 为
+  `None` → `warn!` + 回退 `24*3600`（**文案照抄**迁移前 server 里那段，一字未改）；
+  `max_items_per_run` 原样透传 `EvolutionTask::new`。
+- **★ 测试期插件间 dev-dep（如实记一条）**：`real_vfs()` 的两个「真实后端形态」用例
+  必须用真实 `SqliteBackend`（`find_entry` 只匹配目录的历史缺陷就是被 Mock 目录形态
+  掩盖的），而 core 的 `cfg(test)` 同源包含手法在独立 crate 里用不上。做法：
+  `plugins/task-evolution` 的 `[dev-dependencies]` 加 `tianyan-storage-sqlite` + `tianyan
+  （features = ["test-utils"]）`。**这是测试期依赖边，生产图不受影响**：
+  `cargo tree -p tianyan-task-evolution --edges normal --depth 1` 只有
+  core/async-trait/chrono/serde/serde_json/tokio/tracing。
+  向量脚手架从 `vfs::MockVectorStorage`（`cfg(test)` 私货）换成
+  `tianyan::test_utils::InMemoryVectorStorage`（同为 8 维，语义等价；被锁定的链路是
+  结构化条目，不是向量）。**已知：插件间现存在两条测试期 dev-dep 边**——
+  `storage-vector → storage-sqlite`（序 4 的 examples，一次性运维脚本）与本条。
+  干净解法仍是「装配辅助 crate / `tools-ops` bin 包」（序 3/4 遗留，期 4 视情况）。
+- **行为零变化的证据**：`git diff --no-index`（HEAD 原文件 vs 插件文件）**35 增 / 39 删**，
+  逐行归类为：① `crate::` → `tianyan::` 路径前缀（**24 处**，含测试里的
+  `crate::config::…` / `crate::test_utils::…`）；② trait 定义块移出（11 行，含尾随空行）；
+  ③ `real_vfs()` 的脚手架与注释改写（`SqliteBackend` 改走 dev-dep、向量换
+  `InMemoryVectorStorage`）；④ 新增 3 行模块文档指向 core 的 trait。**任务名 / 显示名 /
+  间隔 / 启用条件 / cron 回退 `warn!` 文案 / `TaskResult` 语义 / 全部断言无一处改动**。
+- **门禁**：`cargo fmt --all -- --check` 干净；`cargo clippy --workspace --all-targets`
+  **零 warning**；`tianyan-core --lib` **1201 passed**（= 基线 1230 − 29 搬走的测试）；
+  `tianyan-task-evolution` **34 passed**（29 迁移 + 5 新清单门禁：注册元数据/间隔换算/
+  enabled 关闭/执行器缺失/可重复调用）、`tianyan-task-builtin` **37 passed**（不变）；
+  `tianyan-server --lib` **187 passed / 1 ignored**（不变）；`tianyan-app` assembly 7 /
+  server 集成 e2e 14 / config_api 5 / shutdown 1 / snapshot_reload 2 全绿；
+  `cargo catalog-check` OK；`cargo tree -p tianyan-task-evolution --edges normal --depth 1`
+  无 `tianyan-server`、无 `tianyan-storage-sqlite`。
+- **测试守恒**：HEAD core 1230 = 现在 core 1201 + 插件 34（其中 29 条为迁移，逐条同名
+  同断言；5 条为新增**清单门禁**）。`tianyan-task-builtin` 37 不动 ⇒ 全仓任务测试
+  71 = 37 + 34。**零放弃、零降级**。
+- **遗留**：
+  1. 跨插件顺序仍**无断言**（`splice(1..1, …)` 只在装配层一行里，没有「清单顺序 =
+     执行顺序」的测试；与 5a 遗留 2 同一件事，期 4 清单收敛时统一补）；
+  2. `TaskServices` 已长到 9 字段（8 + 演化执行器）。它确实是「装配期能力全集」，但
+     期 4 清单收敛时值得按插件分组（每个插件一份能力接口），否则新增插件会持续往
+     同一结构塞字段；
+  3. `AgentEvolutionExecutor` 仍在 server（正确：它是通道层业务），但它依赖
+     `AgentCoordinator` + `WorkingSetRegistry`——期 3 抽 `kernel-impl` 时这两者的归属
+     会决定它是否需要一个中间适配器。
+
 ---
 
 ## 分期与闸门
@@ -532,7 +623,7 @@ tauri 全域只引 `tianyan::{config,common,agent,notification}`，对候选模�
 | **0** | 地基与基线（零行为改动）✅ **已完成** | incremental 实验（**3× 加速 / 185MB 每会话**，建议开启 + GC 3 天/20GB）；`scripts/measure-rebuild.ps1`；`contracts.md`（34 trait 分级 + common 二分）；`microkernel-baseline.md` | 三场景基线齐全（**均 100% 全量重编**）；lint/unit 绿；无行为改动 ✅ |
 | **0.5** | 工具契约与注册形状 + 装配器二分（**工具侧已完成**） | ✅ 元数据表承载执行入口 + 协议工具独立成表（28 分支 match → 一次查表，内核零工具名字面量）；✅ `ToolContext` 承载六个工具域（`impl ToolContext` + 注册表 `Deref`），依赖边界实测：工具域 executor 引用仅 16 处（随插件搬走）。待办：`thin-channel` + `assembly-manifest`；`AppState` 20 字段契约化 | 工具目录 freshness ✅；工具行为零变化 ✅（1431 单测全绿）；clippy 零警告 ✅ |
 | **1** | 工具插件试点（**装配器二分 + tools-fs 骨架已完成**） | ✅ `tianyan-app` bin 包（**清单住 bin**）+ `ToolPluginFactory` 类型擦除 + `create_app_with_plugins` / `start_server_with_plugins*`；✅ `plugins/tools-fs` 独立 crate（`executor::fs` 实现整体迁入）。待续：**整域迁移**——`read_file` 目录模式反向依赖 `executor::fs::execute_list_dir`，故 fs 域必须 6 工具一起搬（read/write/edit/patch/glob/list_dir）才能删 core 侧 | 闸门 A **首测 512 行 ✅**（判据 ≤3.5K）；core 侧暂留（双路径过渡，重名注册自动跳过） |
-| **2** | 适配器与任务插件（**清单已普查，按序推进**） | 迁移顺序（按 自包含度×收益）：**0 清 core 死依赖** → 1 `tools-todo`+`tools-goal` → 2 `tools-web` → 3 `storage-vector` → 4 `storage-sqlite` → 5 `task-*`（2 crate）→ 6 `provider-llm`+`provider-embed`。详见下方「期 2 普查结论」 | 各领域 ≤ 2K；全量 release 不劣化 >10% |
+| **2** | 适配器与任务插件（**期 2 完成**） | 迁移顺序（按 自包含度×收益）：**0 清 core 死依赖** → 1 `tools-todo`+`tools-goal` → 2 `tools-web` → 3 `storage-vector` → 4 `storage-sqlite` → 5 `task-*`（2 crate）→ 6 `provider-llm`+`provider-embed`。详见下方「期 2 普查结论」 | 各领域 ≤ 2K；全量 release 不劣化 >10% |
 | **3** | 策略分离（最难一刀） | 抽 `kernel-impl`（loop/cancel/rollback/stream_forward/working_set）；`context`→`policy-context`；审批→`policy-approval`；`role_learning`→`policy-learning`；`judge`→`policy-review` | **闸门 B**：api ≤ 6K && impl ≤ 15K（或配置外移后 16.1K）；改策略不重编内核；S 级零变更 |
 | **4** | 清单收敛与发行版 | 清单完整化、跨插件顺序断言、desktop/headless/minimal 三份清单 | 装配清单 1 页可查；headless 可构建 |
 

@@ -15,7 +15,6 @@ use tower_http::trace::TraceLayer;
 use tracing::{error, info, warn};
 
 use tianyan::observability::usage_log::UsageLog;
-use tianyan::scheduler::tasks::EvolutionTask;
 use tianyan::scheduler::{TaskContext, TaskDefinition, TaskScheduler};
 use tianyan::vfs::VirtualFileSystem;
 
@@ -644,20 +643,20 @@ async fn start_server_inner(
             }
         });
 
-        // 内置定时任务（ADR-049 期 2 序 5a）：5 个任务的**实现与注册清单**已搬到
-        // `plugins/task-builtin`。本库只做两件事——把能力集合（[`TaskServices`]）递
-        // 过去、按返回顺序逐条 `register_task`；任务名 / 显示名 / 间隔 / 启用条件
-        // （摘要 6h、GC 6h、统计刷盘 60s、快照 GC 12h、提醒 `interval_min*60`）全在
-        // 插件里，server 不认识任何具体任务（D2-3）。
+        // 定时任务（ADR-049 期 2 序 5a + 5b）：**全部任务的实现与注册清单都在插件里**
+        // （`plugins/task-builtin` 的 5 项 + `plugins/task-evolution` 的演化任务）。
+        // 本库只做两件事——把能力集合（[`TaskServices`]）递过去、按返回顺序逐条
+        // `register_task`；任务名 / 显示名 / 间隔 / 启用条件全在插件里，server 不认识
+        // 任何具体任务（D2-3）。
         //
         // 顺序纪律：注册顺序 = 调度器扫描顺序 = 同一轮到期任务的执行顺序
-        // （`RegisteredTask`：「注册顺序 = 扫描顺序」）。插件清单顺序与迁移前那 5 段
-        // `register_task` 逐字一致；`evolution` 仍在本库（序 5b 才迁），迁移前它排在
-        // `summary_generation` 之后——故按「清单第 1 项之后」插入（用位置而非任务名，
-        // 免去 server 对具体任务名的依赖；序 5b 迁走后这段插入自然消失）。
+        // （`RegisteredTask`：「注册顺序 = 扫描顺序」）。**跨插件的顺序由装配层的
+        // `task_factory` 拼接决定**（`splice(1..1, …)`：演化任务紧跟
+        // `summary_generation`，与迁移前一致）——本库只按清单顺序注册。
         {
             let task_services = TaskServices {
-                // 注册期配置快照（提醒的 enabled/interval/max_per_run、存储的 GC 阈值）
+                // 注册期配置快照（提醒的 enabled/interval/max_per_run、存储的 GC 阈值、
+                // 演化的 cron / max_items_per_run）
                 config: app_config.as_ref().clone(),
                 usage_stats: state.usage_stats(),
                 snapshot_manager: state.snapshot_manager(),
@@ -667,51 +666,25 @@ async fn start_server_inner(
                 chat: state.shared_model_services().await?.chat,
                 chat_model: state::resolve_chat_model(&app_config),
                 working_sets: Some(state.working_sets()),
-            };
-            let mut registrations = task_assembly.tasks(&task_services);
-
-            // 注册自演化任务（ADR-017：每日一次；移除 memory_extraction / rule_extraction，
-            // 记忆/技能/规则/组织形态的演化统一由演化智能体综述驱动）
-            {
-                let cfg = state.config().read().await.clone();
-                if cfg.evolution.enabled {
-                    let executor = Arc::new(AgentEvolutionExecutor::new(
+                // 自演化综述执行器（ADR-017）：**server 侧业务实现**（在专用演化会话里
+                // 跑一轮主 agent 产出 diff 计划），必须留在本库；插件只认识 core 的
+                // `EvolutionReviewExecutor` 契约。这正是 D2 的形状——装配期注入
+                // `Arc<dyn Trait>`：server 构造实现 → 放进能力集合 → 插件用它构造任务。
+                // `enabled = false` → `None`（插件因此不注册演化任务）——与迁移前
+                // `if cfg.evolution.enabled` 门控同一语义。
+                evolution_executor: if app_config.evolution.enabled {
+                    Some(Arc::new(AgentEvolutionExecutor::new(
                         state.agent_lock(),
                         state.working_sets(),
-                        state::resolve_chat_model(&cfg),
-                        cfg.evolution.review_role.clone(),
-                    ));
-                    // 旧 cron 配置自动换算为间隔（ADR-024 迁移）；换算不了回退每日一次
-                    let evolution_interval = match tianyan::scheduler::interval_from_cron(
-                        &cfg.evolution.cron,
-                    ) {
-                        Some(secs) => secs,
-                        None => {
-                            tracing::warn!(
-                                old = %cfg.evolution.cron,
-                                fallback_secs = 24 * 3600,
-                                "evolution.cron 无法换算为间隔（ADR-024 已弃用 cron），回退每日一次；可从配置中删除该字段"
-                            );
-                            24 * 3600
-                        }
-                    };
-                    let at = 1.min(registrations.len());
-                    registrations.insert(
-                        at,
-                        TaskRegistration {
-                            name: "evolution".to_string(),
-                            display_name: "自演化综述".to_string(),
-                            interval_secs: evolution_interval,
-                            handler: Arc::new(EvolutionTask::new(
-                                executor,
-                                cfg.evolution.max_items_per_run,
-                            )),
-                        },
-                    );
-                }
-            }
+                        state::resolve_chat_model(&app_config),
+                        app_config.evolution.review_role.clone(),
+                    )))
+                } else {
+                    None
+                },
+            };
 
-            for registration in registrations {
+            for registration in task_assembly.tasks(&task_services) {
                 scheduler
                     .register_task(TaskDefinition::new(
                         registration.name,

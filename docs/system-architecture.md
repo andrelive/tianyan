@@ -81,7 +81,7 @@ tianyan/
 │   │   ├── services.rs  # ModelServices（替代 ModelRouter 的容器）
 │   │   └── provider/    # AsyncOpenAIClient 等统一客户端
 │   ├── observability/ # AgentMetrics 可观测性存储和自省接口
-│   ├── scheduler/  # 定时任务调度机制（TaskHandler/TaskContext/TaskScheduler + 装配原语）；内置任务实现在 plugins/task-builtin，EvolutionTask 暂留 core
+│   ├── scheduler/  # 定时任务调度机制（TaskHandler/TaskContext/TaskScheduler + 装配原语 + EvolutionReviewExecutor 契约）；core 无具体任务实现（→ plugins/task-builtin、plugins/task-evolution）
 │   ├── session/    # 会话管理（SessionStore SQLite 权威存储 + PersistentSessionManager + SessionRecall）
 │   ├── skills/     # 技能系统（definition、executor、handlers/、learning/）
 │   └── vfs/        # 虚拟文件系统（traits、vfs_impl、backend/、vector/、summary/）
@@ -220,7 +220,7 @@ Agent :: process_message(session_id, msg) / process_message_stream（多模态 +
   │     └─ 每条消息实时落库（子代理走 add_structured_message_no_fts + 广播）
   │
   └─ 后台异步（不阻塞响应）：
-        ├─ EvolutionTask（ADR-017）：每日演化综述（记忆/技能/规则/组织形态统一演化）
+        ├─ EvolutionTask（ADR-017，plugins/task-evolution）：每日演化综述（记忆/技能/规则/组织形态统一演化）
         └─ Scheduler 其他定时任务：SummaryTask / GcTask / SnapshotGcTask / ReminderTask
 ```
 
@@ -278,15 +278,18 @@ SSE stream: 7 种 chunk_type 差异化渲染（增量）
 
 ```
 Scheduler 定时触发
-  ├─ EvolutionTask: 综述智能体 → 记忆/技能/规则/角色 diff → 记账提交 VFS
+  ├─ EvolutionTask: EvolutionReviewExecutor（server 实现：主 agent）产出 diff → 记账提交 VFS
   ├─ SummaryTask: SummaryEngine.generate() → VFS 三级摘要 (L0/L1)
   └─ GcTask / SnapshotGcTask / ReminderTask / UsageStatsFlushTask
 ```
 
-> **任务实现的归属**（ADR-049 期 2 序 5a）：上面 5 个任务（Summary / GC / SnapshotGC /
-> Reminder / UsageStatsFlush）已迁至 `plugins/task-builtin`，经 `TaskFactory` 插槽注入；
-> core 只留调度机制（`TaskHandler` / `TaskContext` / `TaskScheduler`）与清单类型
-> `TaskRegistration`。`EvolutionTask` 仍在 core（序 5b 迁）。
+> **任务实现的归属**（ADR-049 期 2 序 5a / 5b）：上面 5 个任务（Summary / GC / SnapshotGC /
+> Reminder / UsageStatsFlush）已迁至 `plugins/task-builtin`，`EvolutionTask` 迁至
+> `plugins/task-evolution`；两份清单由装配层拼接（`splice(1..1, …)`：演化任务紧跟
+> `summary_generation`）后经 `TaskFactory` 插槽注入。core 只留调度机制（`TaskHandler` /
+> `TaskContext` / `TaskScheduler`）、清单类型 `TaskRegistration`、能力集合 `TaskServices`
+> 与综述执行器契约 `EvolutionReviewExecutor`（实现 `AgentEvolutionExecutor` 在 server，
+> 经 `TaskServices.evolution_executor` 注入插件）——**core 已无任何具体任务实现**。
 
 ### 5.3 VFS 数据流
 

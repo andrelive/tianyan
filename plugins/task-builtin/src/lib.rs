@@ -50,6 +50,10 @@
 //! 注册顺序固定 `summary_generation` → `garbage_collection` → `usage_stats_flush` →
 //! `snapshot_gc` → `reminder`（间隔制调度是「单一扫描循环按注册顺序串行执行」，
 //! 顺序即执行顺序，迁移前后一致）。
+//!
+//! **演化任务不在本清单里**（ADR-049 期 2 序 5b）：它由 `tianyan-task-evolution` 提供，
+//! 装配层把它 `splice` 到本清单**第 2 位**（紧跟 `summary_generation`，与迁移前一致）
+//! ——跨插件的相对位置只有装配清单知道，插件之间不互相 import（D2-2）。
 
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
@@ -211,6 +215,9 @@ mod tests {
             chat,
             chat_model: "test-model".to_string(),
             working_sets: None,
+            // 演化综述执行器（ADR-049 序 5b）由 `tianyan-task-evolution` 消费；
+            // 本插件的 5 个任务不需要它。
+            evolution_executor: None,
         }
     }
 

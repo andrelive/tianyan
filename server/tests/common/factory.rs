@@ -158,9 +158,14 @@ pub fn test_assembly() -> tianyan_server::AssemblyServices {
         Ok(storage)
     });
 
-    // 内置任务清单：与 `app` / `tauri` 同一份插件实现（任务名/间隔/启用条件全在插件里）
+    // 定时任务清单：与 `app` / `tauri` 同一份插件实现（任务名/间隔/启用条件全在插件里）
+    // 顺序拼接在装配层（D2-2）：`splice(1..1, …)` = evolution 紧跟 summary_generation。
     let task_factory: tianyan_server::TaskFactory =
-        Arc::new(|services: &tianyan_server::TaskServices| tianyan_task_builtin::tasks(services));
+        Arc::new(|services: &tianyan_server::TaskServices| {
+            let mut registrations = tianyan_task_builtin::tasks(services);
+            registrations.splice(1..1, tianyan_task_evolution::tasks(services));
+            registrations
+        });
 
     tianyan_server::AssemblyServices::new()
         .with_storage_factory(factory)

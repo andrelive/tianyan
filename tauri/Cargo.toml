@@ -29,6 +29,9 @@ tianyan-storage-sqlite = { path = "../plugins/storage-sqlite" }
 # 内置定时任务实现（ADR-049 期 2 序 5a）：5 个任务搬出 core 后由桌面端注入
 # （任务名/显示名/间隔/启用条件全在插件里，server 库不认识任何具体任务）。
 tianyan-task-builtin = { path = "../plugins/task-builtin" }
+# 自演化综述任务实现（ADR-049 期 2 序 5b）：演化任务搬出 core 后由桌面端注入。
+# 清单顺序跨插件，**合并也在这里**（`splice(1..1, …)`：紧跟 summary_generation）。
+tianyan-task-evolution = { path = "../plugins/task-evolution" }
 
 # Tauri framework
 tauri = { version = "2.2", features = ["tray-icon", "devtools"] }

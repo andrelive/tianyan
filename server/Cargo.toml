@@ -57,6 +57,10 @@ tianyan-storage-sqlite = { path = "../plugins/storage-sqlite" }
 # 任务清单，保住「`start_server*` 会注册 5 个内置任务」这条可观测行为。
 # 同样无循环（插件只依赖 core，不依赖 server）。
 tianyan-task-builtin = { path = "../plugins/task-builtin" }
+# 自演化综述任务实现（ADR-049 期 2 序 5b）：`test_assembly()` 里与 builtin 拼接
+# （`splice(1..1, …)`，与 `app`/`tauri` 同形），保住「演化任务排第 2 位」这条顺序
+# 纪律在集成测试里也被覆盖。同样无循环。
+tianyan-task-evolution = { path = "../plugins/task-evolution" }
 
 [[bench]]
 name = "api_benchmarks"

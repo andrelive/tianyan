@@ -70,9 +70,10 @@ pub mod sqlite_db;
 //
 // core 的单元测试（`cargo test -p tianyan-core --lib`）必须能构造真实后端：
 // `vfs::test_utils::create_test_vfs`、`vfs_tests` 的两条「生产同构后端」用例、
-// 角色存储的三处 tempdir VFS，以及 `scheduler::tasks::evolution_task` 的
-// `real_vfs()`（它刻意用 SqliteBackend 锁定生产条目形态——退化成文件后端/桩会
-// 重演「Mock 形态掩盖缺陷」那类事故）。
+// 角色存储的三处 tempdir VFS（刻意用 `SqliteBackend` 锁定生产条目形态——退化成
+// 文件后端/桩会重演「Mock 形态掩盖缺陷」那类事故）。演化任务的同类用例
+// （`real_vfs()`）已随任务搬到 `plugins/task-evolution`，那里用
+// `[dev-dependencies] tianyan-storage-sqlite`（ADR-049 期 2 序 5b）。
 //
 // 为什么不能靠 `[dev-dependencies] tianyan-storage-sqlite`：单测要**把 core 的
 // 类型（`StorageConfig` / `Arc<Database>` / `dyn StorageBackend`）传给插件 API**，

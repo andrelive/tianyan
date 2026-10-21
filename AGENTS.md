@@ -69,11 +69,14 @@ cargo test -p tianyan-core vfs::backend::local -- --nocapture  # 指定测试模
 | `plugins/tools-web/` | `tianyan-tools-web` | 插件：web_search / web_fetch（含实现，`scraper` 在此） |
 | `plugins/storage-vector/` | `tianyan-storage-vector` | 插件：`LanceDbVectorStore`（`lancedb`/`arrow`/`datafusion` 链只在此） |
 | `plugins/storage-sqlite/` | `tianyan-storage-sqlite` | 插件：`SqliteBackend` + `LocalFileBackend`（VFS `StorageBackend` 的两个 adapter；`rusqlite` 仍在 core——本插件收窄的是重编面积，不是依赖面） |
-| `plugins/task-builtin/` | `tianyan-task-builtin` | 插件：5 个内置定时任务实现（摘要生成 / 垃圾回收 / 统计刷盘 / 快照 GC / 主动提醒，含各自内联测试）；`evolution_task` 暂留 core（ADR-049 序 5b） |
+| `plugins/task-builtin/` | `tianyan-task-builtin` | 插件：5 个内置定时任务实现（摘要生成 / 垃圾回收 / 统计刷盘 / 快照 GC / 主动提醒，含各自内联测试） |
+| `plugins/task-evolution/` | `tianyan-task-evolution` | 插件：自演化综述任务（ADR-017 三阶段编排，含 29 个内联测试）；契约 `EvolutionReviewExecutor` 留 core，实现 `AgentEvolutionExecutor` 留 server（ADR-049 序 5b） |
 
 **依赖铁律**（破一条拆包收益全部回吐）：插件只依赖 `core`（kernel-api）；插件之间零互赖；
 `core`/`server` 不认识任何插件 crate。装配经 `server/src/assembly.rs` 的类型擦除插槽
-（`ToolPluginFactory` / `VectorStorageFactory` / `StorageBackendFactory` / `TaskFactory`）。
+（`ToolPluginFactory` / `VectorStorageFactory` / `StorageBackendFactory` / `TaskFactory`；
+`TaskFactory` 由装配层把 `task-builtin::tasks()` 与 `task-evolution::tasks()` 拼接成一份
+清单——`splice(1..1, …)` 让演化任务紧跟 `summary_generation`，跨插件顺序只有装配清单知道）。
 任务的清单项与能力集合（`TaskRegistration` / `TaskServices`）**定义在 core**
 （`core/src/scheduler/task_assembly.rs`，server 侧 re-export）：若住在 server，任务插件
 就得依赖 server 库（破第一条铁律）。
@@ -160,7 +163,7 @@ Harness 工程 → [`docs/harness核心思路/harness-engineering-overview.md`](
 | `skills` | `core/src/skills/` | 技能 = VFS 方法论文档（发现/读取 + GEPA 进化引擎 + 使用复审；无执行语义） | ❌ **不全量加载**，L0 发现→L2 按需 |
 | `session` | `core/src/session/` | `SessionStore`（SQLite 权威存储，ADR-018；SQL 收敛本模块，经 db 单连接）+ `PersistentSessionManager` + `SessionRecall`（FTS 回忆） | ⚠️ 例外：会话内容不经 VFS（ADR-018）；`tianyan://session/{id}` 仅作逻辑标识 |
 | `model` | `core/src/model/` | `ModelServices` 容器（不路由、不重试） | — |
-| `scheduler` | `core/src/scheduler/` | 定时任务**机制 + 装配原语**：`TaskScheduler`（间隔+补跑）、`TaskHandler`/`TaskContext`/`TaskDefinition`、`TaskRegistration`/`TaskServices`；实现只剩 `EvolutionTask`（5 个内置任务已迁 `plugins/task-builtin`，ADR-049 序 5a） | 定时任务产物写入 VFS |
+| `scheduler` | `core/src/scheduler/` | 定时任务**机制 + 装配原语**：`TaskScheduler`（间隔+补跑）、`TaskHandler`/`TaskContext`/`TaskDefinition`、`TaskRegistration`/`TaskServices`、`EvolutionReviewExecutor`（综述执行器契约）；**core 已无任何具体任务实现**（5 个内置任务 → `plugins/task-builtin` 序 5a，演化任务 → `plugins/task-evolution` 序 5b） | 定时任务产物写入 VFS |
 | `observability` | `core/src/observability/` | `AgentMetrics`/`UsageStats`/`TraceCollector`/`ExecutionLog`/`UsageLog`/`RuleRecorder`；SQL 经 db Repository 收敛 | — |
 | `executor` | `core/src/executor/` | 工具执行支撑（Action、审批、LLM-as-Judge、验证门控）+ 语义化编辑（内容匹配 edit / patch）、文件浏览（fs/search）、代码智能（symbols/repo_map/project/test_discovery） | — |
 | `snapshot` | `core/src/snapshot/` | 工作区快照（回退/撤销回退；gzip 压缩 + GC + similar diff） | ⚠️ **ADR-006 例外**：独立文件存储于 `{data_dir}/snapshots/`，不经 VFS |

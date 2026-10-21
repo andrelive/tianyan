@@ -12,7 +12,7 @@ use tokio::sync::RwLock;
 use tianyan::agent::AgentCoordinator;
 use tianyan::common::error::TianyanError;
 use tianyan::common::types::Message;
-use tianyan::scheduler::tasks::EvolutionReviewExecutor;
+use tianyan::scheduler::EvolutionReviewExecutor;
 
 /// 基于主 agent 的演化综述执行器。
 pub struct AgentEvolutionExecutor {

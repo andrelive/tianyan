@@ -22,12 +22,21 @@
 //! - [`TaskResult`][]: 任务执行结果。
 //! - [`TaskRegistration`][]: 一条任务注册（装配原语：任务插件交给调度器的清单项）。
 //! - [`TaskServices`][]: 任务装配时注入的能力集合（统计/快照/会话/通知/模型/工作集）。
+//! - [`EvolutionReviewExecutor`][]: 演化综述执行器契约（server 构造实现，经
+//!   [`TaskServices`] 注入演化任务插件）。
+//!
+//! # 具体任务实现不在本模块（ADR-049 期 2 序 5a / 5b）
+//!
+//! 5 个内置任务在 `plugins/task-builtin`，演化任务在 `plugins/task-evolution`
+//! （`core/src/scheduler/tasks/` 已整目录删除）。本模块只剩**机制 + 装配原语**：
+//! 间隔扫描与补跑、执行契约、注册机制、能力集合——改任务策略／新增任务不重编 core。
 
+mod evolution_executor;
 mod task_assembly;
 mod task_scheduler;
 mod task_state;
-pub mod tasks;
 
+pub use evolution_executor::EvolutionReviewExecutor;
 pub use task_assembly::{TaskRegistration, TaskServices};
 pub use task_scheduler::{
     interval_from_cron, next_due_at, TaskContext, TaskDefinition, TaskHandler, TaskPriority,
