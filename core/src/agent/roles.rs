@@ -320,6 +320,43 @@ impl RoleRegistry {
     }
 }
 
+/// 任务类型关键词分类（统计面板共用；失败回落 `general`）。
+///
+/// 类别：`delegation`（委托）/ `web_research`（网络调研）/ `search`（搜索）/
+/// `code_edit`（代码编辑）/ `verify`（验证）/ `command`（命令执行）/ `general`（通用）。
+///
+/// 归属说明（ADR-049 期 3）：本函数原先住在 `agent/role_learning.rs`，随该模块的
+/// 573 行死代码一起被删时被发现仍被 `server/src/api/roles.rs:215` 复用（角色面板按
+/// 任务类型分组统计），故单独迁到本模块保留。它是**纯函数、零 I/O、零状态**，
+/// 与「角色学习引擎」无关——这正是它不该跟着引擎一起死的原因。
+pub fn categorize_task_by_keyword(description: &str) -> String {
+    let lower = description.to_lowercase();
+    if lower.contains("delegate_to_agent") {
+        return "delegation".to_string();
+    }
+    if lower.contains("web_search") || lower.contains("web_fetch") {
+        return "web_research".to_string();
+    }
+    if lower.contains("grep") || lower.contains("search_vfs") {
+        return "search".to_string();
+    }
+    if lower.contains("apply_edit") || lower.contains("apply_patch") || lower.contains("write_file")
+    {
+        return "code_edit".to_string();
+    }
+    if lower.contains("cargo test")
+        || lower.contains("cargo check")
+        || lower.contains("pytest")
+        || lower.contains("vitest")
+    {
+        return "verify".to_string();
+    }
+    if lower.contains("execute_command") {
+        return "command".to_string();
+    }
+    "general".to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

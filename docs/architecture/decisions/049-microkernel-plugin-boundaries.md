@@ -680,6 +680,19 @@ GEPA）」的 **GEPA 部分作废**；`role_learning.rs`（573 生产）仍在�
 `reshape_after_compression`」顺序契约，位置在协调器而非 `context/`）；
 `agent/cancel.rs` **完全自包含**（零 `crate::` 引用，68 生产行），是最干净的 K1 切入口。
 
+**裁决与执行（2026-10-21，期 3 开工前）**：
+
+- **路线**：T1（policy-approval）→ T2（policy-context）→ T3（policy-review）→
+  T4（config 二分），**T5（kernel-api/impl 切 crate）留到期 4 单独一期**。
+- **`role_learning` 已删除**（573 行 + 2 个测试）：零生产消费者（全仓只出现在自身 /
+  `agent/mod.rs` 导出 / 自身测试），符合「不为迁移而迁移」。**删除中发现一处业务复用**：
+  `server/src/api/roles.rs:215` 用 `categorize_task_by_keyword`（角色面板按任务类型分组
+  统计）——该函数是**纯函数、零 I/O、零状态**，与引擎无关，故单独迁到 `agent/roles.rs`
+  保留（`tianyan::agent::categorize_task_by_keyword` 路径不变，server 零改动）。
+  教训与序 1 的 fs 域同型：**删死代码前必须按「符号」而非「模块」grep 复用面**
+  （按模块名 grep 会漏掉 `categorize_task_by_keyword` 这类不含模块名前缀的导出）。
+  core 测试 1201 → 1199（−2）。
+
 ---
 
 ## 分期与闸门
