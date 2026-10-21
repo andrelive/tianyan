@@ -298,6 +298,23 @@ tauri 全域只引 `tianyan::{config,common,agent,notification}`，对候选模�
 `ModelServices`（容器 + 构造器，须整体外移 assembly）、
 `knowledge/image → model::provider::vision::infer_mime_type`（两域都搬会形成**插件间依赖**，违 D2-2）。
 
+**实施记录（序 2：tools-web，2026-10-20）**：`executor/web.rs`（1383 行，含
+`SearchResult` / `WebSearchClient` / `validate_public_url` 与全部测试）整域迁入
+`plugins/tools-web`（`web_search` / `web_fetch`），`scraper` 依赖随之离开 core。
+
+- **客户端来源**：`PluginServices` 增 `web_config: WebConfig`（core 配置类型），插件在
+  `tools(&config)` 里 `WebSearchClient::new(config)` 构造；server 库仍零插件依赖
+- **降级语义必须保留**（迁移期最容易丢的东西）：`enabled = false` → 返回空清单
+  （迁移前 `AgentBuilder` 有 `if web_config.enabled` 门控，而 `WebSearchClient::new`
+  本身**不读** enabled —— 不在插件里显式判断，"禁用"就会失效）；构造失败（未知后端 /
+  缺 key）→ `warn!` + 空清单（对齐原 builder 的 match 失败分支），**装配不 panic**。
+  两条都有测试锁定（`test_tools_empty_when_disabled` / `test_tools_degrade_on_invalid_config`）
+- `ToolRegistry.web_client` 字段 + `with_web_client` 一并删除：web 客户端不再经注册表，
+  改由插件自持（与 `RepoMapCache` 同一处理模式——这是 core 反向依赖插件的入口）
+- `AgentBuilder.web_config` 字段 / `with_web_config` 移除：web 配置只经 `PluginServices`
+  进入装配（否则该字段成为 never-read 死字段）
+- 渲染契约：`MIGRATED_TOOL_PRESENTATIONS` 加 `web_search` / `web_fetch` → `Web`
+
 ---
 
 ## 分期与闸门
