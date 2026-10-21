@@ -268,7 +268,7 @@ async fn run_server_supervisor(
 
         // 重启前重读配置：数据目录搬迁 / 设置页修改 data_dir 后生效
         // （监督循环持有的 config 是启动时快照，可能已过期）
-        if let Ok(fresh) = tianyan::config::TianyanConfig::load() {
+        if let Ok(fresh) = tianyan_service_config::load() {
             config = fresh;
         }
 
@@ -689,13 +689,11 @@ async fn check_for_updates(app: tauri::AppHandle) {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     // 尝试加载配置（日志初始化需要 [logging] 节；失败则默认配置，前端显示配置向导）
-    let tianyan_config = match tianyan::config::TianyanConfig::load() {
-        Ok(config) => config,
-        Err(e) => {
-            eprintln!("配置加载失败（使用默认配置）: {}", e);
-            tianyan::config::TianyanConfig::default()
-        }
-    };
+    //
+    // 装配顺序（ADR-049 期 3-T4）：**先加载并注入内核槽位，再初始化日志**
+    // ——与 `app/src/main.rs` 同源同形（`load_and_install` 是「加载 → 失败回退默认
+    // + stderr + 诊断槽位 → 注入」的唯一落点）。
+    let tianyan_config = tianyan_service_config::load_and_install();
 
     // 初始化日志（级别/格式来自配置文件 [logging] 节，RUST_LOG 可覆盖级别）
     init_logging(&tianyan_config.logging);
@@ -703,7 +701,7 @@ pub fn run() {
     info!("Starting Tianyan Tauri application...");
 
     // 检查配置状态
-    let configured = tianyan::config::TianyanConfig::config_exists();
+    let configured = tianyan_service_config::config_exists();
     info!("Configuration status: configured={}", configured);
 
     // 创建 Tokio runtime 用于后台服务

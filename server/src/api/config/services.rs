@@ -262,12 +262,14 @@ impl ConfigService {
         })
     }
     async fn persist_config(&self, config: &TianyanConfig) -> Result<(), ApiError> {
-        let path = TianyanConfig::find_config_file()
-            .or_else(TianyanConfig::default_config_path)
+        // 路径解析与写盘（段保全）都在服务层 crate 里（ADR-049 期 3-T4）：
+        // `~/.tianyan/tianyan.toml`，`TIANYAN_CONFIG` 覆盖优先（ADR-023）。
+        let path = tianyan_service_config::find_config_file()
+            .or_else(tianyan_service_config::default_config_path)
             .ok_or_else(|| ApiError::Internal("无法确定配置文件路径".to_string()))?;
 
         // ? 传播：保存失败（IO/序列化）映射为内部错误（无语义前缀，From 默认 Internal）
-        config.save_to_file(&path)?;
+        tianyan_service_config::save_to_file(config, &path)?;
 
         info!(path = %path.display(), "配置已保存到: {}", path.display());
         Ok(())
@@ -275,7 +277,7 @@ impl ConfigService {
 
     /// 校验、持久化并热重载配置。
     async fn persist_and_reload(&self, config: TianyanConfig) -> Result<(), ApiError> {
-        config.validate().map_err(ApiError::Config)?;
+        tianyan_service_config::validate(&config).map_err(ApiError::Config)?;
         // 命令执行底层（ADR-037）：先解析验证（失败 → 拒绝保存，错误分类保真
         // 含修复指引），保存/热重载成功后安装生效。切换的提示词后果（一次前缀
         // 重建 + 一次主动压缩）由工具表指纹机制自动吸收——见 [executor] 注释。

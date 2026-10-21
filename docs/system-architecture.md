@@ -72,7 +72,8 @@ tianyan/
 ├── core/           # 核心库 (lib: tianyan)
 │   ├── agent/      # Agent 协调器 + AgentLoop + ToolRegistry + 会话状态
 │   ├── common/     # 通用类型、错误处理、日志
-│   ├── config/     # 配置管理
+│   ├── config/     # 配置结构 + 全局槽位（TianyanConfig/子 Config/预设表/get_config·set_config）
+│   │               # 加载/持久化/迁移/校验/向导 → service/config（ADR-049 期 3-T4）
 │   ├── context/    # 上下文工程契约 + 组装机制（assembler、port.rs、assembly.rs）；策略实现 → plugins/policy-context
 │   ├── executor/   # [已废弃] 独立执行函数 + 审批工作流 + 验证门控
 │   ├── knowledge/  # 知识库导入和解析（parser、image、ingestor/）
@@ -97,6 +98,12 @@ tianyan/
 │       ├── state.rs        # AppState（持有 Agent、VFS、SessionManager）
 │       ├── agent_builder.rs # Agent 构建工厂
 │       └── lib.rs          # bootstrap_app_vfs() + 服务器启动
+├── service/
+│   └── config/     # 服务层配置 crate（tianyan-service-config）
+│       └── src/loader.rs     # 加载 / 持久化（段保全）/ 路径解析 / 段位注入
+│           src/migration.rs  # 数据目录搬迁（ADR-023）
+│           src/validation.rs # 校验编排（向导 / 配置状态）
+│           src/wizard.rs     # 连接测试 DTO
 ├── gui-vite/            # React TypeScript 前端
 │   └── src/
 │       ├── api/            # API 客户端

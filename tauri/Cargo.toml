@@ -12,6 +12,9 @@ tauri-build = { version = "2.2", features = [] }
 [dependencies]
 tianyan-core = { path = "../core" }
 tianyan-server = { path = "../server" }
+# 服务层配置 crate（ADR-049 期 3-T4）：桌面端同样在启动期「加载 → 注入内核槽位」，
+# 搬迁重启后再重读一次（与 `app/src/main.rs` 同源同形）。
+tianyan-service-config = { path = "../service/config" }
 # 插件清单（ADR-049 期 1）：桌面端也在装配层，清单与独立 bin 同源
 tianyan-tools-fs = { path = "../plugins/tools-fs" }
 # 插件清单（ADR-049 期 1）：桌面端与独立 bin 同源

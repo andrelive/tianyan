@@ -41,7 +41,7 @@ use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
 use tianyan::common::types::{ContentLevel, ContextNamespace, MemoryCategory, TianyanUri};
-use tianyan::config::{ModelCapability, TianyanConfig};
+use tianyan::config::ModelCapability;
 use tianyan::db::Database;
 // ADR-049 期 2 序 6：ModelServices 容器已搬到 server 装配层；运维脚本直接用 provider
 // 插件的能力集合（	ianyan-provider-embed / 	ianyan-provider-llm）——它们只依赖 core。
@@ -247,7 +247,8 @@ async fn apply_item(
 }
 
 async fn run(apply: bool) -> Result<(), Box<dyn std::error::Error>> {
-    let config = TianyanConfig::load()?;
+    // 加载器随 ADR-049 期 3-T4 搬去 `tianyan-service-config`（运维脚本的 dev 边）
+    let config = tianyan_service_config::load()?;
     let db_path = config
         .storage
         .sqlite_path

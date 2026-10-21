@@ -93,16 +93,16 @@ pub async fn get_models(
 
 /// GET /api/config/status — simple bootstrap check for frontend.
 pub async fn get_config_status() -> Json<Value> {
-    let configured = tianyan::config::TianyanConfig::config_exists();
+    let configured = tianyan_service_config::config_exists();
     Json(serde_json::json!({ "configured": configured }))
 }
 
 /// POST /api/config/test-connection — test a model service connection.
 pub async fn test_connection(
     State(state): State<Arc<AppState>>,
-    Json(request): Json<tianyan::config::TestConnectionRequest>,
-) -> Json<tianyan::config::TestConnectionResponse> {
-    use tianyan::config::TestConnectionResponse;
+    Json(request): Json<tianyan_service_config::TestConnectionRequest>,
+) -> Json<tianyan_service_config::TestConnectionResponse> {
+    use tianyan_service_config::TestConnectionResponse;
     if !request.endpoint.starts_with("http://") && !request.endpoint.starts_with("https://") {
         return Json(TestConnectionResponse::error(
             "API 端点 URL 格式无效，必须以 http:// 或 https:// 开头",
@@ -211,9 +211,9 @@ pub async fn migrate_data_dir(
     let current = config.storage.data_dir.clone();
     let new_dir = PathBuf::from(&request.new_dir);
 
-    tianyan::config::migration::validate_migration_target(&current, &new_dir)
+    tianyan_service_config::validate_migration_target(&current, &new_dir)
         .map_err(ApiError::BadRequest)?;
-    tianyan::config::migration::write_migration_request(&current, &new_dir)?;
+    tianyan_service_config::write_migration_request(&current, &new_dir)?;
 
     info!(
         from = %current.display(),

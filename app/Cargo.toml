@@ -14,6 +14,9 @@ path = "src/main.rs"
 [dependencies]
 tianyan = { path = "../core", package = "tianyan-core" }
 tianyan-server = { path = "../server" }
+# 服务层配置 crate（ADR-049 期 3-T4）：装配层负责「先加载并注入内核槽位，再 init」
+# ——`main` 的两处 `load` 走这里，内核不再认识配置文件的路径。
+tianyan-service-config = { path = "../service/config" }
 # 插件清单：**只在本包出现**——server 库因此不依赖插件 crate，
 # 改一行工具只重编插件 + 本 bin（闸门 A 前提）
 tianyan-tools-fs = { path = "../plugins/tools-fs" }

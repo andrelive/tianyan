@@ -28,7 +28,7 @@ use std::sync::Arc;
 
 use chrono::TimeZone;
 use tianyan::common::types::{AgentPath, ContentLevel, ContextNamespace, TianyanUri};
-use tianyan::config::{ModelCapability, TianyanConfig};
+use tianyan::config::ModelCapability;
 use tianyan::db::Database;
 // ADR-049 期 2 序 6：ModelServices 容器已搬到 server 装配层；运维脚本直接用 provider
 // 插件的能力集合（	ianyan-provider-embed / 	ianyan-provider-llm）——它们只依赖 core。
@@ -69,7 +69,8 @@ async fn run() -> Result<(), tianyan::TianyanError> {
     let dry_run = std::env::args().any(|a| a == "--dry-run");
 
     // ── 装配 VFS（与 server initialize_vfs_for_app 同构）──────────────────
-    let config = TianyanConfig::load()?;
+    // 加载器随 ADR-049 期 3-T4 搬去 `tianyan-service-config`（运维脚本的 dev 边）
+    let config = tianyan_service_config::load()?;
     let db_path = config
         .storage
         .sqlite_path

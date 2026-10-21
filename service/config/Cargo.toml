@@ -1,0 +1,33 @@
+[package]
+name = "tianyan-service-config"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "天演服务层：配置加载 / 持久化（段保全）/ 数据目录迁移 / 校验 / 向导 DTO（ADR-049 期 3-T4）"
+
+[lib]
+name = "tianyan_service_config"
+path = "src/lib.rs"
+# 禁用 doctest：与 core/server 同步（本 crate 的文档示例都在 crate 文档里，无独立 doctest 需求）
+doctest = false
+
+[dependencies]
+tianyan = { path = "../../core", package = "tianyan-core" }
+# 配置格式与文件 IO（core 已不再需要 `config`：加载器整段搬到这里）
+config.workspace = true
+toml.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+chrono.workspace = true
+dirs.workspace = true
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+# 集成测试（`tests/config_integration.rs`，随迁自 `core/tests/`）用 `#[tokio::test]`
+tokio.workspace = true

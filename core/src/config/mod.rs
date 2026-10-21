@@ -1,7 +1,23 @@
-//! Tianyan 代理系统的配置管理。
+//! Tianyan 代理系统的配置**结构**与全局**槽位**。
 //!
-//! 本模块提供整个应用程序的配置结构和加载机制。
-//! 使用 std::sync::OnceLock 实现全局静态配置访问。
+//! 本模块只做两件事：定义配置的形状（[`TianyanConfig`] 与各子 Config）与提供
+//! 进程级配置槽位（[`get_config`] / [`set_config`]）。
+//!
+//! # 加载器已外移（ADR-049 期 3-T4）
+//!
+//! 「配置怎么落到磁盘」整段搬去 `tianyan-service-config`：`load` / `load_from_file` /
+//! `find_config_file` / `config_exists` / `default_config_path` / `generate_default_toml` /
+//! `save_to_file`（段保全）/ `validate`（汇总编排）/ `migration`（数据目录搬迁）/
+//! `validation` / `wizard`。判据是 ADR-049 D7「按变化原因切」：改一条校验文案、
+//! 调一次搬迁排除清单、换一个配置路径，不该重编内核。
+//!
+//! 内核对配置的依赖因此**只剩数据形状**：它们仍是内核与插件的共同构造参数
+//! （`TaskServices.config` / `ContextServices.config` / `PluginServices.web_config` …），
+//! 搬走会让所有插件反向依赖服务层（破 D2-1）。预设表 `presets` 同理留在这里
+//! （server 的配置 API 要展示预设，搬进插件会让 server 反向依赖插件）。
+//!
+//! 槽位语义：**装配层注入、内核只读**。未注入时 [`get_config`] 回退
+//! `TianyanConfig::default()`（保持「没有配置文件也能跑」），注入走 [`set_config`]。
 
 use serde::{Deserialize, Serialize};
 
@@ -15,7 +31,6 @@ mod evolution;
 mod executor;
 pub mod mcp;
 mod memory;
-pub mod migration;
 mod model;
 mod presets;
 mod reminder;
@@ -24,9 +39,7 @@ mod roles;
 mod security;
 mod storage;
 mod tool_output;
-pub mod validation;
 pub mod web;
-pub mod wizard;
 
 pub use crate::common::logging::LoggingConfig;
 pub use agent::AgentConfig;
@@ -48,12 +61,7 @@ pub use roles::AgentRolesConfig;
 pub use security::{ApprovalMode, SafetyMode, SecurityConfig};
 pub use storage::{StorageBackendType, StorageConfig, VectorStorageConfig};
 pub use tool_output::ToolOutputConfig;
-pub use validation::{
-    validate_agent_config, validate_models_config, validate_provider, validate_storage_config,
-    validation_errors_to_strings, ValidationResult,
-};
 pub use web::WebConfig;
-pub use wizard::{TestConnectionRequest, TestConnectionResponse};
 
 /// Tianyan 代理的主配置。
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -109,240 +117,36 @@ pub struct TianyanConfig {
     pub tool_output: ToolOutputConfig,
 }
 
-impl TianyanConfig {
-    /// 配置文件名。
-    const CONFIG_FILE_NAME: &'static str = "tianyan.toml";
-
-    /// 从固定位置加载配置：`~/.tianyan/tianyan.toml`。
-    ///
-    /// 配置目录与数据目录是两个概念（ADR-023）：配置文件位置写死、
-    /// 不随 `storage.data_dir` 搬迁；数据目录从配置内容读取。
-    /// 如果找不到配置文件，返回错误。
-    pub fn load() -> Result<Self, TianyanError> {
-        let config_path = Self::find_config_file().ok_or_else(|| {
-            TianyanError::Custom(
-                "配置加载失败：未找到配置文件 ~/.tianyan/tianyan.toml（可用环境变量 TIANYAN_CONFIG 指定其他路径）".to_string(),
-            )
-        })?;
-
-        Self::load_from_file(&config_path)
-    }
-
-    /// 从指定文件加载配置。
-    pub fn load_from_file(path: &std::path::Path) -> Result<Self, TianyanError> {
-        use config::{File, FileFormat};
-
-        let config_raw = config::Config::builder()
-            .add_source(File::from(path).format(FileFormat::Toml))
-            .build()
-            .map_err(|e| TianyanError::Custom(format!("配置加载失败：构建配置失败：{}", e)))?;
-
-        let mut config: TianyanConfig = config_raw
-            .try_deserialize()
-            .map_err(|e| TianyanError::Custom(format!("配置加载失败：反序列化配置失败：{}", e)))?;
-
-        // 规范化路径类配置：展开 `~` 前缀（`~/.tianyan` 等常见写法；
-        // 不展开时会被当作相对路径落在进程 cwd 下——历史上数据落到了
-        // `{cwd}/~/.tianyan`）。
-        config.storage.data_dir = expand_user_dir(&config.storage.data_dir);
-        if let Some(ref sqlite_path) = config.storage.sqlite_path {
-            config.storage.sqlite_path = Some(expand_user_dir(sqlite_path));
-        }
-        config.security.trash_directory = expand_user_dir(&config.security.trash_directory);
-        config.security.allowed_directories = config
-            .security
-            .allowed_directories
-            .iter()
-            .map(|p| expand_user_dir(p))
-            .collect();
-        config.security.blocked_directories = config
-            .security
-            .blocked_directories
-            .iter()
-            .map(|p| expand_user_dir(p))
-            .collect();
-        // 归一安全配置旧字段（ADR-033）：wait_for_approval / allow_all_operations
-        // → approval_mode（仅读取兼容；下次写回时旧字段自然消失）。
-        config.security.normalize();
-
-        config
-            .validate()
-            .map_err(|e| TianyanError::Custom(format!("配置加载失败：{e}")))?;
-
-        Ok(config)
-    }
-
-    /// 在固定位置查找配置文件。
-    ///
-    /// 位置：`~/.tianyan/tianyan.toml`（写死，不随数据目录搬迁）；
-    /// 环境变量 `TIANYAN_CONFIG` 显式指定时最高优先级（e2e/CI 用）。
-    pub fn find_config_file() -> Option<std::path::PathBuf> {
-        // 0. 环境变量显式覆盖（空值视为未设置；路径不存在时原样返回，由 load 报错）
-        if let Ok(path) = std::env::var("TIANYAN_CONFIG") {
-            if !path.trim().is_empty() {
-                return Some(std::path::PathBuf::from(path));
-            }
-        }
-
-        // 1. 固定位置：~/.tianyan/tianyan.toml
-        Self::canonical_config_path().filter(|p| p.exists())
-    }
-
-    /// 固定配置路径（不检查存在性）：`~/.tianyan/tianyan.toml`。
-    fn canonical_config_path() -> Option<std::path::PathBuf> {
-        dirs::home_dir().map(|home| home.join(".tianyan").join(Self::CONFIG_FILE_NAME))
-    }
-
-    /// 检查配置文件是否存在。
-    pub fn config_exists() -> bool {
-        Self::find_config_file().is_some()
-    }
-
-    /// 获取默认配置文件保存路径（配置不存在时首次写入用）：
-    /// `~/.tianyan/tianyan.toml`（与查找位置一致）。
-    pub fn default_config_path() -> Option<std::path::PathBuf> {
-        Self::canonical_config_path()
-    }
-
-    /// 验证配置。
-    pub fn validate(&self) -> Result<(), String> {
-        self.agent.validate()?;
-        self.storage.validate()?;
-        self.models.validate()?;
-        self.logging.validate()?;
-        self.security.validate()?;
-        self.evolution.validate()?;
-        self.retrieval.validate()?;
-        self.mcp.validate().map_err(|e| e.to_string())?;
-        Ok(())
-    }
-
-    /// 生成默认配置文件内容。
-    pub fn generate_default_toml() -> Result<String, TianyanError> {
-        Ok(toml::to_string_pretty(&Self::default())?)
-    }
-
-    /// 将配置保存到文件。
-    ///
-    /// **段保全（T0-6）**：保存前读取现有文件，把程序**未建模**的键（用户
-    /// 自定义段、未来版本字段、版本回滚场景）合并回输出——此前全量序列化
-    /// 覆盖会把它们静默清掉（跨版本回滚时配置退化）。程序建模的键以内存值
-    /// 为准。
-    pub fn save_to_file(&self, path: &std::path::Path) -> Result<(), TianyanError> {
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)
-                .map_err(|e| TianyanError::Custom(format!("配置保存失败：创建目录失败：{}", e)))?;
-        }
-
-        let mut new_value = toml::Value::try_from(self)
-            .map_err(|e| TianyanError::Custom(format!("配置保存失败：序列化失败：{}", e)))?;
-        // 现有文件可解析时合并未建模键（不存在/解析失败则跳过——不阻断保存）
-        if let Ok(existing_raw) = std::fs::read_to_string(path) {
-            if let Ok(existing_value) = existing_raw.parse::<toml::Value>() {
-                new_value = merge_unknown_keys(existing_value, new_value);
-            }
-        }
-
-        let content = toml::to_string_pretty(&new_value)
-            .map_err(|e| TianyanError::Custom(format!("配置保存失败：序列化失败：{}", e)))?;
-
-        std::fs::write(path, content)
-            .map_err(|e| TianyanError::Custom(format!("配置保存失败：写入文件失败：{}", e)))?;
-
-        Ok(())
-    }
-}
-
-/// 合并“程序未建模的键”（段保全，T0-6）：以 `new`（当前配置序列化结果）为
-/// 基准，保留 `existing`（磁盘现有文件）中 `new` 缺失的键；双方都有的表递归
-/// 合并，标量/数组以 `new` 为准（程序建模值优先）。
-fn merge_unknown_keys(existing: toml::Value, new: toml::Value) -> toml::Value {
-    use toml::Value;
-
-    match (existing, new) {
-        (Value::Table(old), Value::Table(mut new_table)) => {
-            for (key, old_val) in old {
-                match new_table.remove(&key) {
-                    Some(new_val) => {
-                        new_table.insert(key, merge_unknown_keys(old_val, new_val));
-                    }
-                    // 未建模键：原样保留（自定义段 / 未来版本字段）
-                    None => {
-                        new_table.insert(key, old_val);
-                    }
-                }
-            }
-            Value::Table(new_table)
-        }
-        // 非表（标量 / 数组 / 类型不一致）：以程序当前值为准
-        (_, new_val) => new_val,
-    }
-}
-
-/// 展开用户目录前缀 `~`（`~` / `~/x` / `~\x`）；无 `~` 前缀时原样返回。
+/// 全局配置槽位（进程级单例，**只由装配层注入**）。
 ///
-/// 配置中的 data_dir 常见写法 `~/.tianyan`：不展开会被当作相对路径落在
-/// 进程 cwd 下（历史上数据落在了 `{cwd}/~/.tianyan`）。
-fn expand_user_dir(path: &std::path::Path) -> std::path::PathBuf {
-    let Some(home) = dirs::home_dir() else {
-        return path.to_path_buf();
-    };
-    if path == std::path::Path::new("~") {
-        return home;
-    }
-    match path.strip_prefix("~") {
-        Ok(rest) if rest.as_os_str().is_empty() => home,
-        Ok(rest) => home.join(rest),
-        Err(_) => path.to_path_buf(),
-    }
-}
-
-/// 全局静态配置实例。
-///
-/// 使用 `std::sync::OnceLock` 实现延迟加载，配置只在首次访问时加载。
-/// 通过 `get_or_init` 保证线程安全的单次初始化，消除 TOCTOU 竞态条件。
+/// 迁移前本槽位用 `get_or_init` 在首次访问时**加载**配置（读文件 + 迁移 + 校验）；
+/// 加载器搬去 `tianyan-service-config` 之后（ADR-049 期 3-T4），内核不再依赖服务层
+/// （D2-1），槽位因此只承担两件事：**存**（[`set_config`]）与**读**
+/// （[`get_config`] / [`try_get_config`]）。
 static CONFIG: std::sync::OnceLock<TianyanConfig> = std::sync::OnceLock::new();
 
-/// 全局配置加载错误（仅首次加载失败时写入）。
+/// 未注入时的回退配置（保持「没有配置文件也能跑」的语义）。
 ///
-/// 与 [`CONFIG`] 同生命周期：进程内只记录首次加载的结果，不可重置；
-/// 加载成功时保持为空。调用方通过 [`last_config_error`] 查询。
+/// 刻意与 [`CONFIG`] 分成两个 `OnceLock`：这样 [`get_config`] 在注入**之前**被
+/// 调用也不会把槽位占死。若沿用迁移前的 `get_or_init`（回退值直接写进同一个
+/// 槽位），「先有人读了配置、装配层再注入」就会静默失败——那是个只在装配顺序
+/// 出错时才暴露的陷阱，不值得为了少一个 `static` 留着。
+static FALLBACK_CONFIG: std::sync::OnceLock<TianyanConfig> = std::sync::OnceLock::new();
+
+/// 全局配置加载错误（仅首次写入生效）。
+///
+/// 与 [`CONFIG`] 同生命周期：进程内只记录首次加载的结果，不可重置；加载成功时
+/// 保持为空。**写入方是装配层**（`tianyan_service_config::load_and_install` 在加载
+/// 失败时调用 [`set_config_error`]），读侧仍是 [`last_config_error`]。
 static CONFIG_LOAD_ERROR: std::sync::OnceLock<TianyanError> = std::sync::OnceLock::new();
-
-/// 加载配置；失败时构造带路径上下文的错误并回退到默认配置。
-///
-/// 返回 `(配置, 错误)`：加载成功时错误为 `None`，失败时错误为 `Some`。
-/// 独立函数便于测试直接验证失败路径（`CONFIG` 为进程级单例，无法重置）。
-fn load_config_or_default() -> (TianyanConfig, Option<TianyanError>) {
-    match TianyanConfig::load() {
-        Ok(config) => (config, None),
-        Err(detail) => {
-            let path =
-                TianyanConfig::find_config_file().or_else(TianyanConfig::default_config_path);
-            let err = config_load_error(path.as_deref(), detail);
-            (TianyanConfig::default(), Some(err))
-        }
-    }
-}
-
-/// 构造配置加载错误（带路径上下文）。
-///
-/// `path` 为实际失败路径（文件存在但损坏）或预期配置路径（文件缺失）。
-fn config_load_error(path: Option<&std::path::Path>, detail: TianyanError) -> TianyanError {
-    let location = match path {
-        Some(p) => p.display().to_string(),
-        None => "默认搜索路径".to_string(),
-    };
-    TianyanError::Custom(format!("config 加载失败（路径：{location}）：{detail}"))
-}
 
 /// 获取全局配置的引用。
 ///
-/// 使用 `OnceLock::get_or_init` 保证线程安全的延迟初始化，
-/// 消除 TOCTOU 竞态条件。
+/// 读的是装配层注入的槽位（[`set_config`]）；**未注入时回退
+/// `TianyanConfig::default()`**——与迁移前「加载失败回退默认配置」的对外语义一致
+/// （调用方永远拿得到一份可用配置，不会 panic）。
 ///
-/// 配置加载失败时**不会** panic：记录 `error` 级别日志（含配置路径与错误详情）
-/// 并回退到默认配置，错误可通过 [`last_config_error`] 查询。
+/// 返回 `&'static`（`OnceLock` 语义）：同一进程内指针稳定，可安全长期持有。
 ///
 /// # 示例
 ///
@@ -355,20 +159,55 @@ fn config_load_error(path: Option<&std::path::Path>, detail: TianyanError) -> Ti
 /// }
 /// ```
 pub fn get_config() -> &'static TianyanConfig {
-    CONFIG.get_or_init(|| {
-        let (config, load_error) = load_config_or_default();
-        if let Some(error) = load_error {
-            tracing::error!(error = %error, "加载配置文件失败，使用默认配置");
-            let _ = CONFIG_LOAD_ERROR.set(error);
-        }
-        config
-    })
+    match CONFIG.get() {
+        Some(config) => config,
+        None => FALLBACK_CONFIG.get_or_init(TianyanConfig::default),
+    }
+}
+
+/// 注入全局配置（**装配层职责**，内核自身不调用）。
+///
+/// 只在槽位为空时生效：重复注入返回 `Err(`[`ConfigSlotOccupied`]`)`，已生效的配置保持不变
+/// （进程内「首次注入即权威」，与迁移前 `OnceLock::get_or_init` 的单次初始化语义
+/// 一致）。返回 `Result` 而不是静默忽略，是为了让装配层能**察觉**「有人在我之前
+/// 注入过」——热重载 / 搬迁重启是唯一会出现重复注入的场景。
+///
+/// 与迁移前的差异只有一处：**加载动作发生在调用方**（
+/// `tianyan_service_config::load` / `load_and_install`），本函数不碰磁盘。
+///
+/// 失败类型刻意做成零大小的 [`ConfigSlotOccupied`] 而不是交还整份配置
+/// （`Result<(), TianyanConfig>` 会被 `clippy::result_large_err` 判为「Err 变体过大」：
+/// 这份配置 1.2KB，而调用方在注入失败时本来就用的是自己手里那份，无需回传）。
+pub fn set_config(config: TianyanConfig) -> Result<(), ConfigSlotOccupied> {
+    CONFIG.set(config).map_err(|_| ConfigSlotOccupied)
+}
+
+/// [`set_config`] 的失败原因：槽位已被注入过。
+///
+/// 零大小类型：调用方只需要知道「晚了」，不需要拿回被拒的配置副本。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ConfigSlotOccupied;
+
+/// 查询已注入的配置（未注入时 `None`）。
+///
+/// 与 [`get_config`] 的区别：本函数**不做默认值回退**，用于装配期探针
+/// （「我到底注入了没有」）与测试。
+pub fn try_get_config() -> Option<&'static TianyanConfig> {
+    CONFIG.get()
+}
+
+/// 记录配置加载失败的原因（**装配层职责**，仅首次写入生效）。
+///
+/// 语义与迁移前 `get_config()` 首次调用失败的路径一致：错误只在第一次写入时留下，
+/// 之后不可重置；读侧是 [`last_config_error`]。
+pub fn set_config_error(error: TianyanError) {
+    let _ = CONFIG_LOAD_ERROR.set(error);
 }
 
 /// 查询全局配置加载错误。
 ///
-/// 若 [`get_config`] 首次调用时配置加载失败（文件缺失或内容损坏），
-/// 返回 `Some`，错误消息包含配置路径与失败详情；否则返回 `None`。
+/// 若配置加载失败（文件缺失或内容损坏），返回 `Some`，错误消息包含配置路径与
+/// 失败详情；否则返回 `None`。
 ///
 /// 用于诊断"配置损坏却静默回退默认配置"的场景：
 /// 调用方（如 server 诊断接口）可据此向用户暴露配置异常。
@@ -418,115 +257,12 @@ mod tests {
         assert!(!config.storage.data_dir.as_os_str().is_empty());
     }
     #[test]
-    fn test_expand_user_dir() {
-        let home = dirs::home_dir().unwrap();
-        // 纯 `~` → home
-        assert_eq!(expand_user_dir(std::path::Path::new("~")), home);
-        // `~/x` → home/x
-        assert_eq!(
-            expand_user_dir(std::path::Path::new("~/tianyan")),
-            home.join("tianyan")
-        );
-        // 无 `~` 前缀原样
-        let abs = std::path::PathBuf::from("C:\\data\\tianyan");
-        assert_eq!(expand_user_dir(&abs), abs);
-        // 非前缀 `~` 不展开
-        let rel = std::path::PathBuf::from("a~b");
-        assert_eq!(expand_user_dir(&rel), rel);
-    }
-    #[test]
-    fn test_load_from_file_expands_tilde_in_path_configs() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("tianyan.toml");
-        let home = dirs::home_dir().unwrap();
-        let toml = r#"
-            [storage]
-            data_dir = "~/data"
-            backend = "sqlite"
-            sqlite_path = "~/db.sqlite"
-
-            [storage.vector]
-            collection_name = "t"
-            vector_dimension = 768
-
-            [security]
-            trash_directory = "~/trash"
-            allowed_directories = ['~/docs', 'C:\abs']
-            blocked_directories = ["~/etc", "~/blocked"]
-
-            [[models.providers]]
-            name = "mock"
-            endpoint = "http://127.0.0.1:9/v1"
-            api_key = "k"
-            timeout = 10
-            enabled = true
-
-            [[models.providers.models]]
-            name = "m"
-            capabilities = ["chat"]
-        "#;
-        std::fs::write(&path, toml).unwrap();
-
-        let config = TianyanConfig::load_from_file(&path).unwrap();
-        assert_eq!(config.storage.data_dir, home.join("data"));
-        assert_eq!(config.storage.sqlite_path, Some(home.join("db.sqlite")));
-        assert_eq!(config.security.trash_directory, home.join("trash"));
-        assert_eq!(config.security.allowed_directories[0], home.join("docs"));
-        assert_eq!(
-            config.security.allowed_directories[1],
-            std::path::PathBuf::from("C:\\abs")
-        );
-        assert_eq!(config.security.blocked_directories[0], home.join("etc"));
-        assert_eq!(config.security.blocked_directories[1], home.join("blocked"));
-    }
-
-    #[test]
     fn test_config_serialization() {
         let config = TianyanConfig::default();
         let toml_str = toml::to_string_pretty(&config).unwrap();
         let parsed: TianyanConfig = toml::from_str(&toml_str).unwrap();
         // 默认配置 providers 和 preferences 都为空
         assert!(parsed.models.providers.is_empty());
-    }
-
-    /// T0-6 主回归：保存时保留程序未建模的段/字段——
-    /// 此前 `save_to_file` 全量序列化覆盖，用户自定义段（或未来版本字段 /
-    /// 版本回滚场景）会被静默清掉。
-    #[test]
-    fn test_save_to_file_preserves_unmodeled_sections() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("tianyan.toml");
-        std::fs::write(
-            &path,
-            "[storage]\ndata_dir = 'D:/tianyan'\n\n[my_custom_section]\nkeep_me = 'yes'\n",
-        )
-        .unwrap();
-
-        TianyanConfig::default().save_to_file(&path).unwrap();
-
-        let content = std::fs::read_to_string(&path).unwrap();
-        assert!(
-            content.contains("my_custom_section") && content.contains("keep_me"),
-            "未建模段必须保全（此前全量覆盖会静默清掉）: {content}"
-        );
-    }
-
-    /// 回归：程序建模的字段以内存值为准（段保全不得反向覆盖当前配置）。
-    #[test]
-    fn test_save_to_file_modeled_values_take_precedence() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("tianyan.toml");
-        std::fs::write(&path, "[agent]\nmax_turns = 7\n").unwrap();
-
-        let mut config = TianyanConfig::default();
-        config.agent.max_turns = 99;
-        config.save_to_file(&path).unwrap();
-
-        let content = std::fs::read_to_string(&path).unwrap();
-        assert!(
-            content.contains("max_turns = 99"),
-            "建模字段以内存值为准: {content}"
-        );
     }
 
     #[test]
@@ -574,13 +310,6 @@ mod tests {
         assert!(config.retrieval.validate().is_ok());
     }
 
-    #[test]
-    fn test_generate_default_toml() {
-        let toml = TianyanConfig::generate_default_toml().unwrap();
-        assert!(toml.contains("[storage]"));
-        assert!(toml.contains("[models]"));
-    }
-
     /// B5 分层覆盖：用户层只写部分键时，缺失字段继承默认层（serde default 即默认层）。
     #[test]
     fn test_user_layer_merges_over_default_layer() {
@@ -615,127 +344,55 @@ mod tests {
         assert!(config.mcp.servers.is_empty(), "mcp 应继承默认层（空）");
     }
 
-    #[test]
-    fn test_load_without_config_file() {
-        // 测试在没有配置文件的情况下，从指定路径加载会返回错误
-        let non_existent_path = std::path::PathBuf::from("/non/existent/path/tianyan.toml");
-        assert!(TianyanConfig::load_from_file(&non_existent_path).is_err());
-    }
-
-    #[test]
-    fn test_config_load_error_contains_path_and_detail() {
-        // 纯函数验证 get_config 失败路径记录的错误格式：
-        // 模块前缀 + 配置路径 + 错误详情
-        let bad_path = std::path::Path::new("/tmp/bad-config/tianyan.toml");
-        let err = config_load_error(
-            Some(bad_path),
-            TianyanError::Custom("反序列化配置失败：syntax".to_string()),
-        );
-        let msg = err.to_string();
-        assert!(msg.contains("config 加载失败"), "应含模块前缀：{msg}");
-        assert!(
-            msg.contains("/tmp/bad-config/tianyan.toml"),
-            "应含配置路径：{msg}"
-        );
-        assert!(msg.contains("反序列化配置失败"), "应含错误详情：{msg}");
-
-        // 路径未知时给出"默认搜索路径"占位
-        let err = config_load_error(None, TianyanError::Custom("未找到配置文件".to_string()));
-        assert!(err.to_string().contains("默认搜索路径"));
-    }
-
-    #[test]
-    fn test_load_invalid_toml_fails() {
-        // 损坏配置（非法 TOML）→ load_from_file 返回错误，
-        // 这是 get_config 记录错误并回退默认配置的触发源
-        let dir = std::env::temp_dir().join(format!(
-            "tianyan-config-test-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_nanos())
-                .unwrap_or(0)
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("tianyan.toml");
-        std::fs::write(&path, "this is not [valid toml = [").unwrap();
-
-        let result = TianyanConfig::load_from_file(&path);
-
-        let _ = std::fs::remove_dir_all(&dir);
-        assert!(result.is_err(), "非法 TOML 应加载失败");
-    }
-
-    /// 保存 / 恢复 TIANYAN_CONFIG 环境变量。
+    /// 槽位语义（ADR-049 期 3-T4）：注入前回退默认 / 首次注入生效 / 重复注入被拒 /
+    /// 诊断错误槽位只记首次。
     ///
-    /// 走**跨模块共享**的 env 锁（`test_support::ENV_LOCK`）——各模块私有锁彼此
-    /// 不互斥，全量并发跑时仍会互相干扰（见 `test_support` 模块文档）。
-    fn with_tianyan_config_env<T>(value: Option<&str>, f: impl FnOnce() -> T) -> T {
-        test_support::with_env_var("TIANYAN_CONFIG", value, f)
-    }
-
+    /// `CONFIG` / `FALLBACK_CONFIG` / `CONFIG_LOAD_ERROR` 都是进程级单例且不可重置
+    /// （`OnceLock`），本测试是 lib 测试二进制中**唯一**触碰它们的测试（其余模块只用
+    /// `TianyanConfig::default()`），因此这里观察到的即全进程行为。加载器一侧的断言
+    /// （路径解析 / `~` 展开 / 段保全 / 错误文案）已随实现迁去 `tianyan-service-config`
+    /// （`loader.rs` 的同名测试）。
     #[test]
-    fn test_find_config_file_prefers_tianyan_config_env() {
-        // README/.env.example 声明的 TIANYAN_CONFIG 覆盖：显式指定路径应优先于默认搜索
-        let dir = std::env::temp_dir().join(format!(
-            "tianyan-config-env-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_nanos())
-                .unwrap_or(0)
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("custom.toml");
-        std::fs::write(&path, "[storage]\n").unwrap();
-
-        let found = with_tianyan_config_env(Some(path.to_str().unwrap()), || {
-            TianyanConfig::find_config_file()
-        });
-        let _ = std::fs::remove_dir_all(&dir);
-        assert_eq!(found, Some(path), "TIANYAN_CONFIG 指定的路径应优先返回");
-    }
-
-    #[test]
-    fn test_find_config_file_ignores_empty_tianyan_config_env() {
-        // 空字符串环境变量不生效，回落到默认搜索（与未设置时结果一致）
-        let normal = with_tianyan_config_env(None, TianyanConfig::find_config_file);
-        let with_empty = with_tianyan_config_env(Some(""), TianyanConfig::find_config_file);
-        assert_eq!(with_empty, normal, "空 TIANYAN_CONFIG 应回落默认搜索");
-    }
-
-    #[test]
-    fn test_find_config_file_surfaces_missing_env_path() {
-        // 显式指定但文件不存在：返回该路径（由 load 报错），不静默回落
-        let missing = std::env::temp_dir().join(format!(
-            "tianyan-config-missing-{}.toml",
-            std::process::id()
-        ));
-        let found = with_tianyan_config_env(Some(missing.to_str().unwrap()), || {
-            TianyanConfig::find_config_file()
-        });
-        assert_eq!(
-            found,
-            Some(missing),
-            "显式 TIANYAN_CONFIG 路径应原样返回（含不存在场景）"
+    fn test_config_slot_injection_semantics() {
+        // 1. 未注入 → `get_config()` 回退默认配置（「没有配置文件也能跑」），
+        //    指针稳定（`OnceLock` 语义：可安全长期持有 `&'static`）。
+        assert!(try_get_config().is_none(), "测试开始时槽位应为空");
+        let fallback = get_config();
+        assert!(!fallback.storage.data_dir.as_os_str().is_empty());
+        assert!(std::ptr::eq(fallback, get_config()));
+        assert!(
+            try_get_config().is_none(),
+            "回退默认值不得占用注入槽位（否则装配层的注入会静默失败）"
         );
-    }
 
-    #[test]
-    fn test_get_config_once_semantics_and_error_query() {
-        // CONFIG / CONFIG_LOAD_ERROR 为进程级单例且不可重置（OnceLock），
-        // 本测试是 lib 测试二进制中唯一调用 get_config() 的测试，
-        // 因此此处观察到的即"首次调用"行为。
-        let config = get_config();
+        // 2. 首次注入生效（装配层职责；内核自身不调用）。
+        let injected = TianyanConfig {
+            agent: AgentConfig {
+                max_turns: 42,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        assert!(set_config(injected).is_ok());
+        assert_eq!(get_config().agent.max_turns, 42);
 
-        // 重复调用返回同一实例（OnceLock 单次初始化语义）
-        assert!(std::ptr::eq(config, get_config()));
+        // 3. 重复注入被拒：交还被拒的配置，已生效配置不变。
+        let conflicting = TianyanConfig {
+            agent: AgentConfig {
+                max_turns: 7,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        assert!(set_config(conflicting).is_err(), "槽位已满时应拒绝重复注入");
+        assert_eq!(get_config().agent.max_turns, 42, "首次注入即权威");
 
-        // 若首次加载失败：错误可查询，且消息含模块前缀与路径上下文
-        if let Some(err) = last_config_error() {
-            let msg = err.to_string();
-            assert!(msg.contains("config 加载失败"), "应含模块前缀：{msg}");
-            assert!(msg.contains("路径"), "应含路径上下文：{msg}");
-        }
+        // 4. 诊断槽位：初值为空 → 首次写入可见 → 文案不被改写。
+        assert!(last_config_error().is_none());
+        set_config_error(TianyanError::Custom(
+            "config 加载失败（路径：/tmp/x/tianyan.toml）：坏 TOML".to_string(),
+        ));
+        let err = last_config_error().expect("首次写入后应可查询");
+        assert!(err.to_string().contains("config 加载失败"), "应含模块前缀");
     }
 }

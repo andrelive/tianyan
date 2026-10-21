@@ -1242,6 +1242,111 @@ ADR-049 期 2 的序 6（当时跳过、留待最后）在期 3-T3 之后补做�
   4. `provider-client` 的字段必须 `pub`（跨 crate 访问），公开面比「只有类型」略大；
      若期 4 决定把 provider 三件套并成一个 crate，这些 `pub` 应回退成 `pub(crate)`。
 
+**实施记录（期 3-T4：service-config，2026-10-21）**：配置的**加载 / 持久化 / 迁移 /
+校验 / 向导**整段迁入 `service/config`（crate `tianyan-service-config`）——
+`core/src/config/migration.rs`（319 生产行）、`validation.rs`（115）、`wizard.rs`（49）
+三文件**整体删除**，`config/mod.rs` 的加载/持久化段一并搬走（`load` / `load_from_file` /
+`find_config_file` / `config_exists` / `default_config_path` / `generate_default_toml` /
+`save_to_file`（段保全）/ `validate`（汇总编排）/ `merge_unknown_keys` / `expand_user_dir`）。
+
+- **★ 本批唯一的设计点：`get_config()` 槽位化**。迁移前 `config::get_config()` 内部
+  `load()`（读文件 + 迁移 + 校验）并用 `OnceLock::get_or_init` 保证「首次访问时加载一次」。
+  加载器搬走后内核不能 `use tianyan_service_config::…`（D2-1 反向依赖），于是切成
+  **槽位 + 注入**：
+
+  | 侧 | 职责 |
+  |---|---|
+  | 内核 `core/src/config/mod.rs` | `get_config()` 纯读槽位（未注入回退 `TianyanConfig::default()`，保持「无配置文件也能跑」）、`set_config(cfg) -> Result<(), ConfigSlotOccupied>`（只在未设置时生效）、`try_get_config()`、`set_config_error()` / `last_config_error()`（诊断槽位） |
+  | 服务层 `service/config` | `load` / `load_from_file` / `find_config_file` / `config_exists` / `default_config_path` / `generate_default_toml` / `save_to_file` / `validate` / `migration` / `validation` / `wizard`，以及**装配期单点** `load_and_install()` |
+  | 装配层 `app` / `tauri` | 启动时一行 `load_and_install()`（**先注入再 `init_logging`**——日志级别来自 `[logging]`） |
+
+  两个细节值得留档：① **回退值用第二个 `OnceLock`**（`FALLBACK_CONFIG`）而不是
+  `get_or_init` 写回主槽位——否则「先有人读了配置、装配层再注入」会静默失败，是只在
+  装配顺序出错时才暴露的陷阱；② `set_config` 的失败类型是零大小的 `ConfigSlotOccupied`
+  而不是交还整份配置（`Result<(), TianyanConfig>` 会触发 `clippy::result_large_err`：
+  这份配置 1.2KB，而调用方注入失败时用的本来就是自己手里那份）。
+
+  `load_and_install()` 同时保留**两条**失败输出，都是迁移前就有的：`eprintln!`（`app` /
+  `tauri` 的兜底：配置破损时 `[logging]` 读不出来、日志订阅者尚未装配，`tracing` 事件
+  会被丢弃）+ `tracing::error!` + 诊断槽位（旧 `get_config()` 首次失败路径，含路径上下文）。
+
+- **★ 热更新路径的核对（第二份真相，既有问题，本批照原样保留）**：`server` 的
+  `PUT /api/v1/config` 走 `ConfigService::persist_and_reload`：`validate` →
+  `save_to_file` → `AppState::update_config`（`Arc<RwLock<TianyanConfig>>`）→ 热重载 Agent。
+  它**不**改写内核槽位。核对结论：**迁移前就不是同一份**——`get_config()` 在 server/app/tauri
+  里根本没有调用点（全仓唯一生产调用是 `core::init()`，而 `init()` 今天也无人调用），
+  `AppState::config` 才是运行期权威。本批不改变这一行为，只在 crate 文档与本节里记明：
+  **槽位 = 启动快照（供 `init()` 读日志配置），`AppState::config` = 运行期权威**；
+  期 4 引入真正的配置源 seam 时才应合并。`OnceLock` 本不可改写，所以「把新配置写回槽位」
+  在槽位方案下**做不到**——若将来需要，得把 `get_config()` 的返回类型从 `&'static` 改掉。
+
+- **为什么结构留 core（不是遗漏）**：`TianyanConfig` 与全部子 Config 是内核与插件的
+  **共同构造参数**（`TaskServices.config` / `ContextServices.config` /
+  `PluginServices.web_config` / `TaskScheduler.config`），搬走等于让所有插件反向依赖
+  服务层；`presets.rs`（`PROVIDER_PRESETS` / `find_preset`）是配置**数据表**，server 的
+  配置 API 要展示预设（`resolve_all_preset_hits`），搬进插件会让 server 反向依赖插件；
+  各子配置的 `validate`（`AgentConfig::validate` 等）是字段自身的约束，随结构走。
+
+- **逐行比对证据**（`git diff --no-index`，HEAD 原文件 vs 新文件；`-w` 忽略缩进）：
+
+  | 文件 | 差异（增/删） | 归类 |
+  |---|---|---|
+  | `migration.rs` | 16 / 10 | ① `use crate::{common,config}` → `use tianyan::…` + `use crate::loader::{…}`（4 行）；② `TianyanConfig::find_config_file()` / `load_from_file` / `save_to_file` → 自由函数（4 处调用点，逐字保留参数与错误映射）；③ 模块文档 +7 行（迁移动机 + 「逐字未改」清单）；④ 一处文档断行重排（1 行） |
+  | `validation.rs` | 8 / 3 | ① `use crate::…` → `use tianyan::…`（2 处，含测试里 1 处）；② 模块文档 +5 行。**函数体与全部错误文案 0 改动** |
+  | `wizard.rs` | 4 / 0 | 仅模块文档 +4 行。类型、字段、`serde` 属性、`success`/`error` 构造**逐字未改**（前端契约不变） |
+  | `config/mod.rs` → `loader.rs` | 102 / 90（`-w`） | ① `impl TianyanConfig { … }` 的关联函数降为自由函数（`Self::x()` → `x()`、`self` → `config` 参数、`std::path::` 前缀改 `use` 导入）；② 新增 `load_and_install`（替换旧 `load_config_or_default` + `get_config` 的首次加载闭包）；③ 模块文档 +48 行（三类职责 + 逐字保留清单）；④ `std::path::Path` → `Path` 之类的导入改写 |
+
+  **判定/校验/迁移的全部文案与规则逐字未动**：`配置加载失败：未找到配置文件 ~/.tianyan/tianyan.toml（可用环境变量 TIANYAN_CONFIG 指定其他路径）` /
+  `配置加载失败：构建配置失败：…` / `配置加载失败：反序列化配置失败：…` /
+  `配置加载失败：{e}` / `配置保存失败：创建目录失败：…`（序列化 / 写入同前缀）/
+  `config 加载失败（路径：{location}）：{detail}` / 全部迁移文案（`新数据目录不能为空` …
+  `migration: 校验失败：源与目标的文件清单或大小不一致`）/ 段保全合并规则（未建模键保留、
+  建模键以内存值为准）/ `TIANYAN_CONFIG` 覆盖与空串回落 / `~` 展开规则。
+
+- **门禁**：`cargo fmt --all -- --check` 干净；`cargo clippy --workspace --all-targets`
+  **零 warning**；`tianyan-core --lib` **1080 passed**（= 基线 1108 − 28 条随迁）；
+  `tianyan-service-config` **29 passed + 3 集成**（12 loader / 11 migration / 5 validation /
+  1 wizard，另 3 条为随迁的 `tests/config_integration.rs`）；`tianyan-server --lib`
+  **197 passed / 1 ignored**、`--tests` 6 / 14 / 1 / 2 全绿；`tianyan-app` 7 passed；
+  `cargo catalog-check` OK；`cargo tree -p tianyan-service-config --edges normal --depth 1`
+  = core / chrono / config / dirs / serde / serde_json / toml / tracing，**无 `tianyan-server`**。
+
+- **测试守恒**：HEAD core `--lib` **1108** = 现在 core **1080** + 本 crate **29**（28 条为
+  逐条同名同断言随迁：loader 11（`~` 展开 / 段保全 ×2 / 默认 TOML / 缺文件 / 错误文案 /
+  非法 TOML / `TIANYAN_CONFIG` ×3）、migration 11（Windows 上编译的那一组）、validation 5、
+  wizard 1；**+1 新增** `test_load_and_install_falls_back_to_default_on_broken_config`——
+  此前「加载失败 → 回退默认 + 记诊断」只有一条**条件式**覆盖（`if let Some(err)`），现在
+  直接断言）。算式：**1108 − 28 = 1080**；**1080 + 29 = 1109 = 1108 + 1（新增）**。
+  另有 `core/tests/config_integration.rs`（3 条集成测试）**整文件随迁** →
+  `service/config/tests/config_integration.rs`，core 侧删除（`--lib` 计数不含它）。
+  **零放弃、零降级。**
+
+- **★ 与任务书估算的偏差（必须留档）**：普查按「mod.rs 的加载段 270 行全部外移」估
+  753 行 → impl 15,314。实测 **core 生产行净减 644**（migration 319 + validation 115 +
+  wizard 49 + mod.rs **161**），差额 **109** 全部来自**留在内核的槽位管道**：新槽位段
+  97 行（3 个 `OnceLock` + `get_config` / `set_config` / `try_get_config` /
+  `set_config_error` / `last_config_error` + `ConfigSlotOccupied` + 文档）替换了旧的
+  66 行加载式槽位（`CONFIG` / `CONFIG_LOAD_ERROR` / `load_config_or_default` /
+  `config_load_error` / `get_config` / `last_config_error`）。
+  → **闸门 B 的 impl 现在是 16,067 − 644 = 15,423（仍超 15K 计 423 行，不是 314）**。
+  这一条不是失手，是「槽位 + 注入」这一分层口径的必然代价：内核必须自己保留
+  `&'static` 的读取面与注入 API。下一批要补的是 423 行，候选见「待决问题」与期 3 普查的
+  `agent/background.rs`（1,300 行，已裁决算 K1，不可外移）之外的余量。
+
+- **遗留**：
+  1. **槽位与 `AppState::config` 是两份真相**（见上）：期 4 引入配置源 seam 时合并；
+     在那之前，任何「读全局配置」的新代码都要想清楚它要的是启动快照还是运行期权威。
+  2. **`storage-vector` 的 4 个 examples 再添一条 dev 边**（→ `tianyan-service-config`），
+     与序 3/4/6 的遗留同型：干净解法仍是独立的 `tools-ops` bin 包。
+  3. 本 crate 公开符号 30 个（loader 9 / migration 12 / validation 6 / wizard 2 +
+     `ConfigSlotOccupied` 不在本 crate）。它不是能力插件（无插槽），消费者有三个
+     （`app` / `tauri` / `server`），因此「每插件 crate 公开符号 ≤ 15」这条反指标不适用；
+     但若期 4 收紧口径，可把 `perform_migration` / `delete_source_entries` /
+     `update_config_data_dir*` / `read_migration_request` 降为 `pub(crate)`（它们只有
+     crate 内测试与内部调用）。
+  4. `service/config` 的目录形态（`service/` 下按域分 crate）是**新约定**：期 4 若把
+     `service-snapshot`（ADR-006 的独立存储语义）也切成 crate，应沿用同一位置规则。
+
 ---
 
 ## 分期与闸门
@@ -1252,7 +1357,7 @@ ADR-049 期 2 的序 6（当时跳过、留待最后）在期 3-T3 之后补做�
 | **0.5** | 工具契约与注册形状 + 装配器二分（**工具侧已完成**） | ✅ 元数据表承载执行入口 + 协议工具独立成表（28 分支 match → 一次查表，内核零工具名字面量）；✅ `ToolContext` 承载六个工具域（`impl ToolContext` + 注册表 `Deref`），依赖边界实测：工具域 executor 引用仅 16 处（随插件搬走）。待办：`thin-channel` + `assembly-manifest`；`AppState` 20 字段契约化 | 工具目录 freshness ✅；工具行为零变化 ✅（1431 单测全绿）；clippy 零警告 ✅ |
 | **1** | 工具插件试点（**装配器二分 + tools-fs 骨架已完成**） | ✅ `tianyan-app` bin 包（**清单住 bin**）+ `ToolPluginFactory` 类型擦除 + `create_app_with_plugins` / `start_server_with_plugins*`；✅ `plugins/tools-fs` 独立 crate（`executor::fs` 实现整体迁入）。待续：**整域迁移**——`read_file` 目录模式反向依赖 `executor::fs::execute_list_dir`，故 fs 域必须 6 工具一起搬（read/write/edit/patch/glob/list_dir）才能删 core 侧 | 闸门 A **首测 512 行 ✅**（判据 ≤3.5K）；core 侧暂留（双路径过渡，重名注册自动跳过） |
 | **2** | 适配器与任务插件（**期 2 全部完成（序 0–6）**） | 迁移顺序（按 自包含度×收益）：**0 清 core 死依赖** → 1 `tools-todo`+`tools-goal` → 2 `tools-web` → 3 `storage-vector` → 4 `storage-sqlite` → 5 `task-*`（2 crate）→ **6 `provider-llm`+`provider-embed`（+ 共享基底 `provider-client`，2026-10-21 补做）**。详见下方「期 2 普查结论」与「实施记录（期 2 序 6）」 | 各领域 ≤ 2K；全量 release 不劣化 >10% |
-| **3** | 策略分离（最难一刀） | 抽 `kernel-impl`（loop/cancel/rollback/stream_forward/working_set）；**`context`→`policy-context`（T2 ✅ 2026-10-21，见下方实施记录；`assembler.rs` 按普查修订留 kernel-impl）**；**审批→`policy-approval`（T1 ✅ 2026-10-21）**；`role_learning`→已删除（零消费者，2026-10-21 裁决）；**`judge` + `skills/reviewer`→`policy-review`（T3 ✅ 2026-10-21，475 生产行；`TaskReviewer` / `SkillReviewPort` 契约留 core）** | **闸门 B**：api ≤ 6K && impl ≤ 15K（或配置外移后 16.1K）；改策略不重编内核；S 级零变更 |
+| **3** | 策略分离（最难一刀） | 抽 `kernel-impl`（loop/cancel/rollback/stream_forward/working_set）；**`context`→`policy-context`（T2 ✅ 2026-10-21，见下方实施记录；`assembler.rs` 按普查修订留 kernel-impl）**；**审批→`policy-approval`（T1 ✅ 2026-10-21）**；`role_learning`→已删除（零消费者，2026-10-21 裁决）；**`judge` + `skills/reviewer`→`policy-review`（T3 ✅ 2026-10-21，475 生产行；`TaskReviewer` / `SkillReviewPort` 契约留 core）**；**配置加载/持久化/迁移/校验/向导→`service-config`（T4 ✅ 2026-10-21，644 生产行净减；结构与预设表留 core，`get_config` 槽位化）** | **闸门 B**：api ≤ 6K && impl ≤ 15K——**期 3 末实测 impl = 15,423，仍超 423**（`agent/background.rs` 1,300 行经裁决算 K1，不可外移）；改策略不重编内核 ✅；S 级零变更 ✅ |
 | **4** | 清单收敛与发行版 | 清单完整化、跨插件顺序断言、desktop/headless/minimal 三份清单 | 装配清单 1 页可查；headless 可构建 |
 
 **反指标**（防拆过头）：每 crate ≥ 300 行且至少 2 个真实消费者；每期净增 pub trait ≤ 3；
@@ -1323,7 +1428,11 @@ ADR-049 期 2 的序 6（当时跳过、留待最后）在期 3-T3 之后补做�
 1. **采样参数缺口**（2026-10-20 发现）：`temperature` / `top_p` 在 core 是 `Option<f32>` 且恒为 `None`
    → 请求不带这两个参数，走服务端默认；前端硬编码的 `temperature: 0.7` 在 server 侧被丢弃（死参数）。
    用户决定：**等微内核完成后统一处理**（届时归入 `provider-llm` 插件的模型规格配置）。
-2. 配置加载（3.3K）是否外移为 `service-config` —— 期 3 决定。
+2. ~~配置加载（3.3K）是否外移为 `service-config`~~ —— **已裁决并实施**（期 3-T4，
+   2026-10-21）：只外移**加载/持久化/迁移/校验/向导**（753 估算 / 644 实测净减），
+   配置**结构**与**预设表**留 core（内核与插件的共同构造参数）；`get_config()` 改为
+   「槽位 + 注入」，见「实施记录（期 3-T4）」。**新遗留**：槽位与 `AppState::config`
+   两份真相待期 4 合并；闸门 B 仍差 423 行。
 3. 期 3 需重新做一次行数账（`agent` 22,994 行中 10.5K 是测试，真正待判源码 12.5K）。
 
 ---

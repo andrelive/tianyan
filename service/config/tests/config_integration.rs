@@ -1,9 +1,15 @@
 //! 配置系统集成测试 — 从文件加载、验证、保存、重新加载的完整流程
+//!
+//! **随迁自 `core/tests/config_integration.rs`**（ADR-049 期 3-T4）：这三个用例走的是
+//! 加载器 / 持久化 / 校验的**端到端**路径（`save_to_file` → 磁盘 → `load_from_file`），
+//! 实现搬进本 crate 后继续由本 crate 做集成测试才有判别力。断言语义逐字未改，只把
+//! `TianyanConfig::{save_to_file, load_from_file, validate}` 换成自由函数调用。
 
 // 测试代码中 unwrap 是有意的（失败即 panic 即测试失败），豁免以保持测试可读性。
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use tianyan::config::{ModelCapability, ModelEntry, ModelRef, ProviderConfig, TianyanConfig};
+use tianyan_service_config::{load_from_file, save_to_file, validate};
 
 fn make_test_config() -> TianyanConfig {
     let mut config = TianyanConfig::default();
@@ -37,10 +43,10 @@ async fn test_config_save_and_reload_roundtrip() {
     let config_path = temp_dir.path().join("tianyan.toml");
 
     let original = make_test_config();
-    original.save_to_file(&config_path).unwrap();
+    save_to_file(&original, &config_path).unwrap();
     assert!(config_path.exists());
 
-    let reloaded = TianyanConfig::load_from_file(&config_path).unwrap();
+    let reloaded = load_from_file(&config_path).unwrap();
     assert_eq!(reloaded.agent.default_top_k, original.agent.default_top_k);
     assert_eq!(
         reloaded.storage.vector.vector_dimension,
@@ -60,6 +66,6 @@ async fn test_config_defaults_are_reasonable() {
 async fn test_model_service_validation_rejects_empty_endpoint() {
     let mut config = make_test_config();
     config.models.providers[0].endpoint = String::new();
-    let result = config.validate();
+    let result = validate(&config);
     assert!(result.is_err(), "空 endpoint 应失败");
 }

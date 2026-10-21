@@ -6,20 +6,26 @@
 //!    drop 释放文件锁（Windows 上移动打开的文件会失败）；
 //! 3. 服务器停止后，监督循环（Tauri）/主循环（独立 server）调用
 //!    [`run_pending_migration`]:
-//!    - **排除清单**：配置文件 `tianyan.toml`（固定于 `~/.tianyan/`——
-//!      即使历史安装把它放在数据目录里，也留在原地不搬）与迁移请求文件；
+//!    - **排除清单**：配置文件 `tianyan.toml`（固定于 `~/.tianyan/`——即使历史
+//!      安装把它放在数据目录里，也留在原地不搬）与迁移请求文件；
 //!    - 复制 → 逐文件校验（相对路径集合 + 字节大小与源一致）；
 //!    - 更新配置 `storage.data_dir`（失败 → 删除已复制内容，源目录未动）；
 //!    - **强制删除**源数据条目（进入本步后不再回滚——新目录数据已校验
 //!      完整、配置已指向新目录；个别文件被占用 → 留作无害残留并在结果
 //!      中报告，绝不留下"两份全量数据"或"半份源数据"的静默状态）；
 //! 4. 以新配置重启（监督循环/主循环重读配置文件）。
+//!
+//! **ADR-049 期 3-T4**：本模块整文件搬出 `core/src/config/`（判据：搬迁是
+//! 「服务层操作磁盘布局」，不属于内核的「配置加载」职责）。除把
+//! `TianyanConfig::find_config_file()` / `load_from_file` / `save_to_file`
+//! 三种调用改成 crate 内自由函数（[`crate::loader`]）外，逻辑与文案**逐字未改**。
 
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
-use crate::common::error::{Result, TianyanError};
-use crate::config::TianyanConfig;
+use tianyan::common::error::{Result, TianyanError};
+
+use crate::loader::{default_config_path, find_config_file, load_from_file, save_to_file};
 
 /// 迁移请求文件名（位于旧 data_dir 内）。
 pub const MIGRATION_REQUEST_FILE: &str = ".tianyan-migrate.json";
@@ -247,17 +253,17 @@ fn copy_recursive(from: &Path, to: &Path) -> std::io::Result<()> {
 ///
 /// 使用生效配置的解析路径（环境变量覆盖优先，否则固定 `~/.tianyan/tianyan.toml`）。
 pub fn update_config_data_dir(new_dir: &Path) -> Result<()> {
-    let path = TianyanConfig::find_config_file()
-        .or_else(TianyanConfig::default_config_path)
+    let path = find_config_file()
+        .or_else(default_config_path)
         .ok_or_else(|| TianyanError::config("migration: 未找到配置文件"))?;
     update_config_data_dir_at(&path, new_dir)
 }
 
 /// 写入 data_dir 到指定配置文件（测试注入配置路径用）。
 pub fn update_config_data_dir_at(config_path: &Path, new_dir: &Path) -> Result<()> {
-    let mut config = TianyanConfig::load_from_file(config_path)?;
+    let mut config = load_from_file(config_path)?;
     config.storage.data_dir = new_dir.to_path_buf();
-    config.save_to_file(config_path)?;
+    save_to_file(&config, config_path)?;
     tracing::info!(path = %config_path.display(), new_dir = %new_dir.display(), "配置已更新 data_dir");
     Ok(())
 }
@@ -269,8 +275,8 @@ pub fn update_config_data_dir_at(config_path: &Path, new_dir: &Path) -> Result<(
 /// 失败时清理已复制内容并清除请求文件（避免重启循环；用户可从 UI 重试），
 /// 配置文件全程不被移动——即使搬迁失败也绝无丢失风险。
 pub fn run_pending_migration(old_data_dir: &Path) -> Result<MigrationOutcome> {
-    let config_path = TianyanConfig::find_config_file()
-        .or_else(TianyanConfig::default_config_path)
+    let config_path = find_config_file()
+        .or_else(default_config_path)
         .ok_or_else(|| TianyanError::config("migration: 未找到配置文件"))?;
     run_pending_migration_at(old_data_dir, &config_path)
 }

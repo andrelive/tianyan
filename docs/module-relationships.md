@@ -13,7 +13,7 @@
 ```
 ┌─────────────────────────────────────────────────────────────────┐
 │                      tauri (tianyan-tauri)                       │
-│  依赖：tianyan-core, tianyan-server                             │
+│  依赖：tianyan-core, tianyan-server, tianyan-service-config      │
 │  职责：桌面应用入口、窗口管理、服务器生命周期                       │
 └───────────────────────────┬─────────────────────────────────────┘
                             │ depends on
@@ -22,10 +22,21 @@
 ┌──────────────────────┐  ┌──────────────────────────────────────┐
 │ server (tianyan-     │  │ core (tianyan-core)                  │
 │   server)            │  │  无外部项目依赖                        │
-│ 依赖：tianyan-core   │  │ 职责：AI Agent 核心、VFS 存储、        │
-│ 职责：HTTP API、     │──│   会话管理、上下文管线、技能系统        │
-│   应用状态管理       │  │                                      │
-└──────────────────────┘  └──────────────────────────────────────┘
+│ 依赖：tianyan-core、 │  │ 职责：AI Agent 核心、VFS 存储、        │
+│  service-config      │──│   会话管理、上下文管线、技能系统        │
+│ 职责：HTTP API、     │  │                                      │
+│   应用状态管理       │  └───────────────▲──────────────────────┘
+└──────────┬───────────┘                  │ depends on
+           │ depends on                   │
+           ▼                              │
+┌──────────────────────────────────────┐  │
+│ service-config (tianyan-service-     │──┘
+│   config)                            │
+│ 依赖：tianyan-core                    │
+│ 职责：配置加载/持久化（段保全）/       │
+│   数据目录迁移/校验编排/向导 DTO       │
+│   （ADR-049 期 3-T4）                 │
+└──────────────────────────────────────┘
               ┌────────────────────────┐
               │ gui (tianyan-gui)      │
               │  无 Rust 层项目依赖     │
@@ -36,12 +47,18 @@
 
 ### 1.2 依赖关系矩阵
 
-| 模块 | tianyan-core | tianyan-server | tianyan-gui | tianyan-tauri |
-|------|:---:|:---:|:---:|:---:|
-| **tianyan-core** | - | ❌ | ❌ | ❌ |
-| **tianyan-server** | ✅ | - | ❌ | ❌ |
-| **tianyan-gui** | ❌ | ❌ | - | ❌ |
-| **tianyan-tauri** | ✅ | ✅ | ❌* | - |
+| 模块 | tianyan-core | tianyan-service-config | tianyan-server | tianyan-gui | tianyan-tauri |
+|------|:---:|:---:|:---:|:---:|:---:|
+| **tianyan-core** | - | ❌ | ❌ | ❌ | ❌ |
+| **tianyan-service-config** | ✅ | - | ❌ | ❌ | ❌ |
+| **tianyan-server** | ✅ | ✅ | - | ❌ | ❌ |
+| **tianyan-gui** | ❌ | ❌ | ❌ | - | ❌ |
+| **tianyan-tauri** | ✅ | ✅ | ✅ | ❌* | - |
+
+> 服务层 crate（`tianyan-service-config`，ADR-049 期 3-T4）只依赖 core：配置加载 / 持久化 /
+> 迁移 / 校验 / 向导 DTO 从 core 搬出后，内核不再认识配置文件的路径（D2-1 反向依赖禁止）。
+> 消费方是三个装配/服务包（`app` / `tauri` / `server`）；插件不依赖它（`storage-vector` 的
+> 4 个 examples 是唯一例外，且只是 **dev-dependency**）。
 
 > \* tauri 通过加载 `gui-vite/dist` 静态资源间接依赖 gui，但无 Rust 编译期依赖。
 
@@ -55,7 +72,8 @@
 core/src/
 ├── agent/       (coordinator, loop, session_state, tool_registry/, tools, types, builder)
 ├── common/      (error, logging, token_estimator, types/ 子模块，含 content_part.rs)
-├── config/      (TOML 配置；LoggingConfig 自 common::logging re-export)
+├── config/      (配置结构 + 全局槽位：TianyanConfig/子 Config/预设表/get_config·set_config；
+│                 加载/持久化/迁移/校验/向导 → service/config，ADR-049 期 3-T4)
 ├── context/     (assembler + port/assembly 契约；管线/压缩/检索 → plugins/policy-context)
 ├── db/          (统一写入门面：Database 门面 + SqliteDb + stats/trace/execution/usage Repository；只依赖 common)
 ├── executor/    (工具执行：Action、审批门控契约、任务自审契约 review::TaskReviewer、验证门控)
@@ -143,11 +161,13 @@ core/src/
 ```
 Tauri App 启动
     │
-    ├─ 1. init_logging()                    [tauri/src/lib.rs]
-    │     └─ 初始化日志系统（文件 + 控制台）
+    ├─ 1. load_and_install()                [service/config/src/loader.rs]
+    │     ├─ 加载配置（TOML 文件 + TIANYAN_CONFIG 覆盖；`~` 展开 + 安全字段归一 + 校验）
+    │     └─ 注入内核槽位（tianyan::config::set_config / set_config_error）；
+    │        失败 → stderr + 诊断槽位 + 回退默认配置
     │
-    ├─ 2. TianyanConfig::load()             [core/src/config/mod.rs]
-    │     └─ 加载配置（TOML 文件 + 环境变量）
+    ├─ 2. init_logging(&config.logging)     [tauri/src/lib.rs]
+    │     └─ 初始化日志系统（文件 + 控制台）——**顺序不可颠倒**：配置先就位才能读 [logging]
     │
     ├─ 3. start_axum_server(config)         [tauri/src/server.rs → server/src/lib.rs]
     │     │

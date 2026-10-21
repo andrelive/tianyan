@@ -237,10 +237,12 @@ fn assembly() -> AssemblyServices {
 async fn main() -> tianyan::common::error::Result<()> {
     // 日志初始化只做一次（tracing 全局 subscriber 不可重复设置；
     // 搬迁重启循环复用同一日志）
-    let config = tianyan::config::TianyanConfig::load().unwrap_or_else(|e| {
-        eprintln!("配置加载失败（使用默认配置）: {}", e);
-        tianyan::config::TianyanConfig::default()
-    });
+    //
+    // 装配顺序（ADR-049 期 3-T4）：**先加载并注入内核槽位，再初始化日志**
+    // ——`init()` / 内核读 `get_config()` 时要拿到真实配置（[logging] 节）。
+    // `load_and_install` 是这条语义的唯一落点（加载失败 → stderr + 诊断槽位 +
+    // 回退默认配置），三处装配因此各写一行。
+    let config = tianyan_service_config::load_and_install();
     tianyan::common::logging::init_logging(&config.logging)?;
     // panic hook（最后防线）：panic 现场写入 <日志目录>/panic.log
     // （与桌面端同一目录：core::common::panic_hook::default_log_dir）。
@@ -249,10 +251,9 @@ async fn main() -> tianyan::common::error::Result<()> {
     // 主循环：数据目录搬迁后以新配置重启（搬迁由 start_server 关停后的
     // handle_pending_migration 执行；无搬迁时单次运行即退出）
     loop {
-        let config = tianyan::config::TianyanConfig::load().unwrap_or_else(|e| {
-            eprintln!("配置加载失败（使用默认配置）: {}", e);
-            tianyan::config::TianyanConfig::default()
-        });
+        // 重启前重读配置（搬迁/设置页改过 data_dir）；内核槽位是**启动快照**，
+        // 重复注入不生效——返回值才是本次要用的配置，与迁移前同义。
+        let config = tianyan_service_config::load_and_install();
 
         // 端口来源单点：from_env 读 TIANYAN_PORT（未设 → 默认 127.0.0.1:3000）。
         // e2e 借此用备用端口启动，避免与运行中的桌面应用抢占 3000。

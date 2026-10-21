@@ -58,9 +58,9 @@ pub struct UpdateConfigRequest {
 impl UpdateConfigRequest {
     /// 验证请求参数
     pub fn validate(&self) -> Result<(), String> {
-        self.config
-            .validate()
-            .map_err(|e| format!("配置验证失败: {}", e))
+        // 校验编排（子配置 validate 的调用顺序）随 ADR-049 期 3-T4 搬去
+        // `tianyan-service-config::validate`；错误文案不变。
+        tianyan_service_config::validate(&self.config).map_err(|e| format!("配置验证失败: {}", e))
     }
 }
 

@@ -13,7 +13,7 @@ use tianyan::config::TianyanConfig;
 /// `None` = 无待处理请求或搬迁失败（调用方以旧配置重启）。
 pub async fn handle_pending_migration(old_config: &TianyanConfig) -> Option<TianyanConfig> {
     let old_dir = old_config.storage.data_dir.clone();
-    match tianyan::config::migration::run_pending_migration(&old_dir) {
+    match tianyan_service_config::run_pending_migration(&old_dir) {
         Ok(outcome) if outcome.migrated => {
             // 被占用而未能删除的源文件：留作无害残留（数据已完整在新目录）
             for leftover in &outcome.leftovers {
@@ -23,7 +23,7 @@ pub async fn handle_pending_migration(old_config: &TianyanConfig) -> Option<Tian
                 );
             }
             // 重读配置（新 data_dir 生效；失败时回退旧配置并告警）
-            match TianyanConfig::load() {
+            match tianyan_service_config::load() {
                 Ok(c) => {
                     tracing::info!(
                         "搬迁完成，以新配置重启（data_dir={}）",

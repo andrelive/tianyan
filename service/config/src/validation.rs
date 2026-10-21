@@ -1,9 +1,14 @@
 //! 配置验证模块。
 //!
 //! 提供配置验证功能，用于配置向导和配置状态检测。
+//!
+//! **ADR-049 期 3-T4**：整文件搬出 `core/src/config/`（配置校验属服务层——它回答
+//! 「这份配置能不能用」，而不是「配置长什么样」）。除 `use crate::…` 改成
+//! `use tianyan::…` 外，函数体与错误文案逐字未改；各子配置的 `validate` 方法仍留
+//! core（它们是字段自身的约束，随结构走）。
 
-use crate::common::error::TianyanError;
-use crate::config::{AgentConfig, ModelsConfig, ProviderConfig, StorageConfig};
+use tianyan::common::error::TianyanError;
+use tianyan::config::{AgentConfig, ModelsConfig, ProviderConfig, StorageConfig};
 
 /// 配置验证结果。
 pub type ValidationResult = Result<(), Vec<TianyanError>>;
@@ -116,7 +121,7 @@ pub fn validation_errors_to_strings(errors: Vec<TianyanError>) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{ModelCapability, ModelEntry};
+    use tianyan::config::{ModelCapability, ModelEntry};
 
     fn make_model(name: &str, caps: Vec<ModelCapability>) -> ModelEntry {
         ModelEntry {

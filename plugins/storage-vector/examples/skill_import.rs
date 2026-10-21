@@ -26,7 +26,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use tianyan::common::types::{ContentLevel, ContextNamespace, TianyanUri};
-use tianyan::config::{ModelCapability, TianyanConfig};
+use tianyan::config::ModelCapability;
 use tianyan::db::Database;
 // ADR-049 期 2 序 6：ModelServices 容器已搬到 server 装配层；运维脚本直接用 provider
 // 插件的能力集合（	ianyan-provider-embed / 	ianyan-provider-llm）——它们只依赖 core。
@@ -78,7 +78,8 @@ async fn run() -> Result<(), tianyan::TianyanError> {
     }
 
     // ── 装配 VFS（与 server initialize_vfs_for_app / memory_cleanup 同构）──
-    let mut config = TianyanConfig::load()?;
+    // 加载器随 ADR-049 期 3-T4 搬去 `tianyan-service-config`（运维脚本的 dev 边）
+    let mut config = tianyan_service_config::load()?;
     if let Some(d) = &data_dir_override {
         config.storage.data_dir = d.clone();
         config.storage.sqlite_path = None;

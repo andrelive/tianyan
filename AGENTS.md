@@ -63,6 +63,7 @@ cargo test -p tianyan-core vfs::backend::local -- --nocapture  # 指定测试模
 | `gui-vite/` | - | React TypeScript 前端（非 crate） |
 | `tauri/` | `tianyan-tauri` | Tauri 桌面包装（第二个装配器） |
 | `mcp/` | `tianyan-mcp` | MCP 协议客户端 |
+| `service/config/` | `tianyan-service-config` | **服务层**：配置加载 / 持久化（段保全）/ 数据目录迁移 / 校验编排 / 向导 DTO（ADR-049 期 3-T4，753 生产行从 core 搬出）；**不含配置结构**（`TianyanConfig` 留 core——内核与插件的共同构造参数） |
 | `plugins/tools-fs/` | `tianyan-tools-fs` | 插件：glob / list_dir / read_file / write_file / apply_edit / apply_patch（定义/门控/审批；实现暂留 core） |
 | `plugins/tools-code/` | `tianyan-tools-code` | 插件：symbol_outline / repo_map / grep（**含实现**，tree-sitter ×6 在此） |
 | `plugins/tools-todo/` | `tianyan-tools-todo` | 插件：todo / goal（含实现） |
@@ -182,7 +183,7 @@ Harness 工程 → [`docs/harness核心思路/harness-engineering-overview.md`](
 | 模块 | 位置 | 一句话 | ⛔ VFS 约束 |
 |------|------|--------|-------------|
 | `common` | `core/src/common/` | 通用类型/错误（`TianyanError` 4 变体 + 语义谓词）/日志/token 估算/UTF-8 截断/HTTP 工厂 | — |
-| `config` | `core/src/config/` | TOML 配置 + 环境变量 + 向导 + 安全策略（ADR-033：`approval_mode`/`safety_mode`） | — |
+| `config` | `core/src/config/` | 配置**结构 + 全局槽位**：`TianyanConfig` 与全部子 Config（agent/storage/model/security/web/mcp/events/evolution/reminder/retrieval/roles/executor/tool_output/memory/clipboard）及其 `Default`、预设数据表 `PROVIDER_PRESETS`/`find_preset`、安全策略归一（ADR-033：`approval_mode`/`safety_mode`）、`get_config()`/`set_config()`/`try_get_config()`（OnceLock 槽位，装配层注入）。**加载 / 持久化 / 迁移 / 校验 / 向导已出 core**（ADR-049 期 3-T4 → `service/config`，`tianyan-service-config`）：它们是服务层的运维语义，不是内核机制 | — |
 | `db` | `core/src/db/` | **统一写入门面**（ADR-020）：Database 门面（单连接 + schema 集中）+ SqliteDb + 业务域 Repository（stats/trace/execution/usage）；只依赖 common | — |
 | `roles` | `core/src/roles/` | 角色基础类型（ADR-016 纯类型层）：config/agent/scheduler 共用 | — |
 | `role_store` | `core/src/role_store.rs` | 角色 VFS 存储（独立存储层，依赖 vfs + roles） | — |

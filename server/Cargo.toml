@@ -9,6 +9,10 @@ description = "HTTP server for Tianyan"
 [dependencies]
 tianyan-core = { path = "../core" }
 tianyan-mcp = { path = "../mcp" }
+# 服务层配置 crate（ADR-049 期 3-T4）：加载 / 持久化（段保全）/ 数据目录迁移 / 校验 /
+# 向导 DTO 从 core 搬出后由通道层直接调用——它们是「配置怎么落盘、搬迁怎么保数据」的
+# 运维语义，不属于内核机制。方向正确（server 是使用方，被依赖方是 core 与服务层）。
+tianyan-service-config = { path = "../service/config" }
 
 # HTTP server
 axum = { version = "0.8", features = ["multipart"] }

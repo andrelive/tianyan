@@ -26,7 +26,7 @@ Core 是天演的核心库，提供 AI Agent 的全部基础能力。4 crate wor
 |--------|------|---------|---------|
 | `agent` | Agent 协调器 + AgentLoop 迭代循环 + 会话状态；**统一循环框架（ADR-030）**：主 agent 与子代理同构（`TurnPolicy` 配置），子代理用流式路径 + 消息落库不索引 FTS（ADR-031：消息不再广播，chat_stream 带 session_id=task_id 路由）；ToolRegistry 工具执行走可插拔管线（`tool_registry/pipeline.rs`：pre-execute 监听器 / 单调守卫 / post-execute 监听器）+ 内置可观测性监听器（`tool_registry/observability.rs`） | coordinator.rs, builder.rs, session_state.rs, loop.rs, tool_registry/（含 pipeline.rs、observability.rs）, tools.rs, types.rs | ✅ 已集成 |
 | `common` | 通用类型（按领域拆分）、错误处理、日志配置、token 估算 | error.rs, logging.rs, token_estimator.rs, types/ | ✅ 已集成 |
-| `config` | 配置管理（TOML + 环境变量 + 向导） | mod.rs, wizard.rs, validation.rs, agent.rs, model.rs | ✅ 已集成 |
+| `config` | 配置**结构 + 全局槽位**（TOML 形状、预设表、`get_config`/`set_config`）；加载/持久化/迁移/校验/向导已出 core（ADR-049 期 3-T4 → `service/config`） | mod.rs, agent.rs, model.rs, presets.rs | ✅ 已集成（加载器在 `tianyan-service-config`） |
 | `context` | 上下文工程**契约 + 组装机制**（策略实现已迁 `plugins/policy-context`，ADR-049 期 3-T2） | assembler.rs, port.rs, assembly.rs（插件侧 pipeline.rs, retrieval/, compression/） | ✅ 已集成 |
 | `executor` | 工具执行支撑（Action、审批**门控契约**、任务自审**契约** `review::TaskReviewer`、验证门控）+ 编程助手执行原语（内容匹配编辑、patch、文件浏览、搜索、符号、仓库地图、测试发现）。审批**实现**已迁 `plugins/policy-approval`（ADR-049 期 3-T1）、自审**实现**已迁 `plugins/policy-review`（期 3-T3，`judge.rs` → `review.rs`） | actions.rs, security.rs, command.rs, output_parse.rs, approval/, types.rs, review.rs, verification.rs, truncate.rs, edit.rs, patch.rs, fs.rs, search.rs, symbols.rs, project.rs, test_discovery.rs | ✅ 正常使用 |
 | `snapshot` | 工作区快照（回退/撤销回退；gzip 压缩 + GC + similar diff） | mod.rs | ✅ 正常使用 |
@@ -319,7 +319,7 @@ soul → rules+memories → history(from compression_marker，含当前用户输
 
 | 子模块 | 核心类型 | 说明 |
 |--------|---------|------|
-| `config` | `TianyanConfig`, `AgentConfig`, `ModelsConfig`, `ConfigStatus` | 全局配置管理，支持 TOML + env。查找顺序：`./tianyan.toml` → `~/.config/tianyan/tianyan.toml` → `~/.tianyan/tianyan.toml` |
+| `config` | `TianyanConfig`, `AgentConfig`, `ModelsConfig`, `ConfigStatus`, `get_config` / `set_config` / `try_get_config` | 配置**结构与槽位**（内核侧）。查找顺序与加载实现已迁 `tianyan-service-config`（ADR-049 期 3-T4）：`TIANYAN_CONFIG` 覆盖优先，否则 `~/.tianyan/tianyan.toml` |
 | `common` | `TianyanError`, `Message`, `TianyanUri`, `Embedding`, `TokenUsage`, `StructuredMessage`, `ContentPart`, `ImageUrl`, `LoggingConfig`, `TokenEstimator` | 通用错误（禁止引入新错误类型）、URI、向量、消息（含多模态 `content_parts`，ADR-010）、记忆类型、日志配置、token 估算（叶模块，无 core 内部依赖）；横切单点：`truncate.rs`（UTF-8 边界截断唯一实现）、`http.rs`（reqwest 客户端工厂，超时/连接池/UA 策略一处定义） |
 | `db` | `Database`, `SqliteDb`, `StatsRepo`, `TraceRepo`, `ExecutionRepo`, `UsageRepo` | **统一写入门面**（ADR-020）：`Database` 门面（单连接 + schema 集中 + lock/try_lock 统一访问）；`SqliteDb`（ADR-005 连接，自 `vfs/backend` 移入）；业务域 Repository 收敛 SQL；**只依赖 `common`**（纯底层） |
 | `roles` | `AgentRole`, `RoleSource`, `RoleStatus`, `RoleUsage`, `DelegationRecord` | 角色基础类型（ADR-016 纯类型层）：config/agent/scheduler 共用，不依赖领域模块——打破 `config↔agent`、`scheduler↔agent` 环 |
@@ -340,7 +340,7 @@ soul → rules+memories → history(from compression_marker，含当前用户输
 | skills | ✅ 完整集成 | 含 GEPA 进化引擎，通过 call_skill 工具桥接 |
 | vfs | ✅ 完整集成 | VirtualFileSystemImpl + `StorageBackend` / `VectorStorage` 契约（SQLite·本地文件实现在 `plugins/storage-sqlite`、LanceDB 在 `plugins/storage-vector`，均经装配层注入）；双层摘要索引 |
 | scheduler | ✅ 完整集成 | TaskScheduler（机制）+ 内置任务在 `plugins/task-builtin`（摘要 / GC / 快照 GC / 提醒 / 统计刷盘）+ 演化任务在 `plugins/task-evolution`（综述执行器实现在 server，经 `TaskServices` 注入） |
-| config | ✅ 完整集成 | 配置加载器和验证器 |
+| config | ✅ 完整集成 | 结构 + 全局槽位在 core；加载器 / 持久化（段保全）/ 迁移 / 校验编排在 `tianyan-service-config`（ADR-049 期 3-T4），装配层启动期 `load_and_install()` 注入槽位 |
 | common | ✅ 完整集成 | 错误类型和通用工具 |
 | session | ✅ 已集成 | `PersistentSessionManager` 基于 `SessionStore`（SQLite 权威存储，ADR-018）；回忆检索 `SessionRecall`（FTS5） |
 | observability | ✅ 已集成 | AgentMetrics 提供可观测性存储和自省接口 |
