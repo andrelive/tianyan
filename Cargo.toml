@@ -15,6 +15,7 @@ members = [
     "plugins/task-evolution",
     "plugins/policy-approval",
     "plugins/policy-context",
+    "plugins/policy-review",
 ]
 resolver = "2"
 

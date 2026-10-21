@@ -1,46 +1,32 @@
 //! 技能使用复审（基于会话证据：执行结果 + 用户反馈）。
 //!
-//! 对会话中**实际调用过**的
-//! 技能，依据「调用参数 + 工具执行结果 + 后续用户反馈」由 LLM 评审，
-//! 产出质量分（0-10）/ 倾向 / 理由，落 VFS `skill/_reviews/<id>.jsonl`。
+//! 对会话中**实际调用过**的技能，依据「调用参数 + 工具执行结果 + 后续用户反馈」由 LLM
+//! 评审，产出质量分（0-10）/ 倾向 / 理由，落 VFS `skill/_reviews/<id>.jsonl`。
 //!
 //! 语义：方法论技能本身无成败——评审的是**使用效果**（被采纳/推动任务/用户满意），
 //! 与面板的「调用频率」互补；低分技能是退役/改进信号。
+//!
+//! ADR-049 期 3-T3：本文件原在 `core/src/skills/reviewer.rs`，实现迁入
+//! `plugins/policy-review`；契约 `SkillReviewPort`（只读 `latest_review`）与记录形状
+//! `SkillReview` 留 core（`tianyan::skills`）。
+//!
+//! **未接线遗留**：`review_conversation`（会话证据 → LLM 评分 → 落盘）今天**零生产
+//! 调用者**（只有本文件的测试）——GUI 能读评审（`SkillReviewPort::latest_review`），
+//! 但**永不产生新评审**。它不是死代码，是**待接线**：保留在具体类型上，不进契约、
+//! 不删、不改替身（ADR-049 期 3-T3「遗留」）。
 
 use std::sync::Arc;
 
-use crate::common::error::Result;
-use crate::common::llm_judge::{parse_llm_json, truncate_output};
-use crate::common::types::{
+use async_trait::async_trait;
+use tianyan::common::error::Result;
+use tianyan::common::llm_judge::{parse_llm_json, truncate_output};
+use tianyan::common::types::{
     ContentLevel, ContextNamespace, Message, Part, StructuredMessage, TianyanUri,
 };
-use crate::model::ChatService;
-use crate::session::parse_message_lines;
-use crate::vfs::VirtualFileSystem;
-
-/// 评审记录存储目录名（技能发现时过滤）。
-pub const REVIEWS_PREFIX: &str = "_reviews";
-
-/// 单次技能使用评审记录。
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct SkillReview {
-    /// 评审时间（epoch 毫秒）。
-    pub ts: i64,
-    /// 技能 ID。
-    pub skill_id: String,
-    /// 来源会话。
-    pub session_id: String,
-    /// 质量分（0-10）。
-    pub score: u8,
-    /// 使用效果判定（positive / neutral / negative）。
-    pub verdict: String,
-    /// 用户反馈倾向（positive / negative / mixed / none）。
-    pub user_feedback: String,
-    /// 理由（截断）。
-    pub reason: String,
-    /// 证据摘要（截断）。
-    pub evidence: String,
-}
+use tianyan::model::ChatService;
+use tianyan::session::parse_message_lines;
+use tianyan::skills::{SkillReview, SkillReviewPort, REVIEWS_PREFIX};
+use tianyan::vfs::VirtualFileSystem;
 
 /// 技能使用评审器。
 #[derive(Clone)]
@@ -83,6 +69,9 @@ impl SkillReviewer {
     }
 
     /// 从会话文本提取技能调用证据并评审（记忆任务顺路调用；失败不影响调用方）。
+    ///
+    /// **当前无生产调用者**（见模块文档的「未接线遗留」）：保留完整实现与测试，
+    /// 接线时只需在会话收尾处调用一次，无需改动本函数。
     pub async fn review_conversation(
         &self,
         session_id: &str,
@@ -262,6 +251,14 @@ impl SkillReviewer {
     /// 某技能的最新评审。
     pub async fn latest_review(&self, skill_id: &str) -> Result<Option<SkillReview>> {
         Ok(self.load_reviews(skill_id).await?.pop())
+    }
+}
+
+#[async_trait]
+impl SkillReviewPort for SkillReviewer {
+    /// 委托给同名固有方法（用完全限定语法，不依赖「固有方法优先」规则）。
+    async fn latest_review(&self, skill_id: &str) -> Result<Option<SkillReview>> {
+        <SkillReviewer>::latest_review(self, skill_id).await
     }
 }
 

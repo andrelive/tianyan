@@ -950,6 +950,129 @@ GEPA）」的 **GEPA 部分作废**；`role_learning.rs`（573 生产）仍在�
      人设 + 上下文无限增长」。`start_server*` 已有硬守卫覆盖生产形态，`create_app` 侧
      未加运行期指标（47 处单测的可观测面不宜再动，留给期 4 清单收敛时统一）。
 
+**实施记录（期 3-T3：policy-review，2026-10-21）**：两个评审面整体迁入
+`plugins/policy-review`（crate `tianyan-policy-review`）——`core/src/executor/judge.rs`
+（322 行 = **200 生产行** + 122 测试行）与 `core/src/skills/reviewer.rs`（303 行 =
+**275 生产行** + 测试声明）+ `core/src/skills/reviewer_tests.rs`（164 行），合计
+**475 生产行搬出 core**。这是期 3 最小的一刀，也是「改 prompt 不重编内核」的最后一块
+拼图：此前调一句判定提示词、改一条评分标准、换一次评审模型，都要重编 core（42.4K）
++ server（13.4K）。
+
+- **契约留 core（两处，都是「trait 签名 + 调用点证据」）**：
+
+  | 留 core | 位置 | 为什么 |
+  |---|---|---|
+  | `TaskReviewer` / `Judgment` / `Verdict` | **新建** `core/src/executor/review.rs`（原 `judge.rs` 删除） | 内核以 `Arc<dyn TaskReviewer>` 消费：`agent/background.rs:280` 字段 / `:364` 注入器、`agent/tool_registry/mod.rs:666`、`AgentBuilder::with_task_reviewer`；`Judgment`/`Verdict` 在 trait 签名里。搬走 ⇒ 内核反向 `use tianyan_policy_review::…`（破 D2-1/D2-3） |
+  | `SkillReviewPort` / `SkillReview` / `REVIEWS_PREFIX` | **新建** `core/src/skills/review.rs` | 见下两条 |
+
+  模块改名（`judge` → `review`）不是审美：`judge` 这个名字原本同时覆盖「契约 + 实现」，
+  实现走后留一个叫 `judge` 的空壳会持续误导（与 T1 把 `gate.rs` 从 `workflow.rs` 里切
+  出来同一条理由）。代价是 4 处 `crate::executor::judge::` 路径改写（`background.rs` 3 处、
+  `tool_registry/mod.rs` 1 处），零语义改动。
+
+- **★ 新增 1 个 pub trait `SkillReviewPort`**（`core/src/skills/review.rs`），本批只此
+  一个（期 3 至今净增 pub trait = **3**，正好压在反指标线上）。方法面按**真实调用点**
+  最小化到 **1 个**：
+
+  | 方法 | 调用点 | 说明 |
+  |---|---|---|
+  | `latest_review(&self, skill_id) -> Result<Option<SkillReview>>` | `server/src/api/skills/handlers.rs`（技能统计面板「每个技能的最新一条评审」） | 只读；读 `skill/_reviews/<id>.jsonl` 的最后一行 |
+
+  **`review_conversation` 与 `load_reviews` 没有进 trait**：`review_conversation`
+  （约 160 行，产生评审的完整逻辑）**零生产调用者**（只有自身测试）——ADR-017 收敛掉
+  「记忆提取任务」后，它原本顺路调用的挂点消失，于是**读侧已接线、写侧未接**（GUI 能
+  看到评审、却永不产生新评审）。这是「未接线」而非死代码，故保留在插件的
+  `SkillReviewer` 具体类型上：**不进契约**（契约里放一个零调用方法等于让未来的实现者
+  对着空气实现）、**不删**（删掉等于把技能质量反馈这条路封死）、**不改 mock**。
+
+- **★ `REVIEWS_PREFIX` 必须留 core（一个口径两个消费者）**：它既是插件的落盘路径
+  （`tianyan://skill/_reviews/<id>.jsonl`），也是内核技能发现时的过滤条件
+  （`skills/manager.rs:43` `if id == crate::skills::REVIEWS_PREFIX` —— 不滤掉的话
+  `_reviews` 会被当成一个「技能」列给用户）。与 T1 的 `action_fingerprint`、T2 的
+  `extract_marker_summary` 是同一类判断：**产生者与消费者必须同源**。
+
+- **`common/llm_judge.rs` 原样不动**（§B.5 第 4 条，本次实测复核）：6 个消费者里 4 个
+  非评审——`vfs/summary/engine.rs:119`（内核摘要解析）、`agent/background.rs:42`
+  （任务通知截断）、`agent/tool_registry/evolution_ops.rs:13`（演化综述）、
+  `plugins/tools-web/src/web.rs:24`（抓取正文截断）。移进 policy-review 会让内核
+  **反向依赖策略插件**；插件只是 `use tianyan::common::llm_judge::…`。
+
+- **`skills/manager.rs` + `SkillManager` 留 core（3a 型业务复用，本批不动）**：
+  `server/src/state.rs`（字段 + 构造）与 `server/src/api/skills/services.rs:17/23` 直接持
+  具体类型干活（技能列表/详情/`call_skill`）——不是装配接线，是 HTTP 业务直接调实现。
+  按 D5 的判据它终将需要 `SkillCatalogPort`，但那会连带 `call_skill` 工具链
+  （`agent/tool_registry` → `skills::SkillManager` 单向依赖），超出本批 475 行的范围。
+
+- **★ 与任务书初稿的偏差：插槽是两个（`TaskReviewerFactory` + `SkillReviewFactory`），
+  不是「只加一个 `skill_review_factory`」**。理由是硬的：`LlmTaskReviewer` 的**构造点
+  不在 server**，而在 core 的 `AgentBuilder::build`（`background_self_review` 为真时
+  内联 `LlmTaskReviewer::new(model_service, &chat_model)`）。实现搬走后，builder 若没有
+  注入路径，就只能把实现留在 core——那等于没搬。因此第二个插槽是本次搬移的**必要配套**，
+  形状与 T1 的 `ApprovalGateFactory` 同款（`Arc<dyn Fn>`、同步、可重复调用）：
+
+  | 插槽 | 形状 | 未装配时 |
+  |---|---|---|
+  | `TaskReviewerFactory`（第七个） | `Arc<dyn Fn(Arc<dyn ChatService>, &str /*model*/) -> Arc<dyn TaskReviewer>>` | `AgentBuilder` 得到 `None` → `background_self_review` 为真时也不装配自审器（通知直接投递）+ **装配期 `warn!`** |
+  | `SkillReviewFactory`（第八个） | `Arc<dyn Fn(Arc<dyn ChatService>, &str, Arc<dyn VirtualFileSystem>) -> Arc<dyn SkillReviewPort>>` | `AppState::create_skill_reviewer` 返回 `None` → 技能统计的 `reviews` 为空数组（**响应结构不变**） |
+
+  「是否自审」（`config.background_self_review`）**仍由内核判**——那是「要不要花这次
+  模型调用」的成本开关（内核行为），不是「怎么审」（插件策略）。插件只回答后者。
+
+- **降级语义的取舍（两处都允许降级，都不静默）**：自审缺失与审批缺失同一档（少一层
+  质量复核；且该开关默认关闭 = opt-in）；复审读端口缺失在 `GET /api/v1/skills/stats`
+  上**不改变可观测形状**（今天「没有评审器」与「有评审器但没有记录」都表现为
+  `reviews: []`）。两处都有判据：装配期 `warn!`（自审）与 `server/src/assembly.rs` 的
+  插槽测试（默认空 / 注入即用 / 可重复调用）。
+  **`create_skill_reviewer` 的签名从 `TianyanResult<Arc<SkillReviewer>>` 变成
+  `TianyanResult<Option<Arc<dyn SkillReviewPort>>>`**（仍保留 `Result`：取共享模型服务
+  失败时照旧向上抛，与迁移前一致）；`handlers.rs` 在 `None` 时**跳过附加字段**而不是
+  造一个空实现——响应结构完全不变，也不会凭空产生一个假实现。
+
+- **逐行比对证据**（`git diff --no-index`，HEAD 原文件 vs 插件文件）：
+
+  | 文件 | 改动行 | 归类 |
+  |---|---|---|
+  | `judge.rs` | 25 增 / 62 删 | ① 契约块（`Verdict` / `Judgment` / `TaskReviewer`，40 行）移出 → 换 4 行 `use tianyan::executor::review::…`；② `crate::` → `tianyan::`（imports + `run_judge` 里的 `crate::common::types::Message` + 测试 4 处）；③ 模块文档改写（+9 行，说明迁移动机与「逐字未改」清单）；④ 测试：`test_verdict_is_pass`（9 行）留 core，两段分节注释（+7） |
+  | `reviewer.rs` | 30 增 / 33 删 | ① `SkillReview` 结构 + `REVIEWS_PREFIX` 常量（28 行）移出 → 换 1 行 `use tianyan::skills::{SkillReview, SkillReviewPort, REVIEWS_PREFIX}`；② `crate::` → `tianyan::`（7 处）；③ 模块文档（+10 行：迁移 + 「未接线遗留」说明）；④ **末尾新增 9 行** `impl SkillReviewPort for SkillReviewer`（1 个方法，委托给同名固有方法，用完全限定语法） |
+  | `reviewer_tests.rs` | 6 / 6 | **全部是 `crate::` → `tianyan::`**（5 处 import + 2 处内联路径），2 个用例的函数体逐字未动 |
+
+  **判定提示词全文（`build_task_review_prompt` / `SKILL_REVIEW_PROMPT`）、`VERDICT:`
+  扫描顺序（先 `PASS` 再 `NEEDS_CHANGES`）、退出码回退、`REASON:` 缺失文案、
+  「自审不可用，默认通过」、空结果短路（`"任务无结果输出"`）、评分标准「4+3+3」、
+  截断预算（2000 / 300 / 400）、`max_reviews_per_conversation = 3`、保留最近 `50` 条、
+  日志文案（`"技能使用评审完成"` / `"技能评审记录存储失败"` / `"技能评审调用失败"` /
+  `"技能评审响应解析失败"` / `"技能评审缺少 score"` / `"LLM 判断调用失败，回退"`）
+  逐字未动。**
+
+- **门禁**：`cargo fmt --all -- --check` 干净；`cargo clippy --workspace --all-targets`
+  **零 warning**；`tianyan-core --lib` **1166 passed**（= 基线 1177 − 11 条随迁用例）；
+  `tianyan-policy-review` **14 passed**（11 迁移 + 3 装配门禁）；`tianyan-server --lib`
+  **194 passed / 1 ignored**（192 + 2 条新插槽测试）、`--tests` 5 / 14 / 1 / 2 全绿；
+  `tianyan-app` 7 passed；`cargo catalog-check` OK；
+  `cargo tree -p tianyan-policy-review --edges normal --depth 1`
+  = core / async-trait / serde / serde_json / tokio / tracing，**无 `tianyan-server`**。
+- **测试守恒**：HEAD core 1177 = 现在 core **1166** + 插件 **14**（11 条为迁移，逐个同名
+  同断言：judge 9 = 4 条 G4 自审 + 3 条判定解析 + 2 条截断预算；reviewer 2 = 会话证据
+  评审 + 无 `call_skill` 空返回；另 3 条为新增**装配门禁**：工厂产出的自审器空结果不花
+  调用 / 复审端口从 `_reviews/<id>.jsonl` 取最新且空 VFS 回 `None` / 契约方法委托给同
+  一份读取逻辑）**− 1**（`test_verdict_is_pass` 测的是 core 的 `Verdict`，留 core）。
+  算式：1177 − 11 = 1166；1166 + 14 = 1180 = 1177 + 3（新增）。**零放弃、零降级**。
+- **遗留**：
+  1. **`review_conversation` 待接线**（本批最需要留档的一条）：技能评审的**写侧**没有
+     生产调用者，面板因此只能显示历史记录、永不更新。接线点应选在**已有模型调用**的
+     位置（会话收尾 / 演化任务）以免多一轮成本；接线时它已经在 `SkillReviewer`
+     （具体类型）上，不必动契约。
+  2. **`skills/manager.rs` + `SkillManager` 仍在 core**（3a 型业务复用）：要走得先抽
+     `SkillCatalogPort`（列表 / 详情 / 读取），并连带处理 `call_skill`
+     （`agent/tool_registry` → `skills::SkillManager` 单向依赖）。与普查结论「`skills`
+     部分可搬」一致，留待期 4。
+  3. **插槽增至 8 个**：`AssemblyServices` 正在变成「所有插件能力的平铺表」。T2 的遗留 2
+     （`TaskServices` 9 字段）与本条是同一件事的两面——期 4 清单收敛时应按插件分组
+     （每个插件一份能力接口），而不是继续往同一个结构上加字段。
+  4. `SkillReviewPort` 只有**读**一面；若未来把「产生评审」也接成契约，应新增
+     `record_review` 之类的方法而不是把 `review_conversation` 整个塞进 trait（后者会把
+     会话解析、`call_skill` 参数形状等内核知识灌进插件的契约面）。
+
 ---
 
 ## 分期与闸门
@@ -960,7 +1083,7 @@ GEPA）」的 **GEPA 部分作废**；`role_learning.rs`（573 生产）仍在�
 | **0.5** | 工具契约与注册形状 + 装配器二分（**工具侧已完成**） | ✅ 元数据表承载执行入口 + 协议工具独立成表（28 分支 match → 一次查表，内核零工具名字面量）；✅ `ToolContext` 承载六个工具域（`impl ToolContext` + 注册表 `Deref`），依赖边界实测：工具域 executor 引用仅 16 处（随插件搬走）。待办：`thin-channel` + `assembly-manifest`；`AppState` 20 字段契约化 | 工具目录 freshness ✅；工具行为零变化 ✅（1431 单测全绿）；clippy 零警告 ✅ |
 | **1** | 工具插件试点（**装配器二分 + tools-fs 骨架已完成**） | ✅ `tianyan-app` bin 包（**清单住 bin**）+ `ToolPluginFactory` 类型擦除 + `create_app_with_plugins` / `start_server_with_plugins*`；✅ `plugins/tools-fs` 独立 crate（`executor::fs` 实现整体迁入）。待续：**整域迁移**——`read_file` 目录模式反向依赖 `executor::fs::execute_list_dir`，故 fs 域必须 6 工具一起搬（read/write/edit/patch/glob/list_dir）才能删 core 侧 | 闸门 A **首测 512 行 ✅**（判据 ≤3.5K）；core 侧暂留（双路径过渡，重名注册自动跳过） |
 | **2** | 适配器与任务插件（**期 2 完成**） | 迁移顺序（按 自包含度×收益）：**0 清 core 死依赖** → 1 `tools-todo`+`tools-goal` → 2 `tools-web` → 3 `storage-vector` → 4 `storage-sqlite` → 5 `task-*`（2 crate）→ 6 `provider-llm`+`provider-embed`。详见下方「期 2 普查结论」 | 各领域 ≤ 2K；全量 release 不劣化 >10% |
-| **3** | 策略分离（最难一刀） | 抽 `kernel-impl`（loop/cancel/rollback/stream_forward/working_set）；**`context`→`policy-context`（T2 ✅ 2026-10-21，见下方实施记录；`assembler.rs` 按普查修订留 kernel-impl）**；**审批→`policy-approval`（T1 ✅ 2026-10-21）**；`role_learning`→已删除（零消费者，2026-10-21 裁决）；`judge`→`policy-review` | **闸门 B**：api ≤ 6K && impl ≤ 15K（或配置外移后 16.1K）；改策略不重编内核；S 级零变更 |
+| **3** | 策略分离（最难一刀） | 抽 `kernel-impl`（loop/cancel/rollback/stream_forward/working_set）；**`context`→`policy-context`（T2 ✅ 2026-10-21，见下方实施记录；`assembler.rs` 按普查修订留 kernel-impl）**；**审批→`policy-approval`（T1 ✅ 2026-10-21）**；`role_learning`→已删除（零消费者，2026-10-21 裁决）；**`judge` + `skills/reviewer`→`policy-review`（T3 ✅ 2026-10-21，475 生产行；`TaskReviewer` / `SkillReviewPort` 契约留 core）** | **闸门 B**：api ≤ 6K && impl ≤ 15K（或配置外移后 16.1K）；改策略不重编内核；S 级零变更 |
 | **4** | 清单收敛与发行版 | 清单完整化、跨插件顺序断言、desktop/headless/minimal 三份清单 | 装配清单 1 页可查；headless 可构建 |
 
 **反指标**（防拆过头）：每 crate ≥ 300 行且至少 2 个真实消费者；每期净增 pub trait ≤ 3；

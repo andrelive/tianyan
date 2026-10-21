@@ -7,8 +7,8 @@ use std::sync::Arc;
 use tianyan::vfs::{StorageBackend, VectorStorage};
 use tianyan_server::{
     start_server_with_shutdown_signal_and_assembly, ApprovalGateFactory, AssemblyServices,
-    ContextFactory, PluginServices, StorageBackendFactory, TaskFactory, ToolPluginFactory,
-    VectorStorageFactory,
+    ContextFactory, PluginServices, SkillReviewFactory, StorageBackendFactory, TaskFactory,
+    TaskReviewerFactory, ToolPluginFactory, VectorStorageFactory,
 };
 use tianyan_storage_sqlite::{LocalFileBackend, SqliteBackend};
 use tianyan_storage_vector::LanceDbVectorStore;
@@ -114,6 +114,31 @@ fn context_factory() -> ContextFactory {
     })
 }
 
+/// 任务结果自审器工厂（`plugins/policy-review`，ADR-049 期 3-T3）。
+///
+/// 与 `app/src/main.rs::task_reviewer_factory` **同形同源**：`LlmTaskReviewer`（判定
+/// 提示词 + `VERDICT:` 解析口径 + 兜底）搬出 core 后由装配层注入，server 库只认
+/// `Arc<dyn TaskReviewer>`。
+fn task_reviewer_factory() -> TaskReviewerFactory {
+    Arc::new(|chat: Arc<dyn tianyan::model::ChatService>, model: &str| {
+        tianyan_policy_review::task_reviewer(chat, model)
+    })
+}
+
+/// 技能使用复审工厂（`plugins/policy-review`，ADR-049 期 3-T3）。
+///
+/// 与 `app/src/main.rs::skill_review_factory` **同形同源**：`SkillReviewer` 搬出 core 后
+/// 由装配层注入，server 库只认 `Arc<dyn SkillReviewPort>`（唯一方法 `latest_review`）。
+fn skill_review_factory() -> SkillReviewFactory {
+    Arc::new(
+        |chat: Arc<dyn tianyan::model::ChatService>,
+         model: &str,
+         vfs: Arc<dyn tianyan::vfs::VirtualFileSystem>| {
+            tianyan_policy_review::skill_reviewer(chat, model, vfs)
+        },
+    )
+}
+
 /// 启动 Axum 服务
 ///
 /// 此函数在后台任务中启动 Axum HTTP 服务器，
@@ -164,15 +189,17 @@ pub async fn start_axum_server(
             tools
         },
     );
-    // 完整装配（ADR-049 期 2 序 3/4/5a、期 3-T1）：
-    // 工具清单 + 向量存储 + 结构化存储 + 内置任务 + 审批门控
+    // 完整装配（ADR-049 期 2 序 3/4/5a、期 3-T1/T2/T3）：
+    // 工具清单 + 向量存储 + 结构化存储 + 内置任务 + 审批门控 + 上下文策略 + 两个评审插槽
     let assembly = AssemblyServices::new()
         .with_plugin_factory(plugin_factory)
         .with_vector_factory(vector_factory())
         .with_storage_factory(storage_factory())
         .with_task_factory(task_factory())
         .with_approval_factory(approval_factory())
-        .with_context_factory(context_factory());
+        .with_context_factory(context_factory())
+        .with_task_reviewer_factory(task_reviewer_factory())
+        .with_skill_review_factory(skill_review_factory());
     if let Err(e) = start_server_with_shutdown_signal_and_assembly(
         listener,
         tianyan_config,

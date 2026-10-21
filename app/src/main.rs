@@ -40,7 +40,8 @@ use std::sync::Arc;
 use tianyan::vfs::{StorageBackend, VectorStorage};
 use tianyan_server::{
     start_server_with_assembly, ApprovalGateFactory, AssemblyServices, ContextFactory,
-    StorageBackendFactory, TaskFactory, ToolPluginFactory, VectorStorageFactory,
+    SkillReviewFactory, StorageBackendFactory, TaskFactory, TaskReviewerFactory, ToolPluginFactory,
+    VectorStorageFactory,
 };
 use tianyan_storage_sqlite::{LocalFileBackend, SqliteBackend};
 use tianyan_storage_vector::LanceDbVectorStore;
@@ -167,7 +168,38 @@ fn context_factory() -> ContextFactory {
     })
 }
 
-/// 完整装配（插件工具清单 + 向量存储 + 结构化存储 + 内置任务 + 审批门控 + 上下文策略）。
+/// 任务结果自审器工厂（`plugins/policy-review`，ADR-049 期 3-T3）。
+///
+/// 同款类型擦除：server 库只认 [`TaskReviewerFactory`]（`Arc<dyn Fn>`），`LlmTaskReviewer`
+/// 只在本包出现。判定提示词、`VERDICT:` 解析口径、故障兜底全在插件里
+/// （`tianyan_policy_review::task_reviewer`），改一句提示词不必重编内核。
+///
+/// 同步工厂：`LlmTaskReviewer::new` 只存（chat 客户端, 模型名）两个字段。
+fn task_reviewer_factory() -> TaskReviewerFactory {
+    Arc::new(|chat: Arc<dyn tianyan::model::ChatService>, model: &str| {
+        tianyan_policy_review::task_reviewer(chat, model)
+    })
+}
+
+/// 技能使用复审工厂（`plugins/policy-review`，ADR-049 期 3-T3）。
+///
+/// 同款类型擦除：server 库只认 [`SkillReviewFactory`]（`Arc<dyn Fn>`），`SkillReviewer`
+/// 只在本包出现。评审记录落 VFS `skill/_reviews/<id>.jsonl`——路径与技能发现时的
+/// 过滤条件（core 的 `REVIEWS_PREFIX`）同源，因此面板读得到插件写下的内容。
+///
+/// 同步工厂：`SkillReviewer::new` 只存（chat, vfs, 模型名）三个字段。
+fn skill_review_factory() -> SkillReviewFactory {
+    Arc::new(
+        |chat: Arc<dyn tianyan::model::ChatService>,
+         model: &str,
+         vfs: Arc<dyn tianyan::vfs::VirtualFileSystem>| {
+            tianyan_policy_review::skill_reviewer(chat, model, vfs)
+        },
+    )
+}
+
+/// 完整装配（插件工具清单 + 向量存储 + 结构化存储 + 内置任务 + 审批门控 + 上下文策略
+/// + 任务自审 + 技能复审）。
 fn assembly() -> AssemblyServices {
     AssemblyServices::new()
         .with_plugin_factory(plugin_factory())
@@ -176,6 +208,8 @@ fn assembly() -> AssemblyServices {
         .with_task_factory(task_factory())
         .with_approval_factory(approval_factory())
         .with_context_factory(context_factory())
+        .with_task_reviewer_factory(task_reviewer_factory())
+        .with_skill_review_factory(skill_review_factory())
 }
 
 #[tokio::main]

@@ -26,6 +26,10 @@
 //! - [`ContextFactory`]：上下文策略实现（`tianyan-policy-context`，ADR-049 期 3-T2）。
 //!   **同步**：管线/压缩器/检索器的构造都只存字段（无 IO）；「注入顺序 / 压缩阈值 /
 //!   摘要提示词 / 检索参数 / 压缩窗口与模型规格联动」的映射随之进插件（单一事实源）。
+//! - [`TaskReviewerFactory`] / [`SkillReviewFactory`]：评审策略实现
+//!   （`tianyan-policy-review`，ADR-049 期 3-T3）。**同步**：两个实现都只存句柄与字段；
+//!   「判定提示词 / `VERDICT:` 解析口径 / 评分标准 / 截断预算」随之进插件
+//!   （任务自审走 [`TaskReviewerFactory`]，技能复审读端口走 [`SkillReviewFactory`]）。
 
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -157,12 +161,61 @@ pub type ApprovalGateFactory = Arc<
 /// （`AppState::reload_agent`），压缩窗口必须跟着**新配置/新模型规格**走。
 pub type ContextFactory = Arc<dyn Fn(&ContextServices) -> Arc<dyn ContextPort> + Send + Sync>;
 
+/// 任务结果自审器工厂（**装配层注入**，ADR-049 期 3-T3）。
+///
+/// `Arc<dyn Fn(Arc<dyn ChatService>, &str) -> Arc<dyn TaskReviewer>>`：
+/// - 第一个参数是**共享的**聊天客户端（`ModelServices.chat` 的克隆，不重复建 HTTP
+///   客户端池）；
+/// - 第二个参数是评审模型名（`resolve_chat_model` 的结果，装配层解析）。
+///
+/// 为什么需要**两个**评审插槽（与任务书初稿的「只加一个 `skill_review_factory`」的偏差，
+/// 理由是硬的）：`LlmTaskReviewer` 的实现今天由 **core** 的
+/// `AgentBuilder::build` 构造（`background_self_review` 为真时内联 `new`）。实现搬进
+/// 插件后，builder 若没有注入路径就只能把实现留在 core——那等于没搬。因此第二个插槽是
+/// 这次搬移的**必要配套**，不是范围扩张；形状与 [`ApprovalGateFactory`] 同款。
+///
+/// **同步**（与其余插槽同理）：`LlmTaskReviewer::new` 只存两个字段，没有任何 IO。
+///
+/// 用 `Arc<dyn Fn>` 而非 `Box<dyn FnOnce>`：配置热重载会重建 agent，评审模型可能已改。
+pub type TaskReviewerFactory = Arc<
+    dyn Fn(
+            Arc<dyn tianyan::model::ChatService>,
+            &str,
+        ) -> Arc<dyn tianyan::executor::review::TaskReviewer>
+        + Send
+        + Sync,
+>;
+
+/// 技能使用复审工厂（**装配层注入**，ADR-049 期 3-T3）。
+///
+/// `Arc<dyn Fn(Arc<dyn ChatService>, &str, Arc<dyn VirtualFileSystem>)
+///   -> Arc<dyn SkillReviewPort>>`：聊天客户端（共享克隆）+ 评审模型名 + VFS
+///   （**与 `SkillManager` 同一个实例**——评审写下的记录与面板读的必须同一份内容）。
+///
+/// 只产出**读端口**（`latest_review`）：产生评审的完整逻辑（`review_conversation`）
+/// 今天零生产调用者，属「未接线」而不是死代码，因此留在插件的具体类型上、不进契约
+/// （见 `plugins/policy-review` 的 crate 文档与 ADR-049 期 3-T3 遗留）。
+///
+/// **同步**：`SkillReviewer::new` 只存三个字段。用 `Arc<dyn Fn>` 而非
+/// `Box<dyn FnOnce>`：每次技能统计请求都要现造一个（旧实现 `create_skill_reviewer`
+/// 就是逐次构造，语义等同）。
+pub type SkillReviewFactory = Arc<
+    dyn Fn(
+            Arc<dyn tianyan::model::ChatService>,
+            &str,
+            Arc<dyn tianyan::vfs::VirtualFileSystem>,
+        ) -> Arc<dyn tianyan::skills::SkillReviewPort>
+        + Send
+        + Sync,
+>;
+
 /// 启装配所需的外部能力集合（`None` = 该扩展点未装配，走降级路径）。
 ///
-/// 目前六个插槽：插件工具清单（[`ToolPluginFactory`]）、向量存储
+/// 目前八个插槽：插件工具清单（[`ToolPluginFactory`]）、向量存储
 /// （[`VectorStorageFactory`]）、结构化存储（[`StorageBackendFactory`]）、
 /// 内置任务清单（[`TaskFactory`]）、审批门控（[`ApprovalGateFactory`]）、
-/// 上下文策略（[`ContextFactory`]）。用
+/// 上下文策略（[`ContextFactory`]）、任务自审（[`TaskReviewerFactory`]）、
+/// 技能复审（[`SkillReviewFactory`]）。用
 /// **一个结构**而不是给每个启动入口再加一个参数：入口变体的数量是组合爆炸
 /// （listener × 关闭信号 × 插件 × 向量 × 存储 × 任务），打包后只需「默认装配」与
 /// 「装配齐全」两类入口。
@@ -174,6 +227,8 @@ pub struct AssemblyServices {
     task_factory: Option<TaskFactory>,
     approval_factory: Option<ApprovalGateFactory>,
     context_factory: Option<ContextFactory>,
+    task_reviewer_factory: Option<TaskReviewerFactory>,
+    skill_review_factory: Option<SkillReviewFactory>,
 }
 
 impl AssemblyServices {
@@ -216,6 +271,17 @@ impl AssemblyServices {
         self.context_factory = Some(factory);
         self
     }
+    /// 装配任务结果自审器工厂（`app` / `tauri` 用：`tianyan-policy-review`）。
+    pub fn with_task_reviewer_factory(mut self, factory: TaskReviewerFactory) -> Self {
+        self.task_reviewer_factory = Some(factory);
+        self
+    }
+
+    /// 装配技能使用复审工厂（`app` / `tauri` 用：`tianyan-policy-review`）。
+    pub fn with_skill_review_factory(mut self, factory: SkillReviewFactory) -> Self {
+        self.skill_review_factory = Some(factory);
+        self
+    }
 
     /// 插件工具清单工厂（`None` = 不注入插件工具）。
     pub(crate) fn plugin_factory(&self) -> Option<ToolPluginFactory> {
@@ -253,6 +319,28 @@ impl AssemblyServices {
     /// 起得来但行为已不成立。`create_app`（构造对象图，47 处 lib 单测/嵌入式）仍允许降级。
     pub(crate) fn context_factory(&self) -> Option<ContextFactory> {
         self.context_factory.clone()
+    }
+    /// 任务结果自审器工厂（`None` = 不装配自审器，任务通知直接投递 + 装配期告警）。
+    ///
+    /// 与其余插槽的 `pub(crate)` 访问器同处：工厂只由本库的组合根（`AppState::new` /
+    /// `reload_agent`）取用——装配层负责**注入**，不负责调用。
+    ///
+    /// **未装配时的降级语义**：`AgentBuilder` 得到 `None`，`background_self_review`
+    /// 为真时不装配自审器（任务完成通知不带 `[自审未通过]` 标记、直接投递），`build`
+    /// 打一条 `warn!` 指路。降级代价与 T1 审批同级（少一层质量复核），远轻于存储降级；
+    /// 且该开关默认关闭（opt-in，每任务多一次模型调用）。
+    pub(crate) fn task_reviewer_factory(&self) -> Option<TaskReviewerFactory> {
+        self.task_reviewer_factory.clone()
+    }
+
+    /// 技能使用复审工厂（`None` = 不装配读端口）。
+    ///
+    /// **未装配时的降级语义**：`AppState::create_skill_reviewer` 返回 `None`，
+    /// `GET /api/v1/skills/stats` 的 `reviews` 字段为空数组——响应结构不变。今天
+    /// 「没有评审器」与「有评审器但没有记录」在该接口上本来都表现为空数组，因此
+    /// 降级不改变可观测形状（判别力由插槽测试锁定：装配了就一定用工厂）。
+    pub(crate) fn skill_review_factory(&self) -> Option<SkillReviewFactory> {
+        self.skill_review_factory.clone()
     }
 
     /// 是否装配了上下文策略工厂（**启动服务的硬前置**，见 `start_server_inner`）。
@@ -1230,5 +1318,152 @@ mod tests {
             Some("injected"),
             "应使用注入的实例"
         );
+    }
+
+    // ── 评审策略插槽（ADR-049 期 3-T3）──────────────────────────────────
+
+    /// 只用于装配测试的自审器桩（本库的插槽测试只关心「工厂是否被使用」）。
+    struct StubTaskReviewer {
+        /// 判别标记：装配层注入的是哪个实例（与「未装配」区分）。
+        marker: &'static str,
+    }
+
+    #[async_trait]
+    impl tianyan::executor::review::TaskReviewer for StubTaskReviewer {
+        async fn review(
+            &self,
+            _description: &str,
+            _result: &str,
+        ) -> tianyan::executor::review::Judgment {
+            tianyan::executor::review::Judgment {
+                verdict: tianyan::executor::review::Verdict::NeedsChanges {
+                    suggestion: self.marker.to_string(),
+                },
+                reason: self.marker.to_string(),
+            }
+        }
+    }
+
+    /// 只用于装配测试的复审端口桩。
+    struct StubSkillReviewPort {
+        /// 判别标记：写进记录的 `reason`，用来证明用的是注入的实例。
+        marker: &'static str,
+    }
+
+    #[async_trait]
+    impl tianyan::skills::SkillReviewPort for StubSkillReviewPort {
+        async fn latest_review(
+            &self,
+            skill_id: &str,
+        ) -> tianyan::Result<Option<tianyan::skills::SkillReview>> {
+            Ok(Some(tianyan::skills::SkillReview {
+                ts: 0,
+                skill_id: skill_id.to_string(),
+                session_id: String::new(),
+                score: 0,
+                verdict: "neutral".to_string(),
+                user_feedback: "none".to_string(),
+                reason: self.marker.to_string(),
+                evidence: String::new(),
+            }))
+        }
+    }
+
+    /// 未装配工厂时两个评审插槽都为空：`AgentBuilder` 因此拿到 `None`（不装配自审器
+    /// + 装配期告警），`create_skill_reviewer` 返回 `None`（`reviews` 为空数组）。
+    ///
+    /// 判别力：若把 `AssemblyServices::default()` 改成「兜底造一个评审器」，本断言必红
+    /// ——而兜底评审器会让「未装配」与「装配了真实现」在日志与响应上**无法区分**
+    /// （ADR-038 可见失败的反面）。
+    #[test]
+    fn test_default_assembly_has_no_review_factories() {
+        assert!(
+            AssemblyServices::new().task_reviewer_factory().is_none(),
+            "未装配时自审插槽必须为空（降级由 AgentBuilder 的 None 分支承担）"
+        );
+        assert!(
+            AssemblyServices::new().skill_review_factory().is_none(),
+            "未装配时复审插槽必须为空（降级由 create_skill_reviewer 的 None 承担）"
+        );
+    }
+
+    /// 装配了工厂时**只用工厂**，且工厂可重复调用（配置热重载重建 agent、以及每次
+    /// 技能统计请求都现造复审器——两者都要求「不是 FnOnce」）。
+    ///
+    /// 判别力：两个桩都把 `marker` 写进返回值（自审的 `reason` / 复审记录的 `reason`）
+    /// —— 插槽没被使用（`*_factory()` 恒 `None`）时 `expect` 直接 panic；若实现被换成
+    /// 「总是通过」的桩，`NeedsChanges` 的断言也会红。
+    #[tokio::test]
+    async fn test_review_factories_are_injected_and_repeatable() {
+        let task_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let skill_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+
+        let task_counter = task_calls.clone();
+        let task_factory: TaskReviewerFactory = Arc::new(
+            move |_chat: Arc<dyn tianyan::model::ChatService>, _model: &str| {
+                task_counter.fetch_add(1, Ordering::SeqCst);
+                Arc::new(StubTaskReviewer { marker: "injected" })
+                    as Arc<dyn tianyan::executor::review::TaskReviewer>
+            },
+        );
+        let skill_counter = skill_calls.clone();
+        let skill_factory: SkillReviewFactory = Arc::new(
+            move |_chat: Arc<dyn tianyan::model::ChatService>,
+                  _model: &str,
+                  _vfs: Arc<dyn tianyan::vfs::VirtualFileSystem>| {
+                skill_counter.fetch_add(1, Ordering::SeqCst);
+                Arc::new(StubSkillReviewPort { marker: "injected" })
+                    as Arc<dyn tianyan::skills::SkillReviewPort>
+            },
+        );
+
+        let assembly = AssemblyServices::new()
+            .with_task_reviewer_factory(task_factory)
+            .with_skill_review_factory(skill_factory);
+        let chat: Arc<dyn tianyan::model::ChatService> = Arc::new(StubChatService);
+        let vfs: Arc<dyn tianyan::vfs::VirtualFileSystem> =
+            Arc::new(tianyan::test_utils::MockVfs::new());
+
+        let reviewer = assembly.task_reviewer_factory().expect("装配后必须有工厂")(
+            chat.clone(),
+            "stub-model",
+        );
+        let _ = assembly.task_reviewer_factory().expect("装配后必须有工厂")(
+            chat.clone(),
+            "stub-model",
+        );
+        assert_eq!(
+            task_calls.load(Ordering::SeqCst),
+            2,
+            "工厂应可重复调用（不是 FnOnce）"
+        );
+        let judgment = reviewer.review("任务", "结果").await;
+        assert_eq!(judgment.reason, "injected", "应使用注入的自审器实例");
+        assert!(
+            !judgment.verdict.is_pass(),
+            "桩给的是 NeedsChanges——若判为通过说明走的不是注入的实例"
+        );
+
+        let port = assembly.skill_review_factory().expect("装配后必须有工厂")(
+            chat,
+            "stub-model",
+            vfs,
+        );
+        let _ = assembly.skill_review_factory().expect("装配后必须有工厂")(
+            Arc::new(StubChatService),
+            "stub-model",
+            Arc::new(tianyan::test_utils::MockVfs::new()),
+        );
+        assert_eq!(
+            skill_calls.load(Ordering::SeqCst),
+            2,
+            "工厂应可重复调用（不是 FnOnce）"
+        );
+        let latest = port
+            .latest_review("probe")
+            .await
+            .expect("桩不该失败")
+            .expect("桩恒回 Some");
+        assert_eq!(latest.reason, "injected", "应使用注入的复审实例");
     }
 }

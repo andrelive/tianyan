@@ -8,8 +8,11 @@ pub mod shell;
 
 /// 审批工作流模块。
 pub mod approval;
-/// LLM 语义判断模块（后台任务结果自审：TaskReviewer / LlmTaskReviewer）。
-pub mod judge;
+/// 任务结果自审**契约**（`TaskReviewer` / `Judgment` / `Verdict`）。
+///
+/// 实现已出 core（ADR-049 期 3-T3 → `plugins/policy-review` 的 `LlmTaskReviewer`），
+/// 本模块只剩内核对外的自审 seam。
+pub mod review;
 /// 执行器类型定义。
 pub mod types;
 

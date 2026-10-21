@@ -47,19 +47,26 @@ pub async fn get_skills_stats(
     } else {
         total_success as f64 / total_calls as f64
     };
-    // 使用复审（基于会话证据：执行结果 + 用户反馈；最新一条）
+    // 使用复审（基于会话证据：执行结果 + 用户反馈；最新一条）。
+    //
+    // ADR-049 期 3-T3：复审实现已出 core（`plugins/policy-review`），本层只认
+    // `SkillReviewPort`；未装配工厂时 `None` → `reviews` 保持空数组（响应结构不变）。
+    // 这与「装配了但没有评审记录」在该接口上不可区分（两者都是空数组），因此降级
+    // 不改变可观测形状。
     let reviewer = state.create_skill_reviewer().await?;
     let mut reviews: Vec<serde_json::Value> = Vec::new();
-    for s in &skills {
-        if let Ok(Some(r)) = reviewer.latest_review(&s.skill_id).await {
-            reviews.push(serde_json::json!({
-                "skill_id": r.skill_id,
-                "score": r.score,
-                "verdict": r.verdict,
-                "user_feedback": r.user_feedback,
-                "reason": r.reason,
-                "ts": r.ts,
-            }));
+    if let Some(reviewer) = reviewer {
+        for s in &skills {
+            if let Ok(Some(r)) = reviewer.latest_review(&s.skill_id).await {
+                reviews.push(serde_json::json!({
+                    "skill_id": r.skill_id,
+                    "score": r.score,
+                    "verdict": r.verdict,
+                    "user_feedback": r.user_feedback,
+                    "reason": r.reason,
+                    "ts": r.ts,
+                }));
+            }
         }
     }
     Ok(Json(serde_json::json!({

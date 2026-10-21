@@ -28,7 +28,7 @@ Core 是天演的核心库，提供 AI Agent 的全部基础能力。4 crate wor
 | `common` | 通用类型（按领域拆分）、错误处理、日志配置、token 估算 | error.rs, logging.rs, token_estimator.rs, types/ | ✅ 已集成 |
 | `config` | 配置管理（TOML + 环境变量 + 向导） | mod.rs, wizard.rs, validation.rs, agent.rs, model.rs | ✅ 已集成 |
 | `context` | 上下文工程**契约 + 组装机制**（策略实现已迁 `plugins/policy-context`，ADR-049 期 3-T2） | assembler.rs, port.rs, assembly.rs（插件侧 pipeline.rs, retrieval/, compression/） | ✅ 已集成 |
-| `executor` | 工具执行支撑（Action、审批**门控契约**、LLM-as-Judge、验证门控）+ 编程助手执行原语（内容匹配编辑、patch、文件浏览、搜索、符号、仓库地图、测试发现）。审批**实现**已迁 `plugins/policy-approval`（ADR-049 期 3-T1） | actions.rs, security.rs, command.rs, output_parse.rs, approval/, types.rs, judge.rs, verification.rs, truncate.rs, edit.rs, patch.rs, fs.rs, search.rs, symbols.rs, project.rs, test_discovery.rs | ✅ 正常使用 |
+| `executor` | 工具执行支撑（Action、审批**门控契约**、任务自审**契约** `review::TaskReviewer`、验证门控）+ 编程助手执行原语（内容匹配编辑、patch、文件浏览、搜索、符号、仓库地图、测试发现）。审批**实现**已迁 `plugins/policy-approval`（ADR-049 期 3-T1）、自审**实现**已迁 `plugins/policy-review`（期 3-T3，`judge.rs` → `review.rs`） | actions.rs, security.rs, command.rs, output_parse.rs, approval/, types.rs, review.rs, verification.rs, truncate.rs, edit.rs, patch.rs, fs.rs, search.rs, symbols.rs, project.rs, test_discovery.rs | ✅ 正常使用 |
 | `snapshot` | 工作区快照（回退/撤销回退；gzip 压缩 + GC + similar diff） | mod.rs | ✅ 正常使用 |
 | `knowledge` | 知识库管理（解析、图像、导入） | parser.rs, image/, types.rs, ingestor/ | ✅ 已集成（Server 层通过 KnowledgeIngestor 真实处理导入与检索） |
 | `memory` | 长期记忆提取 | extractor.rs | ✅ 已集成 |
@@ -163,7 +163,9 @@ Core 是天演的核心库，提供 AI Agent 的全部基础能力。4 crate wor
   （ADR-049 期 3-T1）：`types.rs` 留 core 是因为它们出现在 A 级 trait `AgentCoordinator` 的签名里
   （`approval_status` / `respond_approval`），搬走会让内核反向依赖插件
 - `executor/verification.rs` — 验证门控 + 结构化诊断（`StructuredDiagnostic` / `parse_json_diagnostics`，解析 `cargo check --message-format=json-render-diagnostics`）
-- `executor/judge.rs` — LLM-as-Judge 语义验证
+- `executor/review.rs` — 任务结果自审**契约**（`TaskReviewer` 自审 seam / `Judgment` / `Verdict`）。
+  实现（判定提示词 / `VERDICT:` 解析 / 故障兜底）已迁 `plugins/policy-review`（ADR-049 期 3-T3）；
+  原 `judge.rs` 删除，trait 与判定形状因出现在内核消费面（`Arc<dyn TaskReviewer>`）而留 core
 - `executor/truncate.rs` — 统一截断层（`truncate_head` / `truncate_tail` / `truncate_spill`，`MAX_LINES = 2000` / `MAX_BYTES = 50KB`；单行截断 `truncate_line` / `MAX_LINE_CHARS = 2000` / `TRUNCATED_MARKER`，UTF-8 安全）；字节级前缀截断单点在 `common/truncate.rs`（`truncate_utf8_boundary`，session 存储与可观测性共用）
 - `executor/edit.rs` — 语义化编辑（`ContentEdit` / `apply_edits_to_content` 内容匹配唯一定位 + bottom-up 原子应用 / `apply_edit_action` / `detect_eol` CRLF 保留）
 - `executor/patch.rs` — unified diff（`parse_patch` 解析 `*** Update File:` 信封 / `apply_patch_to_content` similar fuzzy seek / `apply_patch_action` 多文件原子，`FUZZY_RATIO_THRESHOLD = 0.75`）
@@ -265,7 +267,11 @@ soul → rules+memories → history(from compression_marker，含当前用户输
 **模块组织**：
 - `skills/manager.rs` — 技能管理器（VFS 发现 `list_available_skills` + 读取 `read_skill`）
 - `skills/manager.rs` — 技能发现/读取（L0 摘要 + L2 详情）
-- `skills/reviewer.rs` — 技能使用复审（基于会话证据打分，落 VFS `skill/_reviews/`）
+- `skills/review.rs` — 复审**契约**：`SkillReviewPort`（只读 `latest_review`，唯一真实调用点
+  `server/src/api/skills/handlers.rs`）、`SkillReview`（记录形状）、`REVIEWS_PREFIX`
+  （既是插件的落盘路径，也是 `manager.rs` 技能发现时的过滤条件）。**实现已迁
+  `plugins/policy-review`**（ADR-049 期 3-T3：会话证据提取 / 评分提示词 / JSONL 落盘）；
+  产生评审的 `review_conversation` 今天**零生产调用者**，留在插件的具体类型上待接线
 
 > **已删除（T2 清理）**：`skills/learning/`（GEPA 技能自学习引擎，~1100 行）已删除——
 > 全仓无生产消费方（ADR-017 已决策移除 LLM 生成路径），且其 `apply_evaluation` 的
@@ -278,7 +284,7 @@ soul → rules+memories → history(from compression_marker，含当前用户输
 |------|------|
 | `SkillManager` | 技能管理器，`list_available_skills()` 读取所有技能的 abstract，`read_skill()` 读取 L2 详情 |
 | `ExecutionHistory` | 执行历史记录（定义在 `observability`；供角色学习与工具观测消费） |
-| `SkillReviewer` | 技能使用复审（会话证据 → 质量分） |
+| `SkillReviewPort` / `SkillReview` | 技能使用复审读端口（某技能的最新一条评审）+ 记录形状；实现 `SkillReviewer` 在 `tianyan_policy_review` |
 
 **执行语义已移除**：技能没有 handler、没有执行器——文件/命令/网络等能力由 Agent 内置工具直接覆盖，`call_skill` 工具读 VFS 技能文档返回，由 LLM 参考后自行用工具执行。planning 为预置技能（bootstrap 写入 VFS）；外部导入的技能同构。
 

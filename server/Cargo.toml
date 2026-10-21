@@ -69,6 +69,10 @@ tianyan-policy-approval = { path = "../plugins/policy-approval" }
 # ——否则 `create_app` 出来的 agent 会落到 core 的空直通兜底（无 system 前缀 + 不压缩），
 # 集成测试测的就不是生产形态（与序 4 的「兜底后端」同一条纪律）。无循环。
 tianyan-policy-context = { path = "../plugins/policy-context" }
+# 评审策略实现（ADR-049 期 3-T3）：集成测试的 `test_assembly()` 同样注入**真实**评审器
+# ——否则 `/api/v1/skills/stats` 的 reviews 永远为空（读端口未装配），测的就不是生产形态。
+# 与上下文策略同一条纪律：只用 dev-dep，生产图里没有插件（无循环）。
+tianyan-policy-review = { path = "../plugins/policy-review" }
 # core 的测试替身（`MockVfs` / `MockChatService`）作为**特性构建**打开：本库的插槽
 # 测试要构造 `ContextServices`（含 `Arc<dyn VirtualFileSystem>`），不打开就只能
 # 复制一份替身（两份实现同时漂移）。仅测试构建生效，`cargo tree -p tianyan-server`

@@ -55,6 +55,13 @@ pub struct AgentBuilder {
     /// `None` = 未装配 → 工具放行分支（`ToolContext::ensure_approved` 的
     /// 「未装配直接放行」）+ 装配期告警，见 [`Self::with_approval_gate`]。
     approval_gate: Option<Arc<dyn ApprovalGate>>,
+    /// 后台任务结果自审器（G4；ADR-049 期 3-T3：实现已出 core，由装配层注入）。
+    ///
+    /// 只在 `config.background_self_review == true` 时被装进注册表（该开关是
+    /// opt-in 的成本选择，与评审**实现**无关，因此判断留内核）。
+    /// `None` = 未装配 → 不注入自审器（任务通知直接投递）+ 装配期告警，
+    /// 见 [`Self::with_task_reviewer`]。
+    task_reviewer: Option<Arc<dyn crate::executor::review::TaskReviewer>>,
     /// 子 Agent 角色配置（delegate_to_agent role 参数；None 时使用内置角色）。
     agent_roles: Option<AgentRolesConfig>,
     /// 注入的角色注册表（ADR-016：VFS 加载的持久化注册表；优先于 [agent_roles] 合成）。
@@ -110,6 +117,7 @@ impl AgentBuilder {
             background_task_db: None,
             notification_sink: None,
             approval_gate: None,
+            task_reviewer: None,
             agent_roles: None,
             trace_collector: None,
             execution_log: None,
@@ -167,6 +175,26 @@ impl AgentBuilder {
     /// （ADR-038：静默降级的症状是「模型像丢了人设 + 上下文无限增长」，看不出是降级）。
     pub fn with_context_port(mut self, port: Arc<dyn ContextPort>) -> Self {
         self.context_port = Some(port);
+        self
+    }
+
+    /// 设置后台任务结果自审器（G4；ADR-049 期 3-T3）。
+    ///
+    /// 自审**策略**实现已出 core（`plugins/policy-review` 的 `LlmTaskReviewer`）：
+    /// 判定提示词、`VERDICT: PASS|FAIL|NEEDS_CHANGES` 解析口径、故障兜底都在插件里。
+    /// 装配层先用 `TaskReviewerFactory` 把它构造成 `Arc<dyn TaskReviewer>` 再经本方法
+    /// 交给 builder（与 `ApprovalGateFactory` / `ContextFactory` 同一套类型擦除手法）。
+    ///
+    /// **未注入（`None`）的语义**：`config.background_self_review` 为真时不装配自审器
+    /// ——任务完成通知直接投递（不带 `[自审未通过]` 标记），`build` 里 `warn!` 一条指路。
+    /// 为什么允许降级：该开关默认关闭（opt-in，每任务多一次模型调用），缺实现的后果是
+    /// 「少一层质量复核」而非数据/行为不成立；`create_app`（47 处 lib 单测 + 嵌入式）
+    /// 靠「不要求装配」才能起实例。
+    pub fn with_task_reviewer(
+        mut self,
+        reviewer: Arc<dyn crate::executor::review::TaskReviewer>,
+    ) -> Self {
+        self.task_reviewer = Some(reviewer);
         self
     }
 
@@ -512,11 +540,21 @@ impl AgentBuilder {
             tool_registry = tool_registry.with_background_task_db(db.clone());
         }
         // 后台任务结果自审（G4，opt-in）：完成通知注入前 LLM 自审，
-        // 未通过则结果带 [自审未通过] 标记，主 agent 复核
+        // 未通过则结果带 [自审未通过] 标记，主 agent 复核。
+        //
+        // 评审实现已出 core（ADR-049 期 3-T3）：实例由装配层经 `TaskReviewerFactory`
+        // 构造后 `with_task_reviewer` 注入。开关（是否自审 = 成本选择）留内核；
+        // 判据与提示词在 `plugins/policy-review`。`None` = 未装配 → 不装配自审器，
+        // 通知直接投递，并 `warn!` 一条指路（ADR-038 可见失败）。
         if self.config.background_self_review {
-            tool_registry = tool_registry.with_task_reviewer(Arc::new(
-                crate::executor::judge::LlmTaskReviewer::new(model_service.clone(), &chat_model),
-            ));
+            match self.task_reviewer.clone() {
+                Some(reviewer) => tool_registry = tool_registry.with_task_reviewer(reviewer),
+                None => tracing::warn!(
+                    "未装配任务自审器工厂：background_self_review 已启用但自审器缺件，\
+                     任务完成通知将直接投递（不带 [自审未通过] 标记）——生产装配请用 \
+                     create_app_with_assembly / start_server_with_assembly"
+                ),
+            }
         }
         // 结构化 Trace（G6）：轮次/工具/任务 span 持久化（工具 + 后台任务）
         if let Some(ref trace) = self.trace_collector {

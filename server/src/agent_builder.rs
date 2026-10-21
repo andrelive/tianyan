@@ -97,6 +97,7 @@ impl AgentBuilderFactory {
         working_sets: Arc<tianyan::agent::working_set::WorkingSetRegistry>,
         approval_gate: Option<Arc<dyn tianyan::executor::approval::ApprovalGate>>,
         context_port: Option<Arc<dyn crate::ContextPort>>,
+        task_reviewer: Option<Arc<dyn tianyan::executor::review::TaskReviewer>>,
     ) -> TianyanResult<Arc<Agent>> {
         Self::validate_config(config)?;
 
@@ -189,6 +190,14 @@ impl AgentBuilderFactory {
             Some(port) => agent.with_context_port(port),
             None => agent,
         };
+        // 任务结果自审器（ADR-049 期 3-T3）：实现已出 core（`plugins/policy-review`），
+        // 组合根（`AppState::new` / `reload_agent`）经 `TaskReviewerFactory` 建好实例传进来。
+        // `None` = 未装配 → 不注入，`AgentBuilder::build` 在 `background_self_review`
+        // 为真时打一条 `warn!` 指路（通知直接投递，不带 [自审未通过] 标记）。
+        let agent = match task_reviewer {
+            Some(reviewer) => agent.with_task_reviewer(reviewer),
+            None => agent,
+        };
         let mut builder = agent;
         if let Some(trace) = trace_collector {
             // G6：结构化 Trace（与 AppState 共享同一收集器，单一写入路径）
@@ -266,6 +275,7 @@ impl AgentBuilderFactory {
         working_sets: Arc<tianyan::agent::working_set::WorkingSetRegistry>,
         approval_gate: Option<Arc<dyn tianyan::executor::approval::ApprovalGate>>,
         context_port: Option<Arc<dyn crate::ContextPort>>,
+        task_reviewer: Option<Arc<dyn tianyan::executor::review::TaskReviewer>>,
     ) -> TianyanResult<Arc<dyn AgentCoordinator>> {
         match Self::build_agent(
             config,
@@ -290,6 +300,7 @@ impl AgentBuilderFactory {
             working_sets,
             approval_gate,
             context_port,
+            task_reviewer,
         )
         .await
         {

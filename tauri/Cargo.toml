@@ -37,6 +37,8 @@ tianyan-task-evolution = { path = "../plugins/task-evolution" }
 tianyan-policy-approval = { path = "../plugins/policy-approval" }
 # 上下文策略实现（ADR-049 期 3-T2）：与 `app/src/main.rs::context_factory` 同形同源。
 tianyan-policy-context = { path = "../plugins/policy-context" }
+# 评审策略实现（ADR-049 期 3-T3）：与 `app/src/main.rs` 的两个评审工厂同形同源。
+tianyan-policy-review = { path = "../plugins/policy-review" }
 
 # Tauri framework
 tauri = { version = "2.2", features = ["tray-icon", "devtools"] }

@@ -294,6 +294,17 @@ pub struct AppState {
     /// 压缩窗口 / 检索参数必须跟着**新配置与新模型规格**走。`None` = 未装配
     /// （`AgentBuilder` 用 `NullContextPort` 兜底 + 告警；`start_server*` 入口另有硬守卫）。
     context_factory: Option<crate::ContextFactory>,
+    /// 任务结果自审器工厂（ADR-049 期 3-T3：实现已出 core，`plugins/policy-review`）。
+    ///
+    /// 存下来供 [`Self::reload_agent`] 复用：评审模型名来自配置（`resolve_chat_model`），
+    /// 配置热重载后必须用**新模型**重建自审器。`None` = 未装配（`background_self_review`
+    /// 为真时不装配自审器 + 装配期告警）。
+    task_reviewer_factory: Option<crate::TaskReviewerFactory>,
+    /// 技能使用复审工厂（ADR-049 期 3-T3：实现已出 core，`plugins/policy-review`）。
+    ///
+    /// 供 [`Self::create_skill_reviewer`] 逐次构造读端口（旧实现也是逐次 `new`，语义等同）。
+    /// `None` = 未装配 → 该函数返回 `None`，技能统计的 `reviews` 为空数组。
+    skill_review_factory: Option<crate::SkillReviewFactory>,
     usage_log: Arc<UsageLog>,
     /// 工作区快照管理器（配置了 working_directory 时启用）
     /// 工作区快照管理器（配置了 working_directory 时启用）。
@@ -374,6 +385,8 @@ impl AppState {
         database: Arc<Database>,
         approval_factory: Option<crate::ApprovalGateFactory>,
         context_factory: Option<crate::ContextFactory>,
+        skill_review_factory: Option<crate::SkillReviewFactory>,
+        task_reviewer_factory: Option<crate::TaskReviewerFactory>,
     ) -> TianyanResult<Self> {
         // VFS 技能管理器（技能 = VFS 方法论文档；列表/详情/执行 API 数据源）
         let skill_manager = Arc::new(SkillManager::new(vfs.clone()));
@@ -507,6 +520,14 @@ impl AppState {
                 chat_spec: Some(resolve_chat_model_spec(&config)),
             })
         });
+        // 任务结果自审器（ADR-049 期 3-T3）：**实现已出 core**（`plugins/policy-review`），
+        // 组合根经 `TaskReviewerFactory` 建实例。评审模型名与上下文策略同源
+        // （`resolve_chat_model`），聊天客户端是共享实例的克隆（不重复建 HTTP 客户端池）。
+        // `None`（未装配）→ builder 打 `warn!`，任务完成通知直接投递（不带 [自审未通过] 标记）。
+        // 是否自审（`background_self_review`）仍由 `AgentBuilder` 判——那是成本开关，属内核。
+        let task_reviewer = task_reviewer_factory
+            .as_ref()
+            .map(|factory| factory(model_services.chat.clone(), &resolve_chat_model(&config)));
         let agent = AgentBuilderFactory::build_agent_or_wizard(
             &config,
             model_services.clone(),
@@ -530,6 +551,7 @@ impl AppState {
             working_sets.clone(),
             approval_gate.clone(),
             context_port,
+            task_reviewer,
         )
         .await?;
 
@@ -567,6 +589,8 @@ impl AppState {
             plugin_factory: Arc::new(RwLock::new(None)),
             approval_factory,
             context_factory,
+            task_reviewer_factory,
+            skill_review_factory,
             session_leases: crate::session_leases::SessionLeases::new(),
             shutdown_tx: Arc::new(Mutex::new(None)),
         })
@@ -749,6 +773,12 @@ impl AppState {
                 chat_spec: Some(resolve_chat_model_spec(&config)),
             })
         });
+        // 任务结果自审器随新配置重建（ADR-049 期 3-T3）：评审模型名可能已改
+        // （`resolve_chat_model` 取决于 preferences），沿用旧实例会继续用旧模型。
+        let task_reviewer = self
+            .task_reviewer_factory
+            .as_ref()
+            .map(|factory| factory(model_services.chat.clone(), &resolve_chat_model(&config)));
         let new_agent = AgentBuilderFactory::build_agent_or_wizard(
             &config,
             model_services.clone(),
@@ -776,6 +806,7 @@ impl AppState {
             self.working_sets.clone(),
             approval_gate,
             context_port,
+            task_reviewer,
         )
         .await?;
 
@@ -1014,18 +1045,31 @@ impl AppState {
         Ok(Arc::new(summary_engine))
     }
 
-    /// 创建技能使用评审器（记忆提取同周期复审；chat + vfs + 聊天模型）。
+    /// 创建技能使用复审读端口（`Arc<dyn SkillReviewPort>`）。
+    ///
+    /// ADR-049 期 3-T3：实现已出 core（`plugins/policy-review` 的 `SkillReviewer`），
+    /// 本库经装配插槽 [`crate::SkillReviewFactory`] 构造，只认 `tianyan::skills::SkillReviewPort`
+    /// 这一个契约面（唯一方法 `latest_review`）。
+    ///
+    /// # Returns
+    /// * `Ok(None)` —— **未装配**复审工厂（`create_app` / 嵌入式 / 未注入的测试）：
+    ///   调用方（技能统计接口）跳过附加字段，响应结构不变。今天「没有评审器」与
+    ///   「有评审器但没有记录」在该接口上都表现为空数组，因此这条降级不改变可观测形状。
+    /// * `Ok(Some(port))` —— 已装配：构造成功（`SkillReviewer::new` 只存字段，不会失败）。
+    ///
+    /// # Errors
+    /// 仅在取共享模型服务失败时返回（与迁移前一致）。
     pub async fn create_skill_reviewer(
         &self,
-    ) -> TianyanResult<Arc<tianyan::skills::SkillReviewer>> {
+    ) -> TianyanResult<Option<Arc<dyn tianyan::skills::SkillReviewPort>>> {
+        let Some(factory) = self.skill_review_factory.as_ref() else {
+            return Ok(None);
+        };
         let config = self.config.read().await.clone();
         let model_services = self.shared_model_services().await?;
         let chat_model = resolve_chat_model(&config);
-        Ok(Arc::new(tianyan::skills::SkillReviewer::new(
-            model_services.chat,
-            self.vfs.clone(),
-            chat_model,
-        )))
+        let vfs: Arc<dyn tianyan::vfs::VirtualFileSystem> = self.vfs.clone();
+        Ok(Some(factory(model_services.chat, &chat_model, vfs)))
     }
 
     /// 创建知识导入器（复用共享模型服务与唯一构造点 [`build_knowledge_ingestor`]）。

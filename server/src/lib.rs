@@ -45,7 +45,8 @@ use state::AppState;
 
 pub use assembly::{
     ApprovalGateFactory, AssemblyServices, ContextFactory, ContextPort, ContextServices,
-    StorageBackendFactory, TaskFactory, TaskRegistration, TaskServices, VectorStorageFactory,
+    SkillReviewFactory, StorageBackendFactory, TaskFactory, TaskRegistration, TaskReviewerFactory,
+    TaskServices, VectorStorageFactory,
 };
 
 /// Server configuration
@@ -475,6 +476,8 @@ async fn create_app_inner(
         database,
         assembly.approval_factory(),
         assembly.context_factory(),
+        assembly.skill_review_factory(),
+        assembly.task_reviewer_factory(),
     )
     .await?;
 

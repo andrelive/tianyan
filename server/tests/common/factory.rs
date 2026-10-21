@@ -190,9 +190,29 @@ pub fn test_assembly() -> tianyan_server::AssemblyServices {
             tianyan_policy_context::pipeline(services)
         });
 
+    // 评审策略（ADR-049 期 3-T3）：与 `app` / `tauri` 同一份插件实现。任务自审
+    // （判定提示词 + `VERDICT:` 解析 + 兜底）与技能复审（会话证据打分落 VFS）全在插件里
+    // （`tianyan_policy_review::{task_reviewer, skill_reviewer}`），这里只做类型擦除包装。
+    // **不注入**就会落到降级路径（自审器缺件 + 技能统计的 reviews 恒空），集成测试测的
+    // 就不是生产形态（与序 4「不要用 `AssemblyServices::default()` 驱动集成测试」同一条
+    // 纪律）。
+    let task_reviewer_factory: tianyan_server::TaskReviewerFactory =
+        Arc::new(|chat: Arc<dyn tianyan::model::ChatService>, model: &str| {
+            tianyan_policy_review::task_reviewer(chat, model)
+        });
+    let skill_review_factory: tianyan_server::SkillReviewFactory = Arc::new(
+        |chat: Arc<dyn tianyan::model::ChatService>,
+         model: &str,
+         vfs: Arc<dyn tianyan::vfs::VirtualFileSystem>| {
+            tianyan_policy_review::skill_reviewer(chat, model, vfs)
+        },
+    );
+
     tianyan_server::AssemblyServices::new()
         .with_storage_factory(factory)
         .with_task_factory(task_factory)
         .with_approval_factory(approval_factory)
         .with_context_factory(context_factory)
+        .with_task_reviewer_factory(task_reviewer_factory)
+        .with_skill_review_factory(skill_review_factory)
 }

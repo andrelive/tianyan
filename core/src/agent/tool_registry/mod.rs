@@ -663,7 +663,7 @@ impl ToolRegistry {
     /// 设置后台任务结果自审器（G4：完成通知注入前轻量自审；未注入时不自审）。
     pub fn with_task_reviewer(
         mut self,
-        reviewer: Arc<dyn crate::executor::judge::TaskReviewer>,
+        reviewer: Arc<dyn crate::executor::review::TaskReviewer>,
     ) -> Self {
         self.background_tasks = Arc::new(
             (*self.background_tasks)

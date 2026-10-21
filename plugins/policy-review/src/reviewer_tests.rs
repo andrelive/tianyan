@@ -1,13 +1,13 @@
 use std::sync::Arc;
 
 use super::SkillReviewer;
-use crate::common::types::{
+use tianyan::common::types::{
     ContentLevel, ContextNamespace, MessageRole, MessageTime, Part, PartTime, StructuredMessage,
     TianyanUri,
 };
-use crate::model::types::{ChatChoice, ChatCompletionResponse};
-use crate::model::MockChatService;
-use crate::test_utils::MockVfs;
+use tianyan::model::types::{ChatChoice, ChatCompletionResponse};
+use tianyan::model::MockChatService;
+use tianyan::test_utils::MockVfs;
 
 fn response_with(text: &str) -> ChatCompletionResponse {
     ChatCompletionResponse {
@@ -17,10 +17,10 @@ fn response_with(text: &str) -> ChatCompletionResponse {
         model: "test".to_string(),
         choices: vec![ChatChoice {
             index: 0,
-            message: crate::common::types::Message::assistant(text.to_string()),
+            message: tianyan::common::types::Message::assistant(text.to_string()),
             finish_reason: Some("stop".to_string()),
         }],
-        usage: crate::common::types::TokenUsage::default(),
+        usage: tianyan::common::types::TokenUsage::default(),
     }
 }
 

@@ -58,7 +58,7 @@ core/src/
 ├── config/      (TOML 配置；LoggingConfig 自 common::logging re-export)
 ├── context/     (assembler + port/assembly 契约；管线/压缩/检索 → plugins/policy-context)
 ├── db/          (统一写入门面：Database 门面 + SqliteDb + stats/trace/execution/usage Repository；只依赖 common)
-├── executor/    (工具执行：Action、审批、LLM-as-Judge、验证门控)
+├── executor/    (工具执行：Action、审批门控契约、任务自审契约 review::TaskReviewer、验证门控)
 ├── knowledge/   (parser, image/, ingestor/, types)
 ├── model/       (traits, services.rs, provider/)
 ├── observability/ (AgentMetrics, usage_stats/trace/execution_log/usage_log/rule_recorder；SQL 经 db 收敛)
@@ -66,7 +66,7 @@ core/src/
 ├── role_store.rs (角色 VFS 存储，独立存储层)
 ├── scheduler/   (task_scheduler, tasks/)
 ├── session/     (store/search 直接实现 SQL（ADR-018 专属），manager, types)
-├── skills/      (definition, executor, manager, handlers/, learning/, registry, types)
+├── skills/      (manager（发现/读取）+ review.rs 复审契约：SkillReviewPort / SkillReview / REVIEWS_PREFIX；实现 → plugins/policy-review)
 ├── vfs/         (traits, vfs_impl, backend/ 含 sqlite.rs；SqliteDb 已移入 db/)
 └── lib.rs
 ```
@@ -364,6 +364,8 @@ TaskScheduler 触发
 | `ContextPort` | `core/src/context/port.rs` | `ContextPipeline`（`plugins/policy-context`，装配层经 `ContextFactory` 注入；**未装配 → `NullContextPort`（空注入 + 不压缩）+ 装配期告警，`start_server*` 另有启动期硬守卫**） | `agent/agent_core.rs`（`ensure_injectable` :478 / `maybe_compress_and_persist` :751 摘要提取 + :783 压缩） |
 | `SessionManager` | `core/src/session/manager.rs` | `PersistentSessionManager`（基于 `SessionStore`，ADR-018） | `server/state.rs`, `agent/coordinator.rs` |
 | `SkillManager` | `core/src/skills/manager.rs` | `SkillManager` | `server/state.rs`, `server/api/skills/`（VFS 技能发现/读取） |
+| `TaskReviewer` | `core/src/executor/review.rs` | `LlmTaskReviewer`（`plugins/policy-review`，装配层经 `TaskReviewerFactory` 注入；**未装配 → 不自审（通知直接投递）+ `warn!`**） | `agent/background.rs`（`task_reviewer` 字段 / `with_task_reviewer`）、`agent/tool_registry/mod.rs`、`AgentBuilder::with_task_reviewer` |
+| `SkillReviewPort` | `core/src/skills/review.rs` | `SkillReviewer`（`plugins/policy-review`，装配层经 `SkillReviewFactory` 注入；**未装配 → `None`，技能统计 `reviews` 为空数组**） | `server/src/api/skills/handlers.rs`（`latest_review`，技能统计面板） |
 
 > **注意**：`ModelServices` 不是 trait，是 `core/src/model/services.rs` 中的 struct，聚合 `Arc<dyn ChatService>` + `Arc<dyn EmbeddingService>` + `Arc<dyn VlmService>`。
 

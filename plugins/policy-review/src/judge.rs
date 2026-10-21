@@ -1,55 +1,21 @@
-//! LLM-as-Judge 语义验证模块。
+//! LLM-as-Judge 语义验证模块（后台任务结果自审的**实现**）。
 //!
-//! 对命令输出进行语义判断，而非仅依赖退出码和关键词匹配。
+//! 对命令输出/任务结果进行语义判断，而非仅依赖退出码和关键词匹配。
 //! 用于后台任务结果自审（G4）。
+//!
+//! ADR-049 期 3-T3：本文件原在 `core/src/executor/judge.rs`，与
+//! [`tianyan::executor::review`] 的契约（`TaskReviewer` / `Judgment` / `Verdict`）分家后
+//! 迁入 `plugins/policy-review`。**逐字未改**：判定提示词全文、`VERDICT:` 行扫描顺序
+//! （先 `PASS` 再 `NEEDS_CHANGES`）、无判定行时按退出码回退、`REASON:` 缺失时的默认
+//! 文案、故障与空结果的兜底（默认通过）。
 
-use crate::common::llm_judge::truncate_output;
-use crate::model::types::ChatCompletionRequest;
-use crate::model::ChatService;
+use tianyan::common::llm_judge::truncate_output;
+use tianyan::executor::review::{Judgment, TaskReviewer, Verdict};
+use tianyan::model::types::ChatCompletionRequest;
+use tianyan::model::ChatService;
+
 use async_trait::async_trait;
 use std::sync::Arc;
-
-/// 判断结论。
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Verdict {
-    /// 通过 — 输出表明操作成功完成。
-    Pass,
-    /// 失败 — 输出表明操作失败。
-    Fail,
-    /// 需要修改 — 输出表明操作部分成功但有问题需要修复。
-    NeedsChanges {
-        /// LLM 给出的修复建议。
-        suggestion: String,
-    },
-}
-
-impl Verdict {
-    /// 是否表示成功。
-    pub fn is_pass(&self) -> bool {
-        matches!(self, Verdict::Pass)
-    }
-}
-
-/// LLM 判断结果。
-#[derive(Debug, Clone)]
-pub struct Judgment {
-    /// 判断结论。
-    pub verdict: Verdict,
-    /// 判断理由。
-    pub reason: String,
-}
-
-/// 后台任务结果自审器（G4 循环内自审门）。
-///
-/// 后台任务完成通知（ADR-013）注入父会话前，对任务结果做轻量 LLM 自审：
-/// 未通过（`NeedsChanges`/`Fail`）时在结果前标记 `[自审未通过] {reason}`，
-/// 由主 agent 下一轮看到后决策（复核/重新委托）——**不自动重跑**
-/// （重跑语义与成本不可控，决策权留在 LLM）。
-#[async_trait]
-pub trait TaskReviewer: Send + Sync {
-    /// 自审任务结果；返回 [`Judgment`]（`verdict.is_pass()` 判定是否通过）。
-    async fn review(&self, description: &str, result: &str) -> Judgment;
-}
 
 /// LLM 实现：复用 `VERDICT: PASS|FAIL|NEEDS_CHANGES` 判定格式。
 #[derive(Clone)]
@@ -139,7 +105,7 @@ async fn run_judge(
     fallback: impl FnOnce() -> Judgment,
 ) -> Judgment {
     let request =
-        ChatCompletionRequest::new(model, vec![crate::common::types::Message::user(&prompt)]);
+        ChatCompletionRequest::new(model, vec![tianyan::common::types::Message::user(&prompt)]);
     match model_service.chat_completion(request).await {
         Ok(response) => {
             let Some(content) = response.first_choice_content() else {
@@ -202,6 +168,11 @@ fn parse_judgment(content: &str, exit_code: i32) -> Judgment {
 mod tests {
     use super::*;
 
+    // ── 共享截断原语（`tianyan::common::llm_judge::truncate_output`）─────
+    //
+    // 这两条随 `executor/judge.rs` 一同迁来：它们锁的正是自审调用点的截断预算
+    // （`truncate_output(result, 2000)` —— 上限 2000 字符 + 省略标记开销）。
+
     #[test]
     fn test_truncate_short_output_is_unchanged() {
         let short = "hello world";
@@ -215,6 +186,8 @@ mod tests {
         assert!(truncated.len() <= 2500); // Allow some overhead for truncation message
         assert!(truncated.contains("[内容被截断"));
     }
+
+    // ── 判定解析（降级语义的核心）─────────────────────────────────────
 
     #[test]
     fn test_parse_judgment_pass() {
@@ -237,22 +210,12 @@ mod tests {
         assert!(matches!(j.verdict, Verdict::NeedsChanges { .. }));
     }
 
-    #[test]
-    fn test_verdict_is_pass() {
-        assert!(Verdict::Pass.is_pass());
-        assert!(!Verdict::Fail.is_pass());
-        assert!(!Verdict::NeedsChanges {
-            suggestion: String::new()
-        }
-        .is_pass());
-    }
-
     // ── G4 任务结果自审 ───────────────────────────────────────
 
-    use crate::common::error::TianyanError;
-    use crate::common::types::{Message, TokenUsage};
-    use crate::model::types::{ChatChoice, ChatCompletionResponse};
-    use crate::model::MockChatService;
+    use tianyan::common::error::TianyanError;
+    use tianyan::common::types::{Message, TokenUsage};
+    use tianyan::model::types::{ChatChoice, ChatCompletionResponse};
+    use tianyan::model::MockChatService;
 
     fn reviewer_with(mock: MockChatService) -> LlmTaskReviewer {
         LlmTaskReviewer::new(Arc::new(mock), "test-model")

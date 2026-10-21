@@ -277,7 +277,7 @@ pub struct BackgroundTaskManager {
     /// 系统通知通道槽（全部完成/失败时桌面通知；Arc<Mutex> 支持构建后注入）。
     notification: Arc<Mutex<Option<SharedNotificationSink>>>,
     /// 任务结果自审器（G4；None 时不自审——通知直接注入）。
-    task_reviewer: Option<Arc<dyn crate::executor::judge::TaskReviewer>>,
+    task_reviewer: Option<Arc<dyn crate::executor::review::TaskReviewer>>,
     /// 结构化 Trace 收集器（G6；None 时不记录任务 span）。
     trace_collector: Option<Arc<crate::observability::trace::TraceCollector>>,
     /// 任务状态事件通道（ADR-028：状态转移 emit；None 时静默）。
@@ -361,7 +361,7 @@ impl BackgroundTaskManager {
     /// 下一轮看到后决策（复核/重新委托）——不自动重跑。
     pub fn with_task_reviewer(
         mut self,
-        reviewer: Arc<dyn crate::executor::judge::TaskReviewer>,
+        reviewer: Arc<dyn crate::executor::review::TaskReviewer>,
     ) -> Self {
         self.task_reviewer = Some(reviewer);
         self
@@ -2181,7 +2181,7 @@ mod tests {
 
     // ── G4 循环内自审门 ───────────────────────────────────────
 
-    use crate::executor::judge::{Judgment, TaskReviewer, Verdict};
+    use crate::executor::review::{Judgment, TaskReviewer, Verdict};
 
     /// 固定判定结果的 mock 自审器。
     struct FixedReviewer {
