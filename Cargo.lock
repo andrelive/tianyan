@@ -981,37 +981,13 @@ dependencies = [
 ]
 
 [[package]]
-name = "cargo-platform"
-version = "0.3.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dd0061da739915fae12ea00e16397555ed4371a6bb285431aab930f61b0aa4ba"
-dependencies = [
- "serde",
- "serde_core",
-]
-
-[[package]]
 name = "cargo_metadata"
 version = "0.19.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "dd5eb614ed4c27c5d706420e4320fbe3216ab31fa1c33cd8246ac36dae4479ba"
 dependencies = [
  "camino",
- "cargo-platform 0.1.9",
- "semver",
- "serde",
- "serde_json",
- "thiserror 2.0.18",
-]
-
-[[package]]
-name = "cargo_metadata"
-version = "0.23.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ef987d17b0a113becdd19d3d0022d04d7ef41f9efe4f3fb63ac44ba61df3ade9"
-dependencies = [
- "camino",
- "cargo-platform 0.3.3",
+ "cargo-platform",
  "semver",
  "serde",
  "serde_json",
@@ -6322,7 +6298,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7d8fae84b431384b68627d0f9b3b1245fcf9f46f6c0e3dc902e9dce64edd1967"
 dependencies = [
  "libc",
- "windows-sys 0.48.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -9103,7 +9079,7 @@ checksum = "362ab21cd4cc713f2a02b1a9b5688198b1541cfb6907c4281e9190e0f0ef4aa3"
 dependencies = [
  "anyhow",
  "brotli",
- "cargo_metadata 0.19.2",
+ "cargo_metadata",
  "ctor",
  "dom_query",
  "dunce",
@@ -9256,10 +9232,12 @@ dependencies = [
 name = "tianyan-app"
 version = "0.7.0"
 dependencies = [
+ "tempfile",
  "tianyan-core",
  "tianyan-server",
  "tianyan-tools-code",
  "tianyan-tools-fs",
+ "tianyan-tools-todo",
  "tokio",
 ]
 
@@ -9273,7 +9251,6 @@ dependencies = [
  "async-trait",
  "base64 0.22.1",
  "calamine",
- "cargo_metadata 0.23.1",
  "chrono",
  "config",
  "csv",
@@ -9282,7 +9259,6 @@ dependencies = [
  "docx-rs",
  "flate2",
  "futures",
- "ignore",
  "image 0.24.9",
  "kamadak-exif",
  "lancedb",
@@ -9290,7 +9266,6 @@ dependencies = [
  "notify",
  "pdf-extract",
  "pulldown-cmark",
- "regex",
  "reqwest 0.12.28",
  "ring",
  "rusqlite",
@@ -9305,12 +9280,6 @@ dependencies = [
  "toml 0.8.2",
  "tracing",
  "tracing-subscriber",
- "tree-sitter",
- "tree-sitter-go",
- "tree-sitter-javascript",
- "tree-sitter-python",
- "tree-sitter-rust",
- "tree-sitter-typescript",
  "url",
  "uuid",
 ]
@@ -9382,6 +9351,7 @@ dependencies = [
  "tianyan-server",
  "tianyan-tools-code",
  "tianyan-tools-fs",
+ "tianyan-tools-todo",
  "tokio",
  "tracing",
  "tracing-subscriber",
@@ -9413,6 +9383,19 @@ name = "tianyan-tools-fs"
 version = "0.7.0"
 dependencies = [
  "async-trait",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tianyan-core",
+ "tokio",
+]
+
+[[package]]
+name = "tianyan-tools-todo"
+version = "0.7.0"
+dependencies = [
+ "async-trait",
+ "schemars 0.8.22",
  "serde",
  "serde_json",
  "tempfile",
@@ -10552,7 +10535,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.48.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

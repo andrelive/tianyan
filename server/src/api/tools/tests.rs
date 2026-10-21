@@ -100,12 +100,7 @@ async fn list_tools_returns_builtin_tools() {
     // 注：`read_file` / `write_file` / `glob` / `list_dir` / `apply_edit` /
     // `apply_patch` 已迁至 `plugins/tools-fs`（ADR-049 期 1），不再属于内置表；
     // 本测试构造的是 server 侧 registry 替身（不含插件），故断言仍内置的工具。
-    for expected in [
-        "web_search",
-        "web_fetch",
-        "execute_command",
-        "search_vfs",
-    ] {
+    for expected in ["web_search", "web_fetch", "execute_command", "search_vfs"] {
         assert!(names.contains(&expected), "缺少内置工具 {expected}");
     }
 }

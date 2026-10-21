@@ -16,10 +16,18 @@ use tianyan_server::{start_server_with_plugins, ToolPluginFactory};
 /// 新增插件在此追加一行；插件内部顺序即注册顺序（追加到动态工具末尾，
 /// 内置工具顺序不受影响 —— 提示词前缀稳定性）。
 fn plugin_factory() -> ToolPluginFactory {
-    Box::new(|ctx| {
-        // 顺序即注册顺序（追加到动态工具末尾）：fs 域在前、code 域在后。
+    std::sync::Arc::new(|ctx, services| {
+        // 顺序即注册顺序（追加到动态工具末尾）：fs → code → todo/goal。
         let mut tools = tianyan_tools_fs::tools(ctx);
         tools.extend(tianyan_tools_code::tools(ctx));
+        // `todo` / `goal` 还需要**数据存储**（会话绑定的待办 / 目标）：store 由
+        // server 从 `AppState` 递过来（`PluginServices`）——工具必须与 REST API
+        // 读写同一份实例，否则工具写的待办在 UI 里看不见。`tools()` 内部顺序
+        // 固定 `todo` → `goal`（前缀缓存稳定性）。
+        tools.extend(tianyan_tools_todo::tools(
+            services.todo_store(),
+            services.goal_store(),
+        ));
         tools
     })
 }

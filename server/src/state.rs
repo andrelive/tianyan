@@ -32,8 +32,6 @@ use tianyan::{Result as TianyanResult, TianyanError};
 use crate::agent_builder::{create_model_services, AgentBuilderFactory};
 use crate::api::clipboard::tool::ClipboardWriteTool;
 use crate::api::clipboard::types::PendingCapture;
-use crate::api::goals::tool::GoalTool;
-use crate::api::todos::tool::TodoTool;
 use crate::mcp_bridge::McpToolManager;
 use crate::scheduled_tasks::tool::{CreateTaskRequest, ScheduleTaskTool};
 
@@ -42,25 +40,23 @@ fn model_services_error(e: impl std::fmt::Display) -> TianyanError {
     TianyanError::Custom(format!("模型服务错误：模型服务创建失败：{e}"))
 }
 
-/// 按配置派生工作区快照管理器（配置了 `working_directory` 时启用）。
-/// 构造组件工具清单（`schedule_task` / `todo` / `goal`）。
+/// 构造组件工具清单（**server 自有能力**：`schedule_task`）。
 ///
-/// **顺序即注册顺序**，固定为 `schedule_task` → `todo` → `goal`（与历史注入顺序
-/// 一致）：工具定义是提示词前缀的一部分，顺序抖动会白掉前缀缓存。
+/// **顺序即注册顺序**（工具定义是提示词前缀的一部分，顺序抖动会白掉前缀缓存）。
 ///
-/// 抽成纯函数便于单测——不依赖 `AppState` 的 DB / VFS / 模型服务，
-/// 回归测试可直接断言「三个工具名都在返回值里」（删掉任一注入即变红）。
+/// 归属变更（ADR-049 期 1）：`todo` / `goal` 已随实现迁至 `plugins/tools-todo`，
+/// 由**插件清单**在 `create_app_inner` 注册（server 库不依赖插件 crate，否则改
+/// 一行工具就重编 server）。本清单只剩 `schedule_task`——它依赖 server 内部的
+/// 定时任务管理器通道（`scheduled_task_tx`），属 server 自有能力。
+///
+/// 抽成纯函数便于单测——不依赖 `AppState` 的 DB / VFS / 模型服务。
 pub(crate) fn build_component_tools(
-    todo_store: Arc<TodoStore>,
-    goal_store: Arc<GoalStore>,
     schedule_tx: Option<tokio::sync::mpsc::Sender<CreateTaskRequest>>,
 ) -> Vec<Arc<dyn tianyan::agent::DynamicToolExecutor>> {
     let mut tools: Vec<Arc<dyn tianyan::agent::DynamicToolExecutor>> = Vec::new();
     if let Some(tx) = schedule_tx {
         tools.push(Arc::new(ScheduleTaskTool::new(tx)));
     }
-    tools.push(Arc::new(TodoTool::new(todo_store)));
-    tools.push(Arc::new(GoalTool::new(goal_store)));
     tools
 }
 
@@ -328,6 +324,12 @@ pub struct AppState {
     clipboard_pending: Arc<RwLock<Option<PendingCapture>>>,
     /// 用户问题服务（ask_user 同步等待用户回答；回答端点提交入口）。
     user_questions: Arc<tianyan::agent::user_questions::UserQuestionService>,
+    /// 插件清单工厂（**跨 agent 重建复用**）。
+    ///
+    /// 由装配层在 `create_app_inner` 注入；`reload_agent` 重建 agent 后用它重新
+    /// 注册插件工具——否则配置热重载 / 模型切换 / MCP 变更会让全部插件工具
+    /// （`read_file` / `glob` / `grep` / `repo_map` / `todo` / `goal` …）永久丢失。
+    plugin_factory: Arc<RwLock<Option<crate::ToolPluginFactory>>>,
     /// 子智能体消息流事件广播（ADR-026：GET /tasks/stream SSE 订阅源）。
     pub(crate) task_event_tx: tokio::sync::broadcast::Sender<String>,
     /// 会话租约注册表（ADR-041）：控制面互斥（Stream / DestructiveOp）+ 命令幂等。
@@ -515,6 +517,7 @@ impl AppState {
             clipboard_outbox,
             clipboard_pending: Arc::new(RwLock::new(None)),
             user_questions,
+            plugin_factory: Arc::new(RwLock::new(None)),
             session_leases: crate::session_leases::SessionLeases::new(),
             shutdown_tx: Arc::new(Mutex::new(None)),
         })
@@ -637,12 +640,15 @@ impl AppState {
         // 剪贴板写入工具随 agent 重建重新注入（复用同一 outbox 实例，
         // tauri 轮询路径不因热重载中断）
         dynamic_tools.push(Arc::new(ClipboardWriteTool::new(self.clipboard_outbox())));
-        // 组件工具（`todo` / `goal` / `schedule_task`）：**必须随新 agent 一起注入**。
+        // 组件工具（server 自有能力：`schedule_task`）：**必须随新 agent 一起注入**。
         //
-        // 历史 bug（本次修复）：这三个工具只在 `start_server_inner` 里逐次
+        // 历史 bug（本次修复）：这些工具只在 `start_server_inner` 里逐次
         // `register_dynamic_tools`，而 agent 会因配置热重载 / 模型切换 / MCP 变更
-        // 反复重建——重建后它们永久丢失（`tool: 未知工具：todo`），直到重启进程。
-        // 现由 `component_dynamic_tools()` 统一产出，两处装配共用同一清单。
+        // 反复重建——重建后永久丢失（`tool: 未知工具：schedule_task`），直到重启
+        // 进程。现由 `component_dynamic_tools()` 统一产出，两处装配共用同一清单。
+        //
+        // `todo` / `goal` 的实现已迁至 `plugins/tools-todo`（ADR-049 期 1）——
+        // 它们由**插件清单**注入，本清单不再包含。
         dynamic_tools.extend(self.component_dynamic_tools().await);
         // 配置可能已变化（模型/API Key），重建共享模型服务
         let model_services = create_model_services(&config)
@@ -699,7 +705,7 @@ impl AppState {
         )
         .await?;
 
-        *self.agent.write().await = new_agent;
+        *self.agent.write().await = new_agent.clone();
         *self.model_services.write().await = model_services;
         // T0-12：快照管理器随新配置替换（builder 成功后才提交，避免半更新
         // 状态——旧实现根本不重建，快照/回退停留在旧工作目录）
@@ -707,6 +713,10 @@ impl AppState {
             .snapshot_manager
             .write()
             .unwrap_or_else(|e| e.into_inner()) = new_snapshot_manager;
+
+        // 插件工具随新 agent 重新注入（否则热重载后全部插件工具丢失）。
+        // 用 clone 的句柄在锁外注入——避免持有 agent 写锁期间 await。
+        self.register_plugin_tools(&new_agent).await;
 
         tracing::info!("Agent 重新加载成功");
         Ok(())
@@ -836,17 +846,52 @@ impl AppState {
         tracing::info!("schedule_task 工具通道已就绪（跨 agent 重建复用）");
     }
 
-    /// 组件工具清单（`schedule_task` / `todo` / `goal`）——**唯一装配点**。
+    /// 组件工具清单（`schedule_task`）——**唯一装配点**。
     ///
     /// `AppState::new` 之后的首次注入与 `reload_agent` 的每次重建都经此产出。
     /// 历史 bug：此前只在 `start_server_inner` 里逐次 `register_dynamic_tools`，
-    /// agent 因配置热重载 / 模型切换 / MCP 变更重建后，三个工具永久丢失
-    /// （`tool: 未知工具：todo`），直到重启进程。
+    /// agent 因配置热重载 / 模型切换 / MCP 变更重建后，这些工具永久丢失
+    /// （`tool: 未知工具：schedule_task`），直到重启进程。
+    ///
+    /// `todo` / `goal` 已迁至 `plugins/tools-todo`（ADR-049 期 1）：由插件清单
+    /// 注册，本清单只承载 server 自有能力（`schedule_task`）。
     pub async fn component_dynamic_tools(
         &self,
     ) -> Vec<Arc<dyn tianyan::agent::DynamicToolExecutor>> {
         let tx = self.scheduled_task_tx.read().await.clone();
-        build_component_tools(self.todo_store.clone(), self.goal_store.clone(), tx)
+        build_component_tools(tx)
+    }
+
+    /// 装配插件清单工厂（`create_app_inner` 单点调用；存起来供 reload 复用）。
+    pub async fn attach_plugin_factory(&self, factory: crate::ToolPluginFactory) {
+        *self.plugin_factory.write().await = Some(factory);
+    }
+
+    /// 注册插件工具（**唯一注入点**：首次装配与每次 agent 重建共用）。
+    ///
+    /// 历史 bug（本次修复）：插件工具只在 `create_app_inner` 注入一次，而
+    /// `reload_agent` 重建 agent 时只重放 `mcp + clipboard + component_dynamic_tools`
+    /// —— 配置热重载 / 模型切换 / MCP 变更后，**全部插件工具**（`read_file` /
+    /// `glob` / `grep` / `repo_map` / `todo` / `goal` …）静默消失，直到重启进程。
+    ///
+    /// 顺序：取工厂 → 取 `ToolContext` → 构造 store 句柄 → 工厂产出 → 注入
+    /// （追加到动态工具末尾，内置工具顺序不动）。
+    pub async fn register_plugin_tools(&self, agent: &Arc<dyn AgentCoordinator>) {
+        let factory = self.plugin_factory.read().await.clone();
+        let Some(factory) = factory else {
+            return;
+        };
+        let Some(ctx) = agent.tool_context().await else {
+            tracing::info!("agent 未暴露工具上下文，插件工具跳过");
+            return;
+        };
+        let services = crate::PluginServices::new(self.todo_store.clone(), self.goal_store.clone());
+        let tools = factory(&ctx, services);
+        if tools.is_empty() {
+            return;
+        }
+        tracing::info!(count = tools.len(), "插件工具已注册");
+        agent.register_dynamic_tools(tools).await;
     }
 
     /// 获取定时智能体任务管理器（未装配时为 None）。
@@ -956,39 +1001,39 @@ impl AppState {
 mod tests {
     use super::*;
 
-    /// 回归（本次修复）：组件工具（`schedule_task` / `todo` / `goal`）必须由
+    /// 回归（原有断言随 ADR-049 期 1 迁移调整，判别力不降）：组件工具必须由
     /// **单一装配点** `build_component_tools` 产出，且顺序固定。
     ///
-    /// 判别力：删掉任意一处注入 → 断言立即变红。历史 bug 是这三个工具只在
+    /// 归属变更：`todo` / `goal` 的实现已迁至 `plugins/tools-todo`，改由插件清单
+    /// 注册——本清单只剩 server 自有能力 `schedule_task`。这两个工具的「在册 +
+    /// 顺序 `todo` → `goal`」断言随之移到**装配层**
+    /// （`app/tests/assembly.rs::test_plugin_tools_registered_with_presentation`
+    /// 与 `plugins/tools-todo` 的单测），本测试只覆盖仍在 server 侧的部分。
+    ///
+    /// 判别力：删掉 `schedule_task` 注入 → 断言立即变红。历史 bug 是该工具只在
     /// `start_server_inner` 里逐次注入，agent 重建（配置热重载 / 模型切换 /
-    /// MCP 变更）后永久丢失（`tool: 未知工具：todo`），直到重启进程。
+    /// MCP 变更）后永久丢失（`tool: 未知工具：schedule_task`），直到重启进程。
     #[tokio::test]
-    async fn test_component_tools_include_three_tools_in_stable_order() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let todo = Arc::new(TodoStore::new(dir.path()));
-        let goal = Arc::new(GoalStore::new(dir.path()));
+    async fn test_component_tools_include_schedule_task_only() {
         let (tx, _rx) = tokio::sync::mpsc::channel::<CreateTaskRequest>(1);
 
-        let tools = build_component_tools(todo, goal, Some(tx));
+        let tools = build_component_tools(Some(tx));
         let names: Vec<String> = tools.iter().map(|t| t.tool_name()).collect();
         assert_eq!(
             names,
-            vec!["schedule_task", "todo", "goal"],
-            "组件工具顺序即注册顺序（顺序抖动会白掉提示词前缀缓存）"
+            vec!["schedule_task"],
+            "组件工具只剩 server 自有能力（todo / goal 已迁 plugins/tools-todo）"
         );
     }
 
-    /// 无 Provider（manager 未装配）时：`schedule_task` 不出现，但 `todo` / `goal`
-    /// 仍在——这两个不依赖模型服务，配置热重载后必须继续可用。
+    /// 无 Provider（manager 未装配）时：`schedule_task` 不出现 → 组件工具清单为空。
+    ///
+    /// 迁移前这里断言「`todo` / `goal` 仍在」——它们如今属插件清单（不依赖模型
+    /// 服务，由装配层无条件注册），故本断言只剩「通道缺失 → 不注入」这一条。
     #[tokio::test]
-    async fn test_component_tools_without_scheduler_keeps_todo_and_goal() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let todo = Arc::new(TodoStore::new(dir.path()));
-        let goal = Arc::new(GoalStore::new(dir.path()));
-
-        let tools = build_component_tools(todo, goal, None);
-        let names: Vec<String> = tools.iter().map(|t| t.tool_name()).collect();
-        assert_eq!(names, vec!["todo", "goal"]);
+    async fn test_component_tools_empty_without_scheduler() {
+        let tools = build_component_tools(None);
+        assert!(tools.is_empty(), "无调度通道时不应注入任何组件工具");
     }
     use tianyan::config::{
         find_provider, ModelCapability, ModelEntry, ModelPreferences, ModelRef, ModelsConfig,

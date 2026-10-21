@@ -2,7 +2,7 @@
 //!
 //! This module handles the Axum server lifecycle within the Tauri application.
 
-use tianyan_server::start_server_with_shutdown_signal_and_plugins;
+use tianyan_server::{start_server_with_shutdown_signal_and_plugins, PluginServices};
 use tracing::{error, info};
 
 /// 服务器监听地址（仅本机回环，不对外暴露）。
@@ -58,11 +58,20 @@ pub async fn start_axum_server(
 
     // 插件清单（ADR-049 期 1）：桌面端与独立 bin 共用同一工厂——
     // 清单单一事实源在插件 crate（`plugin_factory()`），此处只接线。
-    let plugin_factory = Box::new(|ctx: &tianyan::agent::ToolContext| {
-        let mut tools = tianyan_tools_fs::tools(ctx);
-        tools.extend(tianyan_tools_code::tools(ctx));
-        tools
-    });
+    let plugin_factory = std::sync::Arc::new(
+        |ctx: &tianyan::agent::ToolContext, services: PluginServices| {
+            // 顺序即注册顺序（追加到动态工具末尾）：fs → code → todo/goal。
+            let mut tools = tianyan_tools_fs::tools(ctx);
+            tools.extend(tianyan_tools_code::tools(ctx));
+            // `todo` / `goal` 需与 REST API 共享同一份 store（由 server 从 AppState
+            // 经 `PluginServices` 递入；`tools()` 内部顺序固定 `todo` → `goal`）。
+            tools.extend(tianyan_tools_todo::tools(
+                services.todo_store(),
+                services.goal_store(),
+            ));
+            tools
+        },
+    );
     if let Err(e) = start_server_with_shutdown_signal_and_plugins(
         listener,
         tianyan_config,

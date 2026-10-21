@@ -13,25 +13,46 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use std::collections::HashSet;
+use std::sync::Arc;
 
-use tianyan::agent::{RoleRegistry, ToolRegistry};
+use tianyan::agent::{DynamicToolExecutor, RoleRegistry, ToolContext, ToolRegistry};
 use tianyan::executor::SecurityPolicy;
+use tianyan::goals::GoalStore;
 use tianyan::model::types::ToolPresentation;
+use tianyan::todos::TodoStore;
+
+/// 插件工具清单——与 `app/src/main.rs::plugin_factory` **同源同序**：
+/// fs → code → todo → goal（顺序即注册顺序，抖动会白掉提示词前缀缓存）。
+///
+/// `todo` / `goal` 的实现迁到 `plugins/tools-todo` 后仍需 store：这里用临时目录
+/// 建（注册与取 definition 不碰盘，`TempDir` 释放后工具也不会再去读）。
+fn plugin_tools(ctx: &ToolContext) -> Vec<Arc<dyn DynamicToolExecutor>> {
+    let dir = tempfile::tempdir().unwrap();
+    let mut tools = tianyan_tools_fs::tools(ctx);
+    tools.extend(tianyan_tools_code::tools(ctx));
+    tools.extend(tianyan_tools_todo::tools(
+        Arc::new(TodoStore::new(dir.path())),
+        Arc::new(GoalStore::new(dir.path())),
+    ));
+    tools
+}
 
 /// 构造「内置 + 插件」的完整注册表（与运行时装配同一工厂）。
 async fn full_registry() -> ToolRegistry {
     let registry = ToolRegistry::new(SecurityPolicy::default());
     let ctx = registry.context().clone();
-    for tool in tianyan_tools_fs::tools(&ctx) {
-        registry.register_dynamic_tool(tool).await;
-    }
-    for tool in tianyan_tools_code::tools(&ctx) {
+    for tool in plugin_tools(&ctx) {
         registry.register_dynamic_tool(tool).await;
     }
     registry
 }
 
-/// 插件提供的六个 fs 工具必须全部注册，且展示意图来自插件（A2）。
+/// 插件工具必须全部注册，且展示意图来自插件（A2）。
+///
+/// 覆盖三批迁移：fs 域 6 个（tools-fs）→ code 域 3 个（tools-code）→
+/// `todo` / `goal`（tools-todo）。后两个是 `Generic`（结构化状态卡片，
+/// 与迁移前的组件工具渲染一致）——它们**不需要**进
+/// `MIGRATED_TOOL_PRESENTATIONS`（该表只兜底非默认意图）。
 #[tokio::test]
 async fn test_plugin_tools_registered_with_presentation() {
     let registry = full_registry().await;
@@ -48,6 +69,9 @@ async fn test_plugin_tools_registered_with_presentation() {
         ("symbol_outline", ToolPresentation::Code),
         ("repo_map", ToolPresentation::Code),
         ("grep", ToolPresentation::Search),
+        // tools-todo（ADR-049 期 1）：会话绑定的推理辅助工具
+        ("todo", ToolPresentation::Generic),
+        ("goal", ToolPresentation::Generic),
     ];
     for (name, presentation) in expected {
         assert!(names.contains(&name), "插件工具未注册：{name}");
@@ -57,6 +81,28 @@ async fn test_plugin_tools_registered_with_presentation() {
             "展示意图丢失（插件需覆盖 DynamicToolExecutor::presentation）：{name}"
         );
     }
+}
+
+/// 动态工具注册顺序固定：fs（6）→ code（3）→ todo → goal。
+///
+/// 顺序是提示词前缀的一部分——`todo` / `goal` 从 server 组件工具迁到插件后仍须
+/// 保持 `todo` 在 `goal` 之前、且都排在 code 域之后（与迁移前相对次序一致）。
+#[tokio::test]
+async fn test_plugin_tool_registration_order_is_stable() {
+    let registry = full_registry().await;
+    let defs = registry.definitions().await;
+    let names: Vec<&str> = defs.iter().map(|d| d.function.name.as_str()).collect();
+    let pos = |name: &str| {
+        names
+            .iter()
+            .position(|n| *n == name)
+            .unwrap_or_else(|| panic!("工具未注册：{name}（顺序断言的前提）"))
+    };
+    assert!(pos("grep") < pos("todo"), "todo 应排在 code 域之后");
+    assert!(
+        pos("todo") < pos("goal"),
+        "todo 必须在 goal 之前（前缀缓存稳定性）"
+    );
 }
 
 /// 内置角色的工具白名单必须全部已注册（白名单是过滤清单，含未注册名会被
@@ -99,13 +145,69 @@ async fn test_plugin_tools_do_not_shadow_builtin() {
         .collect();
 
     let ctx = builtin.context().clone();
-    let mut plugin_tools = tianyan_tools_fs::tools(&ctx);
-    plugin_tools.extend(tianyan_tools_code::tools(&ctx));
-    for tool in plugin_tools {
+    for tool in plugin_tools(&ctx) {
         let name = tool.tool_name();
         assert!(
             !builtin_names.contains(&name),
             "插件工具与内置工具重名（会被静默跳过）：{name}——迁移未完成或表项未删"
+        );
+    }
+}
+
+/// 回归：插件清单工厂必须**可重复调用**（`Arc<dyn Fn>` 而非 `Box<dyn FnOnce>`）。
+///
+/// 场景：配置热重载 / 模型切换 / MCP 变更都会重建 agent，`reload_agent` 用同一份
+/// 工厂重新注入插件工具。若工厂是一次性的，重载后**全部插件工具**
+/// （`read_file` / `glob` / `grep` / `repo_map` / `todo` / `goal` …）会静默消失，
+/// 直到重启进程——这正是 `tool: 未知工具：todo` 那类故障的放大版。
+///
+/// 判别力：工厂被调用两次且工具集一致；同时锁住 `ToolPluginFactory` 的类型
+/// （改成 `Box<dyn FnOnce>` 会让本测试编译失败）。
+#[tokio::test]
+async fn test_plugin_factory_is_repeatable_across_agent_rebuilds() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let make_services = || {
+        tianyan_server::PluginServices::new(
+            Arc::new(TodoStore::new(dir.path())),
+            Arc::new(GoalStore::new(dir.path())),
+        )
+    };
+    let factory: tianyan_server::ToolPluginFactory = Arc::new(|ctx, services| {
+        let mut tools = tianyan_tools_fs::tools(ctx);
+        tools.extend(tianyan_tools_code::tools(ctx));
+        tools.extend(tianyan_tools_todo::tools(
+            services.todo_store(),
+            services.goal_store(),
+        ));
+        tools
+    });
+
+    // 第一次装配（首建）与第二次装配（模拟 reload 后的新注册表）必须得到同一工具集
+    let mut snapshots: Vec<Vec<String>> = Vec::new();
+    for _ in 0..2 {
+        let registry = ToolRegistry::new(SecurityPolicy::default());
+        let ctx = registry.context().clone();
+        for tool in factory(&ctx, make_services()) {
+            registry.register_dynamic_tool(tool).await;
+        }
+        let mut names: Vec<String> = registry
+            .definitions()
+            .await
+            .iter()
+            .map(|d| d.function.name.clone())
+            .collect();
+        names.sort();
+        snapshots.push(names);
+    }
+
+    assert_eq!(
+        snapshots[0], snapshots[1],
+        "插件工厂必须可重复调用：热重载后工具集必须与首建一致"
+    );
+    for expected in ["todo", "goal", "read_file", "glob", "grep", "repo_map"] {
+        assert!(
+            snapshots[0].iter().any(|n| n == expected),
+            "插件工具缺失：{expected}"
         );
     }
 }

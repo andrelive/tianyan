@@ -1,0 +1,23 @@
+[package]
+name = "tianyan-tools-todo"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "天演工具插件：待办与目标（todo / goal）"
+
+[dependencies]
+tianyan = { path = "../../core", package = "tianyan-core" }
+async-trait.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+# 参数 schema 由本 crate 的参数 struct 派生（`from_schema::<T>` 单一事实源）
+schemars.workspace = true
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

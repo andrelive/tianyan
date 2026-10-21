@@ -20,7 +20,14 @@ tianyan-tools-fs = { path = "../plugins/tools-fs" }
 # 插件清单：**只在本包出现**——server 库因此不依赖插件 crate，
 # 改一行工具只重编插件 + 本 bin（闸门 A 前提）
 tianyan-tools-code = { path = "../plugins/tools-code" }
+# 插件清单：**只在本包出现**——server 库因此不依赖插件 crate。
+# todo/goal 例外地需要 store：装配层从 AppState 取同一实例传入插件。
+tianyan-tools-todo = { path = "../plugins/tools-todo" }
 tokio.workspace = true
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+# 装配级测试需要临时目录承载 `todo` / `goal` 的 store（与 REST API 共享实例）
+tempfile.workspace = true

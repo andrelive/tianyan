@@ -328,20 +328,72 @@ pub async fn create_app(
     create_app_inner(config, None).await
 }
 
+/// 插件装配所需的**非 `ToolContext` 能力**（store 等）。
+///
+/// 多数插件工具只需 `ToolContext`（路径解析 + 安全策略），但**会话绑定**的
+/// 工具（`todo` / `goal`）还要数据存储。`TodoStore` / `GoalStore` 留在 core
+/// （它们是 store 不是工具，REST API / 会话面板也直接用），且工具与 API 必须
+/// 读写**同一份**实例——工具不能自建 store。
+///
+/// 因此清单工厂的签名是 `Fn(&ToolContext, PluginServices)`（可重复调用：agent
+/// 重建后要重新注入）；本库从
+/// [`AppState`] 取出同一份 store 交给清单（[`AppState::todo_store`] /
+/// [`AppState::goal_store`]），插件 crate 自己不认识 `AppState`。server 库
+/// 仍**不依赖任何插件 crate**（闸门 A：改一行工具不重编 server）。
+#[derive(Clone)]
+pub struct PluginServices {
+    todo_store: Arc<tianyan::todos::TodoStore>,
+    goal_store: Arc<tianyan::goals::GoalStore>,
+}
+
+impl PluginServices {
+    /// 以 AppState 持有的同一份 store 构造（[`create_app_inner`] 单点调用）。
+    pub fn new(
+        todo_store: Arc<tianyan::todos::TodoStore>,
+        goal_store: Arc<tianyan::goals::GoalStore>,
+    ) -> Self {
+        Self {
+            todo_store,
+            goal_store,
+        }
+    }
+
+    /// 待办存储（与 REST API 共享同一实例）。
+    pub fn todo_store(&self) -> Arc<tianyan::todos::TodoStore> {
+        self.todo_store.clone()
+    }
+
+    /// 目标存储（与 REST API 共享同一实例）。
+    pub fn goal_store(&self) -> Arc<tianyan::goals::GoalStore> {
+        self.goal_store.clone()
+    }
+}
+
 /// 插件工具工厂（ADR-049 期 1：**装配清单住在 bin**）。
 ///
-/// server 库**不认识任何具体插件类型**——只认 core 的 `ToolContext` 契约与
-/// `DynamicToolExecutor` trait。类型擦除是刻意的：若 server 库 `use` 了插件
-/// crate，改一行工具就会重编 server 库（13.4K 源码），闸门 A 直接失效。
-pub type ToolPluginFactory = Box<
-    dyn FnOnce(&tianyan::agent::ToolContext) -> Vec<Arc<dyn tianyan::agent::DynamicToolExecutor>>
-        + Send,
+/// server 库**不认识任何具体插件类型**——只认 core 的 `ToolContext` 契约、
+/// [`PluginServices`] 与 `DynamicToolExecutor` trait。类型擦除是刻意的：若
+/// server 库 `use` 了插件 crate，改一行工具就会重编 server 库（13.4K 源码），
+/// 闸门 A 直接失效。
+/// 插件清单工厂（**可重复调用**）。
+///
+/// `Arc<dyn Fn>` 而非 `Box<dyn FnOnce>`：Agent 会因配置热重载 / 模型切换 / MCP 变更
+/// 反复重建，每次重建都要重新注入插件工具——一次性工厂会让插件工具在 reload 后
+/// 永久丢失（`todo` / `read_file` / `grep` 等全部消失，直到重启进程）。
+pub type ToolPluginFactory = Arc<
+    dyn Fn(
+            &tianyan::agent::ToolContext,
+            PluginServices,
+        ) -> Vec<Arc<dyn tianyan::agent::DynamicToolExecutor>>
+        + Send
+        + Sync,
 >;
 
 /// 带插件清单的应用构造（bin / 桌面端用；测试与嵌入式仍走 [`create_app`]）。
 ///
-/// 装配顺序：Agent 先就绪（内部注册表持有 `ToolContext`）→ 取 ctx → 工厂构造
-/// 插件工具 → `register_dynamic_tools` 注入（追加到动态工具末尾，内置顺序不动）。
+/// 装配顺序：Agent 先就绪（内部注册表持有 `ToolContext`）→ 取 ctx + store
+/// （[`PluginServices`]）→ 工厂构造插件工具 → `register_dynamic_tools` 注入
+/// （追加到动态工具末尾，内置顺序不动）。
 pub async fn create_app_with_plugins(
     config: tianyan::config::TianyanConfig,
     plugin_factory: ToolPluginFactory,
@@ -390,19 +442,17 @@ async fn create_app_inner(
     // Create shared application state（传入 VFS + 共享 SqliteDb）
     let state = AppState::new(config, vfs, database).await?;
 
-    // 插件工具注入（ADR-049 期 1）：agent 就绪 → 取 ctx → 工厂构造 → 注册。
-    // 失败语义：ctx 不可得时静默跳过（插件是可选增强，不是启动硬依赖）。
+    // 插件工具注入（ADR-049 期 1）：agent 就绪 → 取 ctx + services → 工厂构造
+    // → 注册。失败语义：ctx 不可得时静默跳过（插件是可选增强，不是启动硬依赖）。
+    //
+    // `PluginServices` 携带 AppState 的 store 实例（`todo` / `goal` 工具需要）：
+    // 装配清单是唯一知道「哪个插件需要哪份 store」的地方，本库只负责递过去。
     if let Some(factory) = plugin_factory {
+        // 工厂存进 AppState：`reload_agent` 重建 agent 时用**同一份**清单重新注入
+        // （否则插件工具在热重载后永久丢失，直到重启进程）。
+        state.attach_plugin_factory(factory).await;
         let agent = state.agent().await;
-        if let Some(ctx) = agent.tool_context().await {
-            let tools = factory(&ctx);
-            if !tools.is_empty() {
-                info!(count = tools.len(), "插件工具已注册");
-                agent.register_dynamic_tools(tools).await;
-            }
-        } else {
-            info!("agent 未暴露工具上下文，插件工具跳过");
-        }
+        state.register_plugin_tools(&agent).await;
     }
 
     info!("Application state initialized successfully");
@@ -748,12 +798,15 @@ async fn start_server_inner(
                 .bind(Some(scheduler.clone()), Some(task_ctx.clone()))
                 .await;
             state.attach_agent_task_manager(Some(manager.clone())).await;
-            // 组件工具（`schedule_task` / `todo` / `goal`）注入：**唯一装配点**。
+            // 组件工具（server 自有能力：`schedule_task`）注入：**唯一装配点**。
             //
             // 与 `reload_agent` 共用 `component_dynamic_tools()`——此前这里是两段
             // 手写 `register_dynamic_tools`，热重载重建 agent 时不会重放，
-            // 三个工具静默消失（`tool: 未知工具：todo`）直到重启进程。
+            // 工具静默消失（`tool: 未知工具：schedule_task`）直到重启进程。
             // 通道创建与消费者 spawn 已收口进 `attach_agent_task_manager`。
+            //
+            // `todo` / `goal` 已迁至 `plugins/tools-todo`（ADR-049 期 1），
+            // 由插件清单在 `create_app_inner` 里注册——server 库不依赖插件 crate。
             state
                 .agent_lock()
                 .read()
