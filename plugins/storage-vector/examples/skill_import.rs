@@ -2,7 +2,7 @@
 //!
 //! 背景（2026-09-14）：外部 agent 技能库（`~/.agents/skills`）
 //! 中的标准化 skills 经评估后，将其方法论要点移植为本工具源目录
-//! （`core/examples/import-skills/*.md`），一次性导入天演技能库
+//! （`plugins/storage-vector/examples/import-skills/*.md`），一次性导入天演技能库
 //! （`tianyan://skill/{id}`），供所有会话/子代理经 `call_skill` / `search_vfs`
 //! 检索复用。
 //!
@@ -14,9 +14,9 @@
 //! 用法（**建议先退出天演应用**——避免与运行中实例的 LanceDB 写入冲突，
 //! 与 memory_cleanup 同款前提）：
 //! ```text
-//! cargo run -p tianyan-core --example skill_import -- --dry-run          # 预览（不连数据目录）
-//! cargo run -p tianyan-core --example skill_import                       # 导入（配置指向的数据目录）
-//! cargo run -p tianyan-core --example skill_import -- --data-dir <path>  # 覆盖数据目录（彩排/隔离）
+//! cargo run -p tianyan-storage-vector --example skill_import -- --dry-run          # 预览（不连数据目录）
+//! cargo run -p tianyan-storage-vector --example skill_import                       # 导入（配置指向的数据目录）
+//! cargo run -p tianyan-storage-vector --example skill_import -- --data-dir <path>  # 覆盖数据目录（彩排/隔离）
 //! ```
 //!
 //! 幂等：已存在的技能原地更新（content/abstract/向量），可重复运行；
@@ -30,9 +30,10 @@ use tianyan::config::{ModelCapability, TianyanConfig};
 use tianyan::db::Database;
 use tianyan::model::ModelServices;
 use tianyan::vfs::{
-    ContentStore, LanceDbVectorStore, SqliteBackend, StorageBackend, VfsCore, VfsSearch,
-    VirtualFileSystemBuilder, VirtualFileSystemImpl,
+    ContentStore, SqliteBackend, StorageBackend, VfsCore, VfsSearch, VirtualFileSystemBuilder,
+    VirtualFileSystemImpl,
 };
+use tianyan_storage_vector::LanceDbVectorStore;
 
 /// 单个技能源（frontmatter 元数据 + 正文）。
 struct SkillSource {

@@ -152,7 +152,7 @@ Tauri App 启动
     │     │
     │     ├─ 3.1 initialize_vfs_for_app()   [server/src/lib.rs]
      │     │     ├─ SqliteBackend::new()
-    │     │     ├─ LanceDbVectorStore::new() + initialize()
+    │     │     ├─ assembly.vector_storage() → VectorStorageFactory（装配层注入 LanceDB）
     │     │     ├─ ModelServices::from_configs() — 替代旧 ModelRouter
     │     │     └─ VirtualFileSystemBuilder::build() + initialize()
     │     │
@@ -259,13 +259,15 @@ React Frontend：增量按 chunk_type 渲染；历史/流式共用服务端 segm
               │                     │                     │
               ▼                     ▼                     ▼
     ┌─────────────────────┐  ┌──────────────┐  ┌───────────────────┐
-    │ backend/sqlite.rs   │  │ summary/     │  │ vector/lancedb/   │
-    │ backend/sqlite_db.rs│  │ SummaryEngine│  │ LanceDbVectorStore│
-    │ (共享 SQLite 连接)  │  │ (依赖 ChatService) │  │ (batch/mod/tests)│
+    │ backend/sqlite.rs   │  │ summary/     │  │ vector/traits.rs  │
+    │ backend/sqlite_db.rs│  │ SummaryEngine│  │ VectorStorage     │
+    │ (共享 SQLite 连接)  │  │ (依赖 ChatService) │  │ （契约，实现在插件）│
     └─────────────────────┘  └──────────────┘  └───────────────────┘
 ```
 
 > **注**：`SqliteDb` 已移入 `db` 模块（`core/src/db/sqlite_db.rs`，`backend/sqlite_db.rs` 仅 re-export 兼容）——全系统唯一 SQLite 连接（ADR-005 单连接语义），经 `db::Database` 门面统一访问（ADR-020）。`SummaryEngine` 经 `model::ChatService` 生成 L0/L1 摘要，是 vfs→model 的残留单向依赖（非环）。
+>
+> **向量存储实现已出 core**（ADR-049 期 2 序 3）：core 只留 `VectorStorage` 契约，`LanceDbVectorStore` 在 `plugins/storage-vector`，由装配层（`app` bin / `tauri`）经 `VectorStorageFactory` 注入 `server/src/assembly.rs`。**依赖方向**：`plugins/storage-vector → core`（单向），core/server 不认识该插件 crate。
 
 ### 3.5 记忆持久化流程（定时任务）
 
@@ -352,7 +354,7 @@ TaskScheduler 触发
 | `VfsSearch` | `core/src/vfs/traits.rs` | `VfsImpl` | `context/retrieval/retriever.rs` |
 | `VirtualFileSystem` | `core/src/vfs/traits.rs` | 实现 VfsCore+ContentStore+VfsSearch 的类型自动获得 | `server/state.rs`, `agent/coordinator.rs`（session/manager 已迁出 VFS，见 ADR-018） |
 | `SqliteBackend` | `core/src/vfs/backend/sqlite.rs` | SQLite 存储后端（具体类型） | `vfs/vfs_impl.rs` |
-| `VectorStorage` | `core/src/vfs/vector/traits.rs` | `LanceDbVectorStore`（`vfs/vector/lancedb/`） | `vfs/vfs_impl.rs`, `context/retrieval/` |
+| `VectorStorage` | `core/src/vfs/vector/traits.rs` | `LanceDbVectorStore`（`plugins/storage-vector`，装配层经 `VectorStorageFactory` 注入） | `vfs/vfs_impl.rs`, `context/retrieval/` |
 | `SessionManager` | `core/src/session/manager.rs` | `PersistentSessionManager`（基于 `SessionStore`，ADR-018） | `server/state.rs`, `agent/coordinator.rs` |
 | `SkillManager` | `core/src/skills/manager.rs` | `SkillManager` | `server/state.rs`, `server/api/skills/`（VFS 技能发现/读取） |
 

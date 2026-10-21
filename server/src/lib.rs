@@ -30,6 +30,8 @@ use crate::scheduled_tasks::manager::{ScheduledAgentTaskManager, SchedulerRegist
 // Import API module
 pub mod agent_builder;
 pub mod api;
+/// 装配扩展点（ADR-049：插件工具清单 + 向量存储工厂）。
+pub mod assembly;
 /// 嵌入用量入账（usage_logs）。
 pub mod embedding_usage;
 pub mod event_push;
@@ -43,6 +45,8 @@ pub mod state;
 
 use api::create_api_router;
 use state::AppState;
+
+pub use assembly::{AssemblyServices, VectorStorageFactory};
 
 /// Server configuration
 #[derive(Debug, Clone)]
@@ -164,14 +168,17 @@ fn get_static_dir() -> std::path::PathBuf {
 ///
 /// 创建并初始化单一的 VFS 实例，供整个应用使用。
 /// `sqlite_db` 为全系统共享连接（ADR-005：禁止第二个 SQLite 连接）。
+///
+/// `assembly` 提供向量存储实现（[`AssemblyServices::vector_storage`]）：
+/// 本库**不认识任何具体向量实现**（LanceDB 等），实现由装配层注入
+/// （ADR-049 期 2 序 3：lancedb/arrow/datafusion 依赖链不进 core）。
 async fn initialize_vfs_for_app(
     config: &tianyan::config::TianyanConfig,
     database: Arc<tianyan::db::Database>,
+    assembly: &AssemblyServices,
 ) -> tianyan::common::error::Result<Arc<tianyan::vfs::VirtualFileSystemImpl>> {
     use tianyan::config::StorageBackendType;
-    use tianyan::vfs::{
-        LanceDbVectorStore, SqliteBackend, StorageBackend, VirtualFileSystemBuilder,
-    };
+    use tianyan::vfs::{SqliteBackend, StorageBackend, VirtualFileSystemBuilder};
 
     // 1. 创建存储后端（config.storage.backend 决定 adapter）
     let storage: Arc<dyn StorageBackend> = match config.storage.backend {
@@ -188,9 +195,8 @@ async fn initialize_vfs_for_app(
         }
     };
 
-    // LanceDB 需要 async 初始化
-    let vector_storage = LanceDbVectorStore::new(&config.storage).await?;
-    let vector_storage = Arc::new(vector_storage);
+    // 向量存储由装配层注入（async 初始化：LanceDB 建连/建表）
+    let vector_storage = assembly.vector_storage(&config.storage).await?;
 
     // 2. 创建模型服务（用于嵌入服务），无配置时跳过
     let mut vfs_builder = VirtualFileSystemBuilder::new()
@@ -320,12 +326,16 @@ const ALLOWED_ORIGINS: [HeaderValue; 6] = [
 ///
 /// 支持无配置启动，用于配置向导模式
 ///
+/// **无插件工具、无向量存储**（[`AssemblyServices`] 的降级路径：空向量存储——
+/// VFS 内容读写/摘要/工具全部可用，但没有语义检索）。生产装配（bin / 桌面端）
+/// 用 [`create_app_with_assembly`] 注入插件工具与向量存储实现。
+///
 /// 返回 (Router, AppState) 元组，以便在关闭时访问 AppState。
 /// `pub` 供集成测试（server/tests/）直接驱动真实路由与处理器。
 pub async fn create_app(
     config: tianyan::config::TianyanConfig,
 ) -> tianyan::common::error::Result<(Router, Arc<AppState>)> {
-    create_app_inner(config, None).await
+    create_app_inner(config, AssemblyServices::default()).await
 }
 
 /// 插件装配所需的**非 `ToolContext` 能力**（store 等）。
@@ -403,17 +413,35 @@ pub type ToolPluginFactory = Arc<
 /// 装配顺序：Agent 先就绪（内部注册表持有 `ToolContext`）→ 取 ctx + store
 /// （[`PluginServices`]）→ 工厂构造插件工具 → `register_dynamic_tools` 注入
 /// （追加到动态工具末尾，内置顺序不动）。
+///
+/// **保留此签名**（既有调用点不破）：等价于
+/// `create_app_with_assembly(config, AssemblyServices::new().with_plugin_factory(pf))`。
+/// 需要同时装配向量存储时用 [`create_app_with_assembly`]。
 pub async fn create_app_with_plugins(
     config: tianyan::config::TianyanConfig,
     plugin_factory: ToolPluginFactory,
 ) -> tianyan::common::error::Result<(Router, Arc<AppState>)> {
-    create_app_inner(config, Some(plugin_factory)).await
+    create_app_with_assembly(
+        config,
+        AssemblyServices::new().with_plugin_factory(plugin_factory),
+    )
+    .await
 }
 
-/// 应用装配主体（`plugin_factory` 为 `Some` 时在 agent 就绪后注入插件工具）。
+/// 带完整装配（插件工具 + 向量存储）的应用构造（bin / 桌面端用）。
+///
+/// 未装配的插槽走降级路径：无插件工具 / 空向量存储（[`AssemblyServices`]）。
+pub async fn create_app_with_assembly(
+    config: tianyan::config::TianyanConfig,
+    assembly: AssemblyServices,
+) -> tianyan::common::error::Result<(Router, Arc<AppState>)> {
+    create_app_inner(config, assembly).await
+}
+
+/// 应用装配主体（`assembly` 决定插件工具与向量存储实现）。
 async fn create_app_inner(
     config: tianyan::config::TianyanConfig,
-    plugin_factory: Option<ToolPluginFactory>,
+    assembly: AssemblyServices,
 ) -> tianyan::common::error::Result<(Router, Arc<AppState>)> {
     // 创建全系统共享的 SqliteDb（ADR-005：单文件、单连接）
     // - backend = "sqlite" 时：VFS 内容存储（vfs_entries 表）
@@ -436,7 +464,7 @@ async fn create_app_inner(
     }
 
     // 在应用层初始化 VFS（单一实例，共享 SqliteDb）
-    let vfs = initialize_vfs_for_app(&config, database.clone()).await?;
+    let vfs = initialize_vfs_for_app(&config, database.clone(), &assembly).await?;
 
     // 命令执行底层（shell provider，ADR-037）：解析（auto 探测 / 用户配置）→
     // 安装全局 spec——失败即启动报错（含修复指引，不静默回退）。
@@ -456,7 +484,7 @@ async fn create_app_inner(
     //
     // `PluginServices` 携带 AppState 的 store 实例（`todo` / `goal` 工具需要）：
     // 装配清单是唯一知道「哪个插件需要哪份 store」的地方，本库只负责递过去。
-    if let Some(factory) = plugin_factory {
+    if let Some(factory) = assembly.plugin_factory() {
         // 工厂存进 AppState：`reload_agent` 重建 agent 时用**同一份**清单重新注入
         // （否则插件工具在热重载后永久丢失，直到重启进程）。
         state.attach_plugin_factory(factory).await;
@@ -530,13 +558,37 @@ pub async fn start_server(
 ///
 /// 与 [`start_server`] 唯一区别是多一个插件工厂——server 库只依赖
 /// [`ToolPluginFactory`]（类型擦除），不认识任何具体插件 crate。
+///
+/// **保留此签名**（既有调用点不破）；等价于
+/// `start_server_with_assembly(config, tianyan_config,
+/// AssemblyServices::new().with_plugin_factory(pf))`。需要同时装配向量存储
+/// （生产装配的实际形态）时用 [`start_server_with_assembly`]。
 pub async fn start_server_with_plugins(
     config: ServerConfig,
     tianyan_config: tianyan::config::TianyanConfig,
     plugin_factory: ToolPluginFactory,
 ) -> tianyan::common::error::Result<()> {
     let listener = bind_listener(&config).await?;
-    start_server_inner(listener, tianyan_config, None, Some(plugin_factory)).await
+    start_server_with_listener_and_assembly(
+        listener,
+        tianyan_config,
+        AssemblyServices::new().with_plugin_factory(plugin_factory),
+    )
+    .await
+}
+
+/// 带完整装配的启动（**bin 用**：插件工具 + 向量存储）。
+///
+/// 与 [`start_server_with_plugins`] 的区别是多一个 [`AssemblyServices`]（含
+/// [`VectorStorageFactory`]）——server 库只依赖两个类型擦除的工厂，不认识任何
+/// 具体插件 crate（闸门 A：改一行插件实现只重编插件 + 装配包）。
+pub async fn start_server_with_assembly(
+    config: ServerConfig,
+    tianyan_config: tianyan::config::TianyanConfig,
+    assembly: AssemblyServices,
+) -> tianyan::common::error::Result<()> {
+    let listener = bind_listener(&config).await?;
+    start_server_with_listener_and_assembly(listener, tianyan_config, assembly).await
 }
 
 /// 绑定监听 socket（各启动入口共用；错误文案单点）。
@@ -562,7 +614,18 @@ pub async fn start_server_with_listener(
     listener: tokio::net::TcpListener,
     tianyan_config: tianyan::config::TianyanConfig,
 ) -> tianyan::common::error::Result<()> {
-    start_server_inner(listener, tianyan_config, None, None).await
+    start_server_inner(listener, tianyan_config, None, AssemblyServices::default()).await
+}
+
+/// 使用调用方已绑定的 listener + 完整装配启动服务器。
+///
+/// 与 [`start_server_with_listener`] 的区别只是装配（见 [`AssemblyServices`]）。
+pub async fn start_server_with_listener_and_assembly(
+    listener: tokio::net::TcpListener,
+    tianyan_config: tianyan::config::TianyanConfig,
+    assembly: AssemblyServices,
+) -> tianyan::common::error::Result<()> {
+    start_server_inner(listener, tianyan_config, None, assembly).await
 }
 
 /// 使用调用方已绑定的 listener + 外部关闭信号启动服务器。
@@ -575,23 +638,43 @@ pub async fn start_server_with_shutdown_signal(
     tianyan_config: tianyan::config::TianyanConfig,
     shutdown_signal: watch::Receiver<bool>,
 ) -> tianyan::common::error::Result<()> {
-    start_server_inner(listener, tianyan_config, Some(shutdown_signal), None).await
+    start_server_inner(
+        listener,
+        tianyan_config,
+        Some(shutdown_signal),
+        AssemblyServices::default(),
+    )
+    .await
 }
 
 /// 桌面端：listener + 外部关闭信号 + 插件清单。
+///
+/// **保留此签名**（既有调用点不破）；等价于
+/// `start_server_with_shutdown_signal_and_assembly(..., AssemblyServices::new()
+/// .with_plugin_factory(pf))`。桌面端生产装配用带 `_and_assembly` 的变体。
 pub async fn start_server_with_shutdown_signal_and_plugins(
     listener: tokio::net::TcpListener,
     tianyan_config: tianyan::config::TianyanConfig,
     shutdown_signal: watch::Receiver<bool>,
     plugin_factory: ToolPluginFactory,
 ) -> tianyan::common::error::Result<()> {
-    start_server_inner(
+    start_server_with_shutdown_signal_and_assembly(
         listener,
         tianyan_config,
-        Some(shutdown_signal),
-        Some(plugin_factory),
+        shutdown_signal,
+        AssemblyServices::new().with_plugin_factory(plugin_factory),
     )
     .await
+}
+
+/// 桌面端：listener + 外部关闭信号 + 完整装配（插件工具 + 向量存储）。
+pub async fn start_server_with_shutdown_signal_and_assembly(
+    listener: tokio::net::TcpListener,
+    tianyan_config: tianyan::config::TianyanConfig,
+    shutdown_signal: watch::Receiver<bool>,
+    assembly: AssemblyServices,
+) -> tianyan::common::error::Result<()> {
+    start_server_inner(listener, tianyan_config, Some(shutdown_signal), assembly).await
 }
 
 /// 服务器主体：装配应用 → 监听 → 优雅关停。
@@ -602,10 +685,10 @@ async fn start_server_inner(
     listener: tokio::net::TcpListener,
     tianyan_config: tianyan::config::TianyanConfig,
     external_shutdown: Option<watch::Receiver<bool>>,
-    plugin_factory: Option<ToolPluginFactory>,
+    assembly: AssemblyServices,
 ) -> tianyan::common::error::Result<()> {
     let has_providers = tianyan_config.models.providers.iter().any(|p| p.enabled);
-    let (app, state) = create_app_inner(tianyan_config, plugin_factory).await?;
+    let (app, state) = create_app_inner(tianyan_config, assembly).await?;
     let task_scheduler: Option<Arc<TaskScheduler>> = if has_providers {
         // last_run 持久化（ADR-024）：宕机错过的事件任务重启后自动补跑
         let app_config = Arc::new(state.config().read().await.clone());

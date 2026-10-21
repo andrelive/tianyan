@@ -31,7 +31,6 @@ ring = { workspace = true }
 
 # JSON Schema generation
 schemars = { workspace = true }
-lancedb.workspace = true
 
 # Document processing
 pulldown-cmark = { workspace = true }
@@ -79,9 +78,6 @@ rusqlite = { workspace = true }
 dashmap = { workspace = true }
 
 # Regular expressions
-
-arrow-array = "58.4.0"
-arrow-schema = "58.4.0"
 
 # 文本相似度比较
 similar = { workspace = true }

@@ -9,9 +9,9 @@ use arrow_array::cast::AsArray;
 use arrow_array::types::Float32Type;
 use arrow_array::{Array, RecordBatch};
 
-use crate::common::error::{Result, TianyanError};
-use crate::common::types::{ContextNamespace, EntryMetadata, TianyanUri};
-use crate::vfs::types::{VectorPoint, VectorSearchResult, VectorType, CURRENT_SCHEMA_VERSION};
+use tianyan::common::error::{Result, TianyanError};
+use tianyan::common::types::{ContextNamespace, EntryMetadata, TianyanUri};
+use tianyan::vfs::{VectorPoint, VectorSearchResult, VectorType, CURRENT_SCHEMA_VERSION};
 
 pub(super) fn append_vector(
     builder: &mut FixedSizeListBuilder<Float32Builder>,

@@ -9,6 +9,7 @@ members = [
     "plugins/tools-code",
     "plugins/tools-todo",
     "plugins/tools-web",
+    "plugins/storage-vector",
 ]
 resolver = "2"
 

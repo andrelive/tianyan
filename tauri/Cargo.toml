@@ -21,6 +21,8 @@ tianyan-tools-code = { path = "../plugins/tools-code" }
 tianyan-tools-todo = { path = "../plugins/tools-todo" }
 # 插件清单（ADR-049 期 2）：web_search / web_fetch。
 tianyan-tools-web = { path = "../plugins/tools-web" }
+# 向量存储实现（ADR-049 期 2 序 3）：LanceDB 搬出 core 后由桌面端注入。
+tianyan-storage-vector = { path = "../plugins/storage-vector" }
 
 # Tauri framework
 tauri = { version = "2.2", features = ["tray-icon", "devtools"] }

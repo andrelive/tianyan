@@ -53,15 +53,25 @@ cargo test -p tianyan-core vfs::backend::local -- --nocapture  # 指定测试模
 
 ## 工作区结构
 
-4 个 Rust crate（+ 1 个前端工程 `gui-vite/`，非 crate），单 `Cargo.toml` workspace (resolver = "2")：
+单 `Cargo.toml` workspace (resolver = "2")。**内核三包 + 装配包 + 插件包**（ADR-049 编译期插件化）：
 
 | Crate | Package | 类型 |
 |-------|---------|------|
-| `core/` | `tianyan-core` (lib: `tianyan`) | 纯库 |
-| `server/` | `tianyan-server` | Axum HTTP 服务 |
-| `gui-vite/` | - | React TypeScript 前端 |
-| `tauri/` | `tianyan-tauri` | Tauri 桌面包装 |
+| `core/` | `tianyan-core` (lib: `tianyan`) | 纯库（内核：契约 + 实现 + 策略） |
+| `server/` | `tianyan-server` | Axum HTTP 服务（**不认识任何具体插件 crate**） |
+| `app/` | `tianyan-app` (bin: `tianyan-server`) | **装配器**：唯一 `use` 插件类型之处，装配清单住这里 |
+| `gui-vite/` | - | React TypeScript 前端（非 crate） |
+| `tauri/` | `tianyan-tauri` | Tauri 桌面包装（第二个装配器） |
 | `mcp/` | `tianyan-mcp` | MCP 协议客户端 |
+| `plugins/tools-fs/` | `tianyan-tools-fs` | 插件：glob / list_dir / read_file / write_file / apply_edit / apply_patch（定义/门控/审批；实现暂留 core） |
+| `plugins/tools-code/` | `tianyan-tools-code` | 插件：symbol_outline / repo_map / grep（**含实现**，tree-sitter ×6 在此） |
+| `plugins/tools-todo/` | `tianyan-tools-todo` | 插件：todo / goal（含实现） |
+| `plugins/tools-web/` | `tianyan-tools-web` | 插件：web_search / web_fetch（含实现，`scraper` 在此） |
+| `plugins/storage-vector/` | `tianyan-storage-vector` | 插件：`LanceDbVectorStore`（`lancedb`/`arrow`/`datafusion` 链只在此） |
+
+**依赖铁律**（破一条拆包收益全部回吐）：插件只依赖 `core`（kernel-api）；插件之间零互赖；
+`core`/`server` 不认识任何插件 crate。装配经 `server/src/assembly.rs` 的类型擦除插槽
+（`ToolPluginFactory` / `VectorStorageFactory`）。
 
 ## 代码规范
 

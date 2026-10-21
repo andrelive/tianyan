@@ -1,8 +1,8 @@
 use super::*;
-use crate::common::types::{ContextNamespace, EntryMetadata, TianyanUri};
-use crate::config::StorageConfig;
-use crate::vfs::CURRENT_SCHEMA_VERSION;
 use tempfile::tempdir;
+use tianyan::common::types::{ContextNamespace, EntryMetadata, TianyanUri};
+use tianyan::config::StorageConfig;
+use tianyan::vfs::CURRENT_SCHEMA_VERSION;
 /// 创建一个测试用的向量（维度 8）。
 fn test_vec() -> Vec<f32> {
     vec![1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
@@ -262,7 +262,7 @@ async fn test_search_abstract_and_overview() {
     store.upsert_point(&p1).await.unwrap();
 
     // 通过 trait 调用默认方法
-    use crate::vfs::vector::VectorStorage;
+    use tianyan::vfs::VectorStorage as _;
     let results = store
         .search_abstract_and_overview(test_vec(), 10, None)
         .await
@@ -318,6 +318,6 @@ async fn test_search_dimension_mismatch_returns_clean_error() {
 #[tokio::test]
 async fn test_embedding_dim_exposes_table_dimension() {
     let (store, _dir) = create_store().await;
-    use crate::vfs::vector::VectorStorage as _;
+    use tianyan::vfs::VectorStorage as _;
     assert_eq!(store.embedding_dim(), 8);
 }

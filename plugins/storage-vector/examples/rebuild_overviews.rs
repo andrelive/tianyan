@@ -17,8 +17,8 @@
 //!
 //! 用法（**建议先退出天演应用**，避免与运行中实例争用 LanceDB 写入）：
 //! ```text
-//! cargo run -p tianyan-core --example rebuild_overviews -- --dry-run   # 预览
-//! cargo run -p tianyan-core --example rebuild_overviews                # 执行
+//! cargo run -p tianyan-storage-vector --example rebuild_overviews -- --dry-run   # 预览
+//! cargo run -p tianyan-storage-vector --example rebuild_overviews                # 执行
 //! ```
 
 use std::sync::Arc;
@@ -29,10 +29,10 @@ use tianyan::config::{ModelCapability, TianyanConfig};
 use tianyan::db::Database;
 use tianyan::model::ModelServices;
 use tianyan::vfs::{
-    parse_doc_index, ContentStore, LanceDbVectorStore, SqliteBackend, StorageBackend,
-    SummaryEngine, SummaryService, VfsCore, VfsSearch, VirtualFileSystem, VirtualFileSystemBuilder,
-    OVERVIEW_TOKEN_LIMIT,
+    parse_doc_index, ContentStore, SqliteBackend, StorageBackend, SummaryEngine, SummaryService,
+    VfsCore, VfsSearch, VirtualFileSystem, VirtualFileSystemBuilder, OVERVIEW_TOKEN_LIMIT,
 };
+use tianyan_storage_vector::LanceDbVectorStore;
 
 #[tokio::main]
 async fn main() {

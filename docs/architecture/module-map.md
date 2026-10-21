@@ -56,7 +56,7 @@
 | `goals` | `core/src/goals/` | 长期目标 + 进度跟踪（会话绑定；运行期 `goals.json`） | `mod.rs` |
 | `notification` | `core/src/notification.rs` | 通知通道抽象（`NotificationSink`；桌面实现由 tauri 注入） | `notification.rs` |
 | `todos` | `core/src/todos/` | 待办清单（会话绑定；运行期 `todos.json`） | `mod.rs` |
-| `vfs` | `core/src/vfs/` | 统一存储与检索层（**项目基础机制**）；`SqliteBackend` 经 `db::Database` 访问（SqliteDb 已移入 `db` 模块，`backend/sqlite_db.rs` 仅 re-export 兼容） | `traits.rs`, `vfs_impl.rs`, `backend/local.rs`, `backend/sqlite.rs`, `vector/lancedb/`, `summary/engine.rs` |
+| `vfs` | `core/src/vfs/` | 统一存储与检索层（**项目基础机制**）；`SqliteBackend` 经 `db::Database` 访问（SqliteDb 已移入 `db` 模块，`backend/sqlite_db.rs` 仅 re-export 兼容）；向量实现已出 core（ADR-049 序 3：只留 `VectorStorage` 契约，LanceDB 在 `plugins/storage-vector`） | `traits.rs`, `vfs_impl.rs`, `backend/local.rs`, `backend/sqlite.rs`, `vector/traits.rs`, `summary/engine.rs` |
 
 ---
 

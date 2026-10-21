@@ -110,7 +110,8 @@ Core 是天演的核心库，提供 AI Agent 的全部基础能力。4 crate wor
 - `vfs/vfs_builder.rs` — `VirtualFileSystemBuilder` 构建器
 - `vfs/backend/sqlite.rs` — SQLite 存储后端（ADR-005 部分落地：`LocalFileBackend` 仍为生产默认后端，SQLite 通过配置 `[storage] backend = "sqlite"` 启用）
 - `vfs/backend/sqlite_db.rs` — 共享 SQLite 连接 `SqliteDb`（与 `observability/usage_stats.rs` 共用，ADR-005 单连接语义；自 `observability/` 下沉，ADR-007）
-- `vfs/vector/lancedb/` — LanceDB 嵌入式向量数据库实现（`batch.rs` / `mod.rs` / `tests.rs`，RRF 融合搜索）
+- `vfs/vector/traits.rs` — `VectorStorage` 向量存储契约（ADR-049 期 2 序 3：实现
+  `LanceDbVectorStore` 已迁至 `plugins/storage-vector`，core 不再承担 lancedb/arrow/datafusion 依赖链）
 - `vfs/summary/engine.rs` — `SummaryEngine` 分层摘要生成（`new(model_service, model_name)` 2 参数，依赖 `model::ChatService`）
 - `vfs/uri_mapper.rs` — URI 到文件系统路径映射
 
@@ -124,7 +125,7 @@ Core 是天演的核心库，提供 AI Agent 的全部基础能力。4 crate wor
 | `VirtualFileSystemImpl` | VFS 默认实现 |
 | `VirtualFileSystemBuilder` | VFS 构建器 |
 | `SqliteBackend` | SQLite 存储后端（具体类型；`LocalFileBackend` 仍为生产默认后端，ADR-005 部分落地） |
-| `LanceDbVectorStore` | LanceDB 嵌入式向量数据库实现（支持多点向量、RRF 融合搜索） |
+| ~~`LanceDbVectorStore`~~ | **已迁出** → `plugins/storage-vector`（ADR-049 序 3）；装配层经 `VectorStorageFactory` 注入（`server/src/assembly.rs`） |
 | `SummaryEngine` | 分层摘要生成引擎（L0: ~100 tokens, L1: ~2K tokens） |
 | `UriMapper` | URI 到文件系统路径映射 |
 
@@ -311,7 +312,7 @@ soul → rules+memories → history(from compression_marker，含当前用户输
 | model | ✅ 完整集成 | ModelServices + AsyncOpenAIClient 已集成；原 ModelRouter 已移除 |
 | context | ✅ 完整集成 | ContextPipeline + DualLayerRetriever + ContextAssembler 在 Agent 中完整集成 |
 | skills | ✅ 完整集成 | 含 GEPA 进化引擎，通过 call_skill 工具桥接 |
-| vfs | ✅ 完整集成 | VirtualFileSystemImpl + SqliteBackend + LanceDbVectorStore；双层摘要索引 |
+| vfs | ✅ 完整集成 | VirtualFileSystemImpl + SqliteBackend + `VectorStorage` 契约（LanceDB 实现在 `plugins/storage-vector`）；双层摘要索引 |
 | scheduler | ✅ 完整集成 | TaskScheduler + SummaryTask + EvolutionTask + GcTask + SnapshotGcTask + ReminderTask + UsageStatsFlushTask |
 | config | ✅ 完整集成 | 配置加载器和验证器 |
 | common | ✅ 完整集成 | 错误类型和通用工具 |

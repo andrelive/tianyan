@@ -315,6 +315,34 @@ tauri 全域只引 `tianyan::{config,common,agent,notification}`，对候选模�
   进入装配（否则该字段成为 never-read 死字段）
 - 渲染契约：`MIGRATED_TOOL_PRESENTATIONS` 加 `web_search` / `web_fetch` → `Web`
 
+**实施记录（序 3：storage-vector，2026-10-21）**：`vfs/vector/lancedb/`（`mod.rs` 501 +
+`batch.rs` 124 + `tests.rs` 323 = 948 行，**16 个测试全迁**）整域迁入
+`plugins/storage-vector`，`lancedb` / `arrow-array` / `arrow-schema` 随之离开 core。
+
+- **契约留 core**：`vfs/vector/mod.rs` 只剩 `VectorStorage` trait（`vfs::VectorStorage`
+  公开路径不变）；`vfs::LanceDbVectorStore` 导出删除，插件导出 `tianyan_storage_vector::LanceDbVectorStore`
+- **装配扩展点 `AssemblyServices`**（`server/src/assembly.rs`）：把「插件工具清单」与
+  「向量存储工厂」打成一个结构，而不是给每个启动入口再加参数——入口本是
+  `listener × 关闭信号 × 插件` 的组合，再加一维即组合爆炸。旧签名（`create_app` /
+  `start_server_with_plugins` 等）**全部保留**且语义等价「只装插件工具 + 空向量存储」；
+  `app`/`tauri` 改用 `*_with_assembly`。工厂用 `Arc<dyn Fn>`（非 `FnOnce`）：数据目录
+  搬迁后的重启会再次装配
+- **降级语义显式化**：未装配工厂时 `NoopVectorStorage`（写入丢弃 / 检索恒空 / 行数 0），
+  启动 `warn!` 指路；**首次向量写入再 `warn!` 一次**（`AtomicBool` 只打一次）——丢弃数据
+  若不留下证据，生产误配的唯一症状是「语义检索永远为空」，看不出是降级还是数据缺失
+  （ADR-038 可见失败）。降级实现放 server 不放 core：它是「没插插槽时怎么办」的装配决策，
+  core 只定义契约
+- **依赖面证据**（`cargo tree --depth 1`）：`tianyan-core` 与 `tianyan-server` 均无
+  `lancedb` / `arrow*` / `datafusion`；`tianyan-storage-vector` 直接依赖 `lancedb 0.33` +
+  `arrow-array`/`arrow-schema 58.4`。**这是本序与序 4 性质上的分水岭**：序 3 收窄的是
+  **依赖面**（编译期最重的箭头链整体改道），序 4 的 `rusqlite` 搬不走（db/session/
+  observability 共用），只收窄重编面积
+- 4 个 core `examples/`（`memory_cleanup` / `memory_path_repair` / `rebuild_overviews` /
+  `skill_import`，含 `import-skills/` 12 篇源文档）随实现迁入插件——它们只依赖 core 公开
+  API + `LanceDbVectorStore`。**遗留**：这些是一次性运维脚本而非插件功能，更干净的做法是
+  `tools-ops` bin 包（与 `app/tauri` 里重复的 12 行 `vector_factory()` 同一类问题：要彻底
+  去重需引入「装配辅助 crate」，超出本序范围）
+
 ---
 
 ## 分期与闸门

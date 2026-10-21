@@ -29,8 +29,8 @@
 //! 用法（在仓库根，建议服务停止后执行——本工具与运行中的服务共用数据目录、
 //! 且直接写 LanceDB）：
 //! ```text
-//! cargo run -p tianyan-core --example memory_path_repair            # 检查
-//! cargo run -p tianyan-core --example memory_path_repair -- --apply # 执行
+//! cargo run -p tianyan-storage-vector --example memory_path_repair # 检查
+//! cargo run -p tianyan-storage-vector --example memory_path_repair -- --apply # 执行
 //! ```
 //!
 //! 一次性工具：修复完成后可删除本文件（不参与发布链）。
@@ -45,9 +45,9 @@ use tianyan::config::{ModelCapability, TianyanConfig};
 use tianyan::db::Database;
 use tianyan::model::ModelServices;
 use tianyan::vfs::{
-    LanceDbVectorStore, SqliteBackend, StorageBackend, VfsCore, VirtualFileSystem,
-    VirtualFileSystemBuilder,
+    SqliteBackend, StorageBackend, VfsCore, VirtualFileSystem, VirtualFileSystemBuilder,
 };
+use tianyan_storage_vector::LanceDbVectorStore;
 
 /// 已知孤儿条目清单（2026-10-17 精确可达性审计产物）。
 ///

@@ -11,7 +11,8 @@
 //! - **StorageBackend**: 结构化存储 adapter seam（ADR-005）
 //! - **LocalFileBackend**: 本地文件系统存储后端（ADR-005 后默认改为 SqliteBackend，保留作可选/测试后端）
 //! - **SqliteBackend**: SQLite 存储后端（配置 `backend = "sqlite"` 启用）
-//! - **VectorStorage**: 向量存储后端 trait（支持 LanceDB 嵌入式向量存储。
+//! - **VectorStorage**: 向量存储后端 trait（嵌入式向量存储的契约；
+//!   实现由 `tianyan-storage-vector` 插件提供，ADR-049）。
 //! - **VirtualFileSystem**: 统一的上下文存储接口
 //! - **SummaryEngine**: 分层摘要生成
 //!
@@ -20,13 +21,18 @@
 //! ```no_run
 //! use std::sync::Arc;
 //! use tianyan::config::StorageConfig;
-//! use tianyan::vfs::{LanceDbVectorStore, LocalFileBackend, VirtualFileSystemImpl};
+//! use tianyan::vfs::{LocalFileBackend, VectorStorage, VirtualFileSystemBuilder};
 //!
-//! async fn setup_storage() {
+//! async fn setup_storage(vector_storage: Arc<dyn VectorStorage>) {
 //!     let config = StorageConfig::default();
 //!     let storage = Arc::new(LocalFileBackend::new(config.clone()));
-//!     let vector_storage = Arc::new(LanceDbVectorStore::new(&config).await.unwrap());
-//!     let vfs = VirtualFileSystemImpl::new(storage, vector_storage, config);
+//!     // 向量实现来自插件（tianyan-storage-vector），由装配层注入
+//!     let vfs = VirtualFileSystemBuilder::new()
+//!         .with_config(config)
+//!         .with_storage(storage)
+//!         .with_vector_storage(vector_storage)
+//!         .build()
+//!         .unwrap();
 //! }
 //! ```
 
@@ -55,7 +61,7 @@ pub use types::{
     CURRENT_SCHEMA_VERSION,
 };
 pub use uri_mapper::UriMapper;
-pub use vector::{LanceDbVectorStore, VectorStorage};
+pub use vector::VectorStorage;
 pub use vfs_impl::{VirtualFileSystemBuilder, VirtualFileSystemImpl};
 
 #[cfg(test)]

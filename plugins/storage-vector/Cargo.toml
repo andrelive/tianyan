@@ -1,0 +1,29 @@
+[package]
+name = "tianyan-storage-vector"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "天演存储插件：LanceDB 嵌入式向量存储（VectorStorage 实现）"
+
+[dependencies]
+tianyan = { path = "../../core", package = "tianyan-core" }
+async-trait.workspace = true
+futures.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+serde_json.workspace = true
+# 向量库 + Arrow 列构建：只进本插件，core 不再承担这组依赖
+# （lancedb → arrow → datafusion 链是全量 debug 构建的最大耗时源）。
+lancedb.workspace = true
+arrow-array = "58.4.0"
+arrow-schema = "58.4.0"
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+# 一次性运维 tools（examples/）需要时间计算与格式化
+chrono.workspace = true

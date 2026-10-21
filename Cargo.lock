@@ -9235,6 +9235,7 @@ dependencies = [
  "tempfile",
  "tianyan-core",
  "tianyan-server",
+ "tianyan-storage-vector",
  "tianyan-tools-code",
  "tianyan-tools-fs",
  "tianyan-tools-todo",
@@ -9246,8 +9247,6 @@ dependencies = [
 name = "tianyan-core"
 version = "0.7.0"
 dependencies = [
- "arrow-array",
- "arrow-schema",
  "async-openai",
  "async-trait",
  "base64 0.22.1",
@@ -9262,7 +9261,6 @@ dependencies = [
  "futures",
  "image 0.24.9",
  "kamadak-exif",
- "lancedb",
  "mockall",
  "notify",
  "pdf-extract",
@@ -9327,6 +9325,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "tianyan-storage-vector"
+version = "0.7.0"
+dependencies = [
+ "arrow-array",
+ "arrow-schema",
+ "async-trait",
+ "chrono",
+ "futures",
+ "lancedb",
+ "serde_json",
+ "tempfile",
+ "tianyan-core",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "tianyan-tauri"
 version = "0.7.0"
 dependencies = [
@@ -9349,6 +9364,7 @@ dependencies = [
  "tauri-plugin-updater",
  "tianyan-core",
  "tianyan-server",
+ "tianyan-storage-vector",
  "tianyan-tools-code",
  "tianyan-tools-fs",
  "tianyan-tools-todo",

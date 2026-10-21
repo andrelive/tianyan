@@ -20,6 +20,9 @@ use tianyan::executor::SecurityPolicy;
 use tianyan::goals::GoalStore;
 use tianyan::model::types::ToolPresentation;
 use tianyan::todos::TodoStore;
+use tianyan::vfs::VectorStorage;
+use tianyan_server::VectorStorageFactory;
+use tianyan_storage_vector::LanceDbVectorStore;
 
 /// 插件工具清单——与 `app/src/main.rs::plugin_factory` **同源同序**：
 /// fs → code → todo → goal → web（顺序即注册顺序，抖动会白掉提示词前缀缓存）。
@@ -228,4 +231,39 @@ async fn test_plugin_factory_is_repeatable_across_agent_rebuilds() {
             "插件工具缺失：{expected}"
         );
     }
+}
+
+/// 装配回归（ADR-049 期 2 序 3）：向量存储工厂必须真的产出 **LanceDB**
+/// （而不是 server 侧「未装配」时的空降级实现）。
+///
+/// 判别力：
+/// 1. 证明 `VectorStorageFactory` 的写法在**装配包外部**可用（闭包 → `Arc<dyn Fn>`
+///    → boxed future 的类型擦除链真的编译得过，与 `app/src/main.rs` 同形）；
+/// 2. 证明 `{data_dir}/lancedb` 被真实创建——空实现不会在磁盘留痕；
+/// 3. 维度来自 `StorageConfig`（8），说明配置被正确传入而非默认值。
+#[tokio::test]
+async fn test_vector_factory_yields_real_lancedb_store() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut config = tianyan::config::StorageConfig {
+        data_dir: dir.path().to_path_buf(),
+        ..Default::default()
+    };
+    config.vector.collection_name = "assembly_test".to_string();
+    config.vector.vector_dimension = 8;
+    // 与 `app/src/main.rs::vector_factory` 同形（借用 → clone → move 进 async）
+    let factory: VectorStorageFactory = Arc::new(|config: &tianyan::config::StorageConfig| {
+        let config = config.clone();
+        Box::pin(async move {
+            let store = LanceDbVectorStore::new(&config).await?;
+            Ok(Arc::new(store) as Arc<dyn VectorStorage>)
+        })
+    });
+
+    let store = factory(&config).await.expect("工厂应构造成功");
+    assert_eq!(store.embedding_dim(), 8, "维度应来自注入的配置");
+    assert_eq!(store.count_rows().await.expect("行数可读"), 0);
+    assert!(
+        dir.path().join("lancedb").is_dir(),
+        "LanceDB 数据目录应被创建（空实现不留痕）"
+    );
 }

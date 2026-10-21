@@ -2,7 +2,14 @@
 //!
 //! This module handles the Axum server lifecycle within the Tauri application.
 
-use tianyan_server::{start_server_with_shutdown_signal_and_plugins, PluginServices};
+use std::sync::Arc;
+
+use tianyan::vfs::VectorStorage;
+use tianyan_server::{
+    start_server_with_shutdown_signal_and_assembly, AssemblyServices, PluginServices,
+    ToolPluginFactory, VectorStorageFactory,
+};
+use tianyan_storage_vector::LanceDbVectorStore;
 use tracing::{error, info};
 
 /// 服务器监听地址（仅本机回环，不对外暴露）。
@@ -23,6 +30,21 @@ pub fn find_available_port(preferred: u16) -> Option<std::net::TcpListener> {
         }
     }
     None
+}
+
+/// 向量存储工厂（LanceDB；`plugins/storage-vector`）。
+///
+/// 与插件工具清单同款类型擦除：server 库只认 [`VectorStorageFactory`]，
+/// `LanceDbVectorStore` 只出现在装配层。`&StorageConfig` 是借用 → 先 `clone`
+/// 再 move 进 async 块；工厂可重复调用（启动重试 / 搬迁重启）。
+fn vector_factory() -> VectorStorageFactory {
+    Arc::new(|config: &tianyan::config::StorageConfig| {
+        let config = config.clone();
+        Box::pin(async move {
+            let store = LanceDbVectorStore::new(&config).await?;
+            Ok(Arc::new(store) as Arc<dyn VectorStorage>)
+        })
+    })
 }
 
 /// 启动 Axum 服务
@@ -58,7 +80,7 @@ pub async fn start_axum_server(
 
     // 插件清单（ADR-049 期 1）：桌面端与独立 bin 共用同一工厂——
     // 清单单一事实源在插件 crate（`plugin_factory()`），此处只接线。
-    let plugin_factory = std::sync::Arc::new(
+    let plugin_factory: ToolPluginFactory = Arc::new(
         |ctx: &tianyan::agent::ToolContext, services: PluginServices| {
             // 顺序即注册顺序（追加到动态工具末尾）：fs → code → todo/goal → web。
             let mut tools = tianyan_tools_fs::tools(ctx);
@@ -75,11 +97,15 @@ pub async fn start_axum_server(
             tools
         },
     );
-    if let Err(e) = start_server_with_shutdown_signal_and_plugins(
+    // 完整装配（ADR-049 期 2 序 3）：工具清单 + 向量存储
+    let assembly = AssemblyServices::new()
+        .with_plugin_factory(plugin_factory)
+        .with_vector_factory(vector_factory());
+    if let Err(e) = start_server_with_shutdown_signal_and_assembly(
         listener,
         tianyan_config,
         shutdown_signal,
-        plugin_factory,
+        assembly,
     )
     .await
     {

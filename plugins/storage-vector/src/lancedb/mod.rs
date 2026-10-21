@@ -18,10 +18,9 @@ use async_trait::async_trait;
 use futures::TryStreamExt;
 use lancedb::query::{ExecutableQuery, QueryBase};
 
-use crate::common::error::{Result, TianyanError};
-use crate::config::StorageConfig;
-use crate::vfs::types::{VectorPoint, VectorSearchQuery, VectorSearchResult, VectorType};
-use crate::vfs::vector::VectorStorage;
+use tianyan::common::error::{Result, TianyanError};
+use tianyan::config::StorageConfig;
+use tianyan::vfs::{VectorPoint, VectorSearchQuery, VectorSearchResult, VectorStorage, VectorType};
 
 /// LanceDB 向量存储实现。
 ///

@@ -8,15 +8,25 @@
 //!
 //! 因此本包只做三件事：加载配置与日志、给出插件清单、启动 server。
 //! server 库通过 `ToolPluginFactory`（类型擦除）接收清单，**不认识任何插件类型**。
+//!
+//! 期 2 序 3 起同一模式也用于**向量存储**：`lancedb`/`arrow`/`datafusion` 链搬进
+//! `plugins/storage-vector` 后，core 不再承担它；本包把 `LanceDbVectorStore` 包成
+//! `VectorStorageFactory` 注入启动入口（server 库同样不认识该实现）。
 
-use tianyan_server::{start_server_with_plugins, ToolPluginFactory};
+use std::sync::Arc;
+
+use tianyan::vfs::VectorStorage;
+use tianyan_server::{
+    start_server_with_assembly, AssemblyServices, ToolPluginFactory, VectorStorageFactory,
+};
+use tianyan_storage_vector::LanceDbVectorStore;
 
 /// 插件清单（**全仓唯一 `use` 具体插件类型的地方**）。
 ///
 /// 新增插件在此追加一行；插件内部顺序即注册顺序（追加到动态工具末尾，
 /// 内置工具顺序不受影响 —— 提示词前缀稳定性）。
 fn plugin_factory() -> ToolPluginFactory {
-    std::sync::Arc::new(|ctx, services| {
+    Arc::new(|ctx, services| {
         // 顺序即注册顺序（追加到动态工具末尾）：fs → code → todo/goal → web。
         let mut tools = tianyan_tools_fs::tools(ctx);
         tools.extend(tianyan_tools_code::tools(ctx));
@@ -34,6 +44,28 @@ fn plugin_factory() -> ToolPluginFactory {
         tools.extend(tianyan_tools_web::tools(&services.web_config()));
         tools
     })
+}
+
+/// 向量存储工厂（LanceDB；`plugins/storage-vector`）。
+///
+/// 类型擦除的同款手法：server 库只认 [`VectorStorageFactory`]（`Arc<dyn Fn>`），
+/// `LanceDbVectorStore` 只在本包出现。工厂**可重复调用**（数据目录搬迁后以新配置
+/// 重启会再次装配）；`&StorageConfig` 是借用，需先 `clone` 再 move 进 async 块。
+fn vector_factory() -> VectorStorageFactory {
+    Arc::new(|config: &tianyan::config::StorageConfig| {
+        let config = config.clone();
+        Box::pin(async move {
+            let store = LanceDbVectorStore::new(&config).await?;
+            Ok(Arc::new(store) as Arc<dyn VectorStorage>)
+        })
+    })
+}
+
+/// 完整装配（插件工具清单 + 向量存储）。
+fn assembly() -> AssemblyServices {
+    AssemblyServices::new()
+        .with_plugin_factory(plugin_factory())
+        .with_vector_factory(vector_factory())
 }
 
 #[tokio::main]
@@ -60,7 +92,7 @@ async fn main() -> tianyan::common::error::Result<()> {
         // 端口来源单点：from_env 读 TIANYAN_PORT（未设 → 默认 127.0.0.1:3000）。
         // e2e 借此用备用端口启动，避免与运行中的桌面应用抢占 3000。
         let server_config = tianyan_server::ServerConfig::from_env();
-        match start_server_with_plugins(server_config, config.clone(), plugin_factory()).await {
+        match start_server_with_assembly(server_config, config.clone(), assembly()).await {
             Ok(()) => {
                 // 服务器正常关停：检查是否有待处理的数据目录搬迁
                 if tianyan_server::migration::handle_pending_migration(&config)

@@ -20,8 +20,8 @@
 //!
 //! 用法：
 //! ```text
-//! cargo run -p tianyan-core --example memory_cleanup -- --dry-run   # 预览
-//! cargo run -p tianyan-core --example memory_cleanup                # 执行
+//! cargo run -p tianyan-storage-vector --example memory_cleanup -- --dry-run   # 预览
+//! cargo run -p tianyan-storage-vector --example memory_cleanup                # 执行
 //! ```
 
 use std::sync::Arc;
@@ -32,9 +32,10 @@ use tianyan::config::{ModelCapability, TianyanConfig};
 use tianyan::db::Database;
 use tianyan::model::ModelServices;
 use tianyan::vfs::{
-    ContentStore, LanceDbVectorStore, SqliteBackend, StorageBackend, VfsCore, VfsSearch,
-    VirtualFileSystem, VirtualFileSystemBuilder,
+    ContentStore, SqliteBackend, StorageBackend, VfsCore, VfsSearch, VirtualFileSystem,
+    VirtualFileSystemBuilder,
 };
+use tianyan_storage_vector::LanceDbVectorStore;
 
 /// 规则归档边界：此日期之前创建的规则视为早期爆炸存量（archived）。
 const RULE_ARCHIVE_BEFORE: (i32, u32, u32) = (2026, 8, 19);
