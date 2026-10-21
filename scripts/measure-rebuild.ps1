@@ -61,6 +61,9 @@ $crateLines = [ordered]@{
     'tianyan-tauri'     = Get-SourceLines 'tauri'
     # 插件 crate（ADR-049 期 1）：重编带度量的主角——改工具只应命中它（+ bin）
     'tianyan-tools-fs'  = Get-SourceLines 'plugins/tools-fs'
+    'tianyan-tools-code' = Get-SourceLines 'plugins/tools-code'
+    # 装配 bin（清单住这里）：改插件会连带重编它——这是闸门 A 的预期成本
+    'tianyan-app'       = Get-SourceLines 'app'
 }
 $totalSrc = ($crateLines.Values | Measure-Object -Sum).Sum
 

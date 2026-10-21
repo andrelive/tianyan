@@ -40,6 +40,7 @@ docx-rs = { workspace = true }
 
 # Image processing
 image = { workspace = true }
+# EXIF 解析：crate 名是 exif（package 名 kamadak-exif），knowledge/image 在用
 kamadak-exif = { workspace = true }
 
 # Data processing
@@ -78,10 +79,7 @@ rusqlite = { workspace = true }
 dashmap = { workspace = true }
 
 # Regular expressions
-regex = { workspace = true }
 
-# 目录遍历（rg 同作者：.gitignore/隐藏文件语义，搜索内嵌用）
-ignore = { workspace = true }
 arrow-array = "58.4.0"
 arrow-schema = "58.4.0"
 
@@ -92,16 +90,7 @@ scraper = "0.20"
 # 压缩 / 解压
 flate2 = { workspace = true }
 
-# Cargo 元数据解析
-cargo_metadata = { workspace = true }
 
-# 语法解析（tree-sitter）
-tree-sitter = { workspace = true }
-tree-sitter-rust = { workspace = true }
-tree-sitter-typescript = { workspace = true }
-tree-sitter-javascript = { workspace = true }
-tree-sitter-python = { workspace = true }
-tree-sitter-go = { workspace = true }
 
 
 # 文件系统事件监听（事件驱动触发，T1 路线）
