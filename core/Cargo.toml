@@ -85,7 +85,6 @@ arrow-schema = "58.4.0"
 
 # 文本相似度比较
 similar = { workspace = true }
-scraper = "0.20"
 
 # 压缩 / 解压
 flate2 = { workspace = true }

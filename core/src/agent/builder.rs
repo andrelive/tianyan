@@ -43,8 +43,6 @@ pub struct AgentBuilder {
     knowledge_ingestor: Option<Arc<KnowledgeIngestor>>,
     security_config: Option<SecurityConfig>,
     usage_stats: Option<Arc<UsageStats>>,
-    /// Web 工具配置（web_search / web_fetch；None 时不启用工具）。
-    web_config: Option<crate::config::WebConfig>,
     /// 工作区快照管理器（配置了 working_directory 时启用）。
     snapshot_manager: Option<Arc<SnapshotManager>>,
     /// 全局默认工作目录（[agent] working_directory 配置；会话级绑定缺省时
@@ -104,7 +102,6 @@ impl AgentBuilder {
             knowledge_ingestor: None,
             security_config: None,
             usage_stats: None,
-            web_config: None,
             snapshot_manager: None,
             default_working_directory: None,
             background_task_db: None,
@@ -205,12 +202,6 @@ impl AgentBuilder {
     /// 设置使用统计追踪器。
     pub fn with_usage_stats(mut self, stats: Arc<UsageStats>) -> Self {
         self.usage_stats = Some(stats);
-        self
-    }
-
-    /// 设置 Web 工具配置（web_search / web_fetch 工具启用开关与后端）。
-    pub fn with_web_config(mut self, config: crate::config::WebConfig) -> Self {
-        self.web_config = Some(config);
         self
     }
 
@@ -485,19 +476,6 @@ impl AgentBuilder {
         }
         if let Some(ref ingestor) = self.knowledge_ingestor {
             tool_registry = tool_registry.with_knowledge_ingestor(ingestor.clone());
-        }
-        // Web 工具（web_search / web_fetch）：配置启用时构建客户端注入
-        if let Some(web_config) = self.web_config {
-            if web_config.enabled {
-                match crate::executor::web::WebSearchClient::new(&web_config) {
-                    Ok(client) => {
-                        tool_registry = tool_registry.with_web_client(Arc::new(client));
-                    }
-                    Err(e) => {
-                        tracing::warn!(error = %e, "Web 工具客户端初始化失败，web_search/web_fetch 不可用");
-                    }
-                }
-            }
         }
         // 后台任务完成通知器：把通知持久化到父会话（主 LLM 下一轮看到并继续）。
         // ADR-035：经工作集落库（物化段同步推进 → 活动轮的轮边界续跑判定可发现它）

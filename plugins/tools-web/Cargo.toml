@@ -1,0 +1,28 @@
+[package]
+name = "tianyan-tools-web"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "天演工具插件：网络检索与抓取（web_search / web_fetch）"
+
+[dependencies]
+tianyan = { path = "../../core", package = "tianyan-core" }
+async-trait.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+schemars.workspace = true
+# 网络请求 + 流式读取 + 缓存 + HTML 解析：只进本插件，core 不再承担这组依赖
+reqwest.workspace = true
+futures.workspace = true
+dashmap.workspace = true
+tracing.workspace = true
+scraper = "0.20"
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

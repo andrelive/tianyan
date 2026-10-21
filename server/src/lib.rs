@@ -344,17 +344,20 @@ pub async fn create_app(
 pub struct PluginServices {
     todo_store: Arc<tianyan::todos::TodoStore>,
     goal_store: Arc<tianyan::goals::GoalStore>,
+    web_config: tianyan::config::WebConfig,
 }
 
 impl PluginServices {
-    /// 以 AppState 持有的同一份 store 构造（[`create_app_inner`] 单点调用）。
+    /// 以 AppState 持有的同一份 store 与 Web 配置构造（[`create_app_inner`] / `register_plugin_tools` 单点调用）。
     pub fn new(
         todo_store: Arc<tianyan::todos::TodoStore>,
         goal_store: Arc<tianyan::goals::GoalStore>,
+        web_config: tianyan::config::WebConfig,
     ) -> Self {
         Self {
             todo_store,
             goal_store,
+            web_config,
         }
     }
 
@@ -366,6 +369,12 @@ impl PluginServices {
     /// 目标存储（与 REST API 共享同一实例）。
     pub fn goal_store(&self) -> Arc<tianyan::goals::GoalStore> {
         self.goal_store.clone()
+    }
+
+    /// Web 工具配置（`web_search` / `web_fetch` 插件据此构造客户端；
+    /// 构造失败时插件自行降级为空清单，不影响装配）。
+    pub fn web_config(&self) -> tianyan::config::WebConfig {
+        self.web_config.clone()
     }
 }
 

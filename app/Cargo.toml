@@ -23,6 +23,8 @@ tianyan-tools-code = { path = "../plugins/tools-code" }
 # 插件清单：**只在本包出现**——server 库因此不依赖插件 crate。
 # todo/goal 例外地需要 store：装配层从 AppState 取同一实例传入插件。
 tianyan-tools-todo = { path = "../plugins/tools-todo" }
+# 插件清单：`web_search` / `web_fetch`（ADR-049 期 2）。
+tianyan-tools-web = { path = "../plugins/tools-web" }
 tokio.workspace = true
 
 [lints]

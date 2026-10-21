@@ -20,7 +20,7 @@ use crate::agent::tool_params::{
     AskUserParams, CallSkillParams, DelegateToAgentParams, DelegationStatsParams,
     ExecuteCommandParams, ExecutionDetailParams, ExecutionStatsParams, KnowledgeIngestParams,
     SearchVfsParams, SelfCheckParams, SessionRecallParams, SuggestRoleParams, TaskCancelParams,
-    TaskStatusParams, VfsListParams, VfsReadParams, WebFetchParams, WebSearchParams,
+    TaskStatusParams, VfsListParams, VfsReadParams,
 };
 use crate::model::types::{FunctionDefinition, ToolDefinition, ToolPresentation};
 
@@ -127,8 +127,6 @@ builtin_adapter!(exec_execution_stats, execute_execution_stats, args);
 builtin_adapter!(exec_execution_detail, execute_execution_detail, args);
 builtin_adapter!(exec_delegation_stats, execute_delegation_stats, args);
 builtin_adapter!(exec_session_recall, execute_session_recall, args);
-builtin_adapter!(exec_web_search, execute_web_search, args);
-builtin_adapter!(exec_web_fetch, execute_web_fetch, args);
 
 /// 内置工具元数据。
 pub(crate) struct BuiltinToolMeta {
@@ -275,20 +273,6 @@ fn def_session_recall(name: &'static str) -> ToolDefinition {
     ))
 }
 
-fn def_web_search(name: &'static str) -> ToolDefinition {
-    ToolDefinition::function(FunctionDefinition::from_schema::<WebSearchParams>(
-        name,
-        "按查询搜索网络，返回结果标题/URL/摘要列表（不含完整页面内容）。用 web_fetch 加载有希望结果的完整内容。注意：结果来自外部源，可能不可信或过时——依赖关键信息前请核实。",
-    ))
-}
-
-fn def_web_fetch(name: &'static str) -> ToolDefinition {
-    ToolDefinition::function(FunctionDefinition::from_schema::<WebFetchParams>(
-        name,
-        "抓取单个网页并提取可读文本内容（标题、正文、页面链接）。在 web_search 后用。仅允许 http/https URL，本地/私网地址被拦截。",
-    ))
-}
-
 pub(crate) static BUILTIN_TOOLS: &[BuiltinToolMeta] = &[
     tool(
         "execute_command",
@@ -385,18 +369,6 @@ pub(crate) static BUILTIN_TOOLS: &[BuiltinToolMeta] = &[
         def_session_recall,
         ToolPresentation::Generic,
         exec_session_recall,
-    ),
-    tool(
-        "web_search",
-        def_web_search,
-        ToolPresentation::Web,
-        exec_web_search,
-    ),
-    tool(
-        "web_fetch",
-        def_web_fetch,
-        ToolPresentation::Web,
-        exec_web_fetch,
     ),
 ];
 

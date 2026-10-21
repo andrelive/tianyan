@@ -149,7 +149,6 @@ impl AgentBuilderFactory {
             .with_retriever(Arc::new(retriever))
             .with_knowledge_ingestor(Arc::new(knowledge_ingestor))
             .with_security_config(config.security.clone())
-            .with_web_config(config.web.clone())
             .with_usage_stats(usage_stats)
             .with_default_working_directory(
                 config.agent.working_directory.clone().map(PathBuf::from),

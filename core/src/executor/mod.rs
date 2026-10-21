@@ -24,8 +24,6 @@ pub mod patch;
 pub mod search_types;
 /// 统一截断层（read/grep 与命令输出模式的 UTF-8 安全截断）。
 pub mod truncate;
-/// Web 工具执行器（web_search / web_fetch：搜索后端 + SSRF 防护 + 缓存）。
-pub mod web;
 
 pub use actions::{
     execute_command_action, execute_command_action_cancellable, execute_read_file,

@@ -22,10 +22,11 @@ use tianyan::model::types::ToolPresentation;
 use tianyan::todos::TodoStore;
 
 /// 插件工具清单——与 `app/src/main.rs::plugin_factory` **同源同序**：
-/// fs → code → todo → goal（顺序即注册顺序，抖动会白掉提示词前缀缓存）。
+/// fs → code → todo → goal → web（顺序即注册顺序，抖动会白掉提示词前缀缓存）。
 ///
 /// `todo` / `goal` 的实现迁到 `plugins/tools-todo` 后仍需 store：这里用临时目录
 /// 建（注册与取 definition 不碰盘，`TempDir` 释放后工具也不会再去读）。
+/// `web_search` / `web_fetch` 用默认 `WebConfig`（只取 schema/definition，不发请求）。
 fn plugin_tools(ctx: &ToolContext) -> Vec<Arc<dyn DynamicToolExecutor>> {
     let dir = tempfile::tempdir().unwrap();
     let mut tools = tianyan_tools_fs::tools(ctx);
@@ -33,6 +34,9 @@ fn plugin_tools(ctx: &ToolContext) -> Vec<Arc<dyn DynamicToolExecutor>> {
     tools.extend(tianyan_tools_todo::tools(
         Arc::new(TodoStore::new(dir.path())),
         Arc::new(GoalStore::new(dir.path())),
+    ));
+    tools.extend(tianyan_tools_web::tools(
+        &tianyan::config::WebConfig::default(),
     ));
     tools
 }
@@ -72,6 +76,9 @@ async fn test_plugin_tools_registered_with_presentation() {
         // tools-todo（ADR-049 期 1）：会话绑定的推理辅助工具
         ("todo", ToolPresentation::Generic),
         ("goal", ToolPresentation::Generic),
+        // tools-web（ADR-049 期 2）：网络检索/抓取工具
+        ("web_search", ToolPresentation::Web),
+        ("web_fetch", ToolPresentation::Web),
     ];
     for (name, presentation) in expected {
         assert!(names.contains(&name), "插件工具未注册：{name}");
@@ -170,6 +177,7 @@ async fn test_plugin_factory_is_repeatable_across_agent_rebuilds() {
         tianyan_server::PluginServices::new(
             Arc::new(TodoStore::new(dir.path())),
             Arc::new(GoalStore::new(dir.path())),
+            tianyan::config::WebConfig::default(),
         )
     };
     let factory: tianyan_server::ToolPluginFactory = Arc::new(|ctx, services| {
@@ -179,6 +187,7 @@ async fn test_plugin_factory_is_repeatable_across_agent_rebuilds() {
             services.todo_store(),
             services.goal_store(),
         ));
+        tools.extend(tianyan_tools_web::tools(&services.web_config()));
         tools
     });
 
@@ -204,7 +213,16 @@ async fn test_plugin_factory_is_repeatable_across_agent_rebuilds() {
         snapshots[0], snapshots[1],
         "插件工厂必须可重复调用：热重载后工具集必须与首建一致"
     );
-    for expected in ["todo", "goal", "read_file", "glob", "grep", "repo_map"] {
+    for expected in [
+        "todo",
+        "goal",
+        "read_file",
+        "glob",
+        "grep",
+        "repo_map",
+        "web_search",
+        "web_fetch",
+    ] {
         assert!(
             snapshots[0].iter().any(|n| n == expected),
             "插件工具缺失：{expected}"

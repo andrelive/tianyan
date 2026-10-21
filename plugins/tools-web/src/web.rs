@@ -20,9 +20,9 @@ use dashmap::DashMap;
 use scraper::{ElementRef, Html, Selector};
 use serde::{Deserialize, Serialize};
 
-use crate::common::error::{Result, TianyanError};
-use crate::common::llm_judge::truncate_output;
-use crate::config::WebConfig;
+use tianyan::common::error::{Result, TianyanError};
+use tianyan::common::llm_judge::truncate_output;
+use tianyan::config::WebConfig;
 
 /// 单条搜索结果。
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -128,28 +128,29 @@ pub struct WebSearchClient {
 impl WebSearchClient {
     /// 从配置创建客户端。
     pub fn new(config: &WebConfig) -> Result<Self> {
-        let http = crate::common::http::build_http_client(crate::common::http::HttpClientSpec {
-            timeout: Duration::from_secs(config.timeout_secs.max(1)),
-            connect_timeout: Duration::from_secs(config.timeout_secs.clamp(1, 15)),
-            user_agent: Some(
-                concat!(
-                    "Mozilla/5.0 (compatible; tianyan-agent/",
-                    env!("CARGO_PKG_VERSION"),
-                    "; +local desktop agent)"
-                )
-                .to_string(),
-            ),
-            // 逐跳 SSRF 校验（T0-3）：初始 URL 由调用方 validate_public_url
-            // 校验，重定向目标在每一跳发出前再校验——否则公网 URL 可以 302
-            // 到内网绕过防护（reqwest 默认静默跟随，最多 10 跳）。
-            redirect_policy: Some(reqwest::redirect::Policy::custom(|attempt| {
-                if validate_public_url(attempt.url().as_str()).is_err() {
-                    attempt.error("禁止访问本地或内网地址")
-                } else {
-                    attempt.follow()
-                }
-            })),
-        })?;
+        let http =
+            tianyan::common::http::build_http_client(tianyan::common::http::HttpClientSpec {
+                timeout: Duration::from_secs(config.timeout_secs.max(1)),
+                connect_timeout: Duration::from_secs(config.timeout_secs.clamp(1, 15)),
+                user_agent: Some(
+                    concat!(
+                        "Mozilla/5.0 (compatible; tianyan-agent/",
+                        env!("CARGO_PKG_VERSION"),
+                        "; +local desktop agent)"
+                    )
+                    .to_string(),
+                ),
+                // 逐跳 SSRF 校验（T0-3）：初始 URL 由调用方 validate_public_url
+                // 校验，重定向目标在每一跳发出前再校验——否则公网 URL 可以 302
+                // 到内网绕过防护（reqwest 默认静默跟随，最多 10 跳）。
+                redirect_policy: Some(reqwest::redirect::Policy::custom(|attempt| {
+                    if validate_public_url(attempt.url().as_str()).is_err() {
+                        attempt.error("禁止访问本地或内网地址")
+                    } else {
+                        attempt.follow()
+                    }
+                })),
+            })?;
 
         Ok(Self {
             http,

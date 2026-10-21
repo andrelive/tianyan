@@ -8,7 +8,6 @@ use tokio::sync::Mutex;
 use crate::agent::RoleRegistry;
 use crate::common::error::TianyanError;
 use crate::executor::approval::ApprovalWorkflow;
-use crate::executor::web::WebSearchClient;
 use crate::executor::SecurityPolicy;
 use crate::knowledge::KnowledgeIngestor;
 use crate::model::types::{ToolCall, ToolDefinition, ToolPresentation};
@@ -209,6 +208,8 @@ pub const MIGRATED_TOOL_PRESENTATIONS: &[(&str, ToolPresentation)] = &[
     ("symbol_outline", ToolPresentation::Code),
     ("repo_map", ToolPresentation::Code),
     ("grep", ToolPresentation::Search),
+    ("web_search", ToolPresentation::Web),
+    ("web_fetch", ToolPresentation::Web),
 ];
 
 /// 已知工具名全集（内置 + 已迁插件），供跨 crate 一致性门禁校验。
@@ -239,8 +240,6 @@ pub struct ToolRegistry {
     pub(crate) observability: observability::ToolObservabilityListener,
     /// 内置工具输出 spill 监听器（ADR-047：超预算结果落盘，会话只留预览 + 路径）。
     pub(crate) tool_output_spill: spill::ToolOutputSpillListener,
-    /// Web 搜索/抓取客户端（web_search / web_fetch 工具依赖）。
-    pub(crate) web_client: Option<Arc<WebSearchClient>>,
     /// 后台任务管理器（delegate_to_agent(background) / task_status / task_cancel）。
     pub(crate) background_tasks: Arc<crate::agent::background::BackgroundTaskManager>,
     /// 后台命令管理器（execute_command(background)；查询/终止经统一 task_status / task_cancel）。
@@ -321,7 +320,6 @@ impl ToolRegistry {
             metrics: None,
             observability: observability::ToolObservabilityListener::default(),
             tool_output_spill: spill::ToolOutputSpillListener::default(),
-            web_client: None,
             background_tasks: Arc::new(crate::agent::background::BackgroundTaskManager::new()),
             command_tasks: Arc::new(crate::executor::CommandManager::new(None)),
             command_logs_dir: None,
@@ -641,12 +639,6 @@ impl ToolRegistry {
     /// 为首个 post-execute 监听器。
     pub fn register_post_execute_listener(&mut self, listener: Arc<dyn ToolPostExecuteListener>) {
         self.post_execute_listeners.push(listener);
-    }
-
-    /// 设置 Web 搜索/抓取客户端（web_search / web_fetch 工具依赖）。
-    pub fn with_web_client(mut self, client: Arc<WebSearchClient>) -> Self {
-        self.web_client = Some(client);
-        self
     }
 
     /// 设置后台任务完成通知器（Agent 装配层注入；默认无通知，
@@ -1019,7 +1011,7 @@ mod tests {
         let registry = ToolRegistry::new(SecurityPolicy::default());
         let defs = registry.definitions().await;
         assert!(!defs.is_empty());
-        assert!(defs.iter().any(|d| d.function.name == "web_search"));
+        assert!(defs.iter().any(|d| d.function.name == "execute_command"));
     }
 
     #[tokio::test]
@@ -1043,7 +1035,6 @@ mod tests {
             registry.presentation("execute_command"),
             ToolPresentation::Terminal
         );
-        assert_eq!(registry.presentation("web_fetch"), ToolPresentation::Web);
         assert_eq!(registry.presentation("call_skill"), ToolPresentation::Skill);
         assert_eq!(
             registry.presentation("delegate_to_agent"),
@@ -1059,6 +1050,8 @@ mod tests {
             ("symbol_outline", ToolPresentation::Code),
             ("repo_map", ToolPresentation::Code),
             ("grep", ToolPresentation::Search),
+            ("web_search", ToolPresentation::Web),
+            ("web_fetch", ToolPresentation::Web),
         ] {
             assert_eq!(
                 ToolRegistry::default_presentation(name),

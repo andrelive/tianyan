@@ -885,7 +885,12 @@ impl AppState {
             tracing::info!("agent 未暴露工具上下文，插件工具跳过");
             return;
         };
-        let services = crate::PluginServices::new(self.todo_store.clone(), self.goal_store.clone());
+        let web_config = self.config.read().await.web.clone();
+        let services = crate::PluginServices::new(
+            self.todo_store.clone(),
+            self.goal_store.clone(),
+            web_config,
+        );
         let tools = factory(&ctx, services);
         if tools.is_empty() {
             return;

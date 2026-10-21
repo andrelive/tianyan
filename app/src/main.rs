@@ -17,7 +17,7 @@ use tianyan_server::{start_server_with_plugins, ToolPluginFactory};
 /// 内置工具顺序不受影响 —— 提示词前缀稳定性）。
 fn plugin_factory() -> ToolPluginFactory {
     std::sync::Arc::new(|ctx, services| {
-        // 顺序即注册顺序（追加到动态工具末尾）：fs → code → todo/goal。
+        // 顺序即注册顺序（追加到动态工具末尾）：fs → code → todo/goal → web。
         let mut tools = tianyan_tools_fs::tools(ctx);
         tools.extend(tianyan_tools_code::tools(ctx));
         // `todo` / `goal` 还需要**数据存储**（会话绑定的待办 / 目标）：store 由
@@ -28,6 +28,10 @@ fn plugin_factory() -> ToolPluginFactory {
             services.todo_store(),
             services.goal_store(),
         ));
+        // `web_search` / `web_fetch`（ADR-049 期 2）：客户端由插件从
+        // `services.web_config()` 就地构造（配置非法时降级为空清单，装配不
+        // panic）。顺序固定在最后（web）。
+        tools.extend(tianyan_tools_web::tools(&services.web_config()));
         tools
     })
 }

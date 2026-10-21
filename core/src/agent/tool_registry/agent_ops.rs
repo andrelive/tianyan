@@ -1265,37 +1265,6 @@ impl ToolRegistry {
             "message": "建议仅供决策参考——最终选择由你决定；[experimental] 角色暂不可调用。",
         }))
     }
-
-    /// 执行 web_search 工具：搜索网页并返回结构化结果（标题/URL/摘要）。
-    pub(crate) async fn execute_web_search(
-        &self,
-        arguments: &str,
-    ) -> Result<serde_json::Value, TianyanError> {
-        let client = self.web_client.as_ref().ok_or_else(|| {
-            TianyanError::Custom(format!(
-                "tool: 执行失败：{}",
-                "WebSearchClient not configured"
-            ))
-        })?;
-        crate::executor::web::execute_web_search(client, arguments).await
-    }
-
-    /// 执行 web_fetch 工具：抓取网页并提取可读文本。
-    ///
-    /// SSRF 防护（仅公网 http/https）在 [`crate::executor::web::validate_public_url`]
-    /// 内强制执行，未配置客户端时返回明确错误。
-    pub(crate) async fn execute_web_fetch(
-        &self,
-        arguments: &str,
-    ) -> Result<serde_json::Value, TianyanError> {
-        let client = self.web_client.as_ref().ok_or_else(|| {
-            TianyanError::Custom(format!(
-                "tool: 执行失败：{}",
-                "WebSearchClient not configured"
-            ))
-        })?;
-        crate::executor::web::execute_web_fetch(client, arguments).await
-    }
 }
 
 /// 测试模块（拆分至独立文件，保持主文件聚焦生产逻辑）。

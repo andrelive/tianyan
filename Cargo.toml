@@ -8,6 +8,7 @@ members = [
     "plugins/tools-fs",
     "plugins/tools-code",
     "plugins/tools-todo",
+    "plugins/tools-web",
 ]
 resolver = "2"
 

@@ -60,7 +60,7 @@ pub async fn start_axum_server(
     // 清单单一事实源在插件 crate（`plugin_factory()`），此处只接线。
     let plugin_factory = std::sync::Arc::new(
         |ctx: &tianyan::agent::ToolContext, services: PluginServices| {
-            // 顺序即注册顺序（追加到动态工具末尾）：fs → code → todo/goal。
+            // 顺序即注册顺序（追加到动态工具末尾）：fs → code → todo/goal → web。
             let mut tools = tianyan_tools_fs::tools(ctx);
             tools.extend(tianyan_tools_code::tools(ctx));
             // `todo` / `goal` 需与 REST API 共享同一份 store（由 server 从 AppState
@@ -69,6 +69,9 @@ pub async fn start_axum_server(
                 services.todo_store(),
                 services.goal_store(),
             ));
+            // `web_search` / `web_fetch`（ADR-049 期 2）：客户端由插件从
+            // `services.web_config()` 就地构造（配置非法时降级为空清单）。
+            tools.extend(tianyan_tools_web::tools(&services.web_config()));
             tools
         },
     );

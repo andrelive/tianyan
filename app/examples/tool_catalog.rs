@@ -50,6 +50,11 @@ async fn main() {
     ) {
         registry.register_dynamic_tool(tool).await;
     }
+    // `web_search` / `web_fetch` 已迁至 `plugins/tools-web`（ADR-049 期 2）：用默认
+    // WebConfig（catalog 只取 schema，不发起任何请求）。
+    for tool in tianyan_tools_web::tools(&tianyan::config::WebConfig::default()) {
+        registry.register_dynamic_tool(tool).await;
+    }
     let (req_tx, _req_rx) = tokio::sync::mpsc::channel(1);
     registry
         .register_dynamic_tool(Arc::new(ScheduleTaskTool::new(req_tx)))
