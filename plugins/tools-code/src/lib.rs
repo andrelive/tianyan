@@ -20,6 +20,8 @@
 //! `repo_map` 的扫描缓存（`RepoMapCache`）是**工具内部实现细节**，随实现搬进本 crate
 //! 并由工具实例自持——此前它挂在 `ToolContext` 上，会让 core 反向依赖插件。
 
+#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
+
 pub mod repo_map;
 pub mod search;
 pub mod search_engine;
