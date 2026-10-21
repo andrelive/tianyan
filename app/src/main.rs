@@ -12,13 +12,20 @@
 //! 期 2 序 3 起同一模式也用于**向量存储**：`lancedb`/`arrow`/`datafusion` 链搬进
 //! `plugins/storage-vector` 后，core 不再承担它；本包把 `LanceDbVectorStore` 包成
 //! `VectorStorageFactory` 注入启动入口（server 库同样不认识该实现）。
+//!
+//! 期 2 序 4 再扩一个插槽：VFS 的**结构化存储**（`SqliteBackend` /
+//! `LocalFileBackend`）搬进 `plugins/storage-sqlite`，本包把两者包成
+//! `StorageBackendFactory` 注入——`config.storage.backend` 选哪个 adapter 也在这里
+//! 决定（server 库只递配置与共享连接）。
 
 use std::sync::Arc;
 
-use tianyan::vfs::VectorStorage;
+use tianyan::vfs::{StorageBackend, VectorStorage};
 use tianyan_server::{
-    start_server_with_assembly, AssemblyServices, ToolPluginFactory, VectorStorageFactory,
+    start_server_with_assembly, AssemblyServices, StorageBackendFactory, ToolPluginFactory,
+    VectorStorageFactory,
 };
+use tianyan_storage_sqlite::{LocalFileBackend, SqliteBackend};
 use tianyan_storage_vector::LanceDbVectorStore;
 
 /// 插件清单（**全仓唯一 `use` 具体插件类型的地方**）。
@@ -61,11 +68,32 @@ fn vector_factory() -> VectorStorageFactory {
     })
 }
 
-/// 完整装配（插件工具清单 + 向量存储）。
+/// 结构化存储工厂（SQLite / 本地文件系统；`plugins/storage-sqlite`）。
+///
+/// **adapter 选择的唯一落地处**（ADR-049 D5）：`config.storage.backend` 决定用
+/// `SqliteBackend`（默认，走共享连接——ADR-005 单连接）还是 `LocalFileBackend`。
+/// server 库拿不到这个判断，因为它不认识两个具体类型。
+///
+/// 同步工厂（两个后端的 `new` 都只存字段，建表/建目录在 `initialize` 里）。
+fn storage_factory() -> StorageBackendFactory {
+    Arc::new(
+        |config: &tianyan::config::StorageConfig, database: Arc<tianyan::db::Database>| {
+            use tianyan::config::StorageBackendType;
+            let backend: Arc<dyn StorageBackend> = match config.backend {
+                StorageBackendType::Local => Arc::new(LocalFileBackend::new(config.clone())),
+                StorageBackendType::Sqlite => Arc::new(SqliteBackend::new(database)),
+            };
+            Ok(backend)
+        },
+    )
+}
+
+/// 完整装配（插件工具清单 + 向量存储 + 结构化存储）。
 fn assembly() -> AssemblyServices {
     AssemblyServices::new()
         .with_plugin_factory(plugin_factory())
         .with_vector_factory(vector_factory())
+        .with_storage_factory(storage_factory())
 }
 
 #[tokio::main]

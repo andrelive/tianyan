@@ -7,13 +7,12 @@ use tokio::fs::{self, OpenOptions};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::Mutex;
 
-use crate::common::error::{Result, TianyanError};
-use crate::common::types::{ContentLevel, TianyanUri};
-use crate::vfs::backend::StorageBackend;
-use crate::vfs::types::ContextEntry;
+use tianyan::common::error::{Result, TianyanError};
+use tianyan::common::types::{ContentLevel, TianyanUri};
+use tianyan::vfs::{ContextEntry, StorageBackend};
 
-use crate::config::StorageConfig;
-use crate::vfs::uri_mapper::UriMapper;
+use tianyan::config::StorageConfig;
+use tianyan::vfs::UriMapper;
 
 /// 本地文件系统存储后端。
 pub struct LocalFileBackend {
@@ -208,7 +207,7 @@ impl StorageBackend for LocalFileBackend {
             .await;
         let detail_content = self.read_content_optional(uri, ContentLevel::Detail).await;
 
-        let mut metadata = crate::common::types::EntryMetadata::new(uri.clone(), "unknown");
+        let mut metadata = tianyan::common::types::EntryMetadata::new(uri.clone(), "unknown");
         metadata.is_directory = is_directory;
         // 本地后端时间来自文件系统（此前为 EntryMetadata::new 的当前时间，
         // 所有条目时间戳恒等于查询时刻，无法反映真实创建/更新时间）
@@ -222,7 +221,7 @@ impl StorageBackend for LocalFileBackend {
             .unwrap_or_else(|_| chrono::Utc::now());
 
         Ok(ContextEntry {
-            schema_version: crate::vfs::types::CURRENT_SCHEMA_VERSION,
+            schema_version: tianyan::vfs::CURRENT_SCHEMA_VERSION,
             abstract_content,
             overview_content,
             detail_content,
@@ -362,8 +361,8 @@ impl StorageBackend for LocalFileBackend {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::common::types::ContextNamespace;
     use tempfile::tempdir;
+    use tianyan::common::types::ContextNamespace;
 
     #[tokio::test]
     async fn test_local_storage_initialize() {

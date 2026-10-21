@@ -1,0 +1,26 @@
+[package]
+name = "tianyan-storage-sqlite"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "天演存储插件：VFS 结构化存储后端（SQLite / 本地文件系统，StorageBackend 实现）"
+
+[dependencies]
+tianyan = { path = "../../core", package = "tianyan-core" }
+async-trait.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+chrono.workspace = true
+# 注意（ADR-049 期 2 序 4）：rusqlite **仍是 core 的依赖**（`db` / `session` / `observability`
+# 共用同一个连接，ADR-020 的 `Database` 门面是全系统写入门面）。本插件直接用它是因为
+# `SqliteBackend` 的 SQL 必须落在**共享连接**上（ADR-005 单连接），而不是另开一个库。
+# 因此本序收窄的是**重编面积**（改后端只重编本插件 + 装配包），不是依赖面。
+rusqlite.workspace = true
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

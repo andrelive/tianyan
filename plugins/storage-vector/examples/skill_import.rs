@@ -30,9 +30,10 @@ use tianyan::config::{ModelCapability, TianyanConfig};
 use tianyan::db::Database;
 use tianyan::model::ModelServices;
 use tianyan::vfs::{
-    ContentStore, SqliteBackend, StorageBackend, VfsCore, VfsSearch, VirtualFileSystemBuilder,
+    ContentStore, StorageBackend, VfsCore, VfsSearch, VirtualFileSystemBuilder,
     VirtualFileSystemImpl,
 };
+use tianyan_storage_sqlite::SqliteBackend;
 use tianyan_storage_vector::LanceDbVectorStore;
 
 /// 单个技能源（frontmatter 元数据 + 正文）。

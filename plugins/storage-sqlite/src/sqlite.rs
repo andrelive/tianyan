@@ -7,11 +7,10 @@ use async_trait::async_trait;
 
 use std::sync::Arc;
 
-use crate::common::error::{Result, TianyanError};
-use crate::common::types::{ContentLevel, EntryMetadata, TianyanUri};
-use crate::db::Database;
-use crate::vfs::backend::StorageBackend;
-use crate::vfs::types::{ContextEntry, CURRENT_SCHEMA_VERSION};
+use tianyan::common::error::{Result, TianyanError};
+use tianyan::common::types::{ContentLevel, EntryMetadata, TianyanUri};
+use tianyan::db::Database;
+use tianyan::vfs::{ContextEntry, StorageBackend, CURRENT_SCHEMA_VERSION};
 
 /// 基于 SQLite 的 VFS 存储后端。
 #[derive(Clone)]
@@ -215,7 +214,7 @@ impl StorageBackend for SqliteBackend {
                 let parsed = TianyanUri::parse(&full_uri).unwrap_or_else(|_| {
                     // fallback: 从 full_uri 构造，可能丢失部分信息但不会 panic
                     TianyanUri::new(
-                        crate::common::types::ContextNamespace::Knowledge,
+                        tianyan::common::types::ContextNamespace::Knowledge,
                         vec![full_uri.clone()],
                     )
                 });
@@ -347,8 +346,8 @@ impl StorageBackend for SqliteBackend {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::common::types::ContextNamespace;
-    use crate::db::Database;
+    use tianyan::common::types::ContextNamespace;
+    use tianyan::db::Database;
 
     async fn setup() -> SqliteBackend {
         let db = Database::open_in_memory().unwrap();

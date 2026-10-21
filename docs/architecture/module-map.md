@@ -56,7 +56,7 @@
 | `goals` | `core/src/goals/` | 长期目标 + 进度跟踪（会话绑定；运行期 `goals.json`） | `mod.rs` |
 | `notification` | `core/src/notification.rs` | 通知通道抽象（`NotificationSink`；桌面实现由 tauri 注入） | `notification.rs` |
 | `todos` | `core/src/todos/` | 待办清单（会话绑定；运行期 `todos.json`） | `mod.rs` |
-| `vfs` | `core/src/vfs/` | 统一存储与检索层（**项目基础机制**）；`SqliteBackend` 经 `db::Database` 访问（SqliteDb 已移入 `db` 模块，`backend/sqlite_db.rs` 仅 re-export 兼容）；向量实现已出 core（ADR-049 序 3：只留 `VectorStorage` 契约，LanceDB 在 `plugins/storage-vector`） | `traits.rs`, `vfs_impl.rs`, `backend/local.rs`, `backend/sqlite.rs`, `vector/traits.rs`, `summary/engine.rs` |
+| `vfs` | `core/src/vfs/` | 统一存储与检索层（**项目基础机制**）；只留 `StorageBackend` 契约（`vfs::StorageBackend` 公开路径不变）与 `UriMapper` 等机制；**后端实现已出 core**（ADR-049 序 4：`backend/sqlite.rs`、`backend/local.rs` → `plugins/storage-sqlite`，装配层经 `StorageBackendFactory` 注入；`backend/sqlite_db.rs` 仅 re-export 兼容，实体在 `db`）；向量实现同样已出 core（序 3：只留 `VectorStorage` 契约，LanceDB 在 `plugins/storage-vector`） | `traits.rs`, `vfs_impl.rs`, `backend/mod.rs`, `uri_mapper.rs`, `vector/traits.rs`, `summary/engine.rs` |
 
 ---
 
@@ -107,7 +107,7 @@
 | `AgentSkills` wrapper | 已删除 | 功能由 `Agent` 直接持有 |
 | `hooks/use-debounced-value.ts` | 已删除 | 浅 hook 内联（唯一调用点 KnowledgeSearchTab 直接实现） |
 
-> **注**：存储后端已 trait 化（`StorageBackend` seam，ADR-005）。**默认后端为 `SqliteBackend`**（`config/storage.rs` 的 `#[default] Sqlite`）；`LocalFileBackend` 保留为可选后端。
+> **注**：存储后端已 trait 化（`StorageBackend` seam，ADR-005）。**默认后端为 `SqliteBackend`**（`config/storage.rs` 的 `#[default] Sqlite`）；`LocalFileBackend` 保留为可选后端。两者的**实现**在 `plugins/storage-sqlite`（ADR-049 序 4），`config.storage.backend` 的 adapter 选择在装配层。
 
 ---
 

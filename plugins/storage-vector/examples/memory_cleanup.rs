@@ -32,9 +32,9 @@ use tianyan::config::{ModelCapability, TianyanConfig};
 use tianyan::db::Database;
 use tianyan::model::ModelServices;
 use tianyan::vfs::{
-    ContentStore, SqliteBackend, StorageBackend, VfsCore, VfsSearch, VirtualFileSystem,
-    VirtualFileSystemBuilder,
+    ContentStore, StorageBackend, VfsCore, VfsSearch, VirtualFileSystem, VirtualFileSystemBuilder,
 };
+use tianyan_storage_sqlite::SqliteBackend;
 use tianyan_storage_vector::LanceDbVectorStore;
 
 /// 规则归档边界：此日期之前创建的规则视为早期爆炸存量（archived）。

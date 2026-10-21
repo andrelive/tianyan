@@ -27,6 +27,9 @@ tianyan-tools-todo = { path = "../plugins/tools-todo" }
 tianyan-tools-web = { path = "../plugins/tools-web" }
 # 向量存储实现（ADR-049 期 2 序 3）：LanceDB 搬出 core 后由本包注入。
 tianyan-storage-vector = { path = "../plugins/storage-vector" }
+# 结构化存储实现（ADR-049 期 2 序 4）：SqliteBackend / LocalFileBackend 搬出 core
+# 后由本包注入（`config.storage.backend` 的 adapter 选择也在装配层）。
+tianyan-storage-sqlite = { path = "../plugins/storage-sqlite" }
 tokio.workspace = true
 
 [lints]

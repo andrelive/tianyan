@@ -29,9 +29,10 @@ use tianyan::config::{ModelCapability, TianyanConfig};
 use tianyan::db::Database;
 use tianyan::model::ModelServices;
 use tianyan::vfs::{
-    parse_doc_index, ContentStore, SqliteBackend, StorageBackend, SummaryEngine, SummaryService,
-    VfsCore, VfsSearch, VirtualFileSystem, VirtualFileSystemBuilder, OVERVIEW_TOKEN_LIMIT,
+    parse_doc_index, ContentStore, StorageBackend, SummaryEngine, SummaryService, VfsCore,
+    VfsSearch, VirtualFileSystem, VirtualFileSystemBuilder, OVERVIEW_TOKEN_LIMIT,
 };
+use tianyan_storage_sqlite::SqliteBackend;
 use tianyan_storage_vector::LanceDbVectorStore;
 
 #[tokio::main]

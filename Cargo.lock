@@ -9235,6 +9235,7 @@ dependencies = [
  "tempfile",
  "tianyan-core",
  "tianyan-server",
+ "tianyan-storage-sqlite",
  "tianyan-storage-vector",
  "tianyan-tools-code",
  "tianyan-tools-fs",
@@ -9325,6 +9326,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "tianyan-storage-sqlite"
+version = "0.7.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "rusqlite",
+ "tempfile",
+ "tianyan-core",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "tianyan-storage-vector"
 version = "0.7.0"
 dependencies = [
@@ -9337,6 +9351,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "tianyan-core",
+ "tianyan-storage-sqlite",
  "tokio",
  "tracing",
 ]
@@ -9364,6 +9379,7 @@ dependencies = [
  "tauri-plugin-updater",
  "tianyan-core",
  "tianyan-server",
+ "tianyan-storage-sqlite",
  "tianyan-storage-vector",
  "tianyan-tools-code",
  "tianyan-tools-fs",

@@ -1137,9 +1137,12 @@ mod tests {
     /// 构造真实后端 VFS（SqliteBackend + 内存 DB + Mock 向量）。
     async fn real_vfs() -> Arc<dyn VirtualFileSystem> {
         use crate::db::Database;
-        use crate::vfs::{
-            MockVectorStorage, SqliteBackend, StorageBackend, VirtualFileSystemBuilder,
-        };
+        // 真实后端实现已迁至插件（ADR-049 期 2 序 4），测试期同源包含于
+        // `vfs::backend`；**必须**继续用 SqliteBackend——下面的测试正是在真实条目
+        // 形态上锁定删除/合并链，换成本地文件/桩会把「Mock 形态掩盖缺陷」这条教训
+        // 重新引入。
+        use crate::vfs::backend::SqliteBackend;
+        use crate::vfs::{MockVectorStorage, StorageBackend, VirtualFileSystemBuilder};
         let database = Database::open_in_memory().unwrap();
         let storage: Arc<dyn StorageBackend> = Arc::new(SqliteBackend::new(database));
         let vector: Arc<dyn crate::vfs::VectorStorage> = Arc::new(MockVectorStorage::new());

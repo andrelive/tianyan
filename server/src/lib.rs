@@ -46,7 +46,7 @@ pub mod state;
 use api::create_api_router;
 use state::AppState;
 
-pub use assembly::{AssemblyServices, VectorStorageFactory};
+pub use assembly::{AssemblyServices, StorageBackendFactory, VectorStorageFactory};
 
 /// Server configuration
 #[derive(Debug, Clone)]
@@ -172,28 +172,25 @@ fn get_static_dir() -> std::path::PathBuf {
 /// `assembly` 提供向量存储实现（[`AssemblyServices::vector_storage`]）：
 /// 本库**不认识任何具体向量实现**（LanceDB 等），实现由装配层注入
 /// （ADR-049 期 2 序 3：lancedb/arrow/datafusion 依赖链不进 core）。
+///
+/// `assembly` 同时提供结构化存储实现（[`AssemblyServices::storage_backend`]）：
+/// `config.storage.backend`（`Local` / `Sqlite`）**选择哪个 adapter 也由装配层
+/// 决定**（ADR-049 D5 / 期 2 序 4）——本库只把配置与共享连接递过去。
 async fn initialize_vfs_for_app(
     config: &tianyan::config::TianyanConfig,
     database: Arc<tianyan::db::Database>,
     assembly: &AssemblyServices,
 ) -> tianyan::common::error::Result<Arc<tianyan::vfs::VirtualFileSystemImpl>> {
-    use tianyan::config::StorageBackendType;
-    use tianyan::vfs::{SqliteBackend, StorageBackend, VirtualFileSystemBuilder};
+    use tianyan::vfs::{StorageBackend, VirtualFileSystemBuilder};
 
-    // 1. 创建存储后端（config.storage.backend 决定 adapter）
-    let storage: Arc<dyn StorageBackend> = match config.storage.backend {
-        StorageBackendType::Local => {
-            Arc::new(tianyan::vfs::LocalFileBackend::new(config.storage.clone()))
-        }
-        StorageBackendType::Sqlite => {
-            info!(
-                "VFS 使用 SQLite 存储后端（共享连接）：{}",
-                database.path().display()
-            );
-            // clone：database 还需用于嵌入用量入账（UsageLog 共享同一连接）
-            Arc::new(SqliteBackend::new(database.clone()))
-        }
-    };
+    // 1. 创建存储后端（实现与 adapter 选择都在装配层；clone：database 还需用于
+    //    嵌入用量入账——UsageLog 共享同一连接）
+    let storage: Arc<dyn StorageBackend> =
+        assembly.storage_backend(&config.storage, database.clone())?;
+    info!(
+        backend = ?config.storage.backend,
+        "VFS 存储后端已装配（实现由装配层注入）"
+    );
 
     // 向量存储由装配层注入（async 初始化：LanceDB 建连/建表）
     let vector_storage = assembly.vector_storage(&config.storage).await?;

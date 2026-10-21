@@ -9,24 +9,28 @@
 //! - **StorageConfig**: 存储后端配置（定义在 `crate::config`）
 //! - **UriMapper**: URI 到文件系统路径的映射
 //! - **StorageBackend**: 结构化存储 adapter seam（ADR-005）
-//! - **LocalFileBackend**: 本地文件系统存储后端（ADR-005 后默认改为 SqliteBackend，保留作可选/测试后端）
-//! - **SqliteBackend**: SQLite 存储后端（配置 `backend = "sqlite"` 启用）
 //! - **VectorStorage**: 向量存储后端 trait（嵌入式向量存储的契约；
 //!   实现由 `tianyan-storage-vector` 插件提供，ADR-049）。
 //! - **VirtualFileSystem**: 统一的上下文存储接口
 //! - **SummaryEngine**: 分层摘要生成
+//!
+//! 两个结构化存储 adapter（`LocalFileBackend` / `SqliteBackend`）与向量实现一
+//! 样已出 core（ADR-049 期 2 序 4）：实现在 `plugins/storage-sqlite`，由装配层
+//! 经 `StorageBackendFactory` 注入。core 只保留契约 trait 与 URI 映射等机制。
 //!
 //! # 示例
 //!
 //! ```no_run
 //! use std::sync::Arc;
 //! use tianyan::config::StorageConfig;
-//! use tianyan::vfs::{LocalFileBackend, VectorStorage, VirtualFileSystemBuilder};
+//! use tianyan::vfs::{StorageBackend, VectorStorage, VirtualFileSystemBuilder};
 //!
-//! async fn setup_storage(vector_storage: Arc<dyn VectorStorage>) {
+//! async fn setup_storage(
+//!     storage: Arc<dyn StorageBackend>,
+//!     vector_storage: Arc<dyn VectorStorage>,
+//! ) {
 //!     let config = StorageConfig::default();
-//!     let storage = Arc::new(LocalFileBackend::new(config.clone()));
-//!     // 向量实现来自插件（tianyan-storage-vector），由装配层注入
+//!     // 存储实现来自插件（tianyan-storage-sqlite），由装配层注入
 //!     let vfs = VirtualFileSystemBuilder::new()
 //!         .with_config(config)
 //!         .with_storage(storage)
@@ -48,7 +52,7 @@ mod vfs_impl;
 mod test_utils;
 
 // 重新导出公共 API
-pub use backend::{LocalFileBackend, SqliteBackend, StorageBackend};
+pub use backend::StorageBackend;
 #[cfg(test)]
 pub use summary::MockSummaryEngine;
 pub use summary::{

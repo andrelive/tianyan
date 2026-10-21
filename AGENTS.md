@@ -68,10 +68,11 @@ cargo test -p tianyan-core vfs::backend::local -- --nocapture  # 指定测试模
 | `plugins/tools-todo/` | `tianyan-tools-todo` | 插件：todo / goal（含实现） |
 | `plugins/tools-web/` | `tianyan-tools-web` | 插件：web_search / web_fetch（含实现，`scraper` 在此） |
 | `plugins/storage-vector/` | `tianyan-storage-vector` | 插件：`LanceDbVectorStore`（`lancedb`/`arrow`/`datafusion` 链只在此） |
+| `plugins/storage-sqlite/` | `tianyan-storage-sqlite` | 插件：`SqliteBackend` + `LocalFileBackend`（VFS `StorageBackend` 的两个 adapter；`rusqlite` 仍在 core——本插件收窄的是重编面积，不是依赖面） |
 
 **依赖铁律**（破一条拆包收益全部回吐）：插件只依赖 `core`（kernel-api）；插件之间零互赖；
 `core`/`server` 不认识任何插件 crate。装配经 `server/src/assembly.rs` 的类型擦除插槽
-（`ToolPluginFactory` / `VectorStorageFactory`）。
+（`ToolPluginFactory` / `VectorStorageFactory` / `StorageBackendFactory`）。
 
 ## 代码规范
 
@@ -148,7 +149,7 @@ Harness 工程 → [`docs/harness核心思路/harness-engineering-overview.md`](
 | `db` | `core/src/db/` | **统一写入门面**（ADR-020）：Database 门面（单连接 + schema 集中）+ SqliteDb + 业务域 Repository（stats/trace/execution/usage）；只依赖 common | — |
 | `roles` | `core/src/roles/` | 角色基础类型（ADR-016 纯类型层）：config/agent/scheduler 共用 | — |
 | `role_store` | `core/src/role_store.rs` | 角色 VFS 存储（独立存储层，依赖 vfs + roles） | — |
-| `vfs` | `core/src/vfs/` | **基础机制**：统一存储检索层（L0/L1/L2 + RRF 融合）；SqliteBackend 经 db::Database 访问 | — |
+| `vfs` | `core/src/vfs/` | **基础机制**：统一存储检索层（L0/L1/L2 + RRF 融合）；只留 `StorageBackend` 契约与 `UriMapper` 等机制，后端实现已出 core（ADR-049 序 4：`backend/sqlite.rs`、`backend/local.rs` 在 `plugins/storage-sqlite`；`backend/sqlite_db.rs` 仅是 `db::sqlite_db` 的兼容 re-export）；向量实现同样在 `plugins/storage-vector`（序 3） | — |
 | `agent` | `core/src/agent/` | Agent 协调器 + AgentLoop + ToolRegistry + 后台任务（ADR-026：委托只支持异步、双信号量排队 20+40、SQL 权威 + 3 天 TTL）；**统一循环框架（ADR-030）**：主 agent 与子代理同构（`TurnPolicy` 配置——工具执行器 Global/RoleFiltered、持久化 FTS 开关、max_turns 策略、请求工具集），收尾统一"无工具调用"（submit_result 降级为可选结果落盘工具，主 agent 用 task_status 查询）；子智能体会话消息落库不索引 FTS（`add_structured_message_no_fts`）+ 流式事件同一通道（ADR-031：消息不再广播，chat_stream 带 session_id=task_id 路由）；**流式转发统一（ADR-032）**：`stream_forward.rs` 单点（建通道即消费防死锁 + 字段注入），用户轮/唤醒轮/子代理共用，映射器与送达目标可插拔；**结构性取消（ADR-036）**：`cancel.rs` 等待原语（`wait_cancelled`/`cancellable`）覆盖请求在飞/流式 recv/组装/压缩等待盲区；**排他写事务（ADR-040）**：`working_set::with_session_exclusive`（取锁 → 锁内 `rebuild` 最新链 → 闭包）+ `rollback.rs`（`rollback_to` / `redo_to`——回退「先文件、后链」全或无，session handler 退化为薄壳）；工具执行走可插拔管线（`tool_registry/pipeline.rs`：pre-execute 监听器 / 单调守卫 / post-execute 监听器，DSH 吸收）+ 内置可观测性监听器（统计/Trace/GEPA/规则学习） | 所有工具操作通过 VFS |
 | `context` | `core/src/context/` | 上下文工程（检索 + 压缩 + 组装） | 检索仅通过 `DualLayerRetriever` |
 | `knowledge` | `core/src/knowledge/` | 知识库导入管道 | ❌ **不建独立检索管道**，导入→VFS→SummaryEngine |
@@ -175,6 +176,7 @@ Harness 工程 → [`docs/harness核心思路/harness-engineering-overview.md`](
 ## 常见陷阱
 
 - `tianyan` 和 `tianyan-core` 是同一个包（lib name: `tianyan`），导入用 `tianyan::...`
+- **`plugins/storage-sqlite/src/{sqlite,local}.rs` 内禁止 `crate::…`**（只允许 `tianyan::…`）：core 单测以 `#[cfg(test)] #[path]` **同源包含**这两个文件（dev-dep 会让 core 编译两份 → `StorageBackend`/`StorageConfig` 出现两个不兼容实例，实测 22 处 E0308/E0277）。写 `crate::` 时它解析到 core 而非插件，报错位置完全不相干。改文件布局须同步 `core/src/vfs/backend/mod.rs` 的 `#[path]`
 - `ServiceDiscovery::is_available()` 是 `async` —— 别忘了 `await`
 - 配置文件固定为 `~/.tianyan/tianyan.toml`（`TIANYAN_CONFIG` 环境变量可覆盖，e2e 用）；数据目录由配置 `storage.data_dir` 决定（默认 `%LOCALAPPDATA%/tianyan`），两者分离、搬迁只动数据（ADR-023）
 - 测试不依赖外部服务，用 `MockVectorStorage` 和 temp dir 隔离

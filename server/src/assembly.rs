@@ -1,26 +1,33 @@
-//! 装配扩展点（ADR-049）：插件工具清单 + 向量存储实现。
+//! 装配扩展点（ADR-049）：插件工具清单 + 向量存储实现 + 结构化存储实现。
 //!
 //! server 库**不认识任何具体插件 crate**：本模块只定义两根**类型擦除**的插槽
 //! （以及没有插槽时的降级实现），由装配层（`app` bin / `tauri` 桌面端）在启动
 //! 时注入。这样改一行插件实现只重编插件 + 装配包，server 库（13.4K 源码）不动
 //! ——闸门 A 的前提。
 //!
-//! 两个插槽同型：
+//! 三个插槽：
 //! - [`ToolPluginFactory`]（`crate::ToolPluginFactory`）：工具清单，**可重复调用**
 //!   （agent 会因配置热重载 / 模型切换反复重建，每次都要重新注入插件工具）。
 //! - [`VectorStorageFactory`]：向量存储实现（`tianyan-storage-vector` 的
 //!   LanceDB 后端）。**异步**：LanceDB 建连/建表是 async，且失败要能向上抛（启动
 //!   期明确失败优于静默无向量）。
+//! - [`StorageBackendFactory`]：VFS 结构化存储实现（`tianyan-storage-sqlite` 的
+//!   `SqliteBackend` / `LocalFileBackend`）。**同步**：两个后端的构造都不做 IO
+//!   （建表/建目录发生在 `StorageBackend::initialize`）。`config.storage.backend`
+//!   的**选择语义**也在工厂里（装配层决定哪个 adapter）——server 库只递配置。
 
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use tracing::warn;
+use tracing::{error, warn};
 
 use tianyan::config::StorageConfig;
-use tianyan::vfs::{VectorPoint, VectorSearchQuery, VectorSearchResult, VectorStorage, VectorType};
+use tianyan::vfs::{
+    ContextEntry, StorageBackend, VectorPoint, VectorSearchQuery, VectorSearchResult,
+    VectorStorage, VectorType,
+};
 
 use crate::ToolPluginFactory;
 
@@ -41,16 +48,36 @@ pub type VectorStorageFactory = Arc<
         + Sync,
 >;
 
+/// 结构化存储后端工厂（**装配层注入**，期 2 序 4）。
+///
+/// `Arc<dyn Fn(&StorageConfig, Arc<Database>) -> Result<Arc<dyn StorageBackend>>>`：
+/// - 第一个参数是 `&StorageConfig`（借用；`config.storage.backend` 的**选择语义**
+///   在这里落地——哪个 adapter 由装配层决定，本库只递配置）；
+/// - 第二个参数是**全系统共享的 SQLite 连接**（ADR-005 单连接：`SqliteBackend` 必须
+///   把 SQL 打在同一根连接上，不能自开一个库）；
+/// - **同步**：`SqliteBackend::new` / `LocalFileBackend::new` 都只存字段不碰 IO
+///   （建表 / 建目录在 `StorageBackend::initialize` 里，由 VFS 初始化链调用），
+///   因此不需要 [`VectorStorageFactory`] 那样的 boxed future。
+///
+/// 用 `Arc<dyn Fn>` 而非 `Box<dyn FnOnce>`：数据目录搬迁后以新配置重启会再次装配。
+pub type StorageBackendFactory = Arc<
+    dyn Fn(&StorageConfig, Arc<tianyan::db::Database>) -> tianyan::Result<Arc<dyn StorageBackend>>
+        + Send
+        + Sync,
+>;
+
 /// 启装配所需的外部能力集合（`None` = 该扩展点未装配，走降级路径）。
 ///
-/// 目前两个插槽：插件工具清单（[`ToolPluginFactory`]）与向量存储
-/// （[`VectorStorageFactory`]）。用**一个结构**而不是给每个启动入口再加一个
-/// 参数：入口变体的数量是组合爆炸（listener × 关闭信号 × 插件 × 向量），打包
-/// 后只需「默认装配」与「装配齐全」两类入口。
+/// 目前三个插槽：插件工具清单（[`ToolPluginFactory`]）、向量存储
+/// （[`VectorStorageFactory`]）、结构化存储（[`StorageBackendFactory`]）。用
+/// **一个结构**而不是给每个启动入口再加一个参数：入口变体的数量是组合爆炸
+/// （listener × 关闭信号 × 插件 × 向量 × 存储），打包后只需「默认装配」与
+/// 「装配齐全」两类入口。
 #[derive(Clone, Default)]
 pub struct AssemblyServices {
     plugin_factory: Option<ToolPluginFactory>,
     vector_factory: Option<VectorStorageFactory>,
+    storage_factory: Option<StorageBackendFactory>,
 }
 
 impl AssemblyServices {
@@ -70,10 +97,51 @@ impl AssemblyServices {
         self.vector_factory = Some(factory);
         self
     }
+    /// 装配结构化存储工厂（`app` / `tauri` 用：SQLite / 本地文件系统）。
+    pub fn with_storage_factory(mut self, factory: StorageBackendFactory) -> Self {
+        self.storage_factory = Some(factory);
+        self
+    }
 
     /// 插件工具清单工厂（`None` = 不注入插件工具）。
     pub(crate) fn plugin_factory(&self) -> Option<ToolPluginFactory> {
         self.plugin_factory.clone()
+    }
+
+    /// 构造 VFS 结构化存储后端实例（**唯一的存储实现选择点**）。
+    ///
+    /// 未装配工厂时返回 [`EphemeralStorageBackend`]（**进程内存**：内容读写正常
+    /// 但**不落盘**，重启即丢）。为什么是兜底而不是 `Err`——两个理由：
+    ///
+    /// 1. **旧入口不能坏**：`create_app` / `start_server*` 这组不带装配的入口是
+    ///    公开 API，约 60 处测试与嵌入式调用靠它起一个能跑的实例（ADR-049 序 3
+    ///    明确「旧签名全部保留且语义等价」）。存储是**启动硬依赖**，返回 `Err`
+    ///    会让这批入口在**任何**构建里都起不来——那等于删掉它们，而不是收敛装配。
+    /// 2. **实现拿不到**：`LocalFileBackend` / `SqliteBackend` 已在插件里
+    ///    （`tianyan-storage-sqlite`），本库**不能** `use` 它；兜底只能在 server
+    ///    内自带。写一份「本地文件/SQLite 的复制品」是两份实现同时漂移，比内存
+    ///    兜底危险得多。
+    ///
+    /// **代价必须可见**（ADR-038 可见失败，比序 3 的向量降级更严）：装配期
+    /// `error!` 一条、首次写入再 `error!` 一次（`atomic` 只打一次）。序 3 的向量
+    /// 降级只是「没有语义检索」，这里降级是「**VFS 内容不落盘**」——生产误配的
+    /// 症状会是「重启后数据全部消失」，所以用 `error` 级而不是 `warn`。
+    pub(crate) fn storage_backend(
+        &self,
+        config: &StorageConfig,
+        database: Arc<tianyan::db::Database>,
+    ) -> tianyan::Result<Arc<dyn StorageBackend>> {
+        match self.storage_factory.as_ref() {
+            Some(factory) => factory(config, database),
+            None => {
+                error!(
+                    backend = ?config.backend,
+                    "未装配结构化存储工厂：VFS 使用**进程内存**存储（内容不落盘，重启即丢）——\
+                     生产装配请用 create_app_with_assembly / start_server_with_assembly"
+                );
+                Ok(Arc::new(EphemeralStorageBackend::new()))
+            }
+        }
     }
 
     /// 构造向量存储实例（**唯一的向量实现选择点**）。
@@ -170,6 +238,172 @@ impl VectorStorage for NoopVectorStorage {
         _min_score: Option<f32>,
     ) -> tianyan::Result<Vec<VectorSearchResult>> {
         Ok(Vec::new())
+    }
+}
+
+/// 进程内存存储后端（未装配 [`StorageBackendFactory`] 时的降级实现）。
+///
+/// 语义**照 `SqliteBackend` 抄**：键是 URI，`is_directory` 是条目自有字段，删除与
+/// 列举都用「URI 后接斜杠」的字符串前缀。两者唯一的差别是「不落盘」。刻意不实现成
+/// 「本地文件后端」——那会与插件里的 `LocalFileBackend` 争同一批路径约定，且形态
+/// 语义（条目是文件还是目录）与生产默认后端 `SqliteBackend` 不一致，正是 ADR-049
+/// 反复强调的「Mock 形态掩盖缺陷」的坑。
+///
+/// 它服务于 `create_app` / `start_server*` 这组**不带装配**的入口（测试与嵌入式，
+/// 见 [`AssemblyServices::storage_backend`]）。**没有任何持久化承诺**：进程退出即
+/// 全部消失——这不是缺陷而是刻意的（写 `error!` 留证据，不静默丢数据）。
+struct EphemeralStorageBackend {
+    /// 键 = `uri.to_string()`（与 `vfs_entries` 主键同口径）。
+    entries: tokio::sync::RwLock<std::collections::HashMap<String, ContextEntry>>,
+    /// 首次「本应落盘」的写入时告警一次（写入是热路径，不能刷屏）。
+    write_warned: AtomicBool,
+}
+
+impl EphemeralStorageBackend {
+    fn new() -> Self {
+        Self {
+            entries: tokio::sync::RwLock::new(std::collections::HashMap::new()),
+            write_warned: AtomicBool::new(false),
+        }
+    }
+
+    /// 首次写入时补一条证据：装配期的 `error!` 只覆盖「起进程那一刻在读日志的人」。
+    fn warn_write_once(&self) {
+        if !self.write_warned.swap(true, Ordering::Relaxed) {
+            error!(
+                "内存存储后端**未落盘**地写入了 VFS 条目（进程退出即丢）：装配层未注入 \
+                 StorageBackendFactory —— 生产装配请用 start_server_with_assembly / \
+                 create_app_with_assembly（本告警只打一次）"
+            );
+        }
+    }
+
+    /// 取某层级字段的可变引用（`ContentLevel` → `ContextEntry` 字段的单点映射）。
+    fn level_mut(
+        entry: &mut ContextEntry,
+        level: tianyan::common::types::ContentLevel,
+    ) -> &mut Option<String> {
+        use tianyan::common::types::ContentLevel;
+        match level {
+            ContentLevel::Abstract => &mut entry.abstract_content,
+            ContentLevel::Overview => &mut entry.overview_content,
+            ContentLevel::Detail => &mut entry.detail_content,
+        }
+    }
+}
+
+#[async_trait]
+impl StorageBackend for EphemeralStorageBackend {
+    async fn initialize(&self) -> tianyan::Result<()> {
+        Ok(())
+    }
+
+    async fn exists(&self, uri: &tianyan::common::types::TianyanUri) -> tianyan::Result<bool> {
+        Ok(self.entries.read().await.contains_key(&uri.to_string()))
+    }
+
+    async fn read_entry(
+        &self,
+        uri: &tianyan::common::types::TianyanUri,
+    ) -> tianyan::Result<ContextEntry> {
+        self.entries
+            .read()
+            .await
+            .get(&uri.to_string())
+            .cloned()
+            .ok_or_else(|| tianyan::TianyanError::not_found(uri.to_string()))
+    }
+
+    async fn write_entry(&self, entry: &ContextEntry) -> tianyan::Result<()> {
+        self.warn_write_once();
+        self.entries
+            .write()
+            .await
+            .insert(entry.uri().to_string(), entry.clone());
+        Ok(())
+    }
+
+    async fn delete_entry(&self, uri: &tianyan::common::types::TianyanUri) -> tianyan::Result<()> {
+        self.warn_write_once();
+        let key = uri.to_string();
+        // 子条目前缀：URI 后接斜杠——与 SqliteBackend 的 substr/length 同口径
+        // （只匹配直接/间接子条目，不误删同前缀兄弟 ab 与 abc）。
+        let dir_prefix = format!("{}/", key);
+        let mut entries = self.entries.write().await;
+        let before = entries.len();
+        entries.retain(|k, _| k != &key && !k.starts_with(&dir_prefix));
+        if entries.len() == before {
+            return Err(tianyan::TianyanError::not_found(key));
+        }
+        Ok(())
+    }
+
+    async fn list_directory(
+        &self,
+        uri: &tianyan::common::types::TianyanUri,
+    ) -> tianyan::Result<Vec<ContextEntry>> {
+        let prefix = format!("{}/", uri);
+        let entries = self.entries.read().await;
+        Ok(entries
+            .iter()
+            .filter_map(|(key, entry)| {
+                let rest = key.strip_prefix(&prefix)?;
+                // 只列一级子条目：前缀之后不得再含 '/'
+                if rest.contains('/') {
+                    return None;
+                }
+                Some(entry.clone())
+            })
+            .collect())
+    }
+
+    async fn read_content(
+        &self,
+        uri: &tianyan::common::types::TianyanUri,
+        level: tianyan::common::types::ContentLevel,
+    ) -> tianyan::Result<String> {
+        let entries = self.entries.read().await;
+        let missing = || tianyan::TianyanError::not_found(format!("{uri} 无 {level:?} 层级内容"));
+        let mut entry = entries.get(&uri.to_string()).cloned().ok_or_else(missing)?;
+        Self::level_mut(&mut entry, level)
+            .clone()
+            .ok_or_else(missing)
+    }
+
+    async fn write_content(
+        &self,
+        uri: &tianyan::common::types::TianyanUri,
+        level: tianyan::common::types::ContentLevel,
+        content: &str,
+    ) -> tianyan::Result<()> {
+        self.warn_write_once();
+        let mut entries = self.entries.write().await;
+        let entry = entries
+            .entry(uri.to_string())
+            .or_insert_with(|| ContextEntry::new_file(uri.clone()));
+        *Self::level_mut(entry, level) = Some(content.to_string());
+        entry.metadata.updated_at = chrono::Utc::now();
+        Ok(())
+    }
+
+    async fn append_content(
+        &self,
+        uri: &tianyan::common::types::TianyanUri,
+        level: tianyan::common::types::ContentLevel,
+        content: &str,
+    ) -> tianyan::Result<()> {
+        self.warn_write_once();
+        let mut entries = self.entries.write().await;
+        let entry = entries
+            .entry(uri.to_string())
+            .or_insert_with(|| ContextEntry::new_file(uri.clone()));
+        let slot = Self::level_mut(entry, level);
+        match slot {
+            Some(existing) => existing.push_str(content),
+            None => *slot = Some(content.to_string()),
+        }
+        entry.metadata.updated_at = chrono::Utc::now();
+        Ok(())
     }
 }
 
@@ -280,5 +514,145 @@ mod tests {
             "首次写入后须置起告警标志（证据链）；随后不再重复打日志（热路径不刷屏）"
         );
         assert_eq!(storage.count_rows().await.expect("计数"), 0);
+    }
+
+    // ── 结构化存储插槽（ADR-049 期 2 序 4）──────────────────────────────
+
+    /// 未装配工厂时给的是**可用但不落盘**的内存后端：VFS 因此仍能读写（不 panic、
+    /// 不阻断启动），但必须留下「未落盘」的证据。
+    ///
+    /// 判别力：若把兜底改成 `Err`，本测试的 `storage_backend` 直接失败；若把
+    /// `warn_write_once` 删了，`write_warned` 断言必红（生产误配将完全无痕）。
+    #[tokio::test]
+    async fn test_default_assembly_storage_is_ephemeral_but_functional() {
+        let config = StorageConfig::default();
+        let database = tianyan::db::Database::open_in_memory().expect("内存库");
+        let storage = AssemblyServices::new()
+            .storage_backend(&config, database)
+            .expect("未装配时应给内存兜底而不是报错");
+
+        let uri = tianyan::TianyanUri::new(
+            tianyan::ContextNamespace::Knowledge,
+            vec!["probe.md".to_string()],
+        );
+        storage
+            .write_content(&uri, tianyan::ContentLevel::Detail, "临时内容")
+            .await
+            .expect("兜底后端应可写入");
+        assert_eq!(
+            storage
+                .read_content(&uri, tianyan::ContentLevel::Detail)
+                .await
+                .expect("回读"),
+            "临时内容"
+        );
+        assert!(storage.exists(&uri).await.expect("存在性"));
+
+        // 首次写入必须留下「未落盘」证据（直接构造以便检查私有标志）
+        let direct = EphemeralStorageBackend::new();
+        assert!(!direct.write_warned.load(Ordering::Relaxed));
+        direct
+            .write_content(&uri, tianyan::ContentLevel::Detail, "x")
+            .await
+            .expect("写入");
+        assert!(
+            direct.write_warned.load(Ordering::Relaxed),
+            "首次写入后须置起告警标志（不静默丢数据）"
+        );
+    }
+
+    /// 装配了工厂时**只用工厂**（兜底不得抢占）。
+    ///
+    /// 判别力：工厂返回的后端里预置了一个条目，返回值若能读到它就证明走的是工厂。
+    #[tokio::test]
+    async fn test_assembly_uses_injected_storage_factory() {
+        let marker = tianyan::TianyanUri::new(
+            tianyan::ContextNamespace::Knowledge,
+            vec!["injected.md".to_string()],
+        );
+        let injected = marker.clone();
+        let factory: StorageBackendFactory = Arc::new(move |_config, _database| {
+            let backend = EphemeralStorageBackend::new();
+            // 同步工厂：先写进一个预置条目（无需 async 上下文）
+            let entry = ContextEntry::new_file(injected.clone());
+            backend
+                .entries
+                .try_write()
+                .expect("未竞争")
+                .insert(entry.uri().to_string(), entry);
+            Ok(Arc::new(backend) as Arc<dyn StorageBackend>)
+        });
+        let config = StorageConfig::default();
+        let database = tianyan::db::Database::open_in_memory().expect("内存库");
+        let storage = AssemblyServices::new()
+            .with_storage_factory(factory)
+            .storage_backend(&config, database)
+            .expect("装配后应成功");
+        assert!(
+            storage.exists(&marker).await.expect("存在性"),
+            "应使用注入的工厂（预置条目是工厂内的判别标记）"
+        );
+    }
+
+    /// 工厂必须可重复调用（数据目录搬迁后的重启会再次装配）。
+    #[tokio::test]
+    async fn test_storage_factory_is_repeatable() {
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counter = calls.clone();
+        let factory: StorageBackendFactory = Arc::new(move |_config, _database| {
+            counter.fetch_add(1, Ordering::SeqCst);
+            Ok(Arc::new(EphemeralStorageBackend::new()) as Arc<dyn StorageBackend>)
+        });
+        let assembly = AssemblyServices::new().with_storage_factory(factory);
+        let config = StorageConfig::default();
+        let database = tianyan::db::Database::open_in_memory().expect("内存库");
+        let _ = assembly.storage_backend(&config, database.clone()).unwrap();
+        let _ = assembly.storage_backend(&config, database).unwrap();
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            2,
+            "工厂应可重复调用（不是 FnOnce）"
+        );
+    }
+
+    /// 内存兜底的条目语义必须与 `SqliteBackend` 同口径（否则兜底会引入只属于测试的
+    /// 行为差异，重演「Mock 形态掩盖缺陷」）：删除按「URI 后接斜杠」前缀级联、
+    /// 不误删同前缀兄弟；列举只给一级子条目。
+    #[tokio::test]
+    async fn test_ephemeral_storage_prefix_semantics_match_sqlite() {
+        let backend = EphemeralStorageBackend::new();
+        let ns = tianyan::ContextNamespace::Knowledge;
+        let parent = tianyan::TianyanUri::new(ns, vec!["ab".to_string()]);
+        let sibling = tianyan::TianyanUri::new(ns, vec!["abc".to_string()]);
+        let child = tianyan::TianyanUri::new(ns, vec!["ab".to_string(), "x.md".to_string()]);
+        let grandchild = tianyan::TianyanUri::new(
+            ns,
+            vec!["ab".to_string(), "deep".to_string(), "y.md".to_string()],
+        );
+        for uri in [&parent, &sibling, &child, &grandchild] {
+            backend
+                .write_entry(&ContextEntry::new_file(uri.clone()))
+                .await
+                .expect("写入");
+        }
+
+        // 列举只给一级子条目（孙条目被过滤）
+        let listed = backend.list_directory(&parent).await.expect("列举");
+        assert_eq!(listed.len(), 1, "只应列出一级子条目");
+
+        backend.delete_entry(&parent).await.expect("删除");
+        assert!(!backend.exists(&parent).await.expect("存在性"));
+        assert!(
+            !backend.exists(&child).await.expect("存在性"),
+            "子条目应被级联删除"
+        );
+        assert!(
+            !backend.exists(&grandchild).await.expect("存在性"),
+            "孙条目应被级联删除"
+        );
+        assert!(
+            backend.exists(&sibling).await.expect("存在性"),
+            "同前缀兄弟条目（ab vs abc）不应被误删"
+        );
     }
 }

@@ -128,7 +128,7 @@ core/src/
 - ✅ **生产代码零模块环**（文件级 SCC 检测 = 0）：
   - 基础类型层：`roles`（角色纯类型）、`common`（错误/估算器等纯类型）——config/agent/scheduler 共用，不依赖领域
   - 存储层：`db`（Database 门面 + SqliteDb + 业务域 Repository）——**只依赖 `common`**（纯底层）
-  - 领域层：`session`（SQL 收敛本模块，经 db 单连接）、`vfs`（SqliteBackend 经 db）、`observability`（SQL 经 db Repository）——单向依赖 db
+  - 领域层：`session`（SQL 收敛本模块，经 db 单连接）、`vfs`（经 `StorageBackend` 契约访问 db）、`observability`（SQL 经 db Repository）——单向依赖 db
   - 顶层：`agent` / `scheduler`（工具化装配，依赖领域层 + 基础类型）
 - ⬇️ 残留单向依赖（均非环，已接受）：`vfs→model`（`SummaryEngine` 摘要生成依赖 `ChatService`）
 - ⚠️ cfg(test) 测试工具环（`context↔test_utils`、`test_utils↔vfs`）：`test_utils` 是 `#[cfg(test)]` 专用模块，环只存在于测试编译，发布编译无环（测试 mock 的天然模式）
@@ -151,7 +151,7 @@ Tauri App 启动
     ├─ 3. start_axum_server(config)         [tauri/src/server.rs → server/src/lib.rs]
     │     │
     │     ├─ 3.1 initialize_vfs_for_app()   [server/src/lib.rs]
-     │     │     ├─ SqliteBackend::new()
+     │     │     ├─ assembly.storage_backend() → StorageBackendFactory（装配层注入本地文件/SQLite）
     │     │     ├─ assembly.vector_storage() → VectorStorageFactory（装配层注入 LanceDB）
     │     │     ├─ ModelServices::from_configs() — 替代旧 ModelRouter
     │     │     └─ VirtualFileSystemBuilder::build() + initialize()
@@ -259,7 +259,7 @@ React Frontend：增量按 chunk_type 渲染；历史/流式共用服务端 segm
               │                     │                     │
               ▼                     ▼                     ▼
     ┌─────────────────────┐  ┌──────────────┐  ┌───────────────────┐
-    │ backend/sqlite.rs   │  │ summary/     │  │ vector/traits.rs  │
+    │ backend/mod.rs      │  │ summary/     │  │ vector/traits.rs  │
     │ backend/sqlite_db.rs│  │ SummaryEngine│  │ VectorStorage     │
     │ (共享 SQLite 连接)  │  │ (依赖 ChatService) │  │ （契约，实现在插件）│
     └─────────────────────┘  └──────────────┘  └───────────────────┘
@@ -268,6 +268,8 @@ React Frontend：增量按 chunk_type 渲染；历史/流式共用服务端 segm
 > **注**：`SqliteDb` 已移入 `db` 模块（`core/src/db/sqlite_db.rs`，`backend/sqlite_db.rs` 仅 re-export 兼容）——全系统唯一 SQLite 连接（ADR-005 单连接语义），经 `db::Database` 门面统一访问（ADR-020）。`SummaryEngine` 经 `model::ChatService` 生成 L0/L1 摘要，是 vfs→model 的残留单向依赖（非环）。
 >
 > **向量存储实现已出 core**（ADR-049 期 2 序 3）：core 只留 `VectorStorage` 契约，`LanceDbVectorStore` 在 `plugins/storage-vector`，由装配层（`app` bin / `tauri`）经 `VectorStorageFactory` 注入 `server/src/assembly.rs`。**依赖方向**：`plugins/storage-vector → core`（单向），core/server 不认识该插件 crate。
+>
+> **存储后端实现也已出 core**（ADR-049 期 2 序 4）：core 只留 `StorageBackend` 契约（`vfs/backend/mod.rs`），`SqliteBackend` / `LocalFileBackend` 在 `plugins/storage-sqlite`，经 `StorageBackendFactory` 注入。**性质不同于序 3**：`rusqlite` 仍留 core（`db/*` + `session/*` 80 处、ADR-020 写入门面），本序收窄的是**重编面积**而非依赖面。core 单测要构造真实后端，而 dev-dep 会因 core 被编译两份导致 trait/类型双实例（实测 E0308/E0277），故测试期以 `#[path]` **同源包含**插件源码——**代价**：这两个源码文件内禁止 `crate::…`（只允许 `tianyan::…`）。
 
 ### 3.5 记忆持久化流程（定时任务）
 
@@ -353,7 +355,7 @@ TaskScheduler 触发
 | `ContentStore` | `core/src/vfs/traits.rs` | `VfsImpl` | `vfs/vfs_impl.rs`, `scheduler/tasks/` |
 | `VfsSearch` | `core/src/vfs/traits.rs` | `VfsImpl` | `context/retrieval/retriever.rs` |
 | `VirtualFileSystem` | `core/src/vfs/traits.rs` | 实现 VfsCore+ContentStore+VfsSearch 的类型自动获得 | `server/state.rs`, `agent/coordinator.rs`（session/manager 已迁出 VFS，见 ADR-018） |
-| `SqliteBackend` | `core/src/vfs/backend/sqlite.rs` | SQLite 存储后端（具体类型） | `vfs/vfs_impl.rs` |
+| `StorageBackend` | `core/src/vfs/backend/mod.rs` | `SqliteBackend` / `LocalFileBackend`（`plugins/storage-sqlite`，装配层经 `StorageBackendFactory` 注入） | `vfs/vfs_impl.rs` |
 | `VectorStorage` | `core/src/vfs/vector/traits.rs` | `LanceDbVectorStore`（`plugins/storage-vector`，装配层经 `VectorStorageFactory` 注入） | `vfs/vfs_impl.rs`, `context/retrieval/` |
 | `SessionManager` | `core/src/session/manager.rs` | `PersistentSessionManager`（基于 `SessionStore`，ADR-018） | `server/state.rs`, `agent/coordinator.rs` |
 | `SkillManager` | `core/src/skills/manager.rs` | `SkillManager` | `server/state.rs`, `server/api/skills/`（VFS 技能发现/读取） |

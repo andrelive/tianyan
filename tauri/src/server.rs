@@ -4,11 +4,12 @@
 
 use std::sync::Arc;
 
-use tianyan::vfs::VectorStorage;
+use tianyan::vfs::{StorageBackend, VectorStorage};
 use tianyan_server::{
     start_server_with_shutdown_signal_and_assembly, AssemblyServices, PluginServices,
-    ToolPluginFactory, VectorStorageFactory,
+    StorageBackendFactory, ToolPluginFactory, VectorStorageFactory,
 };
+use tianyan_storage_sqlite::{LocalFileBackend, SqliteBackend};
 use tianyan_storage_vector::LanceDbVectorStore;
 use tracing::{error, info};
 
@@ -45,6 +46,23 @@ fn vector_factory() -> VectorStorageFactory {
             Ok(Arc::new(store) as Arc<dyn VectorStorage>)
         })
     })
+}
+/// 结构化存储工厂（SQLite / 本地文件系统；`plugins/storage-sqlite`）。
+///
+/// 与 `app/src/main.rs::storage_factory` **同形同源**（ADR-049 期 2 序 4）：
+/// `config.storage.backend` 选 adapter 的语义只在装配层，server 库不认识这两个
+/// 具体类型。同步工厂：两个后端的 `new` 都不做 IO。
+fn storage_factory() -> StorageBackendFactory {
+    Arc::new(
+        |config: &tianyan::config::StorageConfig, database: Arc<tianyan::db::Database>| {
+            use tianyan::config::StorageBackendType;
+            let backend: Arc<dyn StorageBackend> = match config.backend {
+                StorageBackendType::Local => Arc::new(LocalFileBackend::new(config.clone())),
+                StorageBackendType::Sqlite => Arc::new(SqliteBackend::new(database)),
+            };
+            Ok(backend)
+        },
+    )
 }
 
 /// 启动 Axum 服务
@@ -97,10 +115,11 @@ pub async fn start_axum_server(
             tools
         },
     );
-    // 完整装配（ADR-049 期 2 序 3）：工具清单 + 向量存储
+    // 完整装配（ADR-049 期 2 序 3/4）：工具清单 + 向量存储 + 结构化存储
     let assembly = AssemblyServices::new()
         .with_plugin_factory(plugin_factory)
-        .with_vector_factory(vector_factory());
+        .with_vector_factory(vector_factory())
+        .with_storage_factory(storage_factory());
     if let Err(e) = start_server_with_shutdown_signal_and_assembly(
         listener,
         tianyan_config,

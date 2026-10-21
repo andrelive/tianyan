@@ -7,6 +7,10 @@ use std::path::PathBuf;
 ///
 /// SQLite 为默认后端（e2e 全量在 sqlite 上验证通过后翻转，2026-08-15）；
 /// 配置 `backend = "local"` 可回退本地文件系统。
+///
+/// 本枚举是**配置契约**，留在 core；「这个值选哪个 adapter」的落点在装配层
+/// （ADR-049 期 2 序 4：`SqliteBackend` / `LocalFileBackend` 的实现已迁至
+/// `plugins/storage-sqlite`，由 `StorageBackendFactory` 注入）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum StorageBackendType {

@@ -44,9 +44,8 @@ use tianyan::common::types::{ContentLevel, ContextNamespace, MemoryCategory, Tia
 use tianyan::config::{ModelCapability, TianyanConfig};
 use tianyan::db::Database;
 use tianyan::model::ModelServices;
-use tianyan::vfs::{
-    SqliteBackend, StorageBackend, VfsCore, VirtualFileSystem, VirtualFileSystemBuilder,
-};
+use tianyan::vfs::{StorageBackend, VfsCore, VirtualFileSystem, VirtualFileSystemBuilder};
+use tianyan_storage_sqlite::SqliteBackend;
 use tianyan_storage_vector::LanceDbVectorStore;
 
 /// 已知孤儿条目清单（2026-10-17 精确可达性审计产物）。

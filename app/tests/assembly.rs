@@ -20,8 +20,9 @@ use tianyan::executor::SecurityPolicy;
 use tianyan::goals::GoalStore;
 use tianyan::model::types::ToolPresentation;
 use tianyan::todos::TodoStore;
-use tianyan::vfs::VectorStorage;
-use tianyan_server::VectorStorageFactory;
+use tianyan::vfs::{ContextEntry, StorageBackend, VectorStorage};
+use tianyan_server::{StorageBackendFactory, VectorStorageFactory};
+use tianyan_storage_sqlite::{LocalFileBackend, SqliteBackend};
 use tianyan_storage_vector::LanceDbVectorStore;
 
 /// 插件工具清单——与 `app/src/main.rs::plugin_factory` **同源同序**：
@@ -265,5 +266,84 @@ async fn test_vector_factory_yields_real_lancedb_store() {
     assert!(
         dir.path().join("lancedb").is_dir(),
         "LanceDB 数据目录应被创建（空实现不留痕）"
+    );
+}
+
+/// 装配回归（ADR-049 期 2 序 4）：结构化存储工厂必须按 `config.storage.backend`
+/// 真的产出**插件里的实现**，而不是 server 侧「未装配」时的内存兜底。
+///
+/// 判别力：
+/// 1. 与 `app/src/main.rs::storage_factory` 同形的工厂在**装配包外部**构造得出来
+///    （同步工厂的类型擦除链真的编译得过）；
+/// 2. `Sqlite` 分支写入的条目能被**另开一条连接到同一数据库文件**的后端读回——
+///    内存兜底不落盘，`exists` 必为 false；即「装配层真的注入了 SqliteBackend」；
+/// 3. `Local` 分支会真的在磁盘上建出数据目录——内存兜底不建目录；
+/// 4. 两个分支共用同一份 `StorageConfig`，说明 adapter 选择发生在装配层（server
+///    库只递配置与共享连接，不认识这两个类型）。
+#[tokio::test]
+async fn test_storage_factory_yields_real_backend_per_config() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db_path = dir.path().join("tianyan.db");
+    // 与 `app/src/main.rs::storage_factory` 同形
+    let factory: StorageBackendFactory = Arc::new(
+        |config: &tianyan::config::StorageConfig, database: Arc<tianyan::db::Database>| {
+            use tianyan::config::StorageBackendType;
+            let backend: Arc<dyn StorageBackend> = match config.backend {
+                StorageBackendType::Local => Arc::new(LocalFileBackend::new(config.clone())),
+                StorageBackendType::Sqlite => Arc::new(SqliteBackend::new(database)),
+            };
+            Ok(backend)
+        },
+    );
+
+    // ── Sqlite 分支：写入必须落到数据库文件 ──────────────────────────────
+    let sqlite_config = tianyan::config::StorageConfig {
+        data_dir: dir.path().to_path_buf(),
+        backend: tianyan::config::StorageBackendType::Sqlite,
+        sqlite_path: Some(db_path.clone()),
+        ..Default::default()
+    };
+    let database = tianyan::db::Database::open(db_path.clone()).expect("打开数据库");
+    database.init_schemas().await.expect("初始化 schema");
+    let backend = factory(&sqlite_config, database).expect("Sqlite 分支应构造成功");
+    backend.initialize().await.expect("建 vfs_entries 表");
+    let uri = tianyan::TianyanUri::new(
+        tianyan::ContextNamespace::Knowledge,
+        vec!["assembly_probe.md".to_string()],
+    );
+    backend
+        .write_entry(&ContextEntry::new_file(uri.clone()))
+        .await
+        .expect("写条目");
+    drop(backend);
+
+    // 另开一条到同一文件的连接读回（内存兜底不会有任何落盘痕迹）
+    let reopened = tianyan::db::Database::open(db_path).expect("重开数据库");
+    reopened.init_schemas().await.expect("重开初始化 schema");
+    let reopened_backend =
+        factory(&sqlite_config, reopened).expect("Sqlite 分支应可重复构造（重启/搬迁）");
+    assert!(
+        reopened_backend.exists(&uri).await.expect("存在性查询"),
+        "Sqlite 分支必须落盘（未装配时会退化成内存后端，此处读回为空）"
+    );
+
+    // ── Local 分支：必须真的在磁盘上建目录 ───────────────────────────────
+    let local_dir = dir.path().join("local-data");
+    let local_config = tianyan::config::StorageConfig {
+        data_dir: local_dir.clone(),
+        backend: tianyan::config::StorageBackendType::Local,
+        sqlite_path: None,
+        ..Default::default()
+    };
+    let database = tianyan::db::Database::open(dir.path().join("tianyan2.db")).expect("打开数据库");
+    let local_backend = factory(&local_config, database).expect("Local 分支应构造成功");
+    assert!(
+        !local_dir.exists(),
+        "前置：构造阶段不做 IO（建目录在 initialize 里）"
+    );
+    local_backend.initialize().await.expect("建数据目录");
+    assert!(
+        local_dir.is_dir(),
+        "Local 分支应建出数据目录（内存兜底不会留痕）"
     );
 }

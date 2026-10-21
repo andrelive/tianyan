@@ -343,6 +343,76 @@ tauri 全域只引 `tianyan::{config,common,agent,notification}`，对候选模�
   `tools-ops` bin 包（与 `app/tauri` 里重复的 12 行 `vector_factory()` 同一类问题：要彻底
   去重需引入「装配辅助 crate」，超出本序范围）
 
+**实施记录（序 4：storage-sqlite，2026-10-21）**：`vfs/backend/sqlite.rs`（518 行 / 10 测试）
+与 `vfs/backend/local.rs`（414 行 / 4 测试）**整文件**迁入 `plugins/storage-sqlite`
+（crate `tianyan-storage-sqlite`，导出 `SqliteBackend` / `LocalFileBackend`）。
+
+- **契约留 core**：`vfs/backend/mod.rs` 只剩 `StorageBackend` trait（公开路径
+  `vfs::StorageBackend` 不变），`vfs::{LocalFileBackend, SqliteBackend}` 导出删除；
+  `backend/sqlite_db.rs` **必须留 core**——它只是 `crate::db::sqlite_db` 的 re-export
+  兼容层，实体（共享连接 + schema 集中）在 `db`，搬走会造成 core → 插件的反向依赖
+- **`rusqlite` 搬不走：本序收窄的是重编面积，不是依赖面**（与序 3 性质上的分水岭）：
+  `db/*`（`Database` 门面 + 4 个 Repository，ADR-020 全系统写入门面）与 `session/*`
+  （ADR-018 会话权威）共有 80 处 rusqlite 用法，删依赖需先拆 ADR-020。证据：
+  `cargo tree -p tianyan-core --depth 1` 仍含 `rusqlite 0.31`（预期，不要"修"）；
+  `cargo tree -p tianyan-storage-sqlite --depth 1` 含 `tianyan-core` + `rusqlite`
+- **装配**：`AssemblyServices` 加第三插槽 `StorageBackendFactory`
+  （`Arc<dyn Fn(&StorageConfig, Arc<Database>) -> Result<Arc<dyn StorageBackend>>>`，
+  **同步**——两个 `new` 都只存字段，建表/建目录在 `initialize` 里）；`config.storage.backend`
+  的 **adapter 选择语义搬进装配层**（`app/src/main.rs` / `tauri/src/server.rs` 的
+  `storage_factory()`）；`initialize_vfs_for_app` 退化为
+  `assembly.storage_backend(&config.storage, database.clone())?`
+- **降级语义（本序最需要留档的决策）：未装配工厂 → server 侧 `EphemeralStorageBackend`
+  （进程内存，语义照 `SqliteBackend` 抄），不是 `Err`**
+  - 为什么不 `Err`（原倾向）：`create_app` / `start_server*` 这组**不带装配的公开入口**
+    是序 3 明确「保留且语义等价」的 API 面（`create_app` 一家就有 47 处 lib 单测 + 11 处
+    集成测试调用）。存储是启动硬依赖，`Err` 等于让这批入口在**任何**构建里都起不来
+    ——那是删 API，不是收敛装配
+  - 为什么不用「本地文件兜底」：`LocalFileBackend` 在插件里，server 库构造不出来；
+    在 server 侧再写一份文件后端＝两份实现同时漂移
+  - 可见性（ADR-038，比序 3 的向量降级更严）：装配期 `error!` 一条 + **首次写入再
+    `error!` 一条**（`AtomicBool` 只打一次）。向量降级只是「没有语义检索」，这里的
+    降级是「VFS 内容不落盘、重启即丢」，所以用 `error` 级
+  - 判别力：`server/src/assembly.rs` 4 条测试锁住「兜底可用 / 首次写入留痕 / 工厂优先 /
+    可重复调用 / 前缀语义与 `SqliteBackend` 同口径」；`app/tests/assembly.rs` 加
+    **装配级断言**「另开连接到同一 db 文件读回 + Local 分支真的建目录」，锁住「装配层
+    真的注入了插件实现而不是兜底」
+- **★ dev-dependency 反向引用方案实测不可行（与「临时 workspace 最小实验」的结论有出入）**：
+  core 的单测（`#[cfg(test)]`）必须把 core 的类型传进插件 API（`StorageConfig` /
+  `Arc<Database>` / `dyn StorageBackend`）。`cargo test -p tianyan-core --lib` 把 core
+  编译**两份**（带 `cfg(test)` 的测试单元 + 插件依赖的普通 lib），于是 trait 与上述
+  类型出现两个互不兼容的实例 → `[dev-dependencies] tianyan-storage-sqlite` 编译必失败
+  （实测 22 个 `E0308`/`E0277`）。临时实验之所以通过，是因为它没有跨 crate 传 `a` 的类型
+  - **落地替代（同源包含）**：`core/src/vfs/backend/mod.rs` 用
+    `#[cfg(test)] #[path = "../../../../plugins/storage-sqlite/src/{local,sqlite}.rs"]`
+    把插件源码**同源包含**进来，`core/src/lib.rs` 加 `#[cfg(test)] extern crate self as
+    tianyan;` 让那份源码里的 `tianyan::…` 在 crate 内指向自身。**一份源码、零复制、
+    零漂移**；正常构建（`build`/`check`/发布）完全不参与，core 的生产依赖图里没有任何
+    插件（`cargo tree -p tianyan-core` 无 `tianyan-storage-*`）。代价：core 的测试期
+    代码与插件源码有**文件级耦合**（已就地写注释说明），且需 `#[path]` 这种非常规手法
+  - 判别力硬约束满足：`scheduler/tasks/evolution_task.rs::real_vfs()` 仍是**真实
+    `SqliteBackend`**（真实条目形态），没有为省依赖退化成文件后端/桩
+- `plugins/storage-vector/examples/*`（4 个一次性运维脚本）随之改
+  `use tianyan_storage_sqlite::SqliteBackend`：给 `storage-vector` 加了一条**仅 examples
+  用的 dev-dep**（插件间 dev 边，正常依赖图不受影响）；更干净的做法仍是搬进
+  `tools-ops` bin 包（序 3 遗留）
+- **门禁**：`cargo fmt --all -- --check` 干净；`cargo clippy --workspace --all-targets`
+  **零 warning**；`tianyan-core --lib` **1261 passed**（与 HEAD 同数）；`tianyan-server
+  --lib` **183 passed / 1 ignored**（179 + 4 条新装配测试）；`tianyan-storage-sqlite` 14 /
+  `storage-vector` 16 / `tianyan-app` 7 / `tools-code` 32 / `tools-web` 40 / `tools-todo` 13 /
+  `tools-fs` 5 全绿（含 server 集成测试：e2e 14 / config_api 5 / shutdown 1 /
+  snapshot_reload 2）；`cargo catalog-check` OK
+- **测试守恒**：HEAD 1261（core `--lib`）= 现在 core 1261（其中 14 个来自 `#[path]`
+  同源包含）+ 插件 14（同源重跑，非新增）。**零放弃、零降级**
+- **遗留**：
+  1. `server/tests/*` 的集成测试仍走兜底内存后端（不再覆盖真实 adapter，与序 3 的 e2e
+     走 `NoopVectorStorage` 同型）。要覆盖需给 `tianyan-server` 加 dev-dep + 测试装配器
+  2. `StorageBackend` trait 仍在 core，是「跨 `cfg(test)` 类型同一性」问题的**根源**：
+     期 3 若把契约提到独立 `kernel-api` 包，core 单测就能干净地用 dev-dep（届时可删
+     `#[path]` 手法）
+  3. 4 个运维 examples 的归属（`tools-ops` bin 包），以及 `app`/`tauri` 里重复的
+     `vector_factory()` / `storage_factory()`（要彻底去重需引入「装配辅助 crate」）
+
 ---
 
 ## 分期与闸门

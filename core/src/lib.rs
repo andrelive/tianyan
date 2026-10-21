@@ -47,6 +47,15 @@
     allow(clippy::unwrap_used, clippy::expect_used, clippy::unwrap_in_result)
 )]
 
+// ADR-049 期 2 序 4：VFS 存储实现（`LocalFileBackend` / `SqliteBackend`）已迁至
+// `plugins/storage-sqlite`。core 的**单元测试**（`--lib`）却必须能构造它们：单测与
+// `dev-dependencies` 里的插件会各自链一份 `tianyan`（一个带 `cfg(test)`、一个不带），
+// 于是同一个 `StorageBackend` trait 出现两个互不兼容的实例，跨 crate 传类型直接编译失败。
+// 因此测试期以 `#[path]` **同源包含**插件实现（见 `vfs/backend/mod.rs`），本别名让那份
+// 源码里的 `tianyan::…` 在同一 crate 内指向自身。仅 `cfg(test)` 生效，正常构建无此行。
+#[cfg(test)]
+extern crate self as tianyan;
+
 pub mod agent;
 pub mod common;
 pub mod config;
