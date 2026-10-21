@@ -406,29 +406,15 @@ pub type ToolPluginFactory = Arc<
         + Sync,
 >;
 
-/// 带插件清单的应用构造（bin / 桌面端用；测试与嵌入式仍走 [`create_app`]）。
+/// 带完整装配的应用构造（**bin / 桌面端用**）。
 ///
 /// 装配顺序：Agent 先就绪（内部注册表持有 `ToolContext`）→ 取 ctx + store
-/// （[`PluginServices`]）→ 工厂构造插件工具 → `register_dynamic_tools` 注入
-/// （追加到动态工具末尾，内置顺序不动）。
+/// （[`PluginServices`]）→ 插件工具工厂注入（追加到动态工具末尾，内置顺序不动）
+/// → 向量存储 / 结构化存储工厂 → 内置任务清单（在 `start_server_inner` 注册）。
 ///
-/// **保留此签名**（既有调用点不破）：等价于
-/// `create_app_with_assembly(config, AssemblyServices::new().with_plugin_factory(pf))`。
-/// 需要同时装配向量存储时用 [`create_app_with_assembly`]。
-pub async fn create_app_with_plugins(
-    config: tianyan::config::TianyanConfig,
-    plugin_factory: ToolPluginFactory,
-) -> tianyan::common::error::Result<(Router, Arc<AppState>)> {
-    create_app_with_assembly(
-        config,
-        AssemblyServices::new().with_plugin_factory(plugin_factory),
-    )
-    .await
-}
-
-/// 带完整装配（插件工具 + 向量存储）的应用构造（bin / 桌面端用）。
-///
-/// 未装配的插槽走降级路径：无插件工具 / 空向量存储（[`AssemblyServices`]）。
+/// 未装配的插槽走降级路径（无插件工具 / 空向量存储 / 内存存储后端 / 无内置任务），
+/// 每处都有 `warn!` / `error!` 指路（见 [`AssemblyServices`]）。**生产装配不要漏**。
+/// 注意：[`create_app`]（无装配）与之并存，是测试/嵌入式的对象图构造入口。
 pub async fn create_app_with_assembly(
     config: tianyan::config::TianyanConfig,
     assembly: AssemblyServices,
@@ -520,66 +506,30 @@ async fn create_app_inner(
     ))
 }
 
-/// Start the HTTP server
+/// Start the HTTP server（**唯一的生产启动入口之一**：必须带装配）。
+///
+/// # 为什么没有「不带装配」的 `start_server`
+///
+/// ADR-049 期 2 收尾时删除了全部不带装配的启动变体（`start_server` /
+/// `start_server_with_listener` / `start_server_with_shutdown_signal` /
+/// `*_and_plugins` / `start_server_default`，当时全仓**零外部调用者**）。
+/// 理由是结构性的：不带装配的启动会拿到 `EphemeralStorageBackend`（进程内存、
+/// 重启即空）——服务器起得来、数据不落盘，症状是「检索永远为空」而非报错。
+/// VFS 存储是**启动必需项**，不该在「忘了装配」时静默降级；把装配从可选参数
+/// 收成唯一通道，误用就从「运行期隐患」变成「编译期不存在」。
+///
+/// 构造对象图（测试/嵌入式）仍可用 [`create_app`]——它不启动服务、允许内存后端。
 ///
 /// # Arguments
 ///
 /// * `config` - Server configuration (port, host, etc.)
 /// * `tianyan_config` - Tianyan core configuration
+/// * `assembly` - 装配（插件工具 / 向量存储 / 结构化存储 / 内置任务清单）
 ///
 /// # Errors
 ///
 /// Returns an error if the server fails to start or bind to the address
-///
-/// # Example
-///
-/// ```no_run
-/// use tianyan_server::{start_server, ServerConfig};
-/// use tianyan::config::get_config;
-///
-/// #[tokio::main]
-/// async fn main() -> tianyan::common::error::Result<()> {
-///     let server_config = ServerConfig::with_port(3000);
-///     let tianyan_config = get_config().clone();
-///     start_server(server_config, tianyan_config).await
-/// }
-/// ```
-pub async fn start_server(
-    config: ServerConfig,
-    tianyan_config: tianyan::config::TianyanConfig,
-) -> tianyan::common::error::Result<()> {
-    let listener = bind_listener(&config).await?;
-    start_server_with_listener(listener, tianyan_config).await
-}
-
-/// 带插件清单的启动（**bin / 桌面端用**；ADR-049 期 1：装配清单住 bin）。
-///
-/// 与 [`start_server`] 唯一区别是多一个插件工厂——server 库只依赖
-/// [`ToolPluginFactory`]（类型擦除），不认识任何具体插件 crate。
-///
-/// **保留此签名**（既有调用点不破）；等价于
-/// `start_server_with_assembly(config, tianyan_config,
-/// AssemblyServices::new().with_plugin_factory(pf))`。需要同时装配向量存储
-/// （生产装配的实际形态）时用 [`start_server_with_assembly`]。
-pub async fn start_server_with_plugins(
-    config: ServerConfig,
-    tianyan_config: tianyan::config::TianyanConfig,
-    plugin_factory: ToolPluginFactory,
-) -> tianyan::common::error::Result<()> {
-    let listener = bind_listener(&config).await?;
-    start_server_with_listener_and_assembly(
-        listener,
-        tianyan_config,
-        AssemblyServices::new().with_plugin_factory(plugin_factory),
-    )
-    .await
-}
-
-/// 带完整装配的启动（**bin 用**：插件工具 + 向量存储）。
-///
-/// 与 [`start_server_with_plugins`] 的区别是多一个 [`AssemblyServices`]（含
-/// [`VectorStorageFactory`]）——server 库只依赖两个类型擦除的工厂，不认识任何
-/// 具体插件 crate（闸门 A：改一行插件实现只重编插件 + 装配包）。
+/// （`docs/architecture/decisions/049-microkernel-plugin-boundaries.md` 期 2 序 3/4/5a）
 pub async fn start_server_with_assembly(
     config: ServerConfig,
     tianyan_config: tianyan::config::TianyanConfig,
@@ -603,21 +553,13 @@ async fn bind_listener(
     })
 }
 
-/// 使用调用方已绑定的 listener 启动服务器。
-///
-/// 与 [`start_server`] 的区别：监听 socket 由调用方提前绑定并传入，
-/// 消除"探测端口 → 释放 → 重新绑定"之间的竞态窗口
-/// （桌面端动态端口场景使用，见 `tauri::server::find_available_port`）。
-pub async fn start_server_with_listener(
-    listener: tokio::net::TcpListener,
-    tianyan_config: tianyan::config::TianyanConfig,
-) -> tianyan::common::error::Result<()> {
-    start_server_inner(listener, tianyan_config, None, AssemblyServices::default()).await
-}
-
 /// 使用调用方已绑定的 listener + 完整装配启动服务器。
 ///
-/// 与 [`start_server_with_listener`] 的区别只是装配（见 [`AssemblyServices`]）。
+/// 监听 socket 由调用方提前绑定并传入，消除「探测端口 → 释放 → 重新绑定」的
+/// 竞态窗口（桌面端动态端口场景使用，见 `tauri::server::find_available_port`）。
+///
+/// 装配是**必填**（见 [`start_server_with_assembly`] 的「为什么没有不带装配的
+/// `start_server`」）。
 pub async fn start_server_with_listener_and_assembly(
     listener: tokio::net::TcpListener,
     tianyan_config: tianyan::config::TianyanConfig,
@@ -626,46 +568,10 @@ pub async fn start_server_with_listener_and_assembly(
     start_server_inner(listener, tianyan_config, None, assembly).await
 }
 
-/// 使用调用方已绑定的 listener + 外部关闭信号启动服务器。
+/// 桌面端：listener + 外部关闭信号 + 完整装配（**桌面端唯一启动入口**）。
 ///
-/// 桌面端使用：Tauri 退出时通过 watch channel 发送关闭信号，
-/// 触发与 Ctrl+C / SIGTERM 相同的优雅关停链
-/// （停止接收连接 → 停止调度器 → 等待 pending 任务，30s 超时）。
-pub async fn start_server_with_shutdown_signal(
-    listener: tokio::net::TcpListener,
-    tianyan_config: tianyan::config::TianyanConfig,
-    shutdown_signal: watch::Receiver<bool>,
-) -> tianyan::common::error::Result<()> {
-    start_server_inner(
-        listener,
-        tianyan_config,
-        Some(shutdown_signal),
-        AssemblyServices::default(),
-    )
-    .await
-}
-
-/// 桌面端：listener + 外部关闭信号 + 插件清单。
-///
-/// **保留此签名**（既有调用点不破）；等价于
-/// `start_server_with_shutdown_signal_and_assembly(..., AssemblyServices::new()
-/// .with_plugin_factory(pf))`。桌面端生产装配用带 `_and_assembly` 的变体。
-pub async fn start_server_with_shutdown_signal_and_plugins(
-    listener: tokio::net::TcpListener,
-    tianyan_config: tianyan::config::TianyanConfig,
-    shutdown_signal: watch::Receiver<bool>,
-    plugin_factory: ToolPluginFactory,
-) -> tianyan::common::error::Result<()> {
-    start_server_with_shutdown_signal_and_assembly(
-        listener,
-        tianyan_config,
-        shutdown_signal,
-        AssemblyServices::new().with_plugin_factory(plugin_factory),
-    )
-    .await
-}
-
-/// 桌面端：listener + 外部关闭信号 + 完整装配（插件工具 + 向量存储）。
+/// Tauri 退出时通过 watch channel 发送关闭信号，触发与 Ctrl+C / SIGTERM 相同的
+/// 优雅关停链（停止接收连接 → 停止调度器 → 等待 pending 任务，30s 超时）。
 pub async fn start_server_with_shutdown_signal_and_assembly(
     listener: tokio::net::TcpListener,
     tianyan_config: tianyan::config::TianyanConfig,
@@ -685,6 +591,23 @@ async fn start_server_inner(
     external_shutdown: Option<watch::Receiver<bool>>,
     assembly: AssemblyServices,
 ) -> tianyan::common::error::Result<()> {
+    // 启动服务的硬前置：结构化存储后端必须由装配层注入。
+    //
+    // 为什么在「删掉全部不带装配的启动入口」之后还要这道守卫：
+    // `AssemblyServices::default()` 仍是合法值（`start_server_with_assembly(cfg, cfg,
+    // default())` 编译得过），它会让 VFS 落到 `EphemeralStorageBackend`（进程内存）——
+    // 服务器起得来、内容不落盘、重启即空。存储是启动必需项，这类误配必须在**启动前**
+    // 响亮失败，而不是等运行期第一次写入时丢数据。
+    //
+    // `create_app`（测试/嵌入式构造对象图）**不经过**此守卫，仍允许内存后端：那条路径
+    // 的实例生命周期由调用方自己负责，且 47 处单测依赖它。
+    if !assembly.has_storage_factory() {
+        return Err(tianyan::TianyanError::invalid_input(
+            "装配缺陷：启动服务器必须注入 StorageBackendFactory（结构化存储是启动必需项；\
+             缺失会静默使用进程内存后端 → 内容不落盘、重启即丢）。生产装配请用 app/tauri \
+             的 assembly()；测试/嵌入式构造对象图请改用 create_app",
+        ));
+    }
     let has_providers = tianyan_config.models.providers.iter().any(|p| p.enabled);
     // clone：`AssemblyServices` 是 4 个 `Arc`（克隆只加引用计数），而任务清单工厂
     // 在应用构造之后才用到（见下方「内置定时任务」块）。
@@ -1100,18 +1023,37 @@ async fn wait_sigterm() -> Option<&'static str> {
     }
 }
 
-/// Start the server with default configuration
-///
-/// This is a convenience function that starts the server with default settings
-/// (host: 127.0.0.1, port: 3000)
-pub async fn start_server_default() -> tianyan::common::error::Result<()> {
-    let tianyan_config = tianyan::config::get_config().clone();
-    start_server(ServerConfig::default(), tianyan_config).await
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 启动服务必须带结构化存储工厂——否则会静默落到进程内存后端（内容不落盘）。
+    ///
+    /// 判别力：删掉 `start_server_inner` 入口的那道守卫，本测试立刻变红（默认装配会
+    /// 一路走到底、真的去建表并开始监听）。这是「忘记装配」从运行期隐患变成启动期
+    /// 硬失败的锁。
+    #[tokio::test]
+    async fn test_start_server_requires_storage_factory() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("绑定临时端口");
+        let err = start_server_inner(
+            listener,
+            tianyan::config::TianyanConfig::default(),
+            None,
+            AssemblyServices::default(),
+        )
+        .await
+        .expect_err("未装配 StorageBackendFactory 时启动必须失败");
+        assert!(
+            err.is_invalid_input(),
+            "错误类别应为 invalid_input（ADR-014 语义谓词，不做消息文本匹配）：{err}"
+        );
+        assert!(
+            format!("{err}").contains("StorageBackendFactory"),
+            "错误信息须点明缺的是哪个工厂（否则装配缺陷难以定位）：{err}"
+        );
+    }
 
     #[test]
     fn test_server_config_default() {

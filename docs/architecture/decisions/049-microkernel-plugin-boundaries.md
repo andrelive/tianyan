@@ -499,6 +499,30 @@ tauri 全域只引 `tianyan::{config,common,agent,notification}`，对候选模�
   3. `TaskServices` 是全量能力集合（8 字段），序 5b 的演化任务可能需要
      `session_recall` 之外的东西（它在 `TaskContext` 里，不需要动）
 
+**实施记录（装配安全加固：把「忘记装配」从运行期隐患变成启动期硬失败，2026-10-21）**：
+序 3/4/5a 引入插槽后，`AssemblyServices` 各插槽都可缺省，降级路径分别是「无语义检索」/
+「内容不落盘」/「不注册维护任务」。前两者里**存储缺失是数据安全问题**：
+`EphemeralStorageBackend` 让服务器起得来、内容不落盘、重启即空，而症状表现为
+「检索永远为空」而非报错。两道防线：
+
+- **编译期（删入口）**：删除全部不带装配的启动变体——`start_server` /
+  `start_server_with_listener` / `start_server_with_shutdown_signal` /
+  `start_server_with_plugins` / `start_server_with_shutdown_signal_and_plugins` /
+  `start_server_default` / `create_app_with_plugins`。删除前逐条 `git grep` 确认
+  **全仓零外部调用者**（只剩库内互调与 doc 示例）。API 面收敛为
+  `create_app` / `create_app_with_assembly` / `start_server_with_assembly` /
+  `start_server_with_listener_and_assembly` / `start_server_with_shutdown_signal_and_assembly`。
+- **运行期（守卫）**：光删入口不够——`start_server_with_assembly(cfg, cfg,
+  AssemblyServices::default())` 仍能编译。`start_server_inner` 入口加硬前置
+  `has_storage_factory()`，缺失即 `Err(invalid_input("装配缺陷：…StorageBackendFactory…"))`，
+  失败发生在**启动前**（清晰报错）而不是运行期第一次写入丢数据时。
+  有测试锁定（`test_start_server_requires_storage_factory`，删守卫即红）。
+
+**为什么 `create_app` 不设守卫**：它是「构造对象图」而非「跑服务」，实例生命周期由调用方
+自己负责；47 处 lib 单测依赖它。区分点因此是「是否启动服务」而非「是否有装配」——
+这也是两条路径严格度不同的正当理由。降级路径的 `error!`/`warn!` 与「首次写入再告警一次」
+保留，作为最后一道可观测性兜底（ADR-038 可见失败）。
+
 ---
 
 ## 分期与闸门

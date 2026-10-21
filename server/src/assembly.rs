@@ -141,6 +141,17 @@ impl AssemblyServices {
         self.plugin_factory.clone()
     }
 
+    /// 是否装配了结构化存储工厂（**启动服务的硬前置**，见 `start_server_inner`）。
+    ///
+    /// 为什么单独开一个查询方法而不是让 `storage_backend()` 自己报错：
+    /// `create_app`（测试/嵌入式构造对象图）需要允许内存兜底，而
+    /// `start_server*`（真跑服务）必须拒绝——两条路径的严格度不同，判定点必须能
+    /// 被调用方分别选用。守卫放在 `start_server_inner` 入口而不是工厂里，是为了让
+    /// 失败发生在**启动前**（清晰报错）而不是运行期第一次写入时（数据已丢）。
+    pub(crate) fn has_storage_factory(&self) -> bool {
+        self.storage_factory.is_some()
+    }
+
     /// 构造 VFS 结构化存储后端实例（**唯一的存储实现选择点**）。
     ///
     /// 未装配工厂时返回 [`EphemeralStorageBackend`]（**进程内存**：内容读写正常
