@@ -537,9 +537,18 @@ async fn create_app_inner(
     // 前端是 history 路由（`/chat`、`/chat/{session_id}`、`/settings`…），磁盘上没有
     // 对应文件，用户按 F5 时浏览器请求的就是 `/chat` —— 必须回 `index.html` 交给前端路由。
     //
-    // 实现选择：`ServeDir::not_found_service(ServeFile::new(index))` 在
-    // axum 0.8 + tower-http 0.6 的组合下**不生效**（实测：路径与 index.html 均确认存在，
-    // 未命中仍未走 not_found_service，一律 404），故改为显式 fallback handler：
+    // 实现选择（**纠错记录**）：最初用「教科书写法」
+    // `ServeDir::not_found_service(ServeFile::new(index))`，实测仍返回 404，一度误判为
+    // axum 0.8 + tower-http 0.6 的版本缺陷。查 tower-http 源码后确认是**用法错误**：
+    //
+    //     pub fn not_found_service<F2>(self, f: F2) -> ServeDir<SetStatus<F2>> {
+    //         self.fallback(SetStatus::new(f, StatusCode::NOT_FOUND))   // 强制 404
+    //     }
+    //
+    // 它的语义是「404 + 自定义 body」，**不是** SPA fallback（那要求 200 + index.html），
+    // 所以 404 是正确行为。SPA 要用 `.fallback(ServeFile::new(index))`（不带 SetStatus）。
+    // 这里最终选用显式 handler，是因为它能区分两类未命中（见下），比 ServeDir::fallback
+    // 更精确：
     // - `/assets/*` 交给 `ServeDir`（保留正确 MIME 与缓存头）；
     // - 无扩展名的路径（前端路由）→ `index.html`；
     // - 带扩展名的（`/missing.js`）→ 404，**不**伪装成 HTML（否则浏览器把 HTML 当 JS
