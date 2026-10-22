@@ -13,6 +13,10 @@
 //! - `skills/` - 技能执行领域
 //! - `config/` - 配置管理领域
 
+use axum::extract::OriginalUri;
+use axum::http::StatusCode;
+use axum::response::{IntoResponse, Response};
+use axum::Json;
 use axum::Router;
 use std::sync::Arc;
 
@@ -55,8 +59,25 @@ pub use shared::{ApiError, ChatMessage, MessageRole, TokenUsage};
 /// ```
 pub fn create_api_router(state: Arc<AppState>) -> Router {
     Router::new()
-        .nest("/api/v1", create_routes())
+        .nest("/api/v1", create_routes().fallback(api_not_found))
         .with_state(state)
+}
+
+/// 未匹配的 `/api/v1/**` → **404 JSON**。
+///
+/// 为什么必须显式挂：主 router 的 `fallback_service` 是 GUI 静态文件服务，而 SPA 需要
+/// 「未知路径回 `index.html`」（前端路由 `/chat` 刷新不能 404）。若不给 API 子树兜底，
+/// `/api/v1/typo` 会被 SPA fallback 吞成 `index.html` —— 前端拿到 HTML 去 `json()`
+/// 会报「Unexpected token <」，把「路径写错」伪装成解析错误。
+async fn api_not_found(OriginalUri(uri): OriginalUri) -> Response {
+    (
+        StatusCode::NOT_FOUND,
+        Json(serde_json::json!({
+            "error": "not_found",
+            "message": format!("未知 API 端点：{}", uri.path()),
+        })),
+    )
+        .into_response()
 }
 
 /// 创建无状态的路由（用于测试/组合）

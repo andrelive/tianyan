@@ -546,3 +546,91 @@ async fn test_e2e_messages_default_is_latest_page() {
 
     server.shutdown();
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SPA 静态回退与 API 404（修复：前端子路由刷新 404 白屏 / API 未知路径被 SPA 吞掉）
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// SPA 子路由直接访问 / 刷新必须返回外壳 HTML（history 路由语义）。
+///
+/// 判别力：删掉 `static_service` 的 `not_found_service(ServeFile::new(index.html))`
+/// 后，本用例立刻变红（`ServeDir` 对 `/chat` 无对应文件 → 404）。
+#[tokio::test]
+async fn test_e2e_spa_subroute_serves_index_html() {
+    // 静态目录用绝对路径显式指定（测试进程 cwd 是 crate 目录，靠 get_static_dir 的
+    // 猜测列表虽然能命中 `../gui-vite/dist`，但那是隐式的；显式设定让本用例与 cwd 解耦）。
+    // 用 `parent()` 拼出**不含 `..` 的绝对路径**（不能用 canonicalize：Windows 上会变成
+    // `\\?\F:\…` UNC 前缀，`ServeFile` 的路径校验同样会拒）。
+    let dist = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("CARGO_MANIFEST_DIR 应有父目录")
+        .join("gui-vite/dist");
+    assert!(
+        dist.join("index.html").exists(),
+        "本用例需要已构建的前端产物：{}/index.html 不存在（先执行 npm run build）",
+        dist.display()
+    );
+    std::env::set_var("TIANYAN_STATIC_DIR", &dist);
+
+    let dir = tempdir().expect("创建临时目录失败");
+    let config = test_tianyan_config_with_data_dir(dir.path().to_path_buf());
+    let (router, _state) = tianyan_server::create_app_with_assembly(config, test_assembly())
+        .await
+        .expect("create_app 失败");
+    let server = TestServer::start(router).await.expect("启动测试服务器失败");
+
+    for path in ["/chat", "/settings", "/chat/session-does-not-exist"] {
+        let resp = server.get(path).await;
+        assert_eq!(resp.status(), 200, "{path} 应回 SPA 外壳（不是 404）");
+        let body = resp.text().await.unwrap_or_default();
+        assert!(
+            body.contains("id=\"root\""),
+            "{path} 应返回含 #root 的外壳 HTML，实际：{}",
+            &body[..body.len().min(200)]
+        );
+    }
+
+    // 反向对照：真实存在的静态资源仍按 200 返回（fallback 不劫持正常路径）
+    let css = server.get("/assets/index-CYF_pX8c.css").await;
+    assert_eq!(css.status(), 200, "既有静态资源不应被 SPA fallback 影响");
+
+    server.shutdown();
+}
+
+/// 未知 `/api/v1/**` 必须 404 **JSON**，不能被 SPA fallback 变成 index.html。
+///
+/// 判别力：删掉 `api_router` 的 `api_not_found` 兜底后，本用例会拿到 200 + HTML
+/// （前端 `resp.json()` 报 `Unexpected token <`，把「路径写错」伪装成解析错误）。
+#[tokio::test]
+async fn test_e2e_unknown_api_returns_404_json_not_html() {
+    let dir = tempdir().expect("创建临时目录失败");
+    let config = test_tianyan_config_with_data_dir(dir.path().to_path_buf());
+    let (router, _state) = tianyan_server::create_app_with_assembly(config, test_assembly())
+        .await
+        .expect("create_app 失败");
+    let server = TestServer::start(router).await.expect("启动测试服务器失败");
+
+    let resp = server.get("/api/v1/definitely-not-a-route").await;
+    assert_eq!(resp.status(), 404, "未知 API 端点应 404");
+    let content_type = resp
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default()
+        .to_string();
+    assert!(
+        content_type.contains("application/json"),
+        "未知 API 端点应回 JSON（实际 Content-Type: {content_type}）"
+    );
+    let body: serde_json::Value = resp.json().await.expect("应为可解析 JSON");
+    assert_eq!(body["error"], "not_found", "错误类别应为 not_found: {body}");
+    assert!(
+        body["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("/api/v1/definitely-not-a-route"),
+        "错误消息应含请求路径（便于定位）: {body}"
+    );
+
+    server.shutdown();
+}
