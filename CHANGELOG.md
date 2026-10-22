@@ -5,9 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.8.0] - 2026-10-22
+
+### Changed
+- **微内核化：编译期插件化（ADR-049 期 1–3）**——把「改一行实现要重编 5.6 万行」拆成「改插件只重编插件 + 装配包」。新增 **15 个 crate**：`tools-fs` / `tools-code` / `tools-todo` / `tools-web`（工具）、`storage-vector` / `storage-sqlite`（存储适配器）、`task-builtin` / `task-evolution`（定时任务）、`policy-approval` / `policy-context` / `policy-review`（策略）、`provider-client` / `provider-llm` / `provider-embed`（模型 provider）、`tool-pipeline`（工具管线出口）；另有 `service-config`（配置加载/迁移/校验）。`core/src` 生产源码 42,382 → **36,584 行**，`lancedb`/`arrow`/`tree-sitter ×6`/`async-openai` 依赖全部离开 core
+- **装配器二分**：`app`（bin）+ `tauri`（桌面端）是唯一认识具体插件的两处；`tianyan-server` 库经 10 个**类型擦除插槽**接收能力（工具清单 / 向量存储 / 结构化存储 / 任务清单 / 审批 / 上下文 / 任务评审 / 技能评审 / LLM / Embedding / 工具管线），零插件依赖
+- **闸门 B 收口**：内核四件套 `api 4,587 ≤ 6K && impl 14,957 ≤ 15K`；期 3 净增 pub trait 仅 3 个（`ApprovalGate` / `ContextPort` / `SkillReviewPort`，每个方法都有生产调用点证据）
+- **装配安全加固**：删除全部不带装配的启动入口（`start_server` / `start_server_default` / `create_app_with_plugins` 等，删除前确认全仓零调用者）+ `start_server_inner` 启动期硬守卫——结构化存储是启动必需项，缺失即启动失败并点明缺哪个工厂，而不是静默用进程内存后端（数据不落盘、重启即空）
+- **删除死代码**：`role_learning`（573 行，零生产消费者）；保留被角色面板复用的纯函数 `categorize_task_by_keyword`
 
 ### Fixed
+- **headless 独立启动在非 3000 端口整页白屏**：前端 `getApiBase()` 生产分支直接采信 store 出厂值 `http://localhost:3000`，后端端口一变即跨源 CORS 失败、`config/status` 拿不到 → React 挂载中断。改为三级优先：用户显式配置 > 同源 `location.origin` > 非 http 回退（Tauri 注入仍然最优先）
+- **SPA 子路由刷新 404 白屏**：前端是 history 路由，`/chat` 在磁盘上无对应文件，F5 直接 404。改为 `/assets/*` 交给 `ServeDir`、无扩展名路径回 `index.html`、带扩展名如实 404（不伪装成 HTML）；`/api/v1/**` 未知路径由兜底返回 **404 JSON**（否则会被 SPA fallback 吞成 HTML，前端 `json()` 报 `Unexpected token <`）
 - **会话持续 400：`tool` 消息找不到前置 `tool_calls`（ADR-043 修订）**：`normalize_tool_pairs` 处理「调用有、结果无」（中断 / 取消 / 并行丢结果）时，会**删掉** assistant 上的悬空调用、再补一条引用该调用的合成结果 —— 补出来的 `tool` 消息因此必然无人认领。opencode（zen/go → DeepSeek 官方上游）严格校验，报 `Messages with role 'tool' must be a response to a preceding message with 'tool_calls'`，且该会话此后每次请求（含压缩摘要请求，同一套规范化）都失败、彻底卡死；ollama.com 因兼容层不校验工具对而侥幸能跑（不是 provider 差异，是请求本身不合规）。修复：悬空调用**保留**在 assistant 上，只补 id 对齐的合成结果（上游两方向硬约束同时满足）；测试断言补**反向**校验（每条 `tool` 的 `tool_call_id` 必须属于紧邻其前 assistant 的 `tool_calls`）+ 判别力自检（孤立 tool 必 panic）。全库实测：库内孤立结果 0、悬空调用 12 处（6 会话），原实现下 4 个会话的请求视图违规、修复后归零；存量会话无需清洗（视图每次重算）
 
 ## [0.7.0] - 2026-10-19
