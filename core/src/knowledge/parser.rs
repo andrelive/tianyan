@@ -502,7 +502,12 @@ impl XlsxParser {
 
 impl DocumentParser for XlsxParser {
     fn parse(&self, content: &[u8], _filename: &str) -> Result<ParsedDocument> {
-        use calamine::{open_workbook_from_rs, DataType, Reader, Xlsx};
+        // calamine 0.28 API（相对 0.22 的三处变更，逐条对齐）：
+        // 1) `worksheet_range` 直接返回 `Result<Range<Data>, _>`（旧版是 `Option<Result<..>>`）；
+        // 2) `DataType` 变成了 **trait**，枚举变体在 `Data` 上（旧代码写的 `DataType::String`
+        //    在新版会报 `expected a type, found a trait`）；
+        // 3) `Data::Duration` 变体已移除；`CellErrorType` 不再实现 `Display`（只有 `Debug`）。
+        use calamine::{open_workbook_from_rs, Data, Reader, Xlsx};
 
         let mut workbook: Xlsx<_> = open_workbook_from_rs(std::io::Cursor::new(content))
             .map_err(|e| TianyanError::Custom(format!("文档处理错误：XLSX 打开失败: {}", e)))?;
@@ -512,7 +517,7 @@ impl DocumentParser for XlsxParser {
         // 获取工作表名称列表
         let sheet_names = workbook.sheet_names().to_vec();
         for sheet_name in &sheet_names {
-            if let Some(Ok(range)) = workbook.worksheet_range(sheet_name) {
+            if let Ok(range) = workbook.worksheet_range(sheet_name) {
                 if !text.is_empty() {
                     text.push_str("\n---\n");
                 }
@@ -522,16 +527,20 @@ impl DocumentParser for XlsxParser {
                     let cells: Vec<String> = row
                         .iter()
                         .map(|cell| match cell {
-                            DataType::String(s) => s.clone(),
-                            DataType::Float(f) => f.to_string(),
-                            DataType::Int(i) => i.to_string(),
-                            DataType::Bool(b) => b.to_string(),
-                            DataType::DateTime(d) => d.to_string(),
-                            DataType::Empty => String::new(),
-                            DataType::Duration(d) => format!("{}秒", d),
-                            DataType::DateTimeIso(s) => s.clone(),
-                            DataType::DurationIso(s) => s.clone(),
-                            DataType::Error(e) => format!("[错误: {}]", e),
+                            Data::String(s) => s.clone(),
+                            Data::Float(f) => f.to_string(),
+                            Data::Int(i) => i.to_string(),
+                            Data::Bool(b) => b.to_string(),
+                            Data::DateTime(d) => d.to_string(),
+                            Data::Empty => String::new(),
+                            // 旧版 `Data::Duration(Duration)` 分支已随变体移除；
+                            // 时长类单元格现在以 ISO 字符串形式出现（见下一分支）。
+                            Data::DateTimeIso(s) => s.clone(),
+                            Data::DurationIso(s) => s.clone(),
+                            // 注：`CellErrorType` 在 0.28 无 `Display`，改用 `Debug`。
+                            // 罕见路径（仅 xlsx 内错误单元格），文本形态从 Excel 显示式
+                            // （如 `#DIV/0!`）变为枚举名（如 `Div0`）。
+                            Data::Error(e) => format!("[错误: {:?}]", e),
                         })
                         .collect();
                     text.push_str(&cells.join("\t"));
