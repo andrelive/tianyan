@@ -54,6 +54,10 @@ tianyan-policy-review = { path = "../plugins/policy-review" }
 # `ConnectionProbe` 契约）。
 tianyan-provider-llm = { path = "../plugins/provider-llm" }
 tianyan-provider-embed = { path = "../plugins/provider-embed" }
+# 工具管线实现（ADR-049 期 3-T5）：观测监听器（统计 / Trace / GEPA / 规则学习）+
+# 超预算输出落盘（ADR-047）+ 工具目录渲染搬出 core 后由本包注入
+# （`catalog-check` 生成器也从本 crate 取渲染口径）。
+tianyan-tool-pipeline = { path = "../plugins/tool-pipeline" }
 tokio.workspace = true
 
 [lints]

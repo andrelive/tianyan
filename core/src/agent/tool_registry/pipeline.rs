@@ -19,8 +19,16 @@
 use async_trait::async_trait;
 use serde_json::Value;
 
+use std::path::PathBuf;
+use std::sync::Arc;
+
 use crate::common::error::TianyanError;
+use crate::config::ToolOutputConfig;
 use crate::model::types::ToolCall;
+use crate::observability::execution_log::ExecutionLog;
+use crate::observability::trace::TraceCollector;
+use crate::observability::usage_stats::UsageStats;
+use crate::observability::RuleRecorder;
 
 /// 工具执行前置决策（DSH PreDecision 吸收）。
 ///
@@ -103,6 +111,34 @@ pub trait ToolPostExecuteListener: Send + Sync {
         elapsed: std::time::Duration,
     );
 }
+
+/// 工具管线接线（ADR-049 期 3-T5）：`AgentBuilder::build` 填、`ToolPipelineFactory`
+/// 据以构造监听器。每个字段对应迁移前注册表上的一个 `with_*` 委托，`None` = 该职责
+/// 未接线（与迁移前「没调用那个 `with_*`」逐项等价）。
+///
+/// **住在 core**：内核 / 插件 / 装配层三方共用的接线形状——搬进插件会让内核反向
+/// `use tianyan_tool_pipeline::…`（破 D2-1/D2-3）。
+#[derive(Clone, Default)]
+pub struct ToolPipelineWiring {
+    /// 使用统计追踪器（技能 / 工具调用计数与耗时）。
+    pub usage_stats: Option<Arc<UsageStats>>,
+    /// 结构化 Trace 收集器（G6：工具 span）。
+    pub trace_collector: Option<Arc<TraceCollector>>,
+    /// 失败规则记录器（工具执行失败 → GEPA 规则学习的输入）。
+    pub rule_recorder: Option<Arc<RuleRecorder>>,
+    /// GEPA 执行记录数据层（ADR-017；`None` = 不持久化）。
+    pub execution_log: Option<Arc<ExecutionLog>>,
+    /// 工具输出落盘目录 + 预算（ADR-047）；`None` = 不落盘。
+    pub tool_output: Option<(PathBuf, ToolOutputConfig)>,
+}
+
+/// 工具管线工厂（**装配层注入**，ADR-049 期 3-T5）。
+///
+/// 返回值是**有序**清单：**顺序即注册顺序、顺序即语义**（ADR-047：观测须见原始结果，
+/// 落盘是改写者，必须排最后）。契约住 core，实现（两个监听器）住 `plugins/tool-pipeline`。
+/// 同步、可重复调用（与 `TaskFactory` 同理；配置热重载会重建 agent）。
+pub type ToolPipelineFactory =
+    Arc<dyn Fn(&ToolPipelineWiring) -> Vec<Arc<dyn ToolPostExecuteListener>> + Send + Sync>;
 
 #[cfg(test)]
 mod tests {

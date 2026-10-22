@@ -1,0 +1,23 @@
+[package]
+name = "tianyan-tool-pipeline"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "天演工具管线插件：观测监听器（统计/Trace/GEPA/规则学习）+ 超预算输出落盘（ADR-047）+ 工具目录渲染"
+
+[dependencies]
+tianyan = { path = "../../core", package = "tianyan-core" }
+async-trait.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+serde_json.workspace = true
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+# 观测监听器的落库断言要**真实** SQLite（`Database::open_in_memory`），落盘断言要临时
+# 目录。两者都由 core 与 `tempfile` 提供，本 crate 不需要任何替身。
+tempfile.workspace = true

@@ -4,20 +4,23 @@
 //! 失败规则学习从 execute_single 尾部硬编码块迁移为第一个 post-execute 监听器，
 //! 行为完全一致（注册于 ToolRegistry::new，时序与原尾部相同），但自此可被替换、
 //! 组合或旁路——观测不再是管线的一部分，而是管线上的一个消费者。
+//!
+//! **ADR-049 期 3-T5 迁入本 crate**（原 `core/src/agent/tool_registry/observability.rs`）：
+//! 逻辑与文案逐字未改，只把 `crate::…` 改成本 crate 依赖的 `tianyan::…` 路径。搬移后
+//! 「注册于 ToolRegistry::new」一句已不成立——**注册由装配层的 `ToolPipelineFactory`
+//! 完成**（未装配 = 不注册 = 无观测，见 crate 文档「降级语义」）。
 
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 
-use super::pipeline::ToolPostExecuteListener;
-use crate::agent::tool_params::CallSkillParams;
-use crate::common::error::TianyanError;
-use crate::model::types::ToolCall;
-use crate::observability::execution_log::ExecutionLog;
-use crate::observability::trace::TraceCollector;
-use crate::observability::usage_stats::UsageStats;
-use crate::observability::ExecutionHistory;
-use crate::observability::RuleRecorder;
+use tianyan::agent::{CallSkillParams, ToolPostExecuteListener};
+use tianyan::common::error::TianyanError;
+use tianyan::model::types::ToolCall;
+use tianyan::observability::execution_log::ExecutionLog;
+use tianyan::observability::trace::TraceCollector;
+use tianyan::observability::usage_stats::UsageStats;
+use tianyan::observability::{ExecutionHistory, RuleRecorder};
 
 /// 可观测性状态（std Mutex 短临界区：仅克隆 Arc / 同步 push，跨 await 不持锁）。
 #[derive(Default)]
@@ -31,12 +34,12 @@ struct ObservabilityState {
 
 /// 内置可观测性监听器：统计 / Trace / GEPA 历史 / 失败规则学习。
 #[derive(Clone, Default)]
-pub(crate) struct ToolObservabilityListener {
+pub struct ToolObservabilityListener {
     inner: Arc<Mutex<ObservabilityState>>,
 }
 
 impl ToolObservabilityListener {
-    /// 设置使用统计追踪器（由 ToolRegistry::with_usage_stats 委托）。
+    /// 设置使用统计追踪器（装配期由 `ToolPipelineFactory` 接线）。
     pub fn set_usage_stats(&self, stats: Arc<UsageStats>) {
         self.inner
             .lock()
@@ -44,7 +47,7 @@ impl ToolObservabilityListener {
             .usage_stats = Some(stats);
     }
 
-    /// 设置 Trace 收集器（由 ToolRegistry::with_trace_collector 委托）。
+    /// 设置 Trace 收集器（装配期由 `ToolPipelineFactory` 接线）。
     pub fn set_trace_collector(&self, collector: Arc<TraceCollector>) {
         self.inner
             .lock()
@@ -52,7 +55,7 @@ impl ToolObservabilityListener {
             .trace_collector = Some(collector);
     }
 
-    /// 设置规则记录器（由 ToolRegistry::with_rule_recorder 委托）。
+    /// 设置规则记录器（装配期由 `ToolPipelineFactory` 接线）。
     pub fn set_rule_recorder(&self, recorder: Arc<RuleRecorder>) {
         self.inner
             .lock()
@@ -60,7 +63,7 @@ impl ToolObservabilityListener {
             .rule_recorder = Some(recorder);
     }
 
-    /// 设置执行记录日志（GEPA 数据层；由 ToolRegistry::with_execution_log 委托）。
+    /// 设置执行记录日志（GEPA 数据层；装配期由 `ToolPipelineFactory` 接线）。
     pub fn set_execution_log(&self, log: Arc<ExecutionLog>) {
         self.inner
             .lock()
@@ -68,7 +71,7 @@ impl ToolObservabilityListener {
             .execution_log = Some(log);
     }
 
-    /// 取使用统计引用（self_check 技能统计；None = 未配置）。
+    /// 取使用统计引用（诊断 / 装配自检；None = 未配置）。
     pub fn usage_stats_ref(&self) -> Option<Arc<UsageStats>> {
         self.inner
             .lock()
@@ -129,9 +132,9 @@ impl ToolPostExecuteListener for ToolObservabilityListener {
                 session_id,
                 &call.function.name,
                 // 截断单点：common::truncate（禁止模块内复制实现）
-                &crate::common::truncate::truncate_utf8_boundary(
+                &tianyan::common::truncate::truncate_utf8_boundary(
                     arguments,
-                    super::TRACE_PARAMS_MAX_BYTES,
+                    tianyan::agent::TRACE_PARAMS_MAX_BYTES,
                 ),
                 elapsed.as_millis() as i64,
                 success,
@@ -196,7 +199,7 @@ impl ToolPostExecuteListener for ToolObservabilityListener {
                         &abstract_text,
                         &detail_text,
                         "tool-execution",
-                        crate::observability::rule_recorder::FailureKind::Logic,
+                        tianyan::observability::rule_recorder::FailureKind::Logic,
                     )
                     .await
                 {
@@ -214,9 +217,9 @@ impl ToolPostExecuteListener for ToolObservabilityListener {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::common::types::{FunctionCall, ToolCallType};
-    use crate::db::Database;
     use std::time::Duration;
+    use tianyan::common::types::{FunctionCall, ToolCallType};
+    use tianyan::db::Database;
 
     fn tool_call(name: &str, arguments: &str) -> ToolCall {
         ToolCall {

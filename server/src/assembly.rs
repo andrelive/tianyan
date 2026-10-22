@@ -69,6 +69,12 @@ pub use tianyan::context::{ContextPort, ContextServices};
 // server 库（破 D2-1）。
 pub use tianyan::model::{ConnectionProbe, ProviderEmbedServices, ProviderLlmServices};
 
+// 工具管线的**契约面**（ADR-049 期 3-T5）：`ToolPostExecuteListener` 与接线形状
+// （`ToolPipelineWiring`）住在 core 的 `agent::tool_registry::pipeline`——管线是 K1 的
+// 第 4 阶段（注册表按注册顺序调用监听器），契约搬走会让内核反向依赖插件。此处
+// re-export 成插槽契约：插件（生产）、装配层（注入）与本库（转交 builder）三方共用。
+pub use tianyan::agent::{ToolPipelineFactory, ToolPipelineWiring};
+
 /// 聊天 / 视觉 provider 工厂（**装配层注入**，ADR-049 期 2 序 6）。
 ///
 /// `Arc<dyn Fn(&ModelsConfig) -> Result<ProviderLlmServices>>`：参数是模型配置（借用；
@@ -250,15 +256,22 @@ pub type SkillReviewFactory = Arc<
 
 /// 启装配所需的外部能力集合（`None` = 该扩展点未装配，走降级路径）。
 ///
-/// 目前十个插槽：插件工具清单（[`ToolPluginFactory`]）、向量存储
+/// 目前十一个插槽：插件工具清单（[`ToolPluginFactory`]）、向量存储
 /// （[`VectorStorageFactory`]）、结构化存储（[`StorageBackendFactory`]）、
 /// 内置任务清单（[`TaskFactory`]）、审批门控（[`ApprovalGateFactory`]）、
 /// 上下文策略（[`ContextFactory`]）、任务自审（[`TaskReviewerFactory`]）、
 /// 技能复审（[`SkillReviewFactory`]）、聊天/视觉 provider（[`ProviderLlmFactory`]）、
-/// 嵌入 provider（[`ProviderEmbedFactory`]）。用
+/// 嵌入 provider（[`ProviderEmbedFactory`]）、工具管线（[`ToolPipelineFactory`]）。用
 /// **一个结构**而不是给每个启动入口再加一个参数：入口变体的数量是组合爆炸
 /// （listener × 关闭信号 × 插件 × 向量 × 存储 × 任务），打包后只需「默认装配」与
 /// 「装配齐全」两类入口。
+///
+/// ★ **平铺表的治理建议**（ADR-049 期 3-T5 遗留 1，期 4 执行）：11 个平铺字段 + 11 个
+/// `with_*` + 11 个 `pub(crate)` 访问器已经到「查一眼要滚三屏」的程度。期 4 收敛时应
+/// 按**插件**分组（一个插件一份能力结构，如 `struct ToolPlugins { fs, code, todo, … }`）
+/// 或改成**清单结构**（`Vec<AssemblyEntry>`，由插件 crate 各自提供 `entry()`，装配层只
+/// 拼接），而不是继续平铺；`AppState::new` 的同名参数列表同理。本批**不实施**，只留判据
+/// 与方向（详见 ADR-049 期 3-T5 实施记录）。
 #[derive(Clone, Default)]
 pub struct AssemblyServices {
     plugin_factory: Option<ToolPluginFactory>,
@@ -271,6 +284,7 @@ pub struct AssemblyServices {
     skill_review_factory: Option<SkillReviewFactory>,
     provider_llm_factory: Option<ProviderLlmFactory>,
     provider_embed_factory: Option<ProviderEmbedFactory>,
+    tool_pipeline_factory: Option<ToolPipelineFactory>,
 }
 
 impl AssemblyServices {
@@ -334,6 +348,16 @@ impl AssemblyServices {
     /// 装配嵌入 provider 工厂（`app` / `tauri` 用：`tianyan-provider-embed`）。
     pub fn with_provider_embed_factory(mut self, factory: ProviderEmbedFactory) -> Self {
         self.provider_embed_factory = Some(factory);
+        self
+    }
+
+    /// 装配工具管线工厂（`app` / `tauri` 用：`tianyan-tool-pipeline`）。
+    ///
+    /// 观测监听器（统计 / Trace / GEPA 执行记录 / 失败规则学习）与超预算输出落盘
+    /// （ADR-047）的实现搬出 core 后由本插槽注入——`AgentBuilder::build` 按工厂返回的
+    /// **有序**清单注册（观测在前、落盘在后，见 [`ToolPipelineWiring`]）。
+    pub fn with_tool_pipeline_factory(mut self, factory: ToolPipelineFactory) -> Self {
+        self.tool_pipeline_factory = Some(factory);
         self
     }
 
@@ -409,6 +433,24 @@ impl AssemblyServices {
     /// 嵌入 provider 工厂（`None` = 使用 core 的「未配置」降级服务 + 装配期告警）。
     pub(crate) fn provider_embed_factory(&self) -> Option<ProviderEmbedFactory> {
         self.provider_embed_factory.clone()
+    }
+
+    /// 工具管线工厂（`None` = 不装配任何 post-execute 监听器）。
+    ///
+    /// 与其余插槽的 `pub(crate)` 访问器同处：工厂只由本库的组合根（`AppState::new` /
+    /// `reload_agent` → `AgentBuilder`）取用——装配层负责**注入**，不负责调用。
+    ///
+    /// **未装配时的降级语义**：`AgentBuilder::build` **一个监听器都不注册**——超预算
+    /// 工具输出不再落盘（只受既有 `executor::truncate` 截断限制）、使用统计 / Trace 工具
+    /// span / GEPA 执行记录 / 失败规则学习全停；`build` 打一条 `warn!` 指路。
+    ///
+    /// 为什么允许降级而不硬失败：① 缺的是**优化与观测**，不是能力——工具照常执行、
+    /// 结果照常返回；② `create_app`（构造对象图，47 处 lib 单测 + 嵌入式）不要求装配，
+    /// `Err` 等于删入口；③ 与 ADR-047「落盘失败保持原结果（best effort）」同一档语义。
+    /// 可见性由装配期 `warn!` 兜底（ADR-038：静默降级的症状会是「统计面板再也不涨 +
+    /// 大输出重新撑爆上下文」，看不出是降级还是没触发）。
+    pub(crate) fn tool_pipeline_factory(&self) -> Option<ToolPipelineFactory> {
+        self.tool_pipeline_factory.clone()
     }
 
     /// 是否装配了上下文策略工厂（**启动服务的硬前置**，见 `start_server_inner`）。

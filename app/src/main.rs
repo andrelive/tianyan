@@ -41,7 +41,7 @@ use tianyan::vfs::{StorageBackend, VectorStorage};
 use tianyan_server::{
     start_server_with_assembly, ApprovalGateFactory, AssemblyServices, ContextFactory,
     ProviderEmbedFactory, ProviderLlmFactory, SkillReviewFactory, StorageBackendFactory,
-    TaskFactory, TaskReviewerFactory, ToolPluginFactory, VectorStorageFactory,
+    TaskFactory, TaskReviewerFactory, ToolPipelineFactory, ToolPluginFactory, VectorStorageFactory,
 };
 use tianyan_storage_sqlite::{LocalFileBackend, SqliteBackend};
 use tianyan_storage_vector::LanceDbVectorStore;
@@ -217,8 +217,21 @@ fn provider_embed_factory() -> ProviderEmbedFactory {
     Arc::new(|config: &tianyan::config::ModelsConfig| tianyan_provider_embed::services(config))
 }
 
+/// 工具管线工厂（`plugins/tool-pipeline`，ADR-049 期 3-T5）。
+///
+/// 同款类型擦除：server 库只认 [`ToolPipelineFactory`]（`Arc<dyn Fn>`），观测监听器
+/// （统计 / Trace / GEPA 执行记录 / 失败规则学习）与输出落盘（ADR-047）只在本包
+/// （经插件）出现。
+///
+/// **★ 顺序是语义**（ADR-047）：工厂返回的顺序即注册顺序——观测在前（数据层须见
+/// 原始结果）、落盘在后（它是改写者）。顺序在插件里一行可见
+/// （`tianyan_tool_pipeline::ToolPipeline::into_listeners`），并由插件侧测试锁定。
+fn tool_pipeline_factory() -> ToolPipelineFactory {
+    tianyan_tool_pipeline::pipeline_factory()
+}
+
 /// 完整装配（插件工具清单 + 向量存储 + 结构化存储 + 内置任务 + 审批门控 + 上下文策略
-/// + 任务自审 + 技能复审 + 聊天/视觉 provider + 嵌入 provider）。
+/// + 任务自审 + 技能复审 + 聊天/视觉 provider + 嵌入 provider + 工具管线）。
 fn assembly() -> AssemblyServices {
     AssemblyServices::new()
         .with_plugin_factory(plugin_factory())
@@ -231,6 +244,7 @@ fn assembly() -> AssemblyServices {
         .with_skill_review_factory(skill_review_factory())
         .with_provider_llm_factory(provider_llm_factory())
         .with_provider_embed_factory(provider_embed_factory())
+        .with_tool_pipeline_factory(tool_pipeline_factory())
 }
 
 #[tokio::main]

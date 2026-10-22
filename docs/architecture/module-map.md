@@ -26,6 +26,8 @@
 | `core/` | `tianyan-core` (lib: `tianyan`) | 纯库 | `core/src/` |
 | `server/` | `tianyan-server` | Axum HTTP 服务 | `server/src/` |
 | `service/config/` | `tianyan-service-config` | 服务层：配置加载 / 持久化 / 迁移 / 校验 / 向导 DTO（ADR-049 期 3-T4） | `service/config/src/` |
+| `app/` | `tianyan-app` (bin: `tianyan-server`) | 装配器：唯一 `use` 具体插件类型之处（ADR-049 期 1） | `app/src/` |
+| `plugins/*` | `tianyan-{tools-fs,tools-code,tools-todo,tools-web,storage-vector,storage-sqlite,task-builtin,task-evolution,policy-approval,policy-context,policy-review,provider-client,provider-llm,provider-embed,tool-pipeline}` | 编译期插件（只依赖 `core`，彼此零互赖） | `plugins/*/src/` |
 | `gui-vite/` | - | React TS 前端 | `gui-vite/src/` |
 | `tauri/` | `tianyan-tauri` | Tauri 桌面包装 | `tauri/src/` |
 | `mcp/` | `tianyan-mcp` | MCP 协议客户端 | `mcp/src/` |
@@ -38,7 +40,7 @@
 
 | 子模块 | 位置 | 职责 | 关键文件 |
 |--------|------|------|---------|
-| `agent` | `core/src/agent/` | Agent 协调器 + AgentLoop + ToolRegistry + 会话状态 + 后台任务（ADR-026：委托只支持异步、双信号量排队 20+40、SQL 权威注册表 + 3 天 TTL（**持久化仅委托；命令任务有意进程内保留**——§5 D 边界澄清）、子智能体会话消息落库 + 事件通道）；动态工具：`schedule_task`（server 自有能力，经 `AppState::component_dynamic_tools` 注入）；`todo`/`goal` **已迁至 `plugins/tools-todo`**（ADR-049 期 2 序 1），与 `tools-fs`/`tools-code`/`tools-web` 一样经 `PluginServices` + `ToolPluginFactory` 在装配层注入（**首建与每次 reload 共用同一注入点**——否则热重载会丢全部插件工具）；ToolRegistry 工具执行走可插拔管线（`tool_registry/pipeline.rs`：pre-execute 监听器/单调守卫/post-execute 监听器，DSH A1/A4 吸收）+ 内置可观测性监听器（`tool_registry/observability.rs`：统计/Trace/GEPA 历史/规则学习）；内置工具元数据单一事实源（`tool_registry/builtin_tools.rs`：schema/展示意图） | `coordinator.rs`, `loop.rs`, `loop_tests.rs`, `tool_registry/`（含 `pipeline.rs`、`observability.rs`、`builtin_tools.rs`）, `session_state.rs`, `builder.rs`, `background.rs` |
+| `agent` | `core/src/agent/` | Agent 协调器 + AgentLoop + ToolRegistry + 会话状态 + 后台任务（ADR-026：委托只支持异步、双信号量排队 20+40、SQL 权威注册表 + 3 天 TTL（**持久化仅委托；命令任务有意进程内保留**——§5 D 边界澄清）、子智能体会话消息落库 + 事件通道）；动态工具：`schedule_task`（server 自有能力，经 `AppState::component_dynamic_tools` 注入）；`todo`/`goal` **已迁至 `plugins/tools-todo`**（ADR-049 期 2 序 1），与 `tools-fs`/`tools-code`/`tools-web` 一样经 `PluginServices` + `ToolPluginFactory` 在装配层注入（**首建与每次 reload 共用同一注入点**——否则热重载会丢全部插件工具）；ToolRegistry 工具执行走可插拔管线（`tool_registry/pipeline.rs`：pre-execute 监听器/单调守卫/post-execute 监听器，DSH A1/A4 吸收）+ **管线接线契约**（`ToolPipelineWiring` / `ToolPipelineFactory`：装配层注入、`AgentBuilder` 按工厂返回的**有序**清单注册）；**监听器实现已出 core**（ADR-049 期 3-T5 → `plugins/tool-pipeline`：观测监听器（统计/Trace/GEPA 历史/规则学习）+ 输出落盘（ADR-047）+ 工具目录渲染）——注册表**不再自带任何监听器**（未装配 = 不落盘 + 无观测 + 告警）；内置工具元数据单一事实源（`tool_registry/builtin_tools.rs`：schema/展示意图） | `coordinator.rs`, `loop.rs`, `loop_tests.rs`, `tool_registry/`（含 `pipeline.rs`、`builtin_tools.rs`）, `session_state.rs`, `builder.rs`, `background.rs` |
 | `common` | `core/src/common/` | 通用类型、错误处理、日志配置、token 估算、`StructuredMessage`、多模态片段（`ContentPart`/`ImageUrl`）；横切单点：UTF-8 截断（`truncate.rs`）、HTTP 客户端工厂（`http.rs`） | `error.rs`, `logging.rs`, `token_estimator.rs`, `truncate.rs`, `http.rs`, `types/`（含 `content_part.rs`） |
 | `config` | `core/src/config/` | 配置**结构与全局槽位**：`TianyanConfig` + 全部子 Config 及其 `Default`（内核与插件的共同构造参数）、预设数据表 `presets.rs`（server 配置 API 展示预设）、安全字段归一（ADR-033）、`get_config()` / `set_config()` / `try_get_config()`（OnceLock 槽位，装配层注入）。**加载 / 持久化 / 迁移 / 校验 / 向导已出 core**（ADR-049 期 3-T4 → `service/config`：`loader.rs` / `migration.rs` / `validation.rs` / `wizard.rs`） | `mod.rs`, `agent.rs`, `model.rs`, `presets.rs`, `security.rs`, `storage.rs` |
 | `db` | `core/src/db/` | **统一写入门面**（ADR-020）：`Database` 门面（单连接 + schema 集中）+ `SqliteDb`（ADR-005 连接）+ 业务域 Repository（stats/trace/execution/usage）；**只依赖 `common`**（纯底层，无领域依赖） | `mod.rs`, `sqlite_db.rs`, `stats.rs`, `trace.rs`, `execution.rs`, `usage.rs` |
@@ -111,6 +113,9 @@
 | `AgentHarness` wrapper | 已删除 | 功能由 `Agent` 直接持有 |
 | `AgentSkills` wrapper | 已删除 | 功能由 `Agent` 直接持有 |
 | `hooks/use-debounced-value.ts` | 已删除 | 浅 hook 内联（唯一调用点 KnowledgeSearchTab 直接实现） |
+| `agent/tool_registry/observability.rs` | 已迁出 | `plugins/tool-pipeline/src/observability.rs`（观测监听器：统计 / Trace / GEPA / 规则学习；ADR-049 期 3-T5） |
+| `agent/tool_registry/spill.rs` | 已迁出 | `plugins/tool-pipeline/src/spill.rs`（ADR-047 超预算输出落盘；期 3-T5） |
+| `agent/tool_catalog.rs` | 已迁出 | `plugins/tool-pipeline/src/tool_catalog.rs`（工具目录渲染 + freshness 口径；期 3-T5；`cargo catalog-check` 入口改指插件） |
 
 > **注**：存储后端已 trait 化（`StorageBackend` seam，ADR-005）。**默认后端为 `SqliteBackend`**（`config/storage.rs` 的 `#[default] Sqlite`）；`LocalFileBackend` 保留为可选后端。两者的**实现**在 `plugins/storage-sqlite`（ADR-049 序 4），`config.storage.backend` 的 adapter 选择在装配层。
 

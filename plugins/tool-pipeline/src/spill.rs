@@ -19,6 +19,11 @@
 //! 之后）。观测监听器要把**原始结果**写进 Trace / GEPA 数据层
 //! （`ExecutionHistory.result = format!("{v}")`），spill 是改写者，必须排最后，
 //! 否则数据层看到的是改写后的结果，统计与演化数据失真。
+//!
+//! **ADR-049 期 3-T5 迁入本 crate**（原 `core/src/agent/tool_registry/spill.rs`）：
+//! 判定/阈值/落盘文案/日志逐字未改，只把 `crate::…` 改成 `tianyan::…`。`configure`
+//! 由 `pub(crate)`（注册表字段委托）改由本 crate 的 [`crate::pipeline`] 调用——同样的
+//! 一次调用，只是调用者从「注册表的 `with_tool_output`」换成「装配期工厂」。
 
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -26,11 +31,11 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use serde_json::{json, Value};
 
-use super::pipeline::ToolPostExecuteListener;
-use crate::common::error::TianyanError;
-use crate::config::ToolOutputConfig;
-use crate::executor::truncate::truncate_spill_with;
-use crate::model::types::ToolCall;
+use tianyan::agent::ToolPostExecuteListener;
+use tianyan::common::error::TianyanError;
+use tianyan::config::ToolOutputConfig;
+use tianyan::executor::truncate::truncate_spill_with;
+use tianyan::model::types::ToolCall;
 
 /// 不落盘的工具（结果可随时重取，或已有落盘机制）。
 ///
@@ -60,7 +65,7 @@ struct SpillState {
 
 /// 内置工具输出 spill 监听器（ADR-047）。
 #[derive(Clone, Debug)]
-pub(crate) struct ToolOutputSpillListener {
+pub struct ToolOutputSpillListener {
     inner: Arc<Mutex<SpillState>>,
 }
 
@@ -79,7 +84,7 @@ impl Default for ToolOutputSpillListener {
 }
 
 impl ToolOutputSpillListener {
-    /// 配置落盘目录与预算（由 `ToolRegistry::with_tool_output` 委托）。
+    /// 配置落盘目录与预算（装配期由 [`crate::pipeline`] 调用）。
     ///
     /// 阈值下限钳到 1，避免 0 阈值把一切结果都送去落盘。
     pub(crate) fn configure(&self, dir: PathBuf, config: &ToolOutputConfig) {

@@ -19,11 +19,13 @@
 
 use std::sync::Arc;
 
-use tianyan::agent::{tool_catalog, ToolRegistry};
+use tianyan::agent::ToolRegistry;
 use tianyan::executor::SecurityPolicy;
 use tianyan::goals::GoalStore;
 use tianyan::todos::TodoStore;
 use tianyan_server::scheduled_tasks::tool::ScheduleTaskTool;
+// 目录渲染与 freshness 比较口径（ADR-049 期 3-T5：实现已出 core，随工具管线插件走）。
+use tianyan_tool_pipeline::tool_catalog;
 
 #[tokio::main]
 async fn main() {

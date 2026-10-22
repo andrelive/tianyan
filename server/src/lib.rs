@@ -47,7 +47,7 @@ pub use assembly::{
     ApprovalGateFactory, AssemblyServices, ContextFactory, ContextPort, ContextServices,
     ProviderEmbedFactory, ProviderEmbedServices, ProviderLlmFactory, ProviderLlmServices,
     SkillReviewFactory, StorageBackendFactory, TaskFactory, TaskRegistration, TaskReviewerFactory,
-    TaskServices, VectorStorageFactory,
+    TaskServices, ToolPipelineFactory, ToolPipelineWiring, VectorStorageFactory,
 };
 pub use model_services::{create_model_services, ModelServices};
 
@@ -472,6 +472,10 @@ async fn create_app_inner(
     // 上下文策略（ADR-049 期 3-T2）：同一个 `Option<Factory>` 也交给组合根——能力集合
     // 里要用 `AppState` 内部创建的 `usage_stats` 与共享的模型服务，在本函数里组装会
     // 多一份实例（统计分流）。
+    //
+    // 工具管线（ADR-049 期 3-T5）：观测 / 落盘的实现已出 core，工厂同样交给组合根
+    // → `AgentBuilder`（接线值 `usage_stats` / `trace_collector` / `execution_log`
+    // 都是 `AppState`/builder 内部的同一份实例）。
     let state = AppState::new(
         config,
         vfs,
@@ -482,6 +486,7 @@ async fn create_app_inner(
         assembly.task_reviewer_factory(),
         assembly.provider_llm_factory(),
         assembly.provider_embed_factory(),
+        assembly.tool_pipeline_factory(),
     )
     .await?;
 

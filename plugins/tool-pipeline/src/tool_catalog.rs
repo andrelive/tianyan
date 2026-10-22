@@ -1,18 +1,24 @@
 //! 工具目录渲染与 freshness 校验（生成式文档：DSH gen-tool-catalog 纪律吸收）。
 //!
-//! **运行时注册是 schema 唯一真相源**：目录由 [`ToolRegistry`] 实际注册的工具
+//! **运行时注册是 schema 唯一真相源**：目录由 `ToolRegistry` 实际注册的工具
 //! 渲染（内置 + 动态注册的工具）。
 //!
-//! 权威生成器在 **server 侧**（`server/examples/tool_catalog.rs`）——只有它能
-//! 同时装配 core 内置工具与 server 组件工具（`todo`/`goal`/`schedule_task`，
-//! ADR-003 组件工具化）。此前生成器在 core 侧，故那三个工具**不在目录内**，
-//! 既没有文档覆盖、也不受 freshness 门禁保护（其 schema 又是手写的，两个保险
-//! 都缺——`todo` 的「单条快捷形态」正是在这种土壤里长出来的）。
+//! 权威生成器在**装配层**（`app/examples/tool_catalog.rs`）——只有它能同时装配
+//! core 内置工具、插件工具（`tools-fs` / `tools-code` / `tools-todo` / `tools-web`）
+//! 与 server 组件工具（`schedule_task`，ADR-003 组件工具化）。此前生成器在 core 侧，
+//! 故组件工具**不在目录内**，既没有文档覆盖、也不受 freshness 门禁保护（其 schema
+//! 又是手写的，两个保险都缺——`todo` 的「单条快捷形态」正是在这种土壤里长出来的）。
+//!
+//! **ADR-049 期 3-T5 迁入本 crate**（原 `core/src/agent/tool_catalog.rs`）：渲染表头、
+//! 排序口径、`|` 转义、平台提示词归一化逐字未改，只把 `crate::…` 改成 `tianyan::…`。
+//! 搬它的理由与两个监听器同源：**目录是工具集的对外呈现**（B 级），改一句表头/列序
+//! 不该重编内核；`cargo catalog-check` 的入口随之从 `tianyan::agent::tool_catalog`
+//! 变成 `tianyan_tool_pipeline::tool_catalog`（`app/examples/tool_catalog.rs` 一行导入）。
 
 use std::path::Path;
 
-use super::ToolRegistry;
-use crate::model::types::ToolPresentation;
+use tianyan::agent::ToolRegistry;
+use tianyan::model::types::ToolPresentation;
 
 /// 平台描述归一化（freshness 跨平台比较用）：`execute_command` 的描述含
 /// **动态 shell 事实**（`executor::shell::HINT_TEMPLATES`——随执行底层而变，
@@ -23,7 +29,7 @@ use crate::model::types::ToolPresentation;
 pub fn normalize_platform_hints(s: &str) -> String {
     const PLACEHOLDER: &str = "<平台提示>";
     let mut out = s.to_string();
-    for hint in crate::executor::shell::HINT_TEMPLATES {
+    for hint in tianyan::executor::shell::HINT_TEMPLATES {
         out = out.replace(*hint, PLACEHOLDER);
         // 产物表格把描述里的 `|` 转义为 `\|`——PS 系提示词含 `&& / ||`，
         // 故仓库产物中的 hint 是**转义形态**。不用转义形态再替换一次，
@@ -97,6 +103,7 @@ pub fn check(existing_path: &Path, generated: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tianyan::executor::SecurityPolicy;
 
     /// 判别力：归一化必须抹平"不同 shell 事实"的差异——否则跨平台/跨配置的
     /// freshness 门禁恒红（CI 上的"目录偏移"实为平台差异）。
@@ -105,14 +112,14 @@ mod tests {
         // 两种形态都要抹平：产物表格会把 `|` 转义为 `\|`（PS 系 hint 含
         // `&& / ||`）——只处理未转义形态会让跨平台门禁恒红。
         for (label, hint) in [
-            ("HINT_PWSH", crate::executor::shell::HINT_PWSH),
+            ("HINT_PWSH", tianyan::executor::shell::HINT_PWSH),
             (
                 "HINT_WINDOWS_POWERSHELL",
-                crate::executor::shell::HINT_WINDOWS_POWERSHELL,
+                tianyan::executor::shell::HINT_WINDOWS_POWERSHELL,
             ),
-            ("HINT_CMD", crate::executor::shell::HINT_CMD),
+            ("HINT_CMD", tianyan::executor::shell::HINT_CMD),
         ] {
-            let unix_catalog = format!("head\n{}\ntail", crate::executor::shell::HINT_BASH);
+            let unix_catalog = format!("head\n{}\ntail", tianyan::executor::shell::HINT_BASH);
             for raw in [hint, &hint.replace('|', "\\|")] {
                 let windows_catalog = format!("head\n{raw}\ntail");
                 if raw == hint {
@@ -132,7 +139,7 @@ mod tests {
 
     #[tokio::test]
     async fn render_lists_registered_tools_sorted_with_presentation() {
-        let registry = ToolRegistry::new(crate::executor::SecurityPolicy::default());
+        let registry = ToolRegistry::new(SecurityPolicy::default());
         let md = render(&registry).await;
         assert!(md.contains("个工具"), "{md}");
         // 注：`symbol_outline` / `repo_map` / `grep` 已迁至 `plugins/tools-code`

@@ -83,6 +83,11 @@ tianyan-policy-review = { path = "../plugins/policy-review" }
 # 上下文策略、评审器同一条纪律）。无循环（两个插件只依赖 core）。
 tianyan-provider-llm = { path = "../plugins/provider-llm" }
 tianyan-provider-embed = { path = "../plugins/provider-embed" }
+# 工具管线实现（ADR-049 期 3-T5）：集成测试的 `test_assembly()` 注入**真实**观测
+# 监听器与输出落盘（否则一个 post-execute 监听器都不注册，集成测试测不到生产形态的
+# 执行出口——与序 4「不要用 `AssemblyServices::default()` 驱动集成测试」同一条纪律）。
+# 同样无循环（插件只依赖 core，不依赖 server）。
+tianyan-tool-pipeline = { path = "../plugins/tool-pipeline" }
 # core 的测试替身（`MockVfs` / `MockChatService`）作为**特性构建**打开：本库的插槽
 # 测试要构造 `ContextServices`（含 `Arc<dyn VirtualFileSystem>`），不打开就只能
 # 复制一份替身（两份实现同时漂移）。仅测试构建生效，`cargo tree -p tianyan-server`

@@ -46,6 +46,9 @@ tianyan-policy-review = { path = "../plugins/policy-review" }
 # （聊天/视觉 + 嵌入；server 库只认 core 的能力集合与 `ConnectionProbe` 契约）。
 tianyan-provider-llm = { path = "../plugins/provider-llm" }
 tianyan-provider-embed = { path = "../plugins/provider-embed" }
+# 工具管线实现（ADR-049 期 3-T5）：观测监听器 + 超预算输出落盘（ADR-047）搬出 core
+# 后由本包注入（与 `app` 同一份插件工厂 `pipeline_factory()`）。无循环依赖。
+tianyan-tool-pipeline = { path = "../plugins/tool-pipeline" }
 
 # Tauri framework
 tauri = { version = "2.2", features = ["tray-icon", "devtools"] }

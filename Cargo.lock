@@ -9245,6 +9245,7 @@ dependencies = [
  "tianyan-storage-vector",
  "tianyan-task-builtin",
  "tianyan-task-evolution",
+ "tianyan-tool-pipeline",
  "tianyan-tools-code",
  "tianyan-tools-fs",
  "tianyan-tools-todo",
@@ -9412,6 +9413,7 @@ dependencies = [
  "tianyan-storage-sqlite",
  "tianyan-task-builtin",
  "tianyan-task-evolution",
+ "tianyan-tool-pipeline",
  "tokio",
  "tokio-stream",
  "tower",
@@ -9529,6 +9531,7 @@ dependencies = [
  "tianyan-storage-vector",
  "tianyan-task-builtin",
  "tianyan-task-evolution",
+ "tianyan-tool-pipeline",
  "tianyan-tools-code",
  "tianyan-tools-fs",
  "tianyan-tools-todo",
@@ -9537,6 +9540,18 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "url",
+]
+
+[[package]]
+name = "tianyan-tool-pipeline"
+version = "0.7.0"
+dependencies = [
+ "async-trait",
+ "serde_json",
+ "tempfile",
+ "tianyan-core",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]

@@ -2,7 +2,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::agent::r#loop::{AgentLoop, AgentLoopConfig};
-use crate::agent::tool_registry::ToolRegistry;
+use crate::agent::tool_registry::{ToolPipelineFactory, ToolPipelineWiring, ToolRegistry};
 use crate::agent::{RoleRegistry, RoleRouter};
 use crate::common::error::{Result, TianyanError};
 use crate::config::AgentConfig;
@@ -93,6 +93,9 @@ pub struct AgentBuilder {
     task_results_dir: Option<PathBuf>,
     /// 工具输出落盘（ADR-047：超预算结果落盘目录 + 预算；None 时不落盘）。
     tool_output: Option<(PathBuf, crate::config::ToolOutputConfig)>,
+    /// 工具管线工厂（ADR-049 期 3-T5：观测监听器 + 输出落盘的实现已出 core；
+    /// None = 一个管线监听器都不装配 → 不落盘、不记统计/Trace/GEPA/规则，并告警一次）。
+    tool_pipeline: Option<ToolPipelineFactory>,
     /// 用户问题服务（ask_user 同步等待用户回答；None 时工具不可用）。
     user_questions: Option<Arc<crate::agent::user_questions::UserQuestionService>>,
     /// 子智能体消息流事件通道（ADR-026：面板实时流式；None 时静默）。
@@ -132,6 +135,7 @@ impl AgentBuilder {
             command_logs_dir: None,
             task_results_dir: None,
             tool_output: None,
+            tool_pipeline: None,
             role_registry: None,
             role_router: None,
             user_questions: None,
@@ -231,6 +235,17 @@ impl AgentBuilder {
         config: crate::config::ToolOutputConfig,
     ) -> Self {
         self.tool_output = Some((dir, config));
+        self
+    }
+
+    /// 注入工具管线工厂（ADR-049 期 3-T5）。
+    ///
+    /// 观测（统计 / Trace / GEPA / 规则学习）与输出落盘（ADR-047）的**实现**已出 core
+    /// （`plugins/tool-pipeline`）：装配层把插件的 `pipeline_factory()` 塞进
+    /// `AssemblyServices`，组合根再经本方法交给 builder。**未注入**的降级语义与顺序纪律
+    /// 见 [`Self::build`] 的注册处（一个监听器都不注册 + `warn!` 指路；不 panic、不 `Err`）。
+    pub fn with_tool_pipeline_factory(mut self, factory: ToolPipelineFactory) -> Self {
+        self.tool_pipeline = Some(factory);
         self
     }
 
@@ -475,7 +490,6 @@ impl AgentBuilder {
             .with_model_service(model_service.clone())
             .with_model(&chat_model)
             .with_metrics(metrics.clone())
-            .with_rule_recorder(rule_recorder)
             .with_session_manager(session_manager.clone());
         // 审批门控只在装配了就注入（未装配 → `ToolContext.approval_gate` 保持 None，
         // `ensure_approved` 走「未装配直接放行」分支；见上方告警）
@@ -489,10 +503,6 @@ impl AgentBuilder {
         // 委托结果落盘目录（U2：完整结果写文件，完成通知携带路径）
         if let Some(dir) = self.task_results_dir {
             tool_registry = tool_registry.with_task_results_dir(dir);
-        }
-        // 工具输出落盘（ADR-047：超预算结果落盘，会话只留预览 + 路径）
-        if let Some((dir, config)) = self.tool_output.clone() {
-            tool_registry = tool_registry.with_tool_output(dir, &config);
         }
         // 并发配置（ADR-026）：委托双信号量（运行/排队）+ 终端命令上限
         tool_registry = tool_registry.with_concurrency(
@@ -576,6 +586,36 @@ impl AgentBuilder {
         // 用户问题服务（ask_user 同步等待用户回答）
         if let Some(ref service) = self.user_questions {
             tool_registry = tool_registry.with_user_questions(service.clone());
+        }
+
+        // 工具管线（ADR-049 期 3-T5）：观测监听器（统计 / Trace / GEPA / 规则学习）与输出
+        // 落盘（ADR-047）的实现已出 core（`plugins/tool-pipeline`），经工厂注入。
+        //
+        // ★ **顺序是语义**（ADR-047）：工厂返回的顺序即注册顺序——观测监听器在前
+        // （数据层须见**原始结果**），输出落盘在后（它是**改写者**）。顺序锁在插件侧
+        // `spill_tests::test_pipeline_order_observability_sees_original_result`。
+        //
+        // 未装配（`None`）→ **一个监听器都不注册**：不落盘、观测全停；不 panic、不返回
+        // `Err`（`create_app` 的 47 处单测与嵌入式靠「不要求装配」才能起实例），
+        // 可见性由下方 `warn!` 兜底（ADR-038）。
+        match self.tool_pipeline.as_ref() {
+            Some(factory) => {
+                let wiring = ToolPipelineWiring {
+                    usage_stats: self.usage_stats.clone(),
+                    trace_collector: self.trace_collector.clone(),
+                    rule_recorder: Some(rule_recorder),
+                    execution_log: self.execution_log.clone(),
+                    tool_output: self.tool_output.clone(),
+                };
+                for listener in factory(&wiring) {
+                    tool_registry.register_post_execute_listener(listener);
+                }
+            }
+            None => tracing::warn!(
+                "未装配工具管线工厂（ToolPipelineFactory）：工具调用不记统计 / Trace / GEPA \
+                 执行记录，失败不沉淀规则，超预算工具输出不落盘（只受既有截断限制）——\
+                 生产装配请用 create_app_with_assembly / start_server_with_assembly"
+            ),
         }
 
         let mut agent_loop = AgentLoop::new(

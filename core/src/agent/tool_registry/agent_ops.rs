@@ -386,14 +386,14 @@ impl ToolRegistry {
 
     /// 执行 self_check 工具：查询内部指标。
     ///
-    /// 技能激活统计读 UsageStats（持久化权威，ToolObservabilityListener 逐次记录）；
-    /// AgentMetrics 不再维护第二份内存计数（E1：口径统一、重启不丢）。
+    /// 技能激活统计读 UsageStats（持久化权威，逐次记录由管线观测监听器承担——实现已出
+    /// core，`plugins/tool-pipeline`）；AgentMetrics 不再维护第二份内存计数（E1）。
     pub(crate) async fn execute_self_check(&self) -> Result<serde_json::Value, TianyanError> {
         let metrics = self.metrics.as_ref().ok_or_else(|| {
             TianyanError::Custom(format!("tool: 执行失败：{}", "AgentMetrics not configured"))
         })?;
         let mut health = metrics.query_harness_health().await;
-        let top_skills = match self.observability.usage_stats_ref() {
+        let top_skills = match self.usage_stats.as_ref() {
             Some(stats) => stats.query_top_skills(20).await,
             None => Vec::new(),
         };

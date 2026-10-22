@@ -1347,6 +1347,151 @@ ADR-049 期 2 的序 6（当时跳过、留待最后）在期 3-T3 之后补做�
   4. `service/config` 的目录形态（`service/` 下按域分 crate）是**新约定**：期 4 若把
      `service-snapshot`（ADR-006 的独立存储语义）也切成 crate，应沿用同一位置规则。
 
+**实施记录（期 3-T5：tool-pipeline，2026-10-21）**：**工具管线的出口侧**整段迁入
+`plugins/tool-pipeline`（crate `tianyan-tool-pipeline`）——`agent/tool_registry/observability.rs`
+（213 生产行：统计 / Trace / GEPA 执行记录 / 失败规则学习）、`agent/tool_registry/spill.rs`
+（181 生产行：ADR-047 超预算输出落盘）+ 其测试文件 `spill_tests.rs`（265 行）三个文件
+**整体删除**；主搬 **394 生产行**。**本批还把 `agent/tool_catalog.rs`（96 生产行）一并搬入**
+——它单独不成 crate，而 394 达不到闸门 B 需要的 423（见下方规模账），且它是**工具集的对外
+呈现**（表头 / 排序 / `|` 转义 / 平台提示词归一化），变化原因与两个监听器同族：
+改一句表头不该重编内核。
+
+- **★ 本批唯一的设计点：注册表不再自带任何 post-execute 监听器**。迁移前
+  `ToolRegistry::new()` 直接 `push` 两个具体类型的监听器（观测 + 落盘），并因此把
+  `ToolObservabilityListener` / `ToolOutputSpillListener` 作为**字段**持在注册表上
+  （`with_usage_stats` / `with_trace_collector` / `with_rule_recorder` /
+  `with_execution_log` / `with_tool_output` 五个 `with_*` 都是往这两个字段上写状态）。
+  实现搬出 core 后这套形态不成立，改为 **接线形状 + 工厂**（契约住 core，实现住插件）：
+
+  | 侧 | 职责 |
+  |---|---|
+  | core `agent/tool_registry/pipeline.rs` | `ToolPipelineWiring`（5 个 `Option`：`usage_stats` / `trace_collector` / `rule_recorder` / `execution_log` / `tool_output`）+ `ToolPipelineFactory = Arc<dyn Fn(&ToolPipelineWiring) -> Vec<Arc<dyn ToolPostExecuteListener>> + Send + Sync>` |
+  | core `agent/builder.rs` | `AgentBuilder::with_tool_pipeline_factory`；`build()` 组装 wiring（值全部来自 builder **自己的**同名字段——同一份 `Arc`，不二次实例化）→ 按工厂返回顺序逐条 `register_post_execute_listener` |
+  | 插件 `plugins/tool-pipeline` | `pipeline(&wiring) -> ToolPipeline`（两个**具体类型**：装配期/测试要能看接线结果）+ `ToolPipeline::into_listeners()`（**唯一顺序落点**）+ `pipeline_factory()`（类型擦除入口） |
+  | 装配层 `app` / `tauri` / `tests/common/factory.rs` | 各一行 `with_tool_pipeline_factory(tianyan_tool_pipeline::pipeline_factory())` |
+
+  注册表侧**删掉**：两个字段、两个类型的 `mod` 声明、`with_tool_output` / `with_rule_recorder`
+  （唯一的调用者就是 wiring），`with_usage_stats` / `with_execution_log` /
+  `with_trace_collector` 退化为「保留 `Arc` 供自身查询 / 后台任务 span」——`self_check`
+  读技能统计改读 `self.usage_stats`（同一份实例，行为不变）。
+
+- **★ 顺序契约（ADR-047 原文，一字未改）**：ADR-047 明写「落盘为 post-execute 统一出口
+  （单点），**注册在观测监听器之后——数据层须见原始结果**」。现在这条契约有**两个**落点，
+  都各占一行：
+  1. **实现点**（插件 `ToolPipeline::into_listeners`）：
+     `vec![Arc::new(self.observability), Arc::new(self.spill)]`——注释写明「观测在前
+     （数据层须见原始结果），落盘在后（它是改写者）」，这一行就是契约；
+  2. **装配点**（`AgentBuilder::build`）：`for listener in factory(&wiring) { … }` 上方
+     ★ 注释写明「工厂返回的顺序即注册顺序」，并指回实现点与锁测试。
+
+  **顺序锁**（行为式，判别力最强）：`spill_tests::test_pipeline_order_observability_sees_original_result`
+  ——接上 `ExecutionLog`（真实内存 SQLite）+ 小阈值落盘，跑完整条管线后断言
+  **GEPA 数据层里记的是原文**（`result` 含尾部行 `line-49-`、不含 `"spilled"`），而会话侧
+  结果**已被改写**（`spilled: true`）。若把 spill 排到观测之前，数据层只会记到「预览对象」，
+  本测试立刻变红。它替换了迁移前的 `test_registry_registers_spill_listener_second`
+  （后者断言注册表内部字段，注册表不再持有监听器后无处落脚）。另新增
+  `test_pipeline_wires_tool_output_budget`：`wiring.tool_output` 真的落到 spill 监听器
+  （阈值 / 目录 / 开关），迁移前这条断言寄生在注册表字段上。
+
+- **降级语义（未装配插槽时）**：**一个 post-execute 监听器都不注册**——超预算工具输出
+  不再落盘（只受既有 `executor::truncate` 截断限制）、使用统计 / Trace 工具 span /
+  GEPA 执行记录 / 失败规则学习全停；`AgentBuilder::build` 打一条 `warn!` 指路
+  （ADR-038 可见失败：静默降级的唯一症状是「统计面板再也不涨 + 大输出重新撑爆上下文」）。
+  **不 panic、不返回 `Err`**：`create_app`（构造对象图，47 处 lib 单测 + 嵌入式）与集成测试
+  靠「不要求装配也能起实例」才能跑，`Err` 等于删入口。与 ADR-047「落盘失败保持原结果
+  （best effort）」是同一档语义——缺实现时少一层优化，不是工具调用失败。
+  **行为差异清单（仅未装配路径）**：`create_app` 起的实例不再产生 usage stats / 工具
+  Trace span / GEPA 执行记录 / 规则条目，也不落盘——`start_server*` 与集成测试的
+  `test_assembly()` 都注入真工厂，测的仍是生产形态。
+
+- **逐行比对证据**（`git diff --no-index`，HEAD 原文件 vs 新文件；`-w` 与普通口径结果相同，
+  即无「仅缩进」的差异）：增删行数 = 新增/删除。
+
+  | 文件 | 增/删 | 归类 |
+  |---|---|---|
+  | `observability.rs`（→ 插件） | 23 / 20 | ① `use crate::…` → `use tianyan::…`（7 行，其中 `CallSkillParams` 走 `agent::` 重导出、`TRACE_PARAMS_MAX_BYTES` 走新提公的 `agent::` 公共常量）；② `pub(crate) struct` → `pub struct`（跨 crate 必要）；③ 模块文档 +6 行（迁移动机 + 「与 `ToolRegistry::new` 解耦」的更正）；④ 5 处「由 ToolRegistry::with_* 委托」注释改成「装配期由 `ToolPipelineFactory` 接线」。**四个 `set_*` / `on_post_execute` 的函数体、统计键规则（`skill:` 前缀）、Trace 截断上限、GEPA 记录构造、`FailureKind::Logic`、全部 debug 文案 0 改动** |
+  | `spill.rs`（→ 插件） | 12 / 7 | ① 6 行 `use crate::…` → `use tianyan::…`；② `pub(crate) struct` → `pub struct`；③ 模块文档 +5 行；④ `configure` 的注释改调用方。**`SKIP_TOOLS` 白名单、预算判定（`lines <= max_lines && bytes <= max_bytes`）、`truncate_spill_with` 调用参数顺序、spilled 对象 5 个字段、`note` 文案、两条 tracing 文案（info/warn）逐字未改**；阈值下限钳制（`max(1)`）保留在 `configure` 里 |
+  | `spill_tests.rs`（→ 插件） | 61 / 27 | ① 导入改写（`crate::` → `tianyan::`，新增 `Database` / `ExecutionLog` / `ToolPipelineWiring`）；② 8 条测试**逐字未动**；③ `test_registry_registers_spill_listener_second` → 行为式顺序锁（见上）；④ 新增 1 条接线测试 |
+  | `tool_catalog.rs`（→ 插件） | 21 / 14 | ① `crate::` → `tianyan::`（含测试）；② `[ToolRegistry]` 文档链接改成代码体（不同 crate 无法链接）；③ 模块文档 +6 行 + 更正「权威生成器在 `app/examples/`」（原文写的 `server/examples/` 是 0.5.8 的旧位置）。**渲染表头字符串、排序、`\|` 转义、`normalize_platform_hints` 的两种形态替换、`check` 的 CRLF 归一化逐字未改**（`cargo catalog-check` 仍绿即证明：产物与仓库文件逐字一致） |
+
+- **★ 闸门 B 最终实测（期 3 收口数）**：口径 = **四件套**（`core/src` 生产行按文件归属
+  二分：api = trait + 纯类型/契约文件，impl = 其余），生产行 = 到 `#[cfg(test)]` 之前
+  （与 `scripts/measure-rebuild.ps1::Get-SourceLines` 同源）。本批 core 侧逐文件增量：
+
+  | core 文件 | api/impl 桶 | 生产行增量 |
+  |---|---|---|
+  | `agent/tool_registry/observability.rs` | impl | **−213**（整文件迁出） |
+  | `agent/tool_registry/spill.rs` | impl | **−181**（整文件迁出） |
+  | `agent/tool_catalog.rs` | impl | **−96**（整文件迁出） |
+  | `agent/tool_registry/mod.rs` | impl | **−15**（删 2 字段 / 2 `mod` / 2 个 `with_*` / 注册块） |
+  | `agent/tool_registry/agent_ops.rs` | impl | 0（`self.observability.usage_stats_ref()` → `self.usage_stats`） |
+  | `agent/builder.rs` | impl | **+40**（wiring 组装 + 工厂注入 + 告警） |
+  | `agent/tool_registry/pipeline.rs` | **api** | **+36**（`ToolPipelineWiring` + `ToolPipelineFactory`） |
+  | `agent/mod.rs` | **api** | **−1**（`tool_catalog` 导出删除，改导出管线契约 5 个符号） |
+  | **合计** | | **净 −430**（impl −466 / api +35） |
+
+  → **impl = 15,423 − 466 = 14,957（≤ 15,000 ✅，余 43 行）**；
+  **api = 4,552 + 35 = 4,587（≤ 6,000 ✅，余 1,413 行）**。
+  交叉校验（用 T4 当时的粗算式 `impl_old − 生产行净减`）：15,423 − 430 = **14,993**，
+  同样 ≤ 15K（两者差 36 行，正是**接线契约落在 api 桶**的部分——它本就属于契约预算，
+  api 桶余量 1.4K 不缺这 36 行）。
+  **闸门 B 至此收口：`api 4,587 ≤ 6K && impl 14,957 ≤ 15K`。**
+
+- **测试守恒**：HEAD core `--lib` **1080** = 现在 core **1066** + 本 crate **14**（观测 2：
+  T0-9 内存不缓冲 / GEPA 落库；落盘 10：超限改写 / 预算内零成本 / 白名单 /
+  `execute_command` 免落盘 / 失败不改写 / 关闭旁路 / 未配置旁路 / 落盘失败保原结果 /
+  顺序锁（重写）/ 阈值钳制；目录 2：平台归一化 / 渲染排序）。
+  **+2 新增**（`test_pipeline_factory_is_repeatable_and_ordered`、
+  `test_pipeline_wires_tool_output_budget`——注册表不再持有监听器后，这两条只能落在
+  管线入口）。算式：**1080 − 14 = 1066**；**1066 + 16 = 1082 = 1080 + 2（新增）**。
+  **零放弃、零降级。**（`spill_tests.rs` 整文件随迁，core 侧删除。）
+
+- **任务书的后备候选为何不搬**（实测证据）：`file_ops.rs`（174 生产行）、
+  `knowledge_ops.rs`（165）、`evolution_ops.rs`（177）三个文件全是 **`impl ToolContext { … }`**
+  （`file_ops.rs:20 impl ToolContext`、`knowledge_ops.rs:13 impl ToolContext`、
+  `evolution_ops.rs` 同形）——`ToolContext` 是 K4 装配原语（ADR-049 期 0.5.3），搬它们
+  等于把 `ToolContext` 一起搬走，破 D2-1/D2-3。`agent_ops.rs`（1,198）如任务书所述直接依赖
+  `Agent` / `AgentLoop` 具体类型，不搬。因此本批选择搬 `tool_catalog.rs`（无 `ToolContext`
+  依赖，只读 `ToolRegistry::definitions()` / `presentation()` 两个公开方法）。
+
+- **★ 插槽平铺表的治理建议（留给期 4，不在本批实施）**：`AssemblyServices` 到本批已是
+  **11 个平铺字段 + 11 个 `with_*` + 11 个 `pub(crate)` 访问器**，`AppState::new` 的
+  `Option<Factory>` 形参也到了 6 个（另有 `build_agent` / `build_agent_or_wizard` 的
+  24 个形参）。三条候选路线，按推荐顺序：
+
+  1. **按插件分组**（推荐）：一个插件 crate 自己给出**一份能力结构**，装配层只持有
+     `struct Assemblies { tool: ToolAssemblies, storage: StorageAssemblies, policy: PolicyAssemblies, provider: ProviderAssemblies }`。分组维度的判据是**变化原因**（D7 同一把尺子）：
+     工具 / 存储 / 策略 / provider 四族各自的字段经常一起变（如 T2 的 `ContextFactory`
+     与评审两插槽同族），分成 4 组后 `AppState::new` 的形参从 6 降到 2–3，
+     组合根的「用了哪些能力」仍然显式可见。
+  2. **清单结构**：`Vec<AssemblyEntry>`，每个插件 crate 提供 `entry()` 返回「名字 + 装配闭包」，
+     装配层只拼接（与 D6「清单是有序数据」同构）。优点是可一页查询 + 天然支持
+     desktop/headless/minimal 三份清单；缺点是类型擦除再降一层（每个 entry 的输入形状不同，
+     需要 `Any` 或统一成 `&AssemblyContext`），`unsafe_code = deny` 下只能走 `Any` 下行转换，
+     会引入运行期失败点——**与「缺件在启动期响亮失败」的初衷相抵**，故排在 1 之后。
+  3. **合并同类**：把 `TaskReviewerFactory` 与 `SkillReviewFactory`（同属 `policy-review`）、
+     `ProviderLlmFactory` 与 `ProviderEmbedFactory`（同属 provider 域）合并成各一个「域工厂」，
+     11 个字段降到 8 个。代价是两个消费者（自审 / 技能复审、聊天 / 嵌入）的重建时机不同
+     （前者随配置、后者随模型），合并后要么多传参、要么拆返回值——收益最小，仅作兜底。
+
+  三者都不该在期 3 做：本批每加一个插槽都已经付出「三处装配各写一行 + 一处组合根透传」的
+  成本，中途改形状会把 T1–T5 的接线全部重写一遍。**期 4 清单收敛时按 1 起步**，
+  并把「插槽数量 / `AppState::new` 形参数」记成一条反指标（建议 ≤ 4 / ≤ 3）。
+
+- **遗留**：
+  1. **插槽平铺表治理**（见上，期 4 第一件事）；
+  2. **`RuleRecorder` 仍在 core**：它是「失败规则学习」的**写侧数据层**（写 VFS
+     `agent/_rules/…`），今天的唯一生产调用者是观测监听器（构造点在 `AgentBuilder`），
+     读侧是 `policy-context`（检索）与 `task-builtin`（GC 扫描）。搬它可以再省约 330 生产行，
+     但这属于「数据层是否随观测一起外移」的边界裁决（与 `ExecutionLog` / `TraceCollector`
+     同族），不宜在收口批次顺手做；若期 4 决定拆 `kernel-impl`，应与这三个数据层一起判；
+  3. **`tool-pipeline` 与 `tool_catalog` 同 crate 是权宜**：目录渲染与执行出口没有逻辑耦合，
+     只是 96 行单独不成 crate（反指标「每 crate ≥ 300 行」）。期 4 若有更强的归属
+     （例如与 `builtin_tools.rs` 的元数据表同域），应把它挪走；
+  4. **`TRACE_PARAMS_MAX_BYTES` 已提为 `pub`**（`agent::TRACE_PARAMS_MAX_BYTES`）：
+     它是内核与插件共用的观测体积预算，若将来 Trace 契约演化出「每 span 预算」的配置项，
+     这个常量应随之进配置并在 core 侧单点解析。
+
 ---
 
 ## 分期与闸门
@@ -1357,7 +1502,7 @@ ADR-049 期 2 的序 6（当时跳过、留待最后）在期 3-T3 之后补做�
 | **0.5** | 工具契约与注册形状 + 装配器二分（**工具侧已完成**） | ✅ 元数据表承载执行入口 + 协议工具独立成表（28 分支 match → 一次查表，内核零工具名字面量）；✅ `ToolContext` 承载六个工具域（`impl ToolContext` + 注册表 `Deref`），依赖边界实测：工具域 executor 引用仅 16 处（随插件搬走）。待办：`thin-channel` + `assembly-manifest`；`AppState` 20 字段契约化 | 工具目录 freshness ✅；工具行为零变化 ✅（1431 单测全绿）；clippy 零警告 ✅ |
 | **1** | 工具插件试点（**装配器二分 + tools-fs 骨架已完成**） | ✅ `tianyan-app` bin 包（**清单住 bin**）+ `ToolPluginFactory` 类型擦除 + `create_app_with_plugins` / `start_server_with_plugins*`；✅ `plugins/tools-fs` 独立 crate（`executor::fs` 实现整体迁入）。待续：**整域迁移**——`read_file` 目录模式反向依赖 `executor::fs::execute_list_dir`，故 fs 域必须 6 工具一起搬（read/write/edit/patch/glob/list_dir）才能删 core 侧 | 闸门 A **首测 512 行 ✅**（判据 ≤3.5K）；core 侧暂留（双路径过渡，重名注册自动跳过） |
 | **2** | 适配器与任务插件（**期 2 全部完成（序 0–6）**） | 迁移顺序（按 自包含度×收益）：**0 清 core 死依赖** → 1 `tools-todo`+`tools-goal` → 2 `tools-web` → 3 `storage-vector` → 4 `storage-sqlite` → 5 `task-*`（2 crate）→ **6 `provider-llm`+`provider-embed`（+ 共享基底 `provider-client`，2026-10-21 补做）**。详见下方「期 2 普查结论」与「实施记录（期 2 序 6）」 | 各领域 ≤ 2K；全量 release 不劣化 >10% |
-| **3** | 策略分离（最难一刀） | 抽 `kernel-impl`（loop/cancel/rollback/stream_forward/working_set）；**`context`→`policy-context`（T2 ✅ 2026-10-21，见下方实施记录；`assembler.rs` 按普查修订留 kernel-impl）**；**审批→`policy-approval`（T1 ✅ 2026-10-21）**；`role_learning`→已删除（零消费者，2026-10-21 裁决）；**`judge` + `skills/reviewer`→`policy-review`（T3 ✅ 2026-10-21，475 生产行；`TaskReviewer` / `SkillReviewPort` 契约留 core）**；**配置加载/持久化/迁移/校验/向导→`service-config`（T4 ✅ 2026-10-21，644 生产行净减；结构与预设表留 core，`get_config` 槽位化）** | **闸门 B**：api ≤ 6K && impl ≤ 15K——**期 3 末实测 impl = 15,423，仍超 423**（`agent/background.rs` 1,300 行经裁决算 K1，不可外移）；改策略不重编内核 ✅；S 级零变更 ✅ |
+| **3** | 策略分离（最难一刀） | 抽 `kernel-impl`（loop/cancel/rollback/stream_forward/working_set）；**`context`→`policy-context`（T2 ✅ 2026-10-21，见下方实施记录；`assembler.rs` 按普查修订留 kernel-impl）**；**审批→`policy-approval`（T1 ✅ 2026-10-21）**；`role_learning`→已删除（零消费者，2026-10-21 裁决）；**`judge` + `skills/reviewer`→`policy-review`（T3 ✅ 2026-10-21，475 生产行；`TaskReviewer` / `SkillReviewPort` 契约留 core）**；**配置加载/持久化/迁移/校验/向导→`service-config`（T4 ✅ 2026-10-21，644 生产行净减；结构与预设表留 core，`get_config` 槽位化）** | **闸门 B**：api ≤ 6K && impl ≤ 15K——**✅ 期 3 末实测 `api 4,587 / impl 14,957`**（期 3-T5 收口后；口径 = 四件套文件归属。`agent/background.rs` 1,300 行经裁决算 K1，不可外移）；改策略不重编内核 ✅；S 级零变更 ✅ |
 | **4** | 清单收敛与发行版 | 清单完整化、跨插件顺序断言、desktop/headless/minimal 三份清单 | 装配清单 1 页可查；headless 可构建 |
 
 **反指标**（防拆过头）：每 crate ≥ 300 行且至少 2 个真实消费者；每期净增 pub trait ≤ 3；
@@ -1422,6 +1567,7 @@ ADR-049 期 2 的序 6（当时跳过、留待最后）在期 3-T3 之后补做�
 | 038 provider 方言单点 | 方言数据留在 `provider-llm` 内部，仍是单点 |
 | 043 工具对连续性 | 属组装层规范化，留内核 |
 | 047 工具输出 spill | 留注册表层（机制），不下放插件 |
+| 049-3-T5 工具管线出口（观测监听器 + 落盘 + 目录渲染） | 本批把它从「留注册表层」细分为「**契约 + 管线阶段留 core（K1），实现外移插件**」（`ToolPostExecuteListener` / `ToolPipelineWiring` / `ToolPipelineFactory` 住 core，两个监听器住 `plugins/tool-pipeline`）；**顺序契约（观测先、落盘后）逐字保留**并双落点（实现点一行 + 装配点一行）+ 行为式测试锁 |
 
 ## 待决问题（不阻塞期 0/0.5）
 
@@ -1432,8 +1578,9 @@ ADR-049 期 2 的序 6（当时跳过、留待最后）在期 3-T3 之后补做�
    2026-10-21）：只外移**加载/持久化/迁移/校验/向导**（753 估算 / 644 实测净减），
    配置**结构**与**预设表**留 core（内核与插件的共同构造参数）；`get_config()` 改为
    「槽位 + 注入」，见「实施记录（期 3-T4）」。**新遗留**：槽位与 `AppState::config`
-   两份真相待期 4 合并；闸门 B 仍差 423 行。
+   两份真相待期 4 合并。
 3. 期 3 需重新做一次行数账（`agent` 22,994 行中 10.5K 是测试，真正待判源码 12.5K）。
+4. ~~闸门 B 仍差 423 行~~ —— **已收口**（期 3-T5，2026-10-21）：工具管线出口（观测监听器 213 + 输出落盘 181 + 工具目录 96 生产行）迁入 `plugins/tool-pipeline`，core 侧净减 430 生产行 → **impl 14,957 / api 4,587**，两项均过闸门。**新遗留**：① `AssemblyServices` 的 **11 个平铺插槽**需要治理（按插件分组起步，见「实施记录（期 3-T5）」末节）；② `RuleRecorder`（约 330 生产行）作为「失败规则学习的写侧数据层」仍留 core，是否随观测一起外移需与 `ExecutionLog` / `TraceCollector` 一并裁决；③ `tool_catalog` 与 `tool-pipeline` 同 crate 是权宜（96 行单独不成 crate）。
 
 ---
 

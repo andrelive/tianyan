@@ -16,7 +16,6 @@ use crate::observability::execution_log::ExecutionLog;
 use crate::observability::trace::TraceCollector;
 use crate::observability::usage_stats::UsageStats;
 use crate::observability::AgentMetrics;
-use crate::observability::RuleRecorder;
 use crate::session::search::SessionRecall;
 
 use crate::vfs::VirtualFileSystem;
@@ -29,15 +28,14 @@ mod evolution_ops;
 /// 工具执行器实现（按工具域拆分，14 个 `execute_*` 方法）。
 mod file_ops;
 mod knowledge_ops;
-/// 内置可观测性后置监听器（A1：统计/Trace/GEPA/规则学习迁移为管线消费者）。
-mod observability;
 /// 工具执行管线：pre-execute 监听器 / 单调守卫 / post-execute 监听器（A1/A4）。
 mod pipeline;
-/// 工具输出 spill 后置监听器（ADR-047：超预算结果落盘，会话只留预览 + 路径）。
-mod spill;
 
 pub use builtin_tools::builtin_tool_names;
-pub use pipeline::{ToolGuard, ToolPostExecuteListener, ToolPreExecuteListener};
+pub use pipeline::{
+    ToolGuard, ToolPipelineFactory, ToolPipelineWiring, ToolPostExecuteListener,
+    ToolPreExecuteListener,
+};
 
 use builtin_tools::BUILTIN_TOOLS;
 
@@ -99,7 +97,11 @@ pub fn safety_violation<T, E: std::fmt::Display>(result: Result<T, E>) -> Result
 ///
 /// 截断实现取 `common::truncate::truncate_utf8_boundary`（全库截断单点），
 /// 本模块不再自带复制实现。
-pub(crate) const TRACE_PARAMS_MAX_BYTES: usize = 200;
+///
+/// **公开面**（ADR-049 期 3-T5）：观测监听器的实现已迁至 `plugins/tool-pipeline`，
+/// 它按同一上限截断参数摘要。上限是内核与插件**共用的观测体积预算**（S/B 级边界），
+/// 复制一份进插件会让两侧口径同时漂移。
+pub const TRACE_PARAMS_MAX_BYTES: usize = 200;
 
 /// 单个工具调用的执行结果（含耗时元数据）。
 ///
@@ -235,11 +237,9 @@ pub struct ToolRegistry {
     /// 委托子 Agent 时使用的模型名称。
     pub(crate) model: String,
     pub(crate) metrics: Option<Arc<AgentMetrics>>,
-    /// 内置可观测性后置监听器（统计 / Trace / GEPA 历史 / 失败规则学习；
-    /// A1 迁移：原 execute_single 尾部观测逻辑）。
-    pub(crate) observability: observability::ToolObservabilityListener,
-    /// 内置工具输出 spill 监听器（ADR-047：超预算结果落盘，会话只留预览 + 路径）。
-    pub(crate) tool_output_spill: spill::ToolOutputSpillListener,
+    /// 使用统计追踪器（`self_check` 读技能统计；ADR-049 期 3-T5：注册表只留这份引用做
+    /// **自身查询**，「逐次记录」是管线监听器的职责，未装配 = 不记录）。
+    pub(crate) usage_stats: Option<Arc<UsageStats>>,
     /// 后台任务管理器（delegate_to_agent(background) / task_status / task_cancel）。
     pub(crate) background_tasks: Arc<crate::agent::background::BackgroundTaskManager>,
     /// 后台命令管理器（execute_command(background)；查询/终止经统一 task_status / task_cancel）。
@@ -261,7 +261,8 @@ pub struct ToolRegistry {
     pre_execute_listeners: Vec<Arc<dyn ToolPreExecuteListener>>,
     /// 工具执行管线：单调守卫（只允许拒绝；A4）。
     guards: Vec<Arc<dyn ToolGuard>>,
-    /// 工具执行管线：post-execute 监听器（按注册顺序；首个为内置可观测性监听器）。
+    /// 工具执行管线：post-execute 监听器（按注册顺序；顺序即语义，见 ADR-047）。
+    /// 注册表**不预置**任何监听器（ADR-049 期 3-T5）：清单由 [`ToolPipelineFactory`] 给。
     post_execute_listeners: Vec<Arc<dyn ToolPostExecuteListener>>,
     /// 工具 UI 展示意图映射（A2；工具名 → card 类型，不进入 LLM schema）。
     ///
@@ -318,8 +319,7 @@ impl ToolRegistry {
             model_service: None,
             model: "default".to_string(),
             metrics: None,
-            observability: observability::ToolObservabilityListener::default(),
-            tool_output_spill: spill::ToolOutputSpillListener::default(),
+            usage_stats: None,
             background_tasks: Arc::new(crate::agent::background::BackgroundTaskManager::new()),
             command_tasks: Arc::new(crate::executor::CommandManager::new(None)),
             command_logs_dir: None,
@@ -339,16 +339,9 @@ impl ToolRegistry {
             delegation_cancel: Arc::new(Mutex::new(HashMap::new())),
             user_questions: None,
         };
-        // A1：内置可观测性监听器注册为第一个 post-execute 监听器——
-        // 原 execute_single 尾部的统计/Trace/GEPA/规则学习自此是管线消费者。
-        registry
-            .post_execute_listeners
-            .push(Arc::new(registry.observability.clone()));
-        // ADR-047：工具输出 spill 监听器——**必须**在观测监听器之后（观测要把
-        // 原始结果写进 Trace / GEPA 数据层，改写者排最后）。
-        registry
-            .post_execute_listeners
-            .push(Arc::new(registry.tool_output_spill.clone()));
+        // ADR-049 期 3-T5：**注册表不再自带任何 post-execute 监听器**——观测与输出落盘的
+        // 实现已迁至 `plugins/tool-pipeline`，由装配层经 [`ToolPipelineFactory`] 注入、
+        // `AgentBuilder` 按工厂返回的**有序**清单注册（未装配 = 一个都不注册 + `warn!`）。
         registry.register_builtin_tools();
         registry
     }
@@ -452,15 +445,6 @@ impl ToolRegistry {
     pub fn with_task_results_dir(mut self, dir: PathBuf) -> Self {
         self.task_results_dir = Some(dir.clone());
         self.background_tasks = Arc::new((*self.background_tasks).clone().with_results_dir(dir));
-        self
-    }
-
-    /// 设置工具输出落盘（ADR-047）：超预算工具结果的落盘目录 + 预算。
-    ///
-    /// 未调用 = 不落盘（与 `with_command_logs_dir` 同模式：未配置即完全旁路）。
-    /// 监听器在 `new()` 中已固定注册位置（观测监听器之后），此处只配置状态。
-    pub fn with_tool_output(self, dir: PathBuf, config: &crate::config::ToolOutputConfig) -> Self {
-        self.tool_output_spill.configure(dir, config);
         self
     }
 
@@ -570,23 +554,23 @@ impl ToolRegistry {
         self.approval_gate.clone()
     }
 
-    /// 设置规则记录器（工具执行失败时自动学习规则；委托给内置可观测性监听器）。
-    pub fn with_rule_recorder(self, recorder: Arc<RuleRecorder>) -> Self {
-        self.observability.set_rule_recorder(recorder);
-        self
-    }
-
-    /// 设置使用统计追踪器（委托给内置可观测性监听器）。
-    pub fn with_usage_stats(self, stats: Arc<UsageStats>) -> Self {
-        self.observability.set_usage_stats(stats);
+    /// 设置使用统计追踪器（`self_check` 工具读技能统计用；ADR-049 期 3-T5）。
+    ///
+    /// 「逐次记录统计」是管线监听器的职责（实现已出 core）：同一份 `Arc` 也经
+    /// [`ToolPipelineWiring::usage_stats`] 交给监听器，两处读同一个实例。
+    pub fn with_usage_stats(mut self, stats: Arc<UsageStats>) -> Self {
+        self.usage_stats = Some(stats);
         self
     }
 
     /// 设置执行记录日志（ADR-017 GEPA 数据层：execution_stats / execution_detail /
     /// delegation_stats 工具与执行记录持久化依赖）。
+    ///
+    /// 记录持久化本身是管线监听器的职责（实现已出 core，ADR-049 期 3-T5）；注册表保留
+    /// 该引用供上述查询类工具使用，同一份 `Arc` 经 [`ToolPipelineWiring::execution_log`]
+    /// 交给监听器。
     pub fn with_execution_log(mut self, log: Arc<ExecutionLog>) -> Self {
-        self.ctx.execution_log = Some(log.clone());
-        self.observability.set_execution_log(log);
+        self.ctx.execution_log = Some(log);
         self
     }
 
@@ -638,8 +622,8 @@ impl ToolRegistry {
     /// 注册工具执行后置监听器（A1 管线阶段 4，观察/改写结果）。
     ///
     /// 在工具执行完成后按注册顺序调用，可观察结果（审计）或改写结果
-    /// （spill locator、错误包装等）。内置可观测性监听器已在 [`Self::new`] 注册
-    /// 为首个 post-execute 监听器。
+    /// （spill locator、错误包装等）。顺序由 [`ToolPipelineFactory`] 决定——
+    /// 「观测在前、落盘在后」是 ADR-047 的硬契约（ADR-049 期 3-T5）。
     pub fn register_post_execute_listener(&mut self, listener: Arc<dyn ToolPostExecuteListener>) {
         self.post_execute_listeners.push(listener);
     }
@@ -673,10 +657,11 @@ impl ToolRegistry {
         self
     }
 
-    /// 设置结构化 Trace 收集器（G6；工具 span + 后台任务 span 记录；
-    /// 工具 span 委托给内置可观测性监听器）。
+    /// 设置结构化 Trace 收集器（G6；**后台任务** span 记录）。
+    ///
+    /// **工具 span** 由管线监听器记录（实现已出 core，ADR-049 期 3-T5）：同一份
+    /// `Arc` 也经 [`ToolPipelineWiring::trace_collector`] 交给它，写入路径仍是一处。
     pub fn with_trace_collector(mut self, collector: Arc<TraceCollector>) -> Self {
-        self.observability.set_trace_collector(collector.clone());
         self.background_tasks = Arc::new(
             (*self.background_tasks)
                 .clone()
@@ -944,9 +929,9 @@ impl ToolRegistry {
         };
 
         // A1 管线阶段 4：post-execute 监听器（观察/改写结果，按注册顺序）。
-        // 内置可观测性监听器（ToolObservabilityListener）在 new() 时已注册为
-        // 第一个 post-execute 监听器——统计 / Trace / GEPA 历史 / 规则学习
-        // 由此接管（行为与原 execute_single 尾部一致）。
+        // 清单由装配层注入（`ToolPipelineFactory`，ADR-049 期 3-T5）：观测监听器在前
+        // （统计 / Trace / GEPA 历史 / 规则学习见到**原始结果**），输出落盘在后
+        // （ADR-047：它是改写者）。未装配 = 空清单 = 只受既有截断限制。
         let elapsed = start.elapsed();
         for listener in &self.post_execute_listeners {
             listener

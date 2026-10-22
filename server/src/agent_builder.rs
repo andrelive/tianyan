@@ -93,6 +93,7 @@ impl AgentBuilderFactory {
         approval_gate: Option<Arc<dyn tianyan::executor::approval::ApprovalGate>>,
         context_port: Option<Arc<dyn crate::ContextPort>>,
         task_reviewer: Option<Arc<dyn tianyan::executor::review::TaskReviewer>>,
+        tool_pipeline: Option<crate::ToolPipelineFactory>,
     ) -> TianyanResult<Arc<Agent>> {
         Self::validate_config(config)?;
 
@@ -193,6 +194,14 @@ impl AgentBuilderFactory {
             Some(reviewer) => agent.with_task_reviewer(reviewer),
             None => agent,
         };
+        // 工具管线（ADR-049 期 3-T5）：观测监听器（统计 / Trace / GEPA / 规则学习）与
+        // 超预算输出落盘（ADR-047）的实现已出 core（`plugins/tool-pipeline`），组合根经
+        // `ToolPipelineFactory` 建实例传进来。`None` = 未装配 → `AgentBuilder::build`
+        // 一个监听器都不注册（不落盘 + 观测全停）并打一条 `warn!` 指路。
+        let agent = match tool_pipeline {
+            Some(factory) => agent.with_tool_pipeline_factory(factory),
+            None => agent,
+        };
         let mut builder = agent;
         if let Some(trace) = trace_collector {
             // G6：结构化 Trace（与 AppState 共享同一收集器，单一写入路径）
@@ -271,6 +280,7 @@ impl AgentBuilderFactory {
         approval_gate: Option<Arc<dyn tianyan::executor::approval::ApprovalGate>>,
         context_port: Option<Arc<dyn crate::ContextPort>>,
         task_reviewer: Option<Arc<dyn tianyan::executor::review::TaskReviewer>>,
+        tool_pipeline: Option<crate::ToolPipelineFactory>,
     ) -> TianyanResult<Arc<dyn AgentCoordinator>> {
         match Self::build_agent(
             config,
@@ -296,6 +306,7 @@ impl AgentBuilderFactory {
             approval_gate,
             context_port,
             task_reviewer,
+            tool_pipeline,
         )
         .await
         {

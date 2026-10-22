@@ -2,15 +2,22 @@
 //!
 //! 判别力要点：落盘文件必须是**完整**原文（含被预览截掉的尾部），
 //! 而非预览副本——否则"可回溯"承诺落空。
+//!
+//! **ADR-049 期 3-T5 随实现迁入本 crate**。原 `test_registry_registers_spill_listener_second`
+//! 断言的是「注册表里第 2 个监听器是 spill」——注册表不再持有监听器后该断言无处落脚，
+//! 改为**行为式**顺序锁 [`test_pipeline_order_observability_sees_original_result`]：
+//! 跑完整条管线看 GEPA 数据层记到的是原文还是预览（判别力更强，且不依赖内部字段）。
 
 use std::path::PathBuf;
 
 use serde_json::json;
 
 use super::*;
-use crate::agent::ToolRegistry;
-use crate::common::types::{FunctionCall, ToolCallType};
-use crate::executor::SecurityPolicy;
+use crate::pipeline;
+use tianyan::agent::ToolPipelineWiring;
+use tianyan::common::types::{FunctionCall, ToolCallType};
+use tianyan::db::Database;
+use tianyan::observability::execution_log::ExecutionLog;
 
 /// 构造工具调用（仅工具名参与判定）。
 fn make_call(name: &str) -> ToolCall {
@@ -217,34 +224,61 @@ async fn test_spill_failure_keeps_original() {
     assert_eq!(result.unwrap(), original, "落盘失败必须保持原结果");
 }
 
-/// 注册顺序：spill 是第二个后置监听器（观测在前——数据层须见原始结果）。
-#[test]
-fn test_registry_registers_spill_listener_second() {
-    let registry = ToolRegistry::new(SecurityPolicy::default());
-    assert_eq!(
-        registry.post_execute_listeners.len(),
-        2,
-        "应注册 [观测, spill] 两个后置监听器"
-    );
-    assert_eq!(
-        registry.tool_output_spill.snapshot().1,
-        None,
-        "默认未注入目录 = 不落盘"
-    );
+/// ★ 注册顺序（ADR-047 契约）：观测监听器先、落盘后——数据层必须见**原始结果**。
+///
+/// 判别力：若 `pipeline()` 把 spill 排到观测之前，spill 会先把结果换成
+/// `{spilled:true, preview, spill_path, …}`（`preview` 只留前 5 行），于是 GEPA 数据层
+/// 记到的 `result` 里再也找不到尾部行 `line-49-`——统计与演化数据静默失真，无任何报错。
+#[tokio::test]
+async fn test_pipeline_order_observability_sees_original_result() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = Database::open_in_memory().unwrap();
+    db.init_schemas().await.unwrap();
+    let log = ExecutionLog::new(db).unwrap();
+    let wiring = ToolPipelineWiring {
+        execution_log: Some(log.clone()),
+        tool_output: Some((
+            tmp.path().to_path_buf(),
+            ToolOutputConfig {
+                enabled: true,
+                max_lines: 5,
+                max_bytes: 100,
+            },
+        )),
+        ..Default::default()
+    };
+    // 装配顺序 = 工厂返回顺序（观测在前、落盘在后）
+    let listeners = pipeline(&wiring).into_listeners();
+    assert_eq!(listeners.len(), 2, "出口侧管线应为 [观测, 落盘]");
+    let mut result: Result<Value, TianyanError> = Ok(make_result(50));
+    for listener in &listeners {
+        listener
+            .on_post_execute(
+                &make_call("grep"),
+                "s",
+                &mut result,
+                std::time::Duration::ZERO,
+            )
+            .await;
+    }
 
-    let registry = registry.with_tool_output(
-        PathBuf::from("/tmp/tool_output"),
-        &ToolOutputConfig {
-            enabled: true,
-            max_lines: 7,
-            max_bytes: 42,
-        },
+    // 落盘确实发生了（结果已被改写）
+    assert_eq!(
+        result.as_ref().unwrap()["spilled"],
+        json!(true),
+        "落盘监听器必须改写超限结果"
     );
-    let (enabled, dir, max_lines, max_bytes) = registry.tool_output_spill.snapshot();
-    assert!(enabled);
-    assert_eq!(dir, Some(PathBuf::from("/tmp/tool_output")));
-    assert_eq!(max_lines, 7);
-    assert_eq!(max_bytes, 42);
+    // 但数据层记的是**原始**结果（尾部行还在 → 观测先于落盘）
+    let records = log.detail(None, None, 10).await.unwrap();
+    assert_eq!(records.len(), 1, "观测监听器必须写下执行记录");
+    assert!(
+        records[0].result.contains("line-49-"),
+        "GEPA 数据层必须见到原始结果：落盘是改写者，必须排在观测之后（ADR-047）"
+    );
+    assert!(
+        !records[0].result.contains("\"spilled\""),
+        "数据层不得记到落盘后的预览对象（顺序颠倒的症状）"
+    );
 }
 
 /// 阈值下限钳制：0 预算不得让一切结果都落盘（钳到 1）。

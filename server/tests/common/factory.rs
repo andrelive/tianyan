@@ -219,6 +219,14 @@ pub fn test_assembly() -> tianyan_server::AssemblyServices {
     let provider_embed_factory: tianyan_server::ProviderEmbedFactory =
         Arc::new(|config: &ModelsConfig| tianyan_provider_embed::services(config));
 
+    // 工具管线（ADR-049 期 3-T5）：与 `app` / `tauri` 同一份插件实现。观测监听器
+    // （统计 / Trace / GEPA 执行记录 / 失败规则学习）与超预算输出落盘（ADR-047）全在
+    // `tianyan_tool_pipeline` 里，这里只做类型擦除包装。**不注入**就会一个 post-execute
+    // 监听器都不注册（不落盘 + 观测全停），集成测试从此测不到生产形态的执行出口
+    // （与序 4「不要用 `AssemblyServices::default()` 驱动集成测试」同一条纪律）。
+    let tool_pipeline_factory: tianyan_server::ToolPipelineFactory =
+        tianyan_tool_pipeline::pipeline_factory();
+
     tianyan_server::AssemblyServices::new()
         .with_storage_factory(factory)
         .with_task_factory(task_factory)
@@ -228,4 +236,5 @@ pub fn test_assembly() -> tianyan_server::AssemblyServices {
         .with_skill_review_factory(skill_review_factory)
         .with_provider_llm_factory(provider_llm_factory)
         .with_provider_embed_factory(provider_embed_factory)
+        .with_tool_pipeline_factory(tool_pipeline_factory)
 }

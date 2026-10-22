@@ -305,6 +305,13 @@ pub struct AppState {
     /// 供 [`Self::create_skill_reviewer`] 逐次构造读端口（旧实现也是逐次 `new`，语义等同）。
     /// `None` = 未装配 → 该函数返回 `None`，技能统计的 `reviews` 为空数组。
     skill_review_factory: Option<crate::SkillReviewFactory>,
+    /// 工具管线工厂（ADR-049 期 3-T5：观测监听器 + 输出落盘的实现已出 core，
+    /// `plugins/tool-pipeline`）。
+    ///
+    /// 存下来供 [`Self::reload_agent`] 复用：配置热重载会重建 agent，落盘预算
+    /// （`[tool_output]`）与观测接线必须跟着**新配置**走。`None` = 未装配 →
+    /// 不注册任何 post-execute 监听器（不落盘 + 观测全停）+ 装配期告警。
+    tool_pipeline_factory: Option<crate::ToolPipelineFactory>,
     /// 聊天 / 视觉 provider 工厂（ADR-049 期 2 序 6：实现已出 core，`plugins/provider-llm`）。
     ///
     /// 存下来供 [`Self::reload_agent`] 复用：配置热重载会重建模型服务，模型 / API Key /
@@ -393,8 +400,9 @@ impl AppState {
     /// * 模型服务注册失败时返回 ModelService 错误
     /// * Agent 构建失败时返回 AgentCreation 错误
     ///
-    /// `#[allow(clippy::too_many_arguments)]`：五个 `Option<Factory>` 参数是**装配插槽的
-    /// 平铺表**（ADR-049 期 3-T3 遗留 3：期 4 清单收敛时应按插件分组）。这里保持与
+    /// `#[allow(clippy::too_many_arguments)]`：六个 `Option<Factory>` 参数是**装配插槽的
+    /// 平铺表**（ADR-049 期 3-T3 遗留 3 / 期 3-T5 遗留 1：期 4 清单收敛时应按插件分组）。
+    /// 这里保持与
     /// 其余启动入口同形的显式传参，而不是把整个 `AssemblyServices` 塞进组合根——后者
     /// 会让「组合根到底用了哪些能力」变得不可见。
     #[allow(clippy::too_many_arguments)]
@@ -408,6 +416,7 @@ impl AppState {
         task_reviewer_factory: Option<crate::TaskReviewerFactory>,
         provider_llm_factory: Option<crate::ProviderLlmFactory>,
         provider_embed_factory: Option<crate::ProviderEmbedFactory>,
+        tool_pipeline_factory: Option<crate::ToolPipelineFactory>,
     ) -> TianyanResult<Self> {
         // VFS 技能管理器（技能 = VFS 方法论文档；列表/详情/执行 API 数据源）
         let skill_manager = Arc::new(SkillManager::new(vfs.clone()));
@@ -576,6 +585,7 @@ impl AppState {
             approval_gate.clone(),
             context_port,
             task_reviewer,
+            tool_pipeline_factory.clone(),
         )
         .await?;
 
@@ -617,6 +627,7 @@ impl AppState {
             skill_review_factory,
             provider_llm_factory,
             provider_embed_factory,
+            tool_pipeline_factory,
             session_leases: crate::session_leases::SessionLeases::new(),
             shutdown_tx: Arc::new(Mutex::new(None)),
         })
@@ -837,6 +848,9 @@ impl AppState {
             approval_gate,
             context_port,
             task_reviewer,
+            // 工具管线工厂跨热重载复用：落盘预算来自 `[tool_output]`（新配置），
+            // 由 `AgentBuilder` 在 build 时读 builder 侧的新配置值。
+            self.tool_pipeline_factory.clone(),
         )
         .await?;
 
