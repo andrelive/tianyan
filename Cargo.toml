@@ -54,7 +54,7 @@ ring = "0.17"
 lancedb = "0.33"
 
 # Document processing
-pulldown-cmark = "0.9"
+pulldown-cmark = "0.13"
 pdf-extract = "0.7"
 docx-rs = "0.4"
 

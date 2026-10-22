@@ -228,7 +228,10 @@ impl DocumentParser for MarkdownParser {
         // 解析 markdown 并提取目。
         let mut toc = Vec::new();
 
-        use pulldown_cmark::{Event, HeadingLevel, Parser, Tag};
+        // pulldown-cmark 0.13 API（相对 0.9 的两处变更）：
+        // 1) `Tag::Heading` 由 tuple 变体变为 struct 变体（多出 id/classes/attrs 字段）；
+        // 2) `Event::End` 携带 `TagEnd` 而非 `Tag`（结束事件只需要标签种类）。
+        use pulldown_cmark::{Event, HeadingLevel, Parser, Tag, TagEnd};
 
         let parser = Parser::new(&text);
         let mut in_heading = false;
@@ -237,7 +240,7 @@ impl DocumentParser for MarkdownParser {
 
         for event in parser {
             match event {
-                Event::Start(Tag::Heading(level, _, _)) => {
+                Event::Start(Tag::Heading { level, .. }) => {
                     in_heading = true;
                     current_heading_text.clear();
                     current_heading_level = match level {
@@ -252,7 +255,7 @@ impl DocumentParser for MarkdownParser {
                 Event::Text(text) if in_heading => {
                     current_heading_text.push_str(&text);
                 }
-                Event::End(Tag::Heading(_, _, _)) => {
+                Event::End(TagEnd::Heading(_)) => {
                     if in_heading && !current_heading_text.is_empty() {
                         toc.push(TocEntry {
                             title: current_heading_text.trim().to_string(),
