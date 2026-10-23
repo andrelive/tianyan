@@ -5,7 +5,7 @@ edition.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "天演装配器（bin）：唯一 use 具体插件类型的地方（ADR-049 期 1）"
+description = "天演装配器（bin, headless）：配置加载 + 日志 + 启动 + 搬迁重启；装配清单取自 tianyan-assembly（ADR-049 期 1 / 期 4）"
 
 [[bin]]
 name = "tianyan-server"
@@ -14,49 +14,10 @@ path = "src/main.rs"
 [dependencies]
 tianyan = { path = "../core", package = "tianyan-core" }
 tianyan-server = { path = "../server" }
-# 服务层配置 crate（ADR-049 期 3-T4）：装配层负责「先加载并注入内核槽位，再 init」
-# ——`main` 的两处 `load` 走这里，内核不再认识配置文件的路径。
 tianyan-service-config = { path = "../service/config" }
-# 插件清单：**只在本包出现**——server 库因此不依赖插件 crate，
-# 改一行工具只重编插件 + 本 bin（闸门 A 前提）
-tianyan-tools-fs = { path = "../plugins/tools-fs" }
-# 插件清单：**只在本包出现**——server 库因此不依赖插件 crate，
-# 改一行工具只重编插件 + 本 bin（闸门 A 前提）
-tianyan-tools-code = { path = "../plugins/tools-code" }
-# 插件清单：**只在本包出现**——server 库因此不依赖插件 crate。
-# todo/goal 例外地需要 store：装配层从 AppState 取同一实例传入插件。
-tianyan-tools-todo = { path = "../plugins/tools-todo" }
-# 插件清单：`web_search` / `web_fetch`（ADR-049 期 2）。
-tianyan-tools-web = { path = "../plugins/tools-web" }
-# 向量存储实现（ADR-049 期 2 序 3）：LanceDB 搬出 core 后由本包注入。
-tianyan-storage-vector = { path = "../plugins/storage-vector" }
-# 结构化存储实现（ADR-049 期 2 序 4）：SqliteBackend / LocalFileBackend 搬出 core
-# 后由本包注入（`config.storage.backend` 的 adapter 选择也在装配层）。
-tianyan-storage-sqlite = { path = "../plugins/storage-sqlite" }
-# 内置定时任务实现（ADR-049 期 2 序 5a）：5 个任务搬出 core 后由本包注入
-# （任务名/显示名/间隔/启用条件全在插件里，server 库不认识任何具体任务）。
-tianyan-task-builtin = { path = "../plugins/task-builtin" }
-# 自演化综述任务实现（ADR-049 期 2 序 5b）：演化任务搬出 core 后由本包注入。
-# 清单顺序跨插件，**合并也在这里**（`splice(1..1, …)`：紧跟 summary_generation）。
-tianyan-task-evolution = { path = "../plugins/task-evolution" }
-# 审批策略实现（ADR-049 期 3-T1）：审批工作流搬出 core 后由本包注入
-# （风险定级/规则引擎/模式短路/挂起通道全在插件里，server 库不认识审批策略）。
-tianyan-policy-approval = { path = "../plugins/policy-approval" }
-# 上下文策略实现（ADR-049 期 3-T2）：注入管线 / 双层检索 / 分层压缩搬出 core 后由本包
-# 注入（改 prompt 模板 / 压缩阈值 / 检索参数只重编插件 + 本包，内核与通道层不动）。
-tianyan-policy-context = { path = "../plugins/policy-context" }
-# 评审策略实现（ADR-049 期 3-T3）：任务结果自审 + 技能使用复审搬出 core 后由本包注入
-# （改判定提示词 / 评分标准 / 截断预算只重编插件 + 本包，内核与通道层不动）。
-tianyan-policy-review = { path = "../plugins/policy-review" }
-# provider 实现（ADR-049 期 2 序 6）：聊天/视觉与嵌入搬出 core 后由本包注入
-# （客户端构造 / 按能力解析 / 路由池 / 连通性探针 / 宽容 usage 解析全在插件里，
-# server 库只认 core 的 `ProviderLlmServices` / `ProviderEmbedServices` 与
-# `ConnectionProbe` 契约）。
-tianyan-provider-llm = { path = "../plugins/provider-llm" }
-tianyan-provider-embed = { path = "../plugins/provider-embed" }
-# 工具管线实现（ADR-049 期 3-T5）：观测监听器（统计 / Trace / GEPA / 规则学习）+
-# 超预算输出落盘（ADR-047）+ 工具目录渲染搬出 core 后由本包注入
-# （`catalog-check` 生成器也从本 crate 取渲染口径）。
+# 装配清单（ADR-049 期 4）：11 个工厂 + 两份清单的唯一实现在此，本包只调用
+tianyan-assembly = { path = "../assembly" }
+# 工具目录渲染口径（`examples/tool_catalog.rs`）：实现随工具管线插件走（期 3-T5）
 tianyan-tool-pipeline = { path = "../plugins/tool-pipeline" }
 tokio.workspace = true
 
@@ -64,5 +25,4 @@ tokio.workspace = true
 workspace = true
 
 [dev-dependencies]
-# 装配级测试需要临时目录承载 `todo` / `goal` 的 store（与 REST API 共享实例）
 tempfile.workspace = true

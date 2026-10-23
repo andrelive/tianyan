@@ -591,7 +591,17 @@ async fn test_e2e_spa_subroute_serves_index_html() {
     }
 
     // 反向对照：真实存在的静态资源仍按 200 返回（fallback 不劫持正常路径）
-    let css = server.get("/assets/index-CYF_pX8c.css").await;
+    //
+    // 文件名带**内容哈希**（vite / Rolldown 每次构建都变），因此从 dist 现取一个，
+    // 不硬编码——硬编码会让「前端依赖升级 / 重新构建产物」变成「Rust e2e 无故变红」
+    // （期 5-F2 升 vite 8 后本断言即因此失败：旧名 `index-CYF_pX8c.css` 已不存在）。
+    let css_name = std::fs::read_dir(dist.join("assets"))
+        .expect("读取 dist/assets 目录失败")
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .find(|name| name.ends_with(".css"))
+        .expect("dist/assets 里应有 css 产物（先执行 npm run build）");
+    let css = server.get(&format!("/assets/{css_name}")).await;
     assert_eq!(css.status(), 200, "既有静态资源不应被 SPA fallback 影响");
 
     server.shutdown();

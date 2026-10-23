@@ -26,10 +26,11 @@
 | `core/` | `tianyan-core` (lib: `tianyan`) | 纯库 | `core/src/` |
 | `server/` | `tianyan-server` | Axum HTTP 服务 | `server/src/` |
 | `service/config/` | `tianyan-service-config` | 服务层：配置加载 / 持久化 / 迁移 / 校验 / 向导 DTO（ADR-049 期 3-T4） | `service/config/src/` |
-| `app/` | `tianyan-app` (bin: `tianyan-server`) | 装配器：唯一 `use` 具体插件类型之处（ADR-049 期 1） | `app/src/` |
+| `assembly/` | `tianyan-assembly` | 装配清单：11 个插件工厂 + 两份清单（`full()` / `policies()`）+ 跨插件顺序纪律的**单一实现**（ADR-049 期 4）；全仓唯一 `use` 全部插件 crate 之处 | `assembly/src/` |
+| `app/` | `tianyan-app` (bin: `tianyan-server`) | 装配器（headless）：配置加载 + 日志 + 启动 + 搬迁重启；清单取自 `tianyan-assembly`（ADR-049 期 1 / 期 4） | `app/src/` |
 | `plugins/*` | `tianyan-{tools-fs,tools-code,tools-todo,tools-web,storage-vector,storage-sqlite,task-builtin,task-evolution,policy-approval,policy-context,policy-review,provider-client,provider-llm,provider-embed,tool-pipeline}` | 编译期插件（只依赖 `core`，彼此零互赖） | `plugins/*/src/` |
 | `gui-vite/` | - | React TS 前端 | `gui-vite/src/` |
-| `tauri/` | `tianyan-tauri` | Tauri 桌面包装 | `tauri/src/` |
+| `tauri/` | `tianyan-tauri` | Tauri 桌面包装（第二个装配器：端口探测 + 窗口生命周期 + 关闭信号；清单同样取自 `tianyan-assembly`） | `tauri/src/` |
 | `mcp/` | `tianyan-mcp` | MCP 协议客户端 | `mcp/src/` |
 
 共享依赖统一在 workspace `[workspace.dependencies]` 中定义。

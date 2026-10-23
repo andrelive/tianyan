@@ -64,6 +64,7 @@ cargo test -p tianyan-core vfs::backend::local -- --nocapture  # 指定测试模
 | `tauri/` | `tianyan-tauri` | Tauri 桌面包装（第二个装配器） |
 | `mcp/` | `tianyan-mcp` | MCP 协议客户端 |
 | `service/config/` | `tianyan-service-config` | **服务层**：配置加载 / 持久化（段保全）/ 数据目录迁移 / 校验编排 / 向导 DTO（ADR-049 期 3-T4，753 生产行从 core 搬出）；**不含配置结构**（`TianyanConfig` 留 core——内核与插件的共同构造参数） |
+| `assembly/` | `tianyan-assembly` | **装配清单**：11 个插件工厂 + 两份清单（`full()` = 生产 11 插槽 / `policies()` = 集成测试的 9 插槽前缀）+ 跨插件顺序断言的**单一实现**（ADR-049 期 4）；全仓唯一 `use` 全部插件 crate 之处（改造前同一份清单在 `app` / `tauri` / `server/tests` / `app/tests` / `app/examples` 共 5 处副本） |
 | `plugins/tools-fs/` | `tianyan-tools-fs` | 插件：glob / list_dir / read_file / write_file / apply_edit / apply_patch（定义/门控/审批；实现暂留 core） |
 | `plugins/tools-code/` | `tianyan-tools-code` | 插件：symbol_outline / repo_map / grep（**含实现**，tree-sitter ×6 在此） |
 | `plugins/tools-todo/` | `tianyan-tools-todo` | 插件：todo / goal（含实现） |
@@ -81,7 +82,9 @@ cargo test -p tianyan-core vfs::backend::local -- --nocapture  # 指定测试模
 | `plugins/tool-pipeline/` | `tianyan-tool-pipeline` | 插件：**工具管线出口侧**——观测监听器（统计 / Trace / GEPA 执行记录 / 失败规则学习，213 生产行）+ 超预算输出落盘（ADR-047，181 生产行）+ 工具目录渲染（96 生产行），394 生产行搬出 core + 14 个迁移测试 + 2 个新增；契约 `ToolPostExecuteListener` / `ToolPipelineWiring` / `ToolPipelineFactory` 留 core（`agent::tool_registry::pipeline`，期 3-T5） |
 
 **依赖铁律**（破一条拆包收益全部回吐）：插件只依赖 `core`（kernel-api）；插件之间零互赖；
-`core`/`server` 不认识任何插件 crate。装配经 `server/src/assembly.rs` 的类型擦除插槽
+`core`/`server` 不认识任何插件 crate。**认识具体插件 crate 的只有三处**：`assembly/`
+（清单与其唯一实现，ADR-049 期 4）+ `app/`、`tauri/`（两个装配器，只写启动编排）。
+装配经 `server/src/assembly.rs` 的类型擦除插槽
 （`ToolPluginFactory` / `VectorStorageFactory` / `StorageBackendFactory` / `TaskFactory` /
 `ApprovalGateFactory` / `ContextFactory` / `TaskReviewerFactory` / `SkillReviewFactory` /
 `ProviderLlmFactory` / `ProviderEmbedFactory` / `ToolPipelineFactory`，共 11 个；
@@ -227,6 +230,7 @@ Harness 工程 → [`docs/harness核心思路/harness-engineering-overview.md`](
 - `tianyan` 和 `tianyan-core` 是同一个包（lib name: `tianyan`），导入用 `tianyan::...`
 - **`plugins/storage-sqlite/src/{sqlite,local}.rs`、`plugins/policy-approval/src/workflow.rs`、`plugins/policy-context/src/context/**` 内禁止 `crate::…`**（只允许 `tianyan::…`；`policy-context` 额外允许 `crate::context::…`——它自己的模块树，详见其 crate 文档）：core 单测以 `#[cfg(test)] #[path]` **同源包含**这些文件（dev-dep 会让 core 编译两份 → `StorageBackend`/`ApprovalGate`/`ContextPort` 等 trait 出现两个不兼容实例，实测 22 处 E0308/E0277）。写 `crate::` 时它解析到 core 而非插件，报错位置完全不相干。改文件布局须同步 `core/src/vfs/backend/mod.rs`、`core/src/executor/approval/mod.rs` 与 `core/src/context/mod.rs` 的 `#[path]`
   （provider 三件套**不在此列**：它们的测试随文件整体迁移，core 里没有残留的单测需要同源包含——见 ADR-049 期 2 序 6；`plugins/tool-pipeline/src/**` 同此：观测/落盘/目录的测试全部随迁，core 无 `#[path]` 引用）
+- **dev-dependency 环是允许的，别和上一条混为一谈**：`server --dev--> tianyan-assembly --> server`（集成测试用 `tianyan_assembly::policies()`，而 assembly 依赖 server 取 `AssemblyServices` 与 11 个插槽类型别名）。Cargo 允许——dev-dep 不参与**构建**图的环检测，测试目标的依赖图里 server lib 只编一份。与 `#[path]` 同源包含的区别：那里同一批源文件被编进**两个** crate（trait 出现两个不兼容实例），这里是两个独立 crate 的正常依赖。代价：`cargo test -p tianyan-server` 会连带编译 LanceDB 链（首次变慢，换来「9 个工厂只有一份实现」）
 - **provider 域是三个 crate，不是两个**：`tianyan-provider-client`（共享客户端 + 状态码语义分类，无插槽）← `tianyan-provider-llm` / `tianyan-provider-embed`（能力插件，互相零依赖）。原因是孤儿规则：`impl EmbeddingService for AsyncOpenAIClient` 只能写在定义该类型的 crate 里，而客户端被聊天/嵌入共用，构造语义（UA/方言/双预算超时/动态会话头/重试）必须只有一份。两个能力插件各用一个 **newtype + `Deref`**（`ChatClient` / `EmbeddingClient`）满足孤儿规则——`Deref` 让字段与方法访问**逐字保持**（`self.base_url` / `self.send_chat_request(...)` 不改），改动只有类型名
 - **插件测试要用 core 的测试替身（`MockVfs` / `MockChatService`）时开 `test-utils` 特性**：`core/src/test_utils` 与 `model::MockChatService` 的 `cfg` 是 `any(test, feature = "test-utils")`，插件侧写 `[dev-dependencies] tianyan = { path = "../../core", package = "tianyan-core", features = ["test-utils"] }`（`mockall` 因此是 core 的**可选**依赖，默认构建不含）。不这么做只能把替身复制进插件——两份实现同时漂移，测试随即失去意义（ADR-049 序 5a）
 - `ServiceDiscovery::is_available()` 是 `async` —— 别忘了 `await`
@@ -248,4 +252,4 @@ Harness 工程 → [`docs/harness核心思路/harness-engineering-overview.md`](
 - **改了工具描述 / 参数 schema 必须重生成工具目录**：`core/src/agent/tool_registry/builtin_tools.rs` 的 `def_*` 描述或 `*Params` schema 一变，`docs/architecture/tool-catalog.md` 即漂移——tag 推送时 Quality 的 `Tool catalog freshness` 门禁必红，而本地只有 `scripts/test.ps1 lint` 覆盖它（手工跑 `cargo fmt` / `clippy` 不会，极易漏到发布阶段，0.5.7 实发事故）。改完跑 `.\scripts\gen-tool-catalog.ps1` 重生成，并以 **`.\scripts\test.ps1 lint` 作为验收入口**（本地统一门禁，勿用手工命令替代）。**命令单一来源**：命令本体在 `.cargo/config.toml` 的 alias（`cargo catalog-check` / `cargo catalog-gen`），CI 步骤 / 脚本 / 文档均调别名（勿在任何一处内联 `cargo run -p ... --example tool_catalog` 命令行——0.5.9 实发事故：生成器 core→server 迁移后 CI 内联的旧命令未同步，tag 推送后门禁红、不出包）
 ；落盘失败保持原结果（best effort）；目录 `{data_dir}/tool_output/`
 - [ADR-048: 会话内 prune](docs/architecture/decisions/048-session-internal-prune.md) — ❌ **已回退**（实施当日）：事后裁剪已落库的工具输出必然导致前缀缓存分叉（改历史 = 从该位置起末尾全部重算），且会在"本不会压缩"的会话里凭空引入分叉 —— 控制点应在**写入侧**（ADR-047）而非组装侧；否决理由见 [REJECTED.md](docs/architecture/decisions/REJECTED.md) #22
-- [ADR-049: 插件化边界与装配模型](docs/architecture/decisions/049-microkernel-plugin-boundaries.md) — 微内核化，**编译期插件化**（不做 dylib / WASM / 运行时 eval，维持 REJECTED #6 插件市场否决）：三条依赖铁律（插件只依赖 kernel-api / 插件零互赖 / 内核不认识插件）+ S·A·B 契约分级 + 内核四件套 K1~K4（**19.4K 现实值**，非设计稿 15K）+ **装配器二分**（thin-channel + assembly-manifest；实测 server 11.8K 源码不薄则降幅从 95% 掉到 76%）+ 装配清单**有序**（前缀缓存生命线）+ 复用既有 `DynamicToolExecutor` 不新建 Plugin 体系；**6 期 + 6 道数据闸门**（判据 = 实测 56,541 源码行，非设计稿 33K）；VFS/ADR-001/018/030/035/038/047 对账明确不动存储边界
+- [ADR-049: 插件化边界与装配模型](docs/architecture/decisions/049-microkernel-plugin-boundaries.md) — 微内核化，**编译期插件化**（不做 dylib / WASM / 运行时 eval，维持 REJECTED #6 插件市场否决）：三条依赖铁律（插件只依赖 kernel-api / 插件零互赖 / 内核不认识插件）+ S·A·B 契约分级 + 内核四件套 K1~K4（**19.4K 现实值**，非设计稿 15K）+ **装配器二分**（thin-channel + assembly-manifest；实测 server 11.8K 源码不薄则降幅从 95% 掉到 76%）+ 装配清单**有序**（前缀缓存生命线）+ **期 4 清单收敛**（`assembly/`：11 个插件工厂的唯一实现 + `full()` / `policies()` 双清单 + 4 条跨插件顺序断言）+ 复用既有 `DynamicToolExecutor` 不新建 Plugin 体系；**6 期 + 6 道数据闸门**（判据 = 实测 56,541 源码行，非设计稿 33K）；VFS/ADR-001/018/030/035/038/047 对账明确不动存储边界

@@ -1,18 +1,16 @@
 //! Server module for Tauri application
 //!
 //! This module handles the Axum server lifecycle within the Tauri application.
+//!
+//! 装配清单（11 个工厂 + `full()` / `policies()` 两份清单，ADR-049 期 4）的唯一实现
+//! 在 `tianyan-assembly`：本模块只负责「绑定端口 → 转换 listener → 启动 server」。
+//! 改造前本文件与 `app/src/main.rs` 各写了一遍那 11 个工厂（逐字同形，靠注释
+//! 「与 `app/src/main.rs::xxx_factory` 同形同源」互相提醒）——两份副本的漂移是
+//! **静默的**：插槽签名加一个参数时先改的那份能编、后改的报错，而跨插件顺序纪律
+//! （工具 fs→code→todo/goal→web、任务 evolution 排第 2）在某份被单独调整时不会
+//! 编译失败，只会让桌面端聊天前缀缓存命中率悄悄下降。
 
-use std::sync::Arc;
-
-use tianyan::vfs::{StorageBackend, VectorStorage};
-use tianyan_server::{
-    start_server_with_shutdown_signal_and_assembly, ApprovalGateFactory, AssemblyServices,
-    ContextFactory, PluginServices, ProviderEmbedFactory, ProviderLlmFactory, SkillReviewFactory,
-    StorageBackendFactory, TaskFactory, TaskReviewerFactory, ToolPipelineFactory,
-    ToolPluginFactory, VectorStorageFactory,
-};
-use tianyan_storage_sqlite::{LocalFileBackend, SqliteBackend};
-use tianyan_storage_vector::LanceDbVectorStore;
+use tianyan_server::start_server_with_shutdown_signal_and_assembly;
 use tracing::{error, info};
 
 /// 服务器监听地址（仅本机回环，不对外暴露）。
@@ -33,139 +31,6 @@ pub fn find_available_port(preferred: u16) -> Option<std::net::TcpListener> {
         }
     }
     None
-}
-
-/// 向量存储工厂（LanceDB；`plugins/storage-vector`）。
-///
-/// 与插件工具清单同款类型擦除：server 库只认 [`VectorStorageFactory`]，
-/// `LanceDbVectorStore` 只出现在装配层。`&StorageConfig` 是借用 → 先 `clone`
-/// 再 move 进 async 块；工厂可重复调用（启动重试 / 搬迁重启）。
-fn vector_factory() -> VectorStorageFactory {
-    Arc::new(|config: &tianyan::config::StorageConfig| {
-        let config = config.clone();
-        Box::pin(async move {
-            let store = LanceDbVectorStore::new(&config).await?;
-            Ok(Arc::new(store) as Arc<dyn VectorStorage>)
-        })
-    })
-}
-/// 结构化存储工厂（SQLite / 本地文件系统；`plugins/storage-sqlite`）。
-///
-/// 与 `app/src/main.rs::storage_factory` **同形同源**（ADR-049 期 2 序 4）：
-/// `config.storage.backend` 选 adapter 的语义只在装配层，server 库不认识这两个
-/// 具体类型。同步工厂：两个后端的 `new` 都不做 IO。
-fn storage_factory() -> StorageBackendFactory {
-    Arc::new(
-        |config: &tianyan::config::StorageConfig, database: Arc<tianyan::db::Database>| {
-            use tianyan::config::StorageBackendType;
-            let backend: Arc<dyn StorageBackend> = match config.backend {
-                StorageBackendType::Local => Arc::new(LocalFileBackend::new(config.clone())),
-                StorageBackendType::Sqlite => Arc::new(SqliteBackend::new(database)),
-            };
-            Ok(backend)
-        },
-    )
-}
-
-/// 定时任务工厂（`plugins/task-builtin` 序 5a + `plugins/task-evolution` 序 5b）。
-///
-/// 与 `app/src/main.rs::task_factory` **同形同源**：5 个内置任务与自演化综述任务的
-/// 实现与注册清单（名字 / 显示名 / 间隔 / 启用条件）都在插件里，server 库不认识任何
-/// 具体任务。
-///
-/// **顺序拼接在装配层**（D2-2）：注册顺序 = 扫描顺序 = 执行顺序，而「演化任务排第 2
-/// 位（紧跟 `summary_generation`）」是跨插件属性——插件之间不互相 import，只有装配
-/// 清单知道「哪个插件该排在哪」。`splice(1..1, …)` = 在 index 1 之前插入。
-///
-/// 同步工厂——`TaskServices` 由 server 在调用前 await 好（共享 `ModelServices`，
-/// 不重复建 HTTP client 池）。
-fn task_factory() -> TaskFactory {
-    Arc::new(|services: &tianyan_server::TaskServices| {
-        let mut registrations = tianyan_task_builtin::tasks(services);
-        // 顺序纪律：evolution 紧跟 summary_generation（清单第 2 位，与迁移前一致）
-        registrations.splice(1..1, tianyan_task_evolution::tasks(services));
-        registrations
-    })
-}
-
-/// 审批门控工厂（`plugins/policy-approval`，ADR-049 期 3-T1）。
-///
-/// 与 `app/src/main.rs::approval_factory` **同形同源**：审批工作流（风险定级 / 自动
-/// 规则 / 模式短路 / 挂起通道 / 审计）搬出 core 后由装配层注入，server 库只认
-/// `Arc<dyn ApprovalGate>`。「配置 → 规则」的映射住插件里，这里只做类型擦除包装。
-fn approval_factory() -> ApprovalGateFactory {
-    Arc::new(
-        |security: &tianyan::config::SecurityConfig,
-         working_sets: Arc<tianyan::agent::working_set::WorkingSetRegistry>,
-         sink: tianyan::notification::SharedNotificationSink| {
-            tianyan_policy_approval::gate(security, working_sets, sink)
-        },
-    )
-}
-
-/// 上下文策略工厂（`plugins/policy-context`，ADR-049 期 3-T2）。
-///
-/// 与 `app/src/main.rs::context_factory` **同形同源**：管线（注入顺序）/ 双层检索
-/// （意图分类 + RRF）/ 分层压缩搬出 core 后由装配层注入，server 库只认
-/// `Arc<dyn ContextPort>`。注入顺序、检索参数、压缩阈值与「窗口 ↔ 模型规格联动」
-/// 都住插件里（`tianyan_policy_context::pipeline`），这里只做类型擦除包装。
-fn context_factory() -> ContextFactory {
-    Arc::new(|services: &tianyan::context::ContextServices| {
-        tianyan_policy_context::pipeline(services)
-    })
-}
-
-/// 任务结果自审器工厂（`plugins/policy-review`，ADR-049 期 3-T3）。
-///
-/// 与 `app/src/main.rs::task_reviewer_factory` **同形同源**：`LlmTaskReviewer`（判定
-/// 提示词 + `VERDICT:` 解析口径 + 兜底）搬出 core 后由装配层注入，server 库只认
-/// `Arc<dyn TaskReviewer>`。
-fn task_reviewer_factory() -> TaskReviewerFactory {
-    Arc::new(|chat: Arc<dyn tianyan::model::ChatService>, model: &str| {
-        tianyan_policy_review::task_reviewer(chat, model)
-    })
-}
-
-/// 技能使用复审工厂（`plugins/policy-review`，ADR-049 期 3-T3）。
-///
-/// 与 `app/src/main.rs::skill_review_factory` **同形同源**：`SkillReviewer` 搬出 core 后
-/// 由装配层注入，server 库只认 `Arc<dyn SkillReviewPort>`（唯一方法 `latest_review`）。
-fn skill_review_factory() -> SkillReviewFactory {
-    Arc::new(
-        |chat: Arc<dyn tianyan::model::ChatService>,
-         model: &str,
-         vfs: Arc<dyn tianyan::vfs::VirtualFileSystem>| {
-            tianyan_policy_review::skill_reviewer(chat, model, vfs)
-        },
-    )
-}
-
-/// 聊天 / 视觉 provider 工厂（`plugins/provider-llm`，ADR-049 期 2 序 6）。
-///
-/// 与 `app/src/main.rs::provider_llm_factory` **同形同源**：客户端构造、按能力解析、
-/// 每 provider 的聊天路由池与连通性探针都在插件里，server 库只认
-/// `Arc<dyn Fn(&ModelsConfig) -> Result<ProviderLlmServices>>`。
-fn provider_llm_factory() -> ProviderLlmFactory {
-    Arc::new(|config: &tianyan::config::ModelsConfig| tianyan_provider_llm::services(config))
-}
-
-/// 嵌入 provider 工厂（`plugins/provider-embed`，ADR-049 期 2 序 6）。
-///
-/// 与 `app/src/main.rs::provider_embed_factory` **同形同源**；产出里带用量上报槽位。
-fn provider_embed_factory() -> ProviderEmbedFactory {
-    Arc::new(|config: &tianyan::config::ModelsConfig| tianyan_provider_embed::services(config))
-}
-
-/// 工具管线工厂（`plugins/tool-pipeline`，ADR-049 期 3-T5）。
-///
-/// 与 `app/src/main.rs::tool_pipeline_factory` **同形同源**：观测监听器（统计 / Trace /
-/// GEPA 执行记录 / 失败规则学习）与超预算输出落盘（ADR-047）都在插件里，server 库只认
-/// `Arc<dyn Fn(&ToolPipelineWiring) -> Vec<Arc<dyn ToolPostExecuteListener>>>`。
-///
-/// **★ 顺序是语义**：观测在前（数据层须见原始结果）、落盘在后（改写者）——顺序在插件内
-/// `ToolPipeline::into_listeners` 一行可见，并由插件侧测试锁定。
-fn tool_pipeline_factory() -> ToolPipelineFactory {
-    tianyan_tool_pipeline::pipeline_factory()
 }
 
 /// 启动 Axum 服务
@@ -199,40 +64,11 @@ pub async fn start_axum_server(
     };
     info!("Starting Axum server on {}:{}", SERVER_HOST, port);
 
-    // 插件清单（ADR-049 期 1）：桌面端与独立 bin 共用同一工厂——
-    // 清单单一事实源在插件 crate（`plugin_factory()`），此处只接线。
-    let plugin_factory: ToolPluginFactory = Arc::new(
-        |ctx: &tianyan::agent::ToolContext, services: PluginServices| {
-            // 顺序即注册顺序（追加到动态工具末尾）：fs → code → todo/goal → web。
-            let mut tools = tianyan_tools_fs::tools(ctx);
-            tools.extend(tianyan_tools_code::tools(ctx));
-            // `todo` / `goal` 需与 REST API 共享同一份 store（由 server 从 AppState
-            // 经 `PluginServices` 递入；`tools()` 内部顺序固定 `todo` → `goal`）。
-            tools.extend(tianyan_tools_todo::tools(
-                services.todo_store(),
-                services.goal_store(),
-            ));
-            // `web_search` / `web_fetch`（ADR-049 期 2）：客户端由插件从
-            // `services.web_config()` 就地构造（配置非法时降级为空清单）。
-            tools.extend(tianyan_tools_web::tools(&services.web_config()));
-            tools
-        },
-    );
-    // 完整装配（ADR-049 期 2 序 3/4/5a/6、期 3-T1/T2/T3/T5）：
+    // 完整装配（ADR-049 期 2 序 3/4/5a/6、期 3-T1/T2/T3/T5、期 4）：
     // 工具清单 + 向量存储 + 结构化存储 + 内置任务 + 审批门控 + 上下文策略 + 两个评审插槽
-    // + 聊天/视觉 provider + 嵌入 provider + 工具管线
-    let assembly = AssemblyServices::new()
-        .with_plugin_factory(plugin_factory)
-        .with_vector_factory(vector_factory())
-        .with_storage_factory(storage_factory())
-        .with_task_factory(task_factory())
-        .with_approval_factory(approval_factory())
-        .with_context_factory(context_factory())
-        .with_task_reviewer_factory(task_reviewer_factory())
-        .with_skill_review_factory(skill_review_factory())
-        .with_provider_llm_factory(provider_llm_factory())
-        .with_provider_embed_factory(provider_embed_factory())
-        .with_tool_pipeline_factory(tool_pipeline_factory());
+    // + 聊天/视觉 provider + 嵌入 provider + 工具管线——清单在 `tianyan-assembly`，
+    // 与独立 bin 共用同一份实现（顺序纪律也只有那里一份）。
+    let assembly = tianyan_assembly::full();
     if let Err(e) = start_server_with_shutdown_signal_and_assembly(
         listener,
         tianyan_config,

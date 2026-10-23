@@ -53,41 +53,20 @@ doctest = false
 reqwest = { workspace = true, features = ["blocking"] }
 tempfile = { workspace = true }
 criterion = { version = "0.5", features = ["async_tokio"] }
-# 集成测试的**真实装配**（ADR-049 序 4）：`tests/common/factory.rs::test_assembly()`
-# 注入真实 SqliteBackend / LocalFileBackend。无循环依赖（插件只依赖 core，不依赖
-# server），因此不会出现 core 那种「同一 crate 两个编译单元」问题。
-tianyan-storage-sqlite = { path = "../plugins/storage-sqlite" }
-# 内置定时任务实现（ADR-049 期 2 序 5a）：集成测试的 `test_assembly()` 注入真实
-# 任务清单，保住「`start_server*` 会注册 5 个内置任务」这条可观测行为。
-# 同样无循环（插件只依赖 core，不依赖 server）。
-tianyan-task-builtin = { path = "../plugins/task-builtin" }
-# 自演化综述任务实现（ADR-049 期 2 序 5b）：`test_assembly()` 里与 builtin 拼接
-# （`splice(1..1, …)`，与 `app`/`tauri` 同形），保住「演化任务排第 2 位」这条顺序
-# 纪律在集成测试里也被覆盖。同样无循环。
-tianyan-task-evolution = { path = "../plugins/task-evolution" }
-# 审批策略实现（ADR-049 期 3-T1）：集成测试的 `test_assembly()` 注入**真实**审批门控
-# ——否则「黑名单命令被审批层复核」「审批状态接口返回真实配置」这些可观测行为在
-# 集成测试里测的就不是生产形态（与序 4 的「兜底后端」同一条纪律）。同样无循环。
-tianyan-policy-approval = { path = "../plugins/policy-approval" }
-# 上下文策略实现（ADR-049 期 3-T2）：集成测试的 `test_assembly()` 注入**真实**管线
-# ——否则 `create_app` 出来的 agent 会落到 core 的空直通兜底（无 system 前缀 + 不压缩），
-# 集成测试测的就不是生产形态（与序 4 的「兜底后端」同一条纪律）。无循环。
-tianyan-policy-context = { path = "../plugins/policy-context" }
-# 评审策略实现（ADR-049 期 3-T3）：集成测试的 `test_assembly()` 同样注入**真实**评审器
-# ——否则 `/api/v1/skills/stats` 的 reviews 永远为空（读端口未装配），测的就不是生产形态。
-# 与上下文策略同一条纪律：只用 dev-dep，生产图里没有插件（无循环）。
-tianyan-policy-review = { path = "../plugins/policy-review" }
-# provider 实现（ADR-049 期 2 序 6）：集成测试的 `test_assembly()` 注入**真实**的聊天 /
-# 视觉 / 嵌入实现——否则 `ModelServices` 落到 core 的「未配置」降级服务，任何模型调用
-# 都报“应用未配置”，配置解析 / 路由池 / 连通性探针在集成测试里就成了未测试代码（与
-# 上下文策略、评审器同一条纪律）。无循环（两个插件只依赖 core）。
-tianyan-provider-llm = { path = "../plugins/provider-llm" }
-tianyan-provider-embed = { path = "../plugins/provider-embed" }
-# 工具管线实现（ADR-049 期 3-T5）：集成测试的 `test_assembly()` 注入**真实**观测
-# 监听器与输出落盘（否则一个 post-execute 监听器都不注册，集成测试测不到生产形态的
-# 执行出口——与序 4「不要用 `AssemblyServices::default()` 驱动集成测试」同一条纪律）。
-# 同样无循环（插件只依赖 core，不依赖 server）。
-tianyan-tool-pipeline = { path = "../plugins/tool-pipeline" }
+# 集成测试的**真实装配**（ADR-049 期 4）：`tests/common/factory.rs::test_assembly()`
+# 只取 `tianyan_assembly::policies()`——11 个工厂与两份清单的唯一实现都在那里，
+# 本包不再手抄一份（改造前这里还有 9 个工厂的第二份副本）。
+#
+# **依赖形状是 dev-dependency 环**：`tianyan-assembly` 依赖本包（取 `AssemblyServices`
+# 与插槽类型别名），本包又把它作为 dev-dep。Cargo 允许——dev-dep 不参与**构建**图的
+# 环检测，测试目标的依赖图里 server lib 只编一份。它与 core 的「同源包含 + dev-dep
+# 编两份」陷阱不是一回事（见 `core/src/vfs/backend/mod.rs`）：那是 `#[path]` 把同一批
+# 源文件编进两个 crate，这里是两个独立 crate 的正常依赖。
+#
+# 代价：server 的测试目标会连带编译 assembly 的全部依赖（含 LanceDB 链），首次
+# `cargo test -p tianyan-server` 变慢；换来「9 个工厂只有一份实现」，插槽变化在
+# 编译期暴露而不是某个装配器运行期缺件。
+tianyan-assembly = { path = "../assembly" }
 # core 的测试替身（`MockVfs` / `MockChatService`）作为**特性构建**打开：本库的插槽
 # 测试要构造 `ContextServices`（含 `Arc<dyn VirtualFileSystem>`），不打开就只能
 # 复制一份替身（两份实现同时漂移）。仅测试构建生效，`cargo tree -p tianyan-server`

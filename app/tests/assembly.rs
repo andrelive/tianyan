@@ -9,6 +9,11 @@
 //!
 //! 这也是「装配清单住在 bin/装配包」这条边界的副产品：只有依赖插件的包
 //! 才能构造出完整工具集。
+//!
+//! 期 4 起清单本身由 `tianyan-assembly` 提供（`plugin_factory()`），本文件不再
+//! 自写一份——改造前它是同一份清单的**第 4 处副本**（另两处是两个装配器，第 5 处
+//! 是工具目录生成器）：顺序纪律靠 5 份互相提醒，等于没有纪律。工厂实现（向量存储 /
+//! 结构化存储的落盘行为）的内部测试也随实现在 `tianyan-assembly` 侧。
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
@@ -20,29 +25,21 @@ use tianyan::executor::SecurityPolicy;
 use tianyan::goals::GoalStore;
 use tianyan::model::types::ToolPresentation;
 use tianyan::todos::TodoStore;
-use tianyan::vfs::{ContextEntry, StorageBackend, VectorStorage};
-use tianyan_server::{StorageBackendFactory, VectorStorageFactory};
-use tianyan_storage_sqlite::{LocalFileBackend, SqliteBackend};
-use tianyan_storage_vector::LanceDbVectorStore;
 
-/// 插件工具清单——与 `app/src/main.rs::plugin_factory` **同源同序**：
+/// 插件工具清单——与 `tianyan_assembly::plugin_factory` **同源同序**：
 /// fs → code → todo → goal → web（顺序即注册顺序，抖动会白掉提示词前缀缓存）。
 ///
-/// `todo` / `goal` 的实现迁到 `plugins/tools-todo` 后仍需 store：这里用临时目录
-/// 建（注册与取 definition 不碰盘，`TempDir` 释放后工具也不会再去读）。
-/// `web_search` / `web_fetch` 用默认 `WebConfig`（只取 schema/definition，不发请求）。
+/// `todo` / `goal` 需要 store：这里用临时目录建（注册与取 definition 不碰盘，
+/// `TempDir` 释放后工具也不会再去读）。`web_search` / `web_fetch` 用默认 `WebConfig`
+/// （只取 schema/definition，不发请求）。
 fn plugin_tools(ctx: &ToolContext) -> Vec<Arc<dyn DynamicToolExecutor>> {
     let dir = tempfile::tempdir().unwrap();
-    let mut tools = tianyan_tools_fs::tools(ctx);
-    tools.extend(tianyan_tools_code::tools(ctx));
-    tools.extend(tianyan_tools_todo::tools(
+    let services = tianyan_server::PluginServices::new(
         Arc::new(TodoStore::new(dir.path())),
         Arc::new(GoalStore::new(dir.path())),
-    ));
-    tools.extend(tianyan_tools_web::tools(
-        &tianyan::config::WebConfig::default(),
-    ));
-    tools
+        tianyan::config::WebConfig::default(),
+    );
+    tianyan_assembly::plugin_factory()(ctx, services)
 }
 
 /// 构造「内置 + 插件」的完整注册表（与运行时装配同一工厂）。
@@ -184,16 +181,9 @@ async fn test_plugin_factory_is_repeatable_across_agent_rebuilds() {
             tianyan::config::WebConfig::default(),
         )
     };
-    let factory: tianyan_server::ToolPluginFactory = Arc::new(|ctx, services| {
-        let mut tools = tianyan_tools_fs::tools(ctx);
-        tools.extend(tianyan_tools_code::tools(ctx));
-        tools.extend(tianyan_tools_todo::tools(
-            services.todo_store(),
-            services.goal_store(),
-        ));
-        tools.extend(tianyan_tools_web::tools(&services.web_config()));
-        tools
-    });
+    // 真实装配工厂（ADR-049 期 4）：可重复性必须在**生产用的那份实现**上成立，
+    // 而不是本测试自写的一份副本。
+    let factory = tianyan_assembly::plugin_factory();
 
     // 第一次装配（首建）与第二次装配（模拟 reload 后的新注册表）必须得到同一工具集
     let mut snapshots: Vec<Vec<String>> = Vec::new();
@@ -232,118 +222,4 @@ async fn test_plugin_factory_is_repeatable_across_agent_rebuilds() {
             "插件工具缺失：{expected}"
         );
     }
-}
-
-/// 装配回归（ADR-049 期 2 序 3）：向量存储工厂必须真的产出 **LanceDB**
-/// （而不是 server 侧「未装配」时的空降级实现）。
-///
-/// 判别力：
-/// 1. 证明 `VectorStorageFactory` 的写法在**装配包外部**可用（闭包 → `Arc<dyn Fn>`
-///    → boxed future 的类型擦除链真的编译得过，与 `app/src/main.rs` 同形）；
-/// 2. 证明 `{data_dir}/lancedb` 被真实创建——空实现不会在磁盘留痕；
-/// 3. 维度来自 `StorageConfig`（8），说明配置被正确传入而非默认值。
-#[tokio::test]
-async fn test_vector_factory_yields_real_lancedb_store() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let mut config = tianyan::config::StorageConfig {
-        data_dir: dir.path().to_path_buf(),
-        ..Default::default()
-    };
-    config.vector.collection_name = "assembly_test".to_string();
-    config.vector.vector_dimension = 8;
-    // 与 `app/src/main.rs::vector_factory` 同形（借用 → clone → move 进 async）
-    let factory: VectorStorageFactory = Arc::new(|config: &tianyan::config::StorageConfig| {
-        let config = config.clone();
-        Box::pin(async move {
-            let store = LanceDbVectorStore::new(&config).await?;
-            Ok(Arc::new(store) as Arc<dyn VectorStorage>)
-        })
-    });
-
-    let store = factory(&config).await.expect("工厂应构造成功");
-    assert_eq!(store.embedding_dim(), 8, "维度应来自注入的配置");
-    assert_eq!(store.count_rows().await.expect("行数可读"), 0);
-    assert!(
-        dir.path().join("lancedb").is_dir(),
-        "LanceDB 数据目录应被创建（空实现不留痕）"
-    );
-}
-
-/// 装配回归（ADR-049 期 2 序 4）：结构化存储工厂必须按 `config.storage.backend`
-/// 真的产出**插件里的实现**，而不是 server 侧「未装配」时的内存兜底。
-///
-/// 判别力：
-/// 1. 与 `app/src/main.rs::storage_factory` 同形的工厂在**装配包外部**构造得出来
-///    （同步工厂的类型擦除链真的编译得过）；
-/// 2. `Sqlite` 分支写入的条目能被**另开一条连接到同一数据库文件**的后端读回——
-///    内存兜底不落盘，`exists` 必为 false；即「装配层真的注入了 SqliteBackend」；
-/// 3. `Local` 分支会真的在磁盘上建出数据目录——内存兜底不建目录；
-/// 4. 两个分支共用同一份 `StorageConfig`，说明 adapter 选择发生在装配层（server
-///    库只递配置与共享连接，不认识这两个类型）。
-#[tokio::test]
-async fn test_storage_factory_yields_real_backend_per_config() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let db_path = dir.path().join("tianyan.db");
-    // 与 `app/src/main.rs::storage_factory` 同形
-    let factory: StorageBackendFactory = Arc::new(
-        |config: &tianyan::config::StorageConfig, database: Arc<tianyan::db::Database>| {
-            use tianyan::config::StorageBackendType;
-            let backend: Arc<dyn StorageBackend> = match config.backend {
-                StorageBackendType::Local => Arc::new(LocalFileBackend::new(config.clone())),
-                StorageBackendType::Sqlite => Arc::new(SqliteBackend::new(database)),
-            };
-            Ok(backend)
-        },
-    );
-
-    // ── Sqlite 分支：写入必须落到数据库文件 ──────────────────────────────
-    let sqlite_config = tianyan::config::StorageConfig {
-        data_dir: dir.path().to_path_buf(),
-        backend: tianyan::config::StorageBackendType::Sqlite,
-        sqlite_path: Some(db_path.clone()),
-        ..Default::default()
-    };
-    let database = tianyan::db::Database::open(db_path.clone()).expect("打开数据库");
-    database.init_schemas().await.expect("初始化 schema");
-    let backend = factory(&sqlite_config, database).expect("Sqlite 分支应构造成功");
-    backend.initialize().await.expect("建 vfs_entries 表");
-    let uri = tianyan::TianyanUri::new(
-        tianyan::ContextNamespace::Knowledge,
-        vec!["assembly_probe.md".to_string()],
-    );
-    backend
-        .write_entry(&ContextEntry::new_file(uri.clone()))
-        .await
-        .expect("写条目");
-    drop(backend);
-
-    // 另开一条到同一文件的连接读回（内存兜底不会有任何落盘痕迹）
-    let reopened = tianyan::db::Database::open(db_path).expect("重开数据库");
-    reopened.init_schemas().await.expect("重开初始化 schema");
-    let reopened_backend =
-        factory(&sqlite_config, reopened).expect("Sqlite 分支应可重复构造（重启/搬迁）");
-    assert!(
-        reopened_backend.exists(&uri).await.expect("存在性查询"),
-        "Sqlite 分支必须落盘（未装配时会退化成内存后端，此处读回为空）"
-    );
-
-    // ── Local 分支：必须真的在磁盘上建目录 ───────────────────────────────
-    let local_dir = dir.path().join("local-data");
-    let local_config = tianyan::config::StorageConfig {
-        data_dir: local_dir.clone(),
-        backend: tianyan::config::StorageBackendType::Local,
-        sqlite_path: None,
-        ..Default::default()
-    };
-    let database = tianyan::db::Database::open(dir.path().join("tianyan2.db")).expect("打开数据库");
-    let local_backend = factory(&local_config, database).expect("Local 分支应构造成功");
-    assert!(
-        !local_dir.exists(),
-        "前置：构造阶段不做 IO（建目录在 initialize 里）"
-    );
-    local_backend.initialize().await.expect("建数据目录");
-    assert!(
-        local_dir.is_dir(),
-        "Local 分支应建出数据目录（内存兜底不会留痕）"
-    );
 }

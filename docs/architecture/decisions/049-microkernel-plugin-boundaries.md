@@ -1494,6 +1494,131 @@ ADR-049 期 2 的序 6（当时跳过、留待最后）在期 3-T3 之后补做�
 
 ---
 
+### 期 4 实施记录（清单收敛，2026-10-23）
+
+**本批目标**：把「装配清单」本身收敛为单一事实源，并把跨插件顺序从注释变成断言。
+
+#### ① 普查推翻了任务书的「三份清单」：实测是 **5 处副本**，但只该有 **2 个函数**
+
+分期表原写 `desktop()` / `headless()` / `minimal()` 三份清单。实测副本是 5 处：
+
+| 位置 | 工具清单 | 9 个策略工厂 | vector | storage |
+|---|---|---|---|---|
+| `app/src/main.rs` | ✅ | ✅ | ✅ | ✅ |
+| `tauri/src/server.rs` | ✅（内联闭包） | ✅ | ✅ | ✅ |
+| `server/tests/common/factory.rs::test_assembly()` | — | ✅ | — | ✅ |
+| `app/tests/assembly.rs` | ✅ ×2（`plugin_tools()` + 内联工厂） | — | ✅ | ✅ |
+| `app/examples/tool_catalog.rs` | ✅ | — | — | — |
+
+**desktop 与 headless 的装配内容完全相同**——差异只在启动入口
+（`start_server_with_shutdown_signal_and_assembly` vs `start_server_with_assembly`）、
+桌面端的端口探测与窗口生命周期、以及 bin 侧的「搬迁后重启」循环。为「同一份内容」
+造两个名字会让人以为它们真的不同，而「改一处必须改两处」正是要消灭的形态。
+
+因此本批落地的是 **2 个函数，且后者是前者的前缀**：
+
+```text
+full()      = policies() + plugin_factory() + vector_factory()      ← app bin / tauri
+policies()  = 9 个策略 / 基础设施插槽                                ← server 集成测试
+              storage / task / approval / context / task_reviewer /
+              skill_review / provider_llm / provider_embed / tool_pipeline
+```
+
+- **`policies()` 为什么值得一个名字**：`minimal` 的真实需求（集成测试剖面）**确实**
+  与生产不同——少两个「环境相关」插槽（动态工具清单在 `create_app` 路径不注册；
+  真实 LanceDB 会为每个测试建目录）。但它不该叫 `minimal`：那会诱导读者以为
+  「测试少装了几块策略」，而实际上这 9 个策略插槽与生产**完全同形**。
+- **为什么不用 `without_*` 从 `full()` 里拿掉两块**：`AssemblyServices` 只有
+  `with_*`、没有 `without_*`（「装配了又拿掉」与「本来就没装」在运行期不可区分，
+  那是降级路径的语义污染）。前缀关系 `full() = policies() + 2` 是更强的保证：
+  新增一个策略插槽只改 `policies()`，两个消费者同时得到。
+- **`plugin_factory()` 为什么是 `pub`**：除 `full()` 外还有两个**真实**消费者要用同一份
+  清单——`app/examples/tool_catalog.rs`（工具目录的**权威生成器**：目录必须与运行时
+  工具集逐字一致，否则插件工具既无文档覆盖、也不受 freshness 门禁保护）与
+  `app/tests/assembly.rs`（插件工具全部注册 / 展示意图 / 不撞内置 / 工厂可重复）。
+  改造前这两处各自重写了一遍清单。
+
+#### ② 新增的边界认知：**dev-dependency 环是允许的**（与 `#[path]` 陷阱不是一回事）
+
+`server/tests` 要用 `tianyan_assembly::policies()`，而 assembly 依赖 server
+（取 `AssemblyServices` 与 11 个插槽类型别名）→ `server --dev--> assembly --> server`。
+
+**Cargo 允许**：dev-dep 不参与**构建**图的环检测，测试目标的依赖图里 server lib
+只编一份（与普通 dev-dep 无区别）。这与 core 的「`#[path]` 同源包含 + dev-dep →
+同一批源文件编进两个 crate」**完全不同**——那里 `StorageBackend` 会出现两个不兼容
+实例（22 处 E0308/E0277），这里 `AssemblyServices` 始终只有 server 那一份定义。
+
+代价（已实测并接受）：server 的测试目标现在连带编译 assembly 的全部依赖（含 LanceDB
+链），首次 `cargo test -p tianyan-server` 变慢；换来「9 个工厂只有一份实现」——插槽
+变化在**编译期**暴露，而不是等某个装配器运行期缺件（静默降级最贵的那种）。
+
+#### ③ 跨插件顺序：从注释变成断言（期 3-T5 遗留 1 的兑现）
+
+```text
+① 工具注册顺序 = 提示词前缀顺序（抖动 → 前缀缓存全白）
+   fs(read_file, write_file, apply_edit, apply_patch, glob, list_dir)
+     → code(symbol_outline, repo_map, grep) → todo(todo) / goal(goal)
+     → web(web_search, web_fetch)
+② 任务清单顺序 = 扫描顺序 = 同一轮到期任务的执行顺序
+   summary_generation → evolution → garbage_collection → usage_stats_flush
+     → [snapshot_gc] → [reminder]
+         ▲
+         └── splice(1..1)：跨插件位置，只有装配层知道（插件之间零互赖，D2-2）
+③ 工具管线监听器顺序（ADR-047「顺序是语义」）：观测 → 落盘
+         ▲
+         └── 顺序在插件内 `ToolPipeline::into_listeners` 一行可见，装配层不重排
+```
+
+- ① `test_tool_order_is_fs_code_todo_web`：**端到端跑真实插件清单**（不 mock），断言前
+  11 个工具逐位为 fs(6) → code(3) → todo/goal(2)；web 两个若注册必在末尾且顺序固定。
+  用「若注册」而非「必定 13 个」，是为了不让断言退化成 `WebConfig` 校验测试——
+  **配置非法时降级为空清单是插件的合法行为**。
+- ② `merge_task_lists` 是**唯一**的跨插件拼接点（`task_factory` 里只调它）：
+  `test_merge_task_lists_puts_evolution_second` 锁位置，
+  `test_merge_task_lists_is_identity_when_evolution_absent` 锁「演化未启用时内置清单
+  原样不动」。用 `splice` 而非 `insert` 循环，是为了让这条纪律在一行里可见。
+- ③ 顺序留在插件内（本批只做类型擦除包装）：搬进装配层会让顺序脱离被测对象。
+
+**① 的实证价值（当场发生）**：这条断言第一次跑就抓到了**我自己的错误假设**——
+`fs` 域内部顺序按源码排列「看起来」是 `glob, list_dir, read_file, write_file, …`，
+实测注册顺序是 `read_file, write_file, apply_edit, apply_patch, glob, list_dir`
+（与 `ToolPresentation` 表的枚举顺序一致）。这正是「顺序纪律只写在注释里」的典型
+风险：**注释写错了没人发现，断言写错了当场红**。
+
+#### ④ 数据
+
+| 指标 | 改造前 | 改造后 |
+|---|---|---|
+| 清单副本 | **5 处**（见 ① 表） | **2 个函数**（`full()` / `policies()`）+ 1 个工厂（`plugin_factory()`） |
+| `app/src/main.rs` | 277 行 | **101 行** |
+| `tauri/src/server.rs` | 268 行 | **114 行**（含端口探测 + 3 个测试） |
+| `server/tests/common/factory.rs` | 240 行 | **158 行** |
+| `assembly/`（新 crate） | — | 生产 347 行 + 测试 215 行（均含文档） |
+| 装配器对插件的**直接**依赖 | app 15 个 / tauri 15 个 | app **1** 个（`tool-pipeline`：工具目录渲染口径）+ assembly；tauri **0** 个 + assembly |
+| 跨插件顺序断言 | 0（只有注释） | 4 条（工具顺序 ×1、任务位置 ×2、装配可重复 ×1） |
+
+反指标复核：新 crate 347 生产行 ≥300 ✅；真实消费者 3 个（`app` / `tauri` /
+`server/tests`）✅，`plugin_factory` 另有 2 个（catalog 生成器 / 装配级测试）——
+没有一个是「为对称而造」的。
+
+#### ⑤ 未做（明确遗留）
+
+1. **插槽平铺表治理**（期 3-T5 遗留 1 曾标为「期 4 第一件事」）：本批**未做**。它要动
+   `AssemblyServices`（11 字段 + 11 `with_*` + 11 访问器）、`AppState::new` 形参
+   （6 个 `Option<Factory>`）、`build_agent*`（24 形参），风险与收益都和「清单收敛」
+   不同量级。本批已把**漂移风险**消除（唯一实现 + 顺序断言），而平铺表的问题是
+   **可读性 / 形参数**——按「改一批、提交一批」拆成独立批次（**期 4b**），判据沿用
+   下方三条候选路线（按插件分组优先）与反指标（插槽数 / 形参数）。
+2. **启动编排的重复**：`app/src/main.rs` 的「`load_and_install` → `init_logging` →
+   `panic_hook::install`」与 `tauri/src/lib.rs` 里的一套（有各自的 `init_logging` 函数）
+   仍是两份。它属**启动编排**而非装配清单（桌面端还要窗口 / 托盘 / 单实例 / 更新器），
+   收敛需先把「桌面端独有」与「两端共有」切开，留待后续。
+3. **`policies()` 与 `full()` 的字段级断言**：`AssemblyServices` 的访问器是
+   `pub(crate)`，本 crate 无法直接断言「`policies()` 缺的正是那两个插槽」。现有断言是
+   行为级（server 侧插槽测试已覆盖「未装配 → 空清单 / Noop 兜底」），本批不造第二套。
+
+---
+
 ## 分期与闸门
 
 | 期 | 目标 | 动作要点 | 闸门（硬数） |
@@ -1503,7 +1628,7 @@ ADR-049 期 2 的序 6（当时跳过、留待最后）在期 3-T3 之后补做�
 | **1** | 工具插件试点（**装配器二分 + tools-fs 骨架已完成**） | ✅ `tianyan-app` bin 包（**清单住 bin**）+ `ToolPluginFactory` 类型擦除 + `create_app_with_plugins` / `start_server_with_plugins*`；✅ `plugins/tools-fs` 独立 crate（`executor::fs` 实现整体迁入）。待续：**整域迁移**——`read_file` 目录模式反向依赖 `executor::fs::execute_list_dir`，故 fs 域必须 6 工具一起搬（read/write/edit/patch/glob/list_dir）才能删 core 侧 | 闸门 A **首测 512 行 ✅**（判据 ≤3.5K）；core 侧暂留（双路径过渡，重名注册自动跳过） |
 | **2** | 适配器与任务插件（**期 2 全部完成（序 0–6）**） | 迁移顺序（按 自包含度×收益）：**0 清 core 死依赖** → 1 `tools-todo`+`tools-goal` → 2 `tools-web` → 3 `storage-vector` → 4 `storage-sqlite` → 5 `task-*`（2 crate）→ **6 `provider-llm`+`provider-embed`（+ 共享基底 `provider-client`，2026-10-21 补做）**。详见下方「期 2 普查结论」与「实施记录（期 2 序 6）」 | 各领域 ≤ 2K；全量 release 不劣化 >10% |
 | **3** | 策略分离（最难一刀） | 抽 `kernel-impl`（loop/cancel/rollback/stream_forward/working_set）；**`context`→`policy-context`（T2 ✅ 2026-10-21，见下方实施记录；`assembler.rs` 按普查修订留 kernel-impl）**；**审批→`policy-approval`（T1 ✅ 2026-10-21）**；`role_learning`→已删除（零消费者，2026-10-21 裁决）；**`judge` + `skills/reviewer`→`policy-review`（T3 ✅ 2026-10-21，475 生产行；`TaskReviewer` / `SkillReviewPort` 契约留 core）**；**配置加载/持久化/迁移/校验/向导→`service-config`（T4 ✅ 2026-10-21，644 生产行净减；结构与预设表留 core，`get_config` 槽位化）** | **闸门 B**：api ≤ 6K && impl ≤ 15K——**✅ 期 3 末实测 `api 4,587 / impl 14,957`**（期 3-T5 收口后；口径 = 四件套文件归属。`agent/background.rs` 1,300 行经裁决算 K1，不可外移）；改策略不重编内核 ✅；S 级零变更 ✅ |
-| **4** | 清单收敛与发行版 | 清单完整化、跨插件顺序断言、desktop/headless/minimal 三份清单 | 装配清单 1 页可查；headless 可构建 |
+| **4** | 清单收敛与发行版（**清单收敛已完成 = 4a**；插槽治理 = 4b 未做；发行版收尾待 1.0 前） | ✅ `tianyan-assembly`：11 个插件工厂的**唯一实现** + `full()` / `policies()` 双清单（前缀关系）+ 跨插件顺序断言 4 条（详见下方「期 4 实施记录」）；⏳ 插槽平铺表治理（见 ⑤ 遗留 1）；⏳ 安装验收 / `latest.json` / 签名 | 装配清单 1 页可查 ✅（`assembly/src/lib.rs` crate 文档三张图）；headless 可构建 ✅（`app` bin 即 headless）；**原「desktop/headless/minimal 三份清单」被实证推翻**（desktop ≡ headless，minimal = `policies()`——见 期 4 记录 ①） |
 
 **反指标**（防拆过头）：每 crate ≥ 300 行且至少 2 个真实消费者；每期净增 pub trait ≤ 3；
 每插件 crate 公开符号 ≤ 15；全量构建不劣化 >10%。

@@ -1,0 +1,36 @@
+[package]
+name = "tianyan-assembly"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "天演装配清单（ADR-049 期 4）：插件工厂的单一实现与装配顺序纪律"
+
+[dependencies]
+tianyan = { path = "../core", package = "tianyan-core" }
+tianyan-server = { path = "../server" }
+tianyan-tools-fs = { path = "../plugins/tools-fs" }
+tianyan-tools-code = { path = "../plugins/tools-code" }
+tianyan-tools-todo = { path = "../plugins/tools-todo" }
+tianyan-tools-web = { path = "../plugins/tools-web" }
+tianyan-storage-vector = { path = "../plugins/storage-vector" }
+tianyan-storage-sqlite = { path = "../plugins/storage-sqlite" }
+tianyan-task-builtin = { path = "../plugins/task-builtin" }
+tianyan-task-evolution = { path = "../plugins/task-evolution" }
+tianyan-policy-approval = { path = "../plugins/policy-approval" }
+tianyan-policy-context = { path = "../plugins/policy-context" }
+tianyan-policy-review = { path = "../plugins/policy-review" }
+tianyan-provider-llm = { path = "../plugins/provider-llm" }
+tianyan-provider-embed = { path = "../plugins/provider-embed" }
+tianyan-tool-pipeline = { path = "../plugins/tool-pipeline" }
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+# 顺序断言里的占位处理器需要 `TaskHandler` 的 async 方法
+async-trait = "0.1"
+# 工厂回归测试：临时数据目录（只建不清理也无所谓，但用 TempDir 更干净）
+tempfile.workspace = true
+tokio = { workspace = true }

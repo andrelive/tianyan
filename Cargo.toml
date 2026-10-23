@@ -5,6 +5,7 @@ members = [
     "tauri",
     "mcp",
     "app",
+    "assembly",
     "service/config",
     "plugins/tools-fs",
     "plugins/tools-code",

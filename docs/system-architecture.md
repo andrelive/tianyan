@@ -246,7 +246,7 @@ Agent :: process_message(session_id, msg) / process_message_stream（多模态 +
 - `observability.rs` 承担 usage stats / Trace / GEPA 执行历史 / 失败规则学习；
 - `spill.rs` 承担超预算工具输出落盘（ADR-047），**必须注册在观测监听器之后**——数据层要看到原始结果，落盘会替换 result。未装配时降级为「大输出不落盘 + warn 一次」（best effort，与 ADR-047 一致）。
 
-装配经 `AssemblyServices::tool_pipeline_factory` 注入（server 库不认识该插件）。
+装配经 `AssemblyServices::tool_pipeline_factory` 注入（server 库不认识该插件）；工厂的**实现**在 `tianyan-assembly`（ADR-049 期 4：11 个插件工厂的单一实现，`app` bin / `tauri` / 集成测试共用同一份，改造前共有 5 处副本）。
 
 - **25 个内置工具**：基于 `#[derive(JsonSchema)]` 参数结构体自动生成 Schema；完整清单见自动生成的 [`docs/architecture/tool-catalog.md`](architecture/tool-catalog.md)（`scripts/gen-tool-catalog.ps1` 生成，freshness 挂入 `scripts/test.ps1` lint 门禁）
 - **展示契约（A2）**：每个工具注册 `ToolPresentation` 展示意图（read/terminal/diff/search/web/...），随 SSE `tool_call` 事件透传，前端 `ToolCallCard` 数据驱动渲染——工具与 UI 解耦

@@ -15,40 +15,8 @@ tianyan-server = { path = "../server" }
 # 服务层配置 crate（ADR-049 期 3-T4）：桌面端同样在启动期「加载 → 注入内核槽位」，
 # 搬迁重启后再重读一次（与 `app/src/main.rs` 同源同形）。
 tianyan-service-config = { path = "../service/config" }
-# 插件清单（ADR-049 期 1）：桌面端也在装配层，清单与独立 bin 同源
-tianyan-tools-fs = { path = "../plugins/tools-fs" }
-# 插件清单（ADR-049 期 1）：桌面端与独立 bin 同源
-tianyan-tools-code = { path = "../plugins/tools-code" }
-# 插件清单（ADR-049 期 1）：桌面端与独立 bin 同源。
-# todo/goal 例外地需要 store：装配层从 AppState 取同一实例传入插件。
-tianyan-tools-todo = { path = "../plugins/tools-todo" }
-# 插件清单（ADR-049 期 2）：web_search / web_fetch。
-tianyan-tools-web = { path = "../plugins/tools-web" }
-# 向量存储实现（ADR-049 期 2 序 3）：LanceDB 搬出 core 后由桌面端注入。
-tianyan-storage-vector = { path = "../plugins/storage-vector" }
-# 结构化存储实现（ADR-049 期 2 序 4）：SqliteBackend / LocalFileBackend 搬出 core
-# 后由桌面端注入（`config.storage.backend` 的 adapter 选择也在装配层）。
-tianyan-storage-sqlite = { path = "../plugins/storage-sqlite" }
-# 内置定时任务实现（ADR-049 期 2 序 5a）：5 个任务搬出 core 后由桌面端注入
-# （任务名/显示名/间隔/启用条件全在插件里，server 库不认识任何具体任务）。
-tianyan-task-builtin = { path = "../plugins/task-builtin" }
-# 自演化综述任务实现（ADR-049 期 2 序 5b）：演化任务搬出 core 后由桌面端注入。
-# 清单顺序跨插件，**合并也在这里**（`splice(1..1, …)`：紧跟 summary_generation）。
-tianyan-task-evolution = { path = "../plugins/task-evolution" }
-# 审批策略实现（ADR-049 期 3-T1）：审批工作流搬出 core 后由桌面端注入
-# （与 `app/src/main.rs::approval_factory` 同形同源）。
-tianyan-policy-approval = { path = "../plugins/policy-approval" }
-# 上下文策略实现（ADR-049 期 3-T2）：与 `app/src/main.rs::context_factory` 同形同源。
-tianyan-policy-context = { path = "../plugins/policy-context" }
-# 评审策略实现（ADR-049 期 3-T3）：与 `app/src/main.rs` 的两个评审工厂同形同源。
-tianyan-policy-review = { path = "../plugins/policy-review" }
-# provider 实现（ADR-049 期 2 序 6）：与 `app/src/main.rs` 的两个 provider 工厂同形同源
-# （聊天/视觉 + 嵌入；server 库只认 core 的能力集合与 `ConnectionProbe` 契约）。
-tianyan-provider-llm = { path = "../plugins/provider-llm" }
-tianyan-provider-embed = { path = "../plugins/provider-embed" }
-# 工具管线实现（ADR-049 期 3-T5）：观测监听器 + 超预算输出落盘（ADR-047）搬出 core
-# 后由本包注入（与 `app` 同一份插件工厂 `pipeline_factory()`）。无循环依赖。
-tianyan-tool-pipeline = { path = "../plugins/tool-pipeline" }
+# 装配清单单一实现（ADR-049 期 4）：11 个工厂与三份清单都在此，桌面端只调用
+tianyan-assembly = { path = "../assembly" }
 
 # Tauri framework
 tauri = { version = "2.2", features = ["tray-icon", "devtools"] }

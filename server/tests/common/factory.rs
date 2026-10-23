@@ -121,120 +121,48 @@ pub fn test_tianyan_config_with_data_dir(data_dir: std::path::PathBuf) -> Tianya
     }
 }
 
-/// 集成测试用的**真实装配**（ADR-049，期 2 序 4 / 序 5a）。
+/// 集成测试用的**真实装配**（ADR-049 期 2 序 4 / 序 5a；**期 4 起只剩一行**）。
 ///
-/// 存储后端按 `config.storage.backend` 分发到真实的 `SqliteBackend` /
-/// `LocalFileBackend`——与生产装配器（`app` bin / `tauri`）同一份选择逻辑，
-/// 只是把「哪个 adapter」的 match 从 server 库搬到了装配侧（D5）。
+/// ## 期 4：这里不再手抄装配清单
 ///
-/// 内置任务清单同样注入真实实现（序 5a）：迁移前 `start_server*` **会**注册那 5 个
-/// 任务，若集成测试走「未装配 → 不注册」的降级路径，测的就不是生产的形态
-/// （与序 4 的「兜底后端」同一条纪律：**不要用 `AssemblyServices::default()` 驱动
-/// 集成测试**）。`create_app` 路径本就不注册任务，因此那里的行为不受影响。
+/// 期 4 之前本函数是**第二份**手抄的 9 个工厂（`app` bin 与 `tauri` 各一份，合计
+/// 三份副本），每份都靠注释「与 `app` / `tauri` 同一份插件实现」互相提醒——插槽
+/// 签名一变，先改的那份能编、后改的那份报错；而**顺序纪律**在某一份里被单独调整时
+/// 连编译都不会失败。期 4 把 11 个工厂与两份清单收敛到 `tianyan_assembly`（唯一
+/// 实现），本函数只取 [`tianyan_assembly::policies`]。
+///
+/// **为什么是 `policies()` 而不是 `full()`**：`full()` 额外含两个「环境相关」插槽
+/// ——动态工具清单（`create_app` 路径本就不注册插件工具）与真实向量存储（LanceDB
+/// 会为每个测试建目录）。集成测试不需要它们；而 `policies()` 里的 9 个插槽与生产
+/// **完全同形**：
+///
+/// - 存储后端按 `config.storage.backend` 分发到真实 `SqliteBackend` /
+///   `LocalFileBackend`——与生产装配器同一份选择逻辑（D5）；
+/// - 任务清单是**真实插件项**（迁移前 `start_server*` 会注册那 5 个 + 演化任务，
+///   `splice(1..1, …)` 的跨插件位置也只在装配层）；
+/// - 审批 / 上下文 / 评审 / provider / 工具管线全部注入真实实现。
 ///
 /// **不要用 `AssemblyServices::default()` 驱动集成测试**：那会落到内存兜底后端
 /// （`EphemeralStorageBackend`），测试虽然能过，却不再覆盖真实 SQL 语句、表结构
 /// 与文件目录语义——而 `StorageBackendType` 的默认值就是 `Sqlite`，也就是说退化
 /// 成兜底等于**判别力回退**（序 4 迁移时一度如此，已在本函数修正）。
 ///
-/// 注意：本函数能成立的前提是 `tianyan-storage-sqlite` 只是 server 的 dev-dep
-/// 且**不被 server 依赖**（无环）；core 的同类需求不能照抄——core 若这样做会被
-/// 编译两份，trait 与类型出现两个不兼容实例（见 `core/src/vfs/backend/mod.rs`）。
+/// ## 依赖形状：dev-dependency 环（**Cargo 允许**）
+///
+/// `tianyan-assembly` 依赖 `tianyan-server`（取 `AssemblyServices` 与 11 个插槽
+/// 类型别名），而本包把它作为 **dev-dependency**：`server --dev--> assembly -->
+/// server`。这不违反 Cargo 的环检测——dev-dep 不参与**构建**图的环检测，测试目标
+/// 的依赖图里 server lib 只编一份，与普通 dev-dep 无区别。
+///
+/// 它**不是** core 那种「同源包含 + dev-dep 导致编译两份」的陷阱
+/// （见 `core/src/vfs/backend/mod.rs`）：那里是 `#[path]` 把同一批源文件编进两个
+/// crate，于是 `StorageBackend` 出现两个不兼容实例；这里是两个独立 crate 的正常
+/// 依赖，`AssemblyServices` 始终只有 server 里那一份定义。
+///
+/// 代价（已实测并接受）：server 的测试目标现在会连带编译 `tianyan-assembly` 的全部
+/// 依赖（含 LanceDB 链），首次 `cargo test -p tianyan-server` 因此变慢；换来的是
+/// 「9 个工厂只有一份实现」——插槽变化时在**编译期**暴露，而不是等某个装配器运行时
+/// 缺件（静默降级最贵的那种 bug）。
 pub fn test_assembly() -> tianyan_server::AssemblyServices {
-    use std::sync::Arc;
-
-    use tianyan::config::StorageBackendType;
-    use tianyan::vfs::StorageBackend;
-
-    let factory: tianyan_server::StorageBackendFactory = Arc::new(|config, database| {
-        let storage: Arc<dyn StorageBackend> = match config.backend {
-            StorageBackendType::Local => Arc::new(tianyan_storage_sqlite::LocalFileBackend::new(
-                config.clone(),
-            )),
-            StorageBackendType::Sqlite => {
-                Arc::new(tianyan_storage_sqlite::SqliteBackend::new(database))
-            }
-        };
-        Ok(storage)
-    });
-
-    // 定时任务清单：与 `app` / `tauri` 同一份插件实现（任务名/间隔/启用条件全在插件里）
-    // 顺序拼接在装配层（D2-2）：`splice(1..1, …)` = evolution 紧跟 summary_generation。
-    let task_factory: tianyan_server::TaskFactory =
-        Arc::new(|services: &tianyan_server::TaskServices| {
-            let mut registrations = tianyan_task_builtin::tasks(services);
-            registrations.splice(1..1, tianyan_task_evolution::tasks(services));
-            registrations
-        });
-
-    // 审批门控（ADR-049 期 3-T1）：与 `app` / `tauri` 同一份插件实现。「配置 → 自动
-    // 审批规则」的映射住插件里（`tianyan_policy_approval::gate`），这里只做类型擦除
-    // 包装。**不注入**就会落到「未装配 → 工具直接放行」的降级路径，测的就不是生产
-    // 形态（与序 4「不要用 `AssemblyServices::default()` 驱动集成测试」同一条纪律）。
-    let approval_factory: tianyan_server::ApprovalGateFactory = Arc::new(
-        |security: &SecurityConfig,
-         working_sets: Arc<tianyan::agent::working_set::WorkingSetRegistry>,
-         sink: tianyan::notification::SharedNotificationSink| {
-            tianyan_policy_approval::gate(security, working_sets, sink)
-        },
-    );
-
-    // 上下文策略（ADR-049 期 3-T2）：与 `app` / `tauri` 同一份插件实现。「注入顺序 /
-    // 检索参数 / 压缩阈值 / 压缩窗口 ↔ 模型规格联动」全在插件里
-    // （`tianyan_policy_context::pipeline`），这里只做类型擦除包装。
-    // **不注入**就会落到 core 的空直通兜底（无 system 前缀 + 不压缩），集成测试测的
-    // 就不是生产形态（与序 4「不要用 `AssemblyServices::default()` 驱动集成测试」
-    // 同一条纪律；`start_server*` 入口另有硬守卫，缺件根本起不来）。
-    let context_factory: tianyan_server::ContextFactory =
-        Arc::new(|services: &tianyan_server::ContextServices| {
-            tianyan_policy_context::pipeline(services)
-        });
-
-    // 评审策略（ADR-049 期 3-T3）：与 `app` / `tauri` 同一份插件实现。任务自审
-    // （判定提示词 + `VERDICT:` 解析 + 兜底）与技能复审（会话证据打分落 VFS）全在插件里
-    // （`tianyan_policy_review::{task_reviewer, skill_reviewer}`），这里只做类型擦除包装。
-    // **不注入**就会落到降级路径（自审器缺件 + 技能统计的 reviews 恒空），集成测试测的
-    // 就不是生产形态（与序 4「不要用 `AssemblyServices::default()` 驱动集成测试」同一条
-    // 纪律）。
-    let task_reviewer_factory: tianyan_server::TaskReviewerFactory =
-        Arc::new(|chat: Arc<dyn tianyan::model::ChatService>, model: &str| {
-            tianyan_policy_review::task_reviewer(chat, model)
-        });
-    let skill_review_factory: tianyan_server::SkillReviewFactory = Arc::new(
-        |chat: Arc<dyn tianyan::model::ChatService>,
-         model: &str,
-         vfs: Arc<dyn tianyan::vfs::VirtualFileSystem>| {
-            tianyan_policy_review::skill_reviewer(chat, model, vfs)
-        },
-    );
-
-    // provider 实现（ADR-049 期 2 序 6）：与 `app` / `tauri` 同一份插件实现。客户端构造、
-    // 按能力解析、每 provider 的聊天路由池、连通性探针全在插件里
-    // （`tianyan_provider_llm::services` / `tianyan_provider_embed::services`），这里只做
-    // 类型擦除包装。**不注入**就会落到 core 的「未配置」降级服务（任何模型调用都报
-    // “应用未配置”），集成测试从此测不到真实的能力解析与请求构造（与序 4「不要用
-    // `AssemblyServices::default()` 驱动集成测试」同一条纪律）。
-    let provider_llm_factory: tianyan_server::ProviderLlmFactory =
-        Arc::new(|config: &ModelsConfig| tianyan_provider_llm::services(config));
-    let provider_embed_factory: tianyan_server::ProviderEmbedFactory =
-        Arc::new(|config: &ModelsConfig| tianyan_provider_embed::services(config));
-
-    // 工具管线（ADR-049 期 3-T5）：与 `app` / `tauri` 同一份插件实现。观测监听器
-    // （统计 / Trace / GEPA 执行记录 / 失败规则学习）与超预算输出落盘（ADR-047）全在
-    // `tianyan_tool_pipeline` 里，这里只做类型擦除包装。**不注入**就会一个 post-execute
-    // 监听器都不注册（不落盘 + 观测全停），集成测试从此测不到生产形态的执行出口
-    // （与序 4「不要用 `AssemblyServices::default()` 驱动集成测试」同一条纪律）。
-    let tool_pipeline_factory: tianyan_server::ToolPipelineFactory =
-        tianyan_tool_pipeline::pipeline_factory();
-
-    tianyan_server::AssemblyServices::new()
-        .with_storage_factory(factory)
-        .with_task_factory(task_factory)
-        .with_approval_factory(approval_factory)
-        .with_context_factory(context_factory)
-        .with_task_reviewer_factory(task_reviewer_factory)
-        .with_skill_review_factory(skill_review_factory)
-        .with_provider_llm_factory(provider_llm_factory)
-        .with_provider_embed_factory(provider_embed_factory)
-        .with_tool_pipeline_factory(tool_pipeline_factory)
+    tianyan_assembly::policies()
 }
