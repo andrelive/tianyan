@@ -49,19 +49,25 @@ export default defineConfig({
       output: {
         // 大依赖按域分块（C6）：配合路由级 React.lazy，首屏只加载 react 壳 +
         // chat 域；markdown/编辑器块按需进入
-        manualChunks: {
-          'vendor-react': ['react', 'react-dom', 'react-router-dom', 'zustand'],
-          'vendor-editor': [
-            '@codemirror/state',
-            '@codemirror/view',
-            '@codemirror/language',
-            '@codemirror/commands',
-            '@codemirror/merge',
-            '@codemirror/lang-javascript',
-            '@codemirror/lang-python',
-            '@codemirror/lang-rust',
-          ],
-          'vendor-markdown': ['react-markdown', 'remark-gfm', 'react-syntax-highlighter'],
+        //
+        // vite 8 起打包内核换成 **Rolldown**：它只接受 `manualChunks` 的**函数**形式
+        // （对象形式会抛 `TypeError: manualChunks is not a function`）。语义等价改写：
+        // 按「包路径前缀」归组，与原来按包名列举的效果一致。
+        manualChunks(id: string) {
+          if (!id.includes('node_modules')) return undefined;
+          // 顺序有意义：先匹配更具体的域
+          if (/node_modules[\\/]@codemirror[\\/]/.test(id)) return 'vendor-editor';
+          if (
+            /node_modules[\\/](react-markdown|remark-gfm|react-syntax-highlighter|refractor|hastscript|hast-util-|unist-util-|mdast-util-|micromark|remark-|rehype-)/.test(
+              id,
+            )
+          ) {
+            return 'vendor-markdown';
+          }
+          if (/node_modules[\\/](react|react-dom|react-router|react-router-dom|zustand|scheduler)[\\/]/.test(id)) {
+            return 'vendor-react';
+          }
+          return undefined;
         },
       },
     },
