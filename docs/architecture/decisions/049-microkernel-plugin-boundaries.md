@@ -1,7 +1,7 @@
 # ADR-049: 插件化边界与装配模型（微内核化）
 
 **日期**: 2026-10-20
-**状态**: ✅ 已采纳（期 0 实施中）
+**状态**: ✅ 已实施（期 0–4 全部完成，随 **1.0.0** 交付；依赖现代化是独立工作项，台账见 `docs/operations/dependency-upgrade.md`）
 **影响范围**: 全仓编译边界 —— 4 个 crate → 约 26 个编译域；涉及
 `core/src/{agent,executor,context,model,vfs,session,common,config,scheduler}` 的模块归属、
 `server/src/state.rs`（装配器二分与字段契约化）、`tauri/src`、`mcp/src`、
@@ -1939,10 +1939,14 @@ D2-2 约束的是**实现协作**；现在连 dev 边都不再有，不再需要
 | **1** | 工具插件试点（**装配器二分 + tools-fs 骨架已完成**） | ✅ `tianyan-app` bin 包（**清单住 bin**）+ `ToolPluginFactory` 类型擦除 + `create_app_with_plugins` / `start_server_with_plugins*`；✅ `plugins/tools-fs` 独立 crate（`executor::fs` 实现整体迁入）。待续：**整域迁移**——`read_file` 目录模式反向依赖 `executor::fs::execute_list_dir`，故 fs 域必须 6 工具一起搬（read/write/edit/patch/glob/list_dir）才能删 core 侧 | 闸门 A **首测 512 行 ✅**（判据 ≤3.5K）；core 侧暂留（双路径过渡，重名注册自动跳过） |
 | **2** | 适配器与任务插件（**期 2 全部完成（序 0–6）**） | 迁移顺序（按 自包含度×收益）：**0 清 core 死依赖** → 1 `tools-todo`+`tools-goal` → 2 `tools-web` → 3 `storage-vector` → 4 `storage-sqlite` → 5 `task-*`（2 crate）→ **6 `provider-llm`+`provider-embed`（+ 共享基底 `provider-client`，2026-10-21 补做）**。详见下方「期 2 普查结论」与「实施记录（期 2 序 6）」 | 各领域 ≤ 2K；全量 release 不劣化 >10% |
 | **3** | 策略分离（最难一刀） | 抽 `kernel-impl`（loop/cancel/rollback/stream_forward/working_set）；**`context`→`policy-context`（T2 ✅ 2026-10-21，见下方实施记录；`assembler.rs` 按普查修订留 kernel-impl）**；**审批→`policy-approval`（T1 ✅ 2026-10-21）**；`role_learning`→已删除（零消费者，2026-10-21 裁决）；**`judge` + `skills/reviewer`→`policy-review`（T3 ✅ 2026-10-21，475 生产行；`TaskReviewer` / `SkillReviewPort` 契约留 core）**；**配置加载/持久化/迁移/校验/向导→`service-config`（T4 ✅ 2026-10-21，644 生产行净减；结构与预设表留 core，`get_config` 槽位化）** | **闸门 B**：api ≤ 6K && impl ≤ 15K——**✅ 期 3 末实测 `api 4,587 / impl 14,957`**（期 3-T5 收口后；口径 = 四件套文件归属。`agent/background.rs` 1,300 行经裁决算 K1，不可外移）；改策略不重编内核 ✅；S 级零变更 ✅ |
-| **4** | 清单收敛、插槽治理与技能回路（**4a / 4b / 4c 均 ✅**；发行版收尾待 1.0 前） | ✅ **4a** `tianyan-assembly`：11 个插件工厂的**唯一实现** + `full()` / `policies()` 双清单（前缀关系）+ 跨插件顺序断言 4 条（见「期 4 实施记录」）；✅ **4b** `server/src/assembly/`：11 个平铺插槽按变化原因收敛成 **4 组**（`manifests` / `storage` / `policies` / `providers`）+ 按组拆文件 + `AppState` 工厂字段 7→3 / `new` 形参 10→6（见「期 4b 实施记录」）；✅ **4c** 技能反馈回路收敛：演化材料接入**技能使用统计**（近 30 天）+ 判断纪律，机械评分链整条退役（**净删 829 行、插槽 11→10**，见「期 4c 实施记录」）；⏳ 安装验收 / `latest.json` / 签名 | 装配清单 1 页可查 ✅（`assembly/src/lib.rs` crate 文档三张图 + `server/src/assembly/` 六个文件全 ≤377 行）；headless 可构建 ✅（`app` bin 即 headless）；**原「desktop/headless/minimal 三份清单」被实证推翻**（desktop ≡ headless，minimal = `policies()`——见 期 4 记录 ①）；插槽组数 **4**（≤4 ✅）/ `AppState::new` 插槽形参 **3**（≤3 ✅）；技能质量判断从「机械评分」改为「统计事实 + 智能体判断」（与 ADR-017 统一接管对齐） |
+| **4** | 清单收敛、插槽治理、技能回路与运维工具（**4a / 4b / 4c / 4d 均 ✅**） | ✅ **4a** `tianyan-assembly`：10 个插件工厂的**唯一实现** + `full()` / `policies()` 双清单（前缀关系）+ 跨插件顺序断言 4 条（见「期 4 实施记录」）；✅ **4b** `server/src/assembly/`：11 个平铺插槽按变化原因收敛成 **4 组**（`manifests` / `storage` / `policies` / `providers`）+ 按组拆文件 + `AppState` 工厂字段 7→3 / `new` 形参 10→6（见「期 4b 实施记录」）；✅ **4c** 技能反馈回路收敛：演化材料接入**技能使用统计**（近 30 天）+ 判断纪律，机械评分链整条退役（**净删 829 行、插槽 11→10**，见「期 4c 实施记录」）；✅ **4d** 运维工具独立成包：`tianyan-tools-ops`（2 迁 2 删），`storage-vector` 的 dev-deps **5 → 1**（见「期 4d 实施记录」）；⏳ 安装验收 / `latest.json` / 签名（1.0.0 发布流程） | 装配清单 1 页可查 ✅（`assembly/src/lib.rs` crate 文档三张图 + `server/src/assembly/` 六个文件全 ≤377 行）；headless 可构建 ✅（`app` bin 即 headless）；**原「desktop/headless/minimal 三份清单」被实证推翻**（desktop ≡ headless，minimal = `policies()`——见 期 4 记录 ①）；插槽组数 **4**（≤4 ✅）/ `AppState::new` 插槽形参 **3**（≤3 ✅）；技能质量判断从「机械评分」改为「统计事实 + 智能体判断」（与 ADR-017 统一接管对齐） |
 
 **反指标**（防拆过头）：每 crate ≥ 300 行且至少 2 个真实消费者；每期净增 pub trait ≤ 3；
 每插件 crate 公开符号 ≤ 15；全量构建不劣化 >10%。
+
+> **关于「期 5」**：CHANGELOG / 发布说明里的「期 5 依赖现代化」是一个**独立工作项**（不在本 ADR
+> 的分期表内）——它以 1.0 为目标、按 6 批推进，台账与「三处刻意不升」的依据见
+> `docs/operations/dependency-upgrade.md`。
 
 ---
 

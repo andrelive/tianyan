@@ -8,14 +8,14 @@
 
 Tianyan（天演）是一个本地优先的通用智能体：以大语言模型（LLM）为核心智能引擎，通过自然语言交互帮助用户完成各类任务。
 
-所有上下文（用户偏好、记忆、知识库、技能）统一由自研 **VFS（虚拟文件系统）** 管理——L0/L1/L2 双层摘要索引 + 向量融合检索；记忆与技能随使用自动学习进化（GEPA）。数据本地存储（SQLite + LanceDB），隐私优先。项目持续开发中，发布记录见 [Releases](https://github.com/andrelive/tianyan/releases) 与 [CHANGELOG](./CHANGELOG.md)。
+所有上下文（用户偏好、记忆、知识库、技能）统一由自研 **VFS（虚拟文件系统）** 管理——L0/L1/L2 双层摘要索引 + 向量融合检索；记忆与技能由**自演化综述**定期归纳演进（每日一次，读用户原话 + 执行数据 + 使用统计后产出增删改计划）。数据本地存储（SQLite + LanceDB），隐私优先。项目持续开发中，发布记录见 [Releases](https://github.com/andrelive/tianyan/releases) 与 [CHANGELOG](./CHANGELOG.md)。
 
 ## 核心特性
 
 - **统一上下文（VFS）**：偏好 / 记忆 / 知识 / 技能同构存储与检索，分层摘要 + RRF 融合；上下文自动 / 手动压缩
-- **自进化**：技能自动学习（planning 预置 + GEPA 进化）、记忆巩固、执行规则提炼
+- **自进化（ADR-017）**：单一「自演化综述」任务统一接管记忆 / 技能 / 规则 / 角色的归纳与淘汰（读用户原话 + GEPA 执行数据 + 技能使用统计，产出增删改计划并记账）；`planning` 等预置技能 + 技能导入工具
 - **桌面应用**：Tauri + React + TypeScript + Axum 跨平台应用（Windows 提供 MSI 安装包）
-- **工具系统**：30+ 内置工具（文件 / 搜索 / 语义化编辑 / 网页搜索抓取 / 知识导入 / 委托 / 定时任务 / 剪贴板……），OpenAI function calling 兼容，支持动态注册
+- **工具系统**：**25 个内置 + 13 个插件工具**（文件读写 / 语义化编辑 / 代码结构 / 搜索 / 网页抓取 / 知识导入 / 待办与目标 / 委托 / 定时任务 / 剪贴板……），OpenAI function calling 兼容，支持动态注册（完整清单见 [tool-catalog](./docs/architecture/tool-catalog.md)）
 - **子智能体编排**：`delegate_to_agent` 并行委托 + 嵌套（深度上限 3）+ 角色注册表；后台任务完成自动通知
 - **MCP 桥接**：接入外部 MCP 服务器（Playwright 浏览器自动化等；stdio + streamable HTTP；截图自动落盘）
 - **多模态**：对话图片输入（粘贴 / 拖拽 / 选择，需 vision 模型支持）
@@ -76,12 +76,17 @@ cd gui-vite && npm run dev
 | 目录 | 说明 |
 |------|------|
 | `core/` | 核心库（lib 名 `tianyan`）：Agent 循环、工具系统、VFS、上下文工程（检索/压缩/组装）、会话、快照、可观测性等 |
-| `server/` | Axum HTTP 服务：REST API + SSE 事件流 + MCP 桥接 + 定时任务 |
+| `server/` | Axum HTTP 服务：REST API + SSE 事件流 + MCP 桥接 + 定时任务（**经类型擦除插槽接收能力，不认识任何插件**） |
+| `assembly/` | 装配清单（ADR-049 期 4）：插件工厂与 `full()` / `policies()` 两份清单的唯一实现 |
+| `app/` | headless 装配器（bin `tianyan-server`）：配置加载 + 启动 + 搬迁重启 |
+| `plugins/*` | 15 个编译期插件（工具 / 存储 / 任务 / 策略 / provider / 工具管线），只依赖 `core` |
+| `service/config/` | 服务层：配置加载 / 持久化 / 数据目录迁移 / 校验 / 向导 DTO |
+| `tools-ops/` | 运维工具（服务停止后直接修数据的终端脚本，**不被任何 crate 依赖**） |
 | `gui-vite/` | React + TypeScript 前端（Vite） |
 | `tauri/` | Tauri 桌面包装（内嵌服务器） |
 | `mcp/` | MCP 协议客户端（stdio + streamable HTTP） |
 
-技术栈：Rust（stable）· Axum 0.8 · Tauri 2.2+ · Tokio · React 18 + Vite 5 + Zustand + Tailwind · LanceDB（嵌入式向量）· SQLite（主存储）。
+技术栈：Rust（stable）· Axum 0.8 · Tauri 2.12+ · Tokio · **React 19 + Vite 8（Rolldown）+ Zustand 5 + Tailwind 3.4** · LanceDB（嵌入式向量，0.33 刻意未升）· SQLite（主存储）。
 
 核心设计基于一系列架构决策记录（[ADR](./docs/architecture/decisions/)）：VFS 双层摘要索引（ADR-001）、StructuredMessage 单一真相源（ADR-002）、组件工具化（ADR-003）、前缀匹配上下文组装（ADR-004）、统一事件推送（ADR-028/029）、统一 Agent 循环（ADR-030）等。
 
