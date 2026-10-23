@@ -51,6 +51,10 @@ anyhow = "1.0"
 ring = "0.17"
 
 # Vector database (embedded)
+# 0.39/0.40 暂不升：其 `job.rs` 无条件引用 `Error::Http`，而该变体被
+# `#[cfg(feature = "remote")]` 门控（`pub mod job;` 却未 gate）→ 默认 features 下
+# 编译失败（上游打包缺陷）。启用 `remote` 会拉进 tonic/arrow-flight/prost 一整套
+# 远程客户端依赖，而本项目只用本地嵌入式 LanceDB。等上游修复或确有远程需求时再评估。
 lancedb = "0.33"
 
 # Document processing
