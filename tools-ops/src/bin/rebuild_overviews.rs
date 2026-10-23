@@ -17,26 +17,21 @@
 //!
 //! 用法（**建议先退出天演应用**，避免与运行中实例争用 LanceDB 写入）：
 //! ```text
-//! cargo run -p tianyan-storage-vector --example rebuild_overviews -- --dry-run   # 预览
-//! cargo run -p tianyan-storage-vector --example rebuild_overviews                # 执行
+//! cargo run -p tianyan-tools-ops --bin rebuild_overviews -- --dry-run   # 预览
+//! cargo run -p tianyan-tools-ops --bin rebuild_overviews                # 执行
 //! ```
-
-use std::sync::Arc;
 
 use tianyan::common::token_estimator::estimate_tokens;
 use tianyan::common::types::{system_paths, ContentLevel, ContextNamespace, TianyanUri};
-use tianyan::config::ModelCapability;
-use tianyan::db::Database;
 // ADR-049 期 2 序 6：ModelServices 容器已搬到 server 装配层；运维脚本直接用 provider
-// 插件的能力集合（	ianyan-provider-embed / 	ianyan-provider-llm）——它们只依赖 core。
+// 插件的能力集合（tianyan-provider-embed / tianyan-provider-llm）——它们只依赖 core。
+// 最小装配（配置 → SQLite 后端 → LanceDB → 嵌入 provider → VFS）已抽到本包 `lib.rs`；
+// 只有本脚本需要 LLM 摘要，故 `llm_services` + `SummaryEngine` 留在这里。
 use tianyan::vfs::{
-    parse_doc_index, ContentStore, StorageBackend, SummaryEngine, SummaryService, VfsCore,
-    VfsSearch, VirtualFileSystem, VirtualFileSystemBuilder, OVERVIEW_TOKEN_LIMIT,
+    parse_doc_index, ContentStore, SummaryEngine, SummaryService, VfsCore, VfsSearch,
+    VirtualFileSystem, OVERVIEW_TOKEN_LIMIT,
 };
-use tianyan_provider_embed::services as embedding_services;
 use tianyan_provider_llm::services as llm_services;
-use tianyan_storage_sqlite::SqliteBackend;
-use tianyan_storage_vector::LanceDbVectorStore;
 
 #[tokio::main]
 async fn main() {
@@ -49,34 +44,12 @@ async fn main() {
 async fn run() -> Result<(), tianyan::TianyanError> {
     let dry_run = std::env::args().any(|a| a == "--dry-run");
 
-    // ── 装配（与 server initialize_vfs_for_app 同构）────────────────────────
-    // 加载器随 ADR-049 期 3-T4 搬去 `tianyan-service-config`（运维脚本的 dev 边）
-    let config = tianyan_service_config::load()?;
-    let db_path = config
-        .storage
-        .sqlite_path
-        .clone()
-        .unwrap_or_else(|| config.storage.data_dir.join("tianyan.db"));
-    println!("数据目录：{}", config.storage.data_dir.display());
-    println!("数据库：{}", db_path.display());
-    let database = Database::open(db_path)?;
-    let storage: Arc<dyn StorageBackend> = Arc::new(SqliteBackend::new(database));
-    let vector_storage = Arc::new(LanceDbVectorStore::new(&config.storage).await?);
-    let llm = llm_services(&config.models)?;
-    let embed = embedding_services(&config.models)?;
-    let emb_model = config
-        .models
-        .resolve(ModelCapability::TextEmbedding)
-        .map(|r| r.model)
-        .unwrap_or_else(|| "text-embedding-3-small".to_string());
-    let vfs = VirtualFileSystemBuilder::new()
-        .with_config(config.storage.clone())
-        .with_storage(storage)
-        .with_vector_storage(vector_storage)
-        .with_embedding_provider(embed.embedding, emb_model)
-        .build()?;
-    vfs.initialize().await?;
+    // ── 装配（与 server initialize_vfs_for_app 同构；实现见本包 `lib.rs`）────
+    let config = tianyan_tools_ops::load_config(None)?;
+    tianyan_tools_ops::print_targets(&config);
+    let vfs = tianyan_tools_ops::open_vfs(&config).await?;
 
+    let llm = llm_services(&config.models)?;
     let engine = SummaryEngine::new(llm.chat.clone(), llm.chat_model.clone());
 
     println!(

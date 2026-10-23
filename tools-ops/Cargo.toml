@@ -1,0 +1,23 @@
+[package]
+name = "tianyan-tools-ops"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "天演运维工具（ADR-049 期 4d）：服务停止后直接修复/迁移数据的终端脚本（不被任何 crate 依赖）"
+
+[dependencies]
+tianyan = { path = "../core", package = "tianyan-core" }
+# 以下 5 个是「运维脚本必须能手工装配一个最小 VFS」的依赖。它们出现在**终端消费者**
+# 里是合法的（与 `app` / `tauri` 同类）；放在插件 crate 的 dev-deps 里才是语义错位
+# （那会让「插件之间零互赖」变成一条注释豁免）。
+tianyan-storage-sqlite = { path = "../plugins/storage-sqlite" }
+tianyan-storage-vector = { path = "../plugins/storage-vector" }
+tianyan-provider-embed = { path = "../plugins/provider-embed" }
+tianyan-provider-llm = { path = "../plugins/provider-llm" }
+tianyan-service-config = { path = "../service/config" }
+tokio.workspace = true
+
+[lints]
+workspace = true

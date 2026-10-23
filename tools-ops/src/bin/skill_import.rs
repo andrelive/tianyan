@@ -2,7 +2,7 @@
 //!
 //! 背景（2026-09-14）：外部 agent 技能库（`~/.agents/skills`）
 //! 中的标准化 skills 经评估后，将其方法论要点移植为本工具源目录
-//! （`plugins/storage-vector/examples/import-skills/*.md`），一次性导入天演技能库
+//! （`tools-ops/assets/import-skills/*.md`），一次性导入天演技能库
 //! （`tianyan://skill/{id}`），供所有会话/子代理经 `call_skill` / `search_vfs`
 //! 检索复用。
 //!
@@ -11,32 +11,23 @@
 //! - **显式向量索引**：`vfs.write` 不触发索引（索引单点在 `update_summary_vectors`，
 //!   否则 `search_vfs` 语义检索不到——预置 planning 技能即因此检不到）。
 //!
-//! 用法（**建议先退出天演应用**——避免与运行中实例的 LanceDB 写入冲突，
-//! 与 memory_cleanup 同款前提）：
+//! 用法（**建议先退出天演应用**——避免与运行中实例的 LanceDB 写入冲突）：
 //! ```text
-//! cargo run -p tianyan-storage-vector --example skill_import -- --dry-run          # 预览（不连数据目录）
-//! cargo run -p tianyan-storage-vector --example skill_import                       # 导入（配置指向的数据目录）
-//! cargo run -p tianyan-storage-vector --example skill_import -- --data-dir <path>  # 覆盖数据目录（彩排/隔离）
+//! cargo run -p tianyan-tools-ops --bin skill_import -- --dry-run          # 预览（不连数据目录）
+//! cargo run -p tianyan-tools-ops --bin skill_import                       # 导入（配置指向的数据目录）
+//! cargo run -p tianyan-tools-ops --bin skill_import -- --data-dir <path>  # 覆盖数据目录（彩排/隔离）
 //! ```
 //!
 //! 幂等：已存在的技能原地更新（content/abstract/向量），可重复运行；
 //! 单条失败不中止整批（失败项修复后重跑即可）。
 
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 
 use tianyan::common::types::{ContentLevel, ContextNamespace, TianyanUri};
-use tianyan::config::ModelCapability;
-use tianyan::db::Database;
 // ADR-049 期 2 序 6：ModelServices 容器已搬到 server 装配层；运维脚本直接用 provider
-// 插件的能力集合（	ianyan-provider-embed / 	ianyan-provider-llm）——它们只依赖 core。
-use tianyan::vfs::{
-    ContentStore, StorageBackend, VfsCore, VfsSearch, VirtualFileSystemBuilder,
-    VirtualFileSystemImpl,
-};
-use tianyan_provider_embed::services as embedding_services;
-use tianyan_storage_sqlite::SqliteBackend;
-use tianyan_storage_vector::LanceDbVectorStore;
+// 插件的能力集合（tianyan-provider-embed / tianyan-provider-llm）——它们只依赖 core。
+// 最小装配（配置 → SQLite 后端 → LanceDB → 嵌入 provider → VFS）已抽到本包 `lib.rs`。
+use tianyan::vfs::{ContentStore, VfsCore, VfsSearch, VirtualFileSystemImpl};
 
 /// 单个技能源（frontmatter 元数据 + 正文）。
 struct SkillSource {
@@ -64,7 +55,7 @@ async fn run() -> Result<(), tianyan::TianyanError> {
         .map(PathBuf::from);
 
     let src_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("examples")
+        .join("assets")
         .join("import-skills");
     let sources = load_sources(&src_dir)?;
     println!("源目录：{}（{} 个技能）", src_dir.display(), sources.len());
@@ -77,38 +68,11 @@ async fn run() -> Result<(), tianyan::TianyanError> {
         return Ok(());
     }
 
-    // ── 装配 VFS（与 server initialize_vfs_for_app / memory_cleanup 同构）──
-    // 加载器随 ADR-049 期 3-T4 搬去 `tianyan-service-config`（运维脚本的 dev 边）
-    let mut config = tianyan_service_config::load()?;
-    if let Some(d) = &data_dir_override {
-        config.storage.data_dir = d.clone();
-        config.storage.sqlite_path = None;
-    }
-    let db_path = config
-        .storage
-        .sqlite_path
-        .clone()
-        .unwrap_or_else(|| config.storage.data_dir.join("tianyan.db"));
-    println!("\n数据目录：{}", config.storage.data_dir.display());
-    println!("数据库：{}", db_path.display());
-
-    let database = Database::open(db_path)?;
-    database.init_schemas().await?;
-    let storage: Arc<dyn StorageBackend> = Arc::new(SqliteBackend::new(database));
-    let vector_storage = Arc::new(LanceDbVectorStore::new(&config.storage).await?);
-    let embed = embedding_services(&config.models)?;
-    let emb_model = config
-        .models
-        .resolve(ModelCapability::TextEmbedding)
-        .map(|r| r.model)
-        .unwrap_or_else(|| "text-embedding-3-small".to_string());
-    let vfs = VirtualFileSystemBuilder::new()
-        .with_config(config.storage.clone())
-        .with_storage(storage)
-        .with_vector_storage(vector_storage)
-        .with_embedding_provider(embed.embedding, emb_model)
-        .build()?;
-    vfs.initialize().await?;
+    // ── 装配 VFS（与 server initialize_vfs_for_app 同构；实现见本包 `lib.rs`）──
+    let config = tianyan_tools_ops::load_config(data_dir_override)?;
+    println!();
+    tianyan_tools_ops::print_targets(&config);
+    let vfs = tianyan_tools_ops::open_vfs(&config).await?;
 
     // ── --verify：技能检索自检（语义检索应命中导入的技能）───────────
     if verify_only {

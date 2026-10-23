@@ -341,7 +341,9 @@ tauri 全域只引 `tianyan::{config,common,agent,notification}`，对候选模�
   `skill_import`，含 `import-skills/` 12 篇源文档）随实现迁入插件——它们只依赖 core 公开
   API + `LanceDbVectorStore`。**遗留**：这些是一次性运维脚本而非插件功能，更干净的做法是
   `tools-ops` bin 包（与 `app/tauri` 里重复的 12 行 `vector_factory()` 同一类问题：要彻底
-  去重需引入「装配辅助 crate」，超出本序范围）
+  去重需引入「装配辅助 crate」，超出本序范围）。**已实施（期 4d）**：`tools-ops` 包已承接
+  （2 个有复用价值的脚本迁入 `tools-ops/src/bin/`，2 个一次性脚本随其历史问题修复删除，源
+  文档随迁 `tools-ops/assets/import-skills/`；`vector_factory()` 去重仍待「装配辅助 crate」）
 
 **实施记录（序 4：storage-sqlite，2026-10-21）**：`vfs/backend/sqlite.rs`（518 行 / 10 测试）
 与 `vfs/backend/local.rs`（414 行 / 4 测试）**整文件**迁入 `plugins/storage-sqlite`
@@ -395,7 +397,8 @@ tauri 全域只引 `tianyan::{config,common,agent,notification}`，对候选模�
 - `plugins/storage-vector/examples/*`（4 个一次性运维脚本）随之改
   `use tianyan_storage_sqlite::SqliteBackend`：给 `storage-vector` 加了一条**仅 examples
   用的 dev-dep**（插件间 dev 边，正常依赖图不受影响）；更干净的做法仍是搬进
-  `tools-ops` bin 包（序 3 遗留）
+  `tools-ops` bin 包（序 3 遗留）。**已实施（期 4d）**：`tools-ops` 包已承接——这条 dev 边
+  随之消失（`storage-vector` 的 `[dev-dependencies]` 只剩 `tempfile`）
 - **门禁**：`cargo fmt --all -- --check` 干净；`cargo clippy --workspace --all-targets`
   **零 warning**；`tianyan-core --lib` **1261 passed**（与 HEAD 同数）；`tianyan-server
   --lib` **183 passed / 1 ignored**（179 + 4 条新装配测试）；`tianyan-storage-sqlite` 14 /
@@ -418,8 +421,9 @@ tauri 全域只引 `tianyan::{config,common,agent,notification}`，对候选模�
   2. `StorageBackend` trait 仍在 core，是「跨 `cfg(test)` 类型同一性」问题的**根源**：
      期 3 若把契约提到独立 `kernel-api` 包，core 单测就能干净地用 dev-dep（届时可删
      `#[path]` 手法）
-  3. 4 个运维 examples 的归属（`tools-ops` bin 包），以及 `app`/`tauri` 里重复的
-     `vector_factory()` / `storage_factory()`（要彻底去重需引入「装配辅助 crate」）
+  3. ~~4 个运维 examples 的归属（`tools-ops` bin 包）~~ **已实施（期 4d）**：`tools-ops`
+     包已承接（2 迁 2 删，dev 边清零）；`app`/`tauri` 里重复的 `vector_factory()` /
+     `storage_factory()` 仍在（要彻底去重需引入「装配辅助 crate」）
 
 **实施记录（序 5a：task-builtin，2026-10-21）**：5 个内置定时任务**整文件**迁入
 `plugins/task-builtin`（crate `tianyan-task-builtin`）——`summary_task.rs` 616、
@@ -587,6 +591,8 @@ tauri 全域只引 `tianyan::{config,common,agent,notification}`，对候选模�
   结构化条目，不是向量）。**已知：插件间现存在两条测试期 dev-dep 边**——
   `storage-vector → storage-sqlite`（序 4 的 examples，一次性运维脚本）与本条。
   干净解法仍是「装配辅助 crate / `tools-ops` bin 包」（序 3/4 遗留，期 4 视情况）。
+  **已实施（期 4d）**：`tools-ops` 包已承接——`storage-vector → storage-sqlite` 这条边
+  随之消失（本文记录的「两条 dev 边」现状只剩本条 `task-evolution`）
 - **行为零变化的证据**：`git diff --no-index`（HEAD 原文件 vs 插件文件）**35 增 / 39 删**，
   逐行归类为：① `crate::` → `tianyan::` 路径前缀（**24 处**，含测试里的
   `crate::config::…` / `crate::test_utils::…`）；② trait 定义块移出（11 行，含尾随空行）；
@@ -1237,8 +1243,9 @@ ADR-049 期 2 的序 6（当时跳过、留待最后）在期 3-T3 之后补做�
   2. **`config/model.rs` 的方言数据（950 行）仍在 core**，它是 `TianyanConfig` 的字段形状；
      期 3-T4「config 二分」把它连同 loader（753 行）一起外移后，改一个方言细节才真正只重编
      插件（本序只做到「改方言的**消费逻辑**不重编内核」）；
-  3. **`storage-vector` 的 4 个 examples 又添两条 dev 边**（→ provider-llm / provider-embed），
-     与序 3/4 的遗留同型：干净解法是独立的 `tools-ops` bin 包；
+  3. ~~**`storage-vector` 的 4 个 examples 又添两条 dev 边**（→ provider-llm / provider-embed），
+     与序 3/4 的遗留同型：干净解法是独立的 `tools-ops` bin 包~~；
+     **已实施（期 4d）**：`tools-ops` 包已承接（两条 dev 边随之消失）；
   4. `provider-client` 的字段必须 `pub`（跨 crate 访问），公开面比「只有类型」略大；
      若期 4 决定把 provider 三件套并成一个 crate，这些 `pub` 应回退成 `pub(crate)`。
 
@@ -1338,6 +1345,7 @@ ADR-049 期 2 的序 6（当时跳过、留待最后）在期 3-T3 之后补做�
      在那之前，任何「读全局配置」的新代码都要想清楚它要的是启动快照还是运行期权威。
   2. **`storage-vector` 的 4 个 examples 再添一条 dev 边**（→ `tianyan-service-config`），
      与序 3/4/6 的遗留同型：干净解法仍是独立的 `tools-ops` bin 包。
+     **已实施（期 4d）**：`tools-ops` 包已承接（该 dev 边随之消失）。
   3. 本 crate 公开符号 30 个（loader 9 / migration 12 / validation 6 / wizard 2 +
      `ConfigSlotOccupied` 不在本 crate）。它不是能力插件（无插槽），消费者有三个
      （`app` / `tauri` / `server`），因此「每插件 crate 公开符号 ≤ 15」这条反指标不适用；
@@ -1819,6 +1827,106 @@ user_questions / task_event_sink 等，再递给 builder）。两类问题的判
 「UI 从未渲染 reviews」，实际是 `SkillsPanel` 有两处渲染（PowerShell 的 `**` 通配不递归、
 `plugins/` 与 `gui-vite/src/components/` 都没被扫到）——**跨目录 grep 必须逐个目录显式列举，
 不要依赖 `**`**。
+
+### 期 4d 实施记录（运维工具独立成包，2026-10-23）
+
+**起因**：待办第 2 项——`plugins/storage-vector/examples/` 寄居 4 个运维脚本（1498 行），靠
+**5 条插件间 dev-dependency** 撑着。ADR-049 序 3 / 序 4 / 期 3 普查共 6 处记录了正确解法
+（`tools-ops` bin 包），但一直没做。
+
+#### ① 定性：这不是「examples 放错了地方」，而是**依赖语义错位**
+
+4 个脚本的依赖完全一样：
+
+```rust
+use tianyan_storage_vector::LanceDbVectorStore;   // 本 crate 自己的实现
+use tianyan_storage_sqlite::SqliteBackend;        // 另一个插件
+use tianyan_provider_embed::services;             // 又一个插件
+use tianyan_provider_llm::services;               // 又一个插件
+use tianyan_service_config;                       // 服务层
+```
+
+它们要做的是「**服务不启动**、手工装配一个最小 VFS、直接改库」——天然需要这些 crate。把这个
+需求放在**插件** crate 的 dev-deps 里，等于让 D2-2「插件之间零互赖」变成一条**注释豁免**
+（`storage-vector/Cargo.toml` 里那三段长注释就是在解释这件事）。
+
+#### ② 决策：A2 —— 迁 2 个、删 2 个
+
+| 脚本 | 行数 | 处置 | 理由 |
+|---|---:|---|---|
+| `skill_import` | 290 | **迁入** | 把方法论 md 导入技能库；`assets/` 的 12 篇就是正文，明确有复用价值 |
+| `rebuild_overviews` | 175 | **迁入** | 存量 L1 目录化迁移；VFS 语义再变时仍需 |
+| `memory_cleanup` | 625 | **删除** | 0.4.0 记忆治理波次配套；它针对的历史问题（`find_entry` 缺陷 / L1 扩写污染 / 运维数据混入）均已修复 |
+| `memory_path_repair` | 408 | **删除** | 0.6.7 畸形路径修复；写入侧已 `normalize_entry_id` 收口，24 条存量已修完 |
+
+删前 grep 全仓：两者**只在历史记录**（`RELEASE_NOTES` / `CHANGELOG` / `REFACTOR_LOG` /
+ADR-034）里被提及，**零现行文档 / 脚本 / 代码引用**。用户裁决原话：「本次本身就是重构」——
+所以按彻底的口径删。
+
+#### ③ 结构：共享装配抽到 lib
+
+```text
+tools-ops/
+├── Cargo.toml                      23
+├── src/lib.rs                      84   load_config / open_vfs / print_targets（最小装配）
+├── src/bin/skill_import.rs        254   原 290 − 50 + 14（装配段/资产路径/用法命令）
+├── src/bin/rebuild_overviews.rs   148   原 175 − 39 + 12（同上）
+└── assets/import-skills/*.md       12 篇（`git mv` 原样搬，943 行）
+```
+
+**为什么用 `[[bin]]` 而不是 `examples/`**：examples 的语义是「库的用法示例」，而这些是**工具**
+——使用者敲的是「我要修数据」，不是「我要看这个库怎么用」。
+`cargo run -p tianyan-tools-ops --bin skill_import` 读起来就是「跑一个运维工具」。
+
+**为什么不能复用 `tianyan_assembly::full()`**：`full()` 返回工厂集合，真正构造 VFS 还要经
+server 的 `initialize_vfs_for_app`（依赖 `AppState` 一整串对象图）；而本包的前提恰恰是**不启动
+服务**。所以保留一份「最小装配」——它是运维语义，不进生产装配。
+
+**一处合并副作用（如实记录）**：`init_schemas()` 原本只在 `skill_import` 里调，现在进了共享
+`open_vfs`，`rebuild_overviews` 也随之多做一次幂等建表（`CREATE TABLE IF NOT EXISTS` 语义，
+无行为风险）。
+
+#### ④ 收益（本批的核心不是行数，是依赖语义）
+
+```text
+改造前：plugins/storage-vector  [dev-dependencies]
+        ├── chrono
+        ├── tianyan-storage-sqlite     ← 插件间 dev 边
+        ├── tianyan-provider-embed     ← 插件间 dev 边
+        ├── tianyan-provider-llm       ← 插件间 dev 边
+        └── tianyan-service-config     ← 插件→服务层 dev 边
+
+改造后：plugins/storage-vector  [dev-dependencies]
+        └── tempfile                   ← 只剩测试临时目录
+
+        tools-ops  [dependencies]      ← 终端消费者，依赖一切是合法的（同 app / tauri）
+        ├── tianyan-core
+        ├── tianyan-storage-sqlite / -storage-vector
+        ├── tianyan-provider-embed / -provider-llm
+        └── tianyan-service-config
+```
+
+D2-2 约束的是**实现协作**；现在连 dev 边都不再有，不再需要注释豁免。
+（`cargo tree --workspace -i tianyan-tools-ops` 输出只有它自己——确认它是**终端消费者**，
+没有任何 crate 依赖它。）
+
+#### ⑤ 数据与验收
+
+| 项 | 结果 |
+|---|---|
+| 新包 | `tianyan-tools-ops`：486 行（lib 84 + 2 bin 402）≥ 300 ✅ |
+| 删除 | 2 个一次性脚本 **1033 行** |
+| 迁入 | 2 个脚本（业务逻辑零改动：`git diff --no-index` 逐行归类为「用法命令 / 资产路径 / `use` 裁剪 / 装配段换 4 行」） |
+| `storage-vector` dev-deps | **5 条 → 1 条**（`tempfile`） |
+| 验证 | fmt 干净 / clippy `--workspace --all-targets` 零 warning / `cargo test --workspace` **1750 passed / 0 failed**（不增删测试）/ `skill_import --dry-run` **实跑成功**（12 篇 frontmatter 与正文全部解析通过、不触碰数据目录）/ `cargo tree -p tianyan-storage-vector --edges dev` 只剩 `tempfile` |
+| 刻意未跑 | `rebuild_overviews`（任何参数都没跑——它会连真实数据目录并写 LanceDB） |
+
+#### ⑥ 连带修正的失真表述
+
+- `docs/module-relationships.md` 里「`storage-vector` 的 4 个 examples 是唯一例外（dev-dependency）」
+  → 改为「`examples` 已迁出为 `tools-ops` 包，插件之间零 dev 边」；
+- `AGENTS.md`「认识具体插件 crate 的只有三处」→ 补一句「另有 `tools-ops/`（终端消费者，
+  不被任何 crate 依赖，与两个装配器的区别是它不提供装配清单）」。
 
 ---
 

@@ -57,8 +57,9 @@
 
 > 服务层 crate（`tianyan-service-config`，ADR-049 期 3-T4）只依赖 core：配置加载 / 持久化 /
 > 迁移 / 校验 / 向导 DTO 从 core 搬出后，内核不再认识配置文件的路径（D2-1 反向依赖禁止）。
-> 消费方是三个装配/服务包（`app` / `tauri` / `server`）；插件不依赖它（`storage-vector` 的
-> 4 个 examples 是唯一例外，且只是 **dev-dependency**）。
+> 消费方是四个装配/服务包（`app` / `tauri` / `server` / `tools-ops`）；**插件不依赖它**
+> （ADR-049 期 4d 前，`storage-vector` 的 4 个 examples 是唯一例外、且只是 dev-dependency；
+> 那批运维脚本已迁出为 `tools-ops` 包，因此插件之间现在**零 dev 边**）。
 
 > \* tauri 通过加载 `gui-vite/dist` 静态资源间接依赖 gui，但无 Rust 编译期依赖。
 

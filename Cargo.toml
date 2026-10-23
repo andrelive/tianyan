@@ -6,6 +6,7 @@ members = [
     "mcp",
     "app",
     "assembly",
+    "tools-ops",
     "service/config",
     "plugins/tools-fs",
     "plugins/tools-code",

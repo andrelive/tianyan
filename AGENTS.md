@@ -65,6 +65,7 @@ cargo test -p tianyan-core vfs::backend::local -- --nocapture  # 指定测试模
 | `mcp/` | `tianyan-mcp` | MCP 协议客户端 |
 | `service/config/` | `tianyan-service-config` | **服务层**：配置加载 / 持久化（段保全）/ 数据目录迁移 / 校验编排 / 向导 DTO（ADR-049 期 3-T4，753 生产行从 core 搬出）；**不含配置结构**（`TianyanConfig` 留 core——内核与插件的共同构造参数） |
 | `assembly/` | `tianyan-assembly` | **装配清单**：11 个插件工厂 + 两份清单（`full()` = 生产 11 插槽 / `policies()` = 集成测试的 9 插槽前缀）+ 跨插件顺序断言的**单一实现**（ADR-049 期 4）；全仓唯一 `use` 全部插件 crate 之处（改造前同一份清单在 `app` / `tauri` / `server/tests` / `app/tests` / `app/examples` 共 5 处副本） |
+| `tools-ops/` | `tianyan-tools-ops` | **运维工具**（ADR-049 期 4d）：服务停止后直接修数据的终端脚本（`skill_import` / `rebuild_overviews`），**不被任何 crate 依赖**；插件 crate 因此零 dev 边 |
 | `plugins/tools-fs/` | `tianyan-tools-fs` | 插件：glob / list_dir / read_file / write_file / apply_edit / apply_patch（定义/门控/审批；实现暂留 core） |
 | `plugins/tools-code/` | `tianyan-tools-code` | 插件：symbol_outline / repo_map / grep（**含实现**，tree-sitter ×6 在此） |
 | `plugins/tools-todo/` | `tianyan-tools-todo` | 插件：todo / goal（含实现） |
@@ -83,7 +84,9 @@ cargo test -p tianyan-core vfs::backend::local -- --nocapture  # 指定测试模
 
 **依赖铁律**（破一条拆包收益全部回吐）：插件只依赖 `core`（kernel-api）；插件之间零互赖；
 `core`/`server` 不认识任何插件 crate。**认识具体插件 crate 的只有三处**：`assembly/`
-（清单与其唯一实现，ADR-049 期 4）+ `app/`、`tauri/`（两个装配器，只写启动编排）。
+（清单与其唯一实现，ADR-049 期 4）+ `app/`、`tauri/`（两个装配器，只写启动编排）；
+另有一个**终端消费者** `tools-ops/`（运维脚本，依赖插件但**不被任何 crate 依赖**，
+与两个装配器的区别是它不提供装配清单，且可在服务未启动时直接改数据——期 4d）。
 装配经 `server/src/assembly/` 的类型擦除插槽——**10 个插槽按「变化原因」分 4 组**
 （ADR-049 期 4b 分组，理由见该模块 crate 文档；**原 11 个**，期 4c 退役「技能质量评审」
 后 `policies` 组少一根 `SkillReviewFactory`——判断改由演化智能体依据技能使用统计 +

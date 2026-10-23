@@ -9861,16 +9861,11 @@ dependencies = [
  "arrow-array",
  "arrow-schema",
  "async-trait",
- "chrono",
  "futures",
  "lancedb",
  "serde_json",
  "tempfile",
  "tianyan-core",
- "tianyan-provider-embed",
- "tianyan-provider-llm",
- "tianyan-service-config",
- "tianyan-storage-sqlite",
  "tokio",
  "tracing",
 ]
@@ -9973,6 +9968,19 @@ dependencies = [
  "serde_json",
  "tempfile",
  "tianyan-core",
+ "tokio",
+]
+
+[[package]]
+name = "tianyan-tools-ops"
+version = "0.8.0"
+dependencies = [
+ "tianyan-core",
+ "tianyan-provider-embed",
+ "tianyan-provider-llm",
+ "tianyan-service-config",
+ "tianyan-storage-sqlite",
+ "tianyan-storage-vector",
  "tokio",
 ]
 

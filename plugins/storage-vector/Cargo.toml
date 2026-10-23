@@ -25,21 +25,3 @@ workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
-# 一次性运维 tools（examples/）需要时间计算与格式化
-chrono.workspace = true
-# 一次性运维 tools（examples/）要装配真实 VFS 后端：`SqliteBackend` 已随 ADR-049
-# 期 2 序 4 迁至 `plugins/storage-sqlite`。
-#
-# 注意：这是**插件间的 dev-dependency，只服务于 examples/**，不进入任何插件的
-# 正常运行依赖图（D2-2「插件之间零互赖」针对的是实现协作）。更干净的形态是把
-# 这 4 个运维脚本搬进独立的 `tools-ops` bin 包——见 ADR-049 序 3/序 4 的「遗留」。
-tianyan-storage-sqlite = { path = "../storage-sqlite" }
-# 同一理由：`ModelServices` 容器随 ADR-049 期 2 序 6 搬到 server 装配层后，运维脚本改用
-# provider 插件的能力集合（嵌入 / 聊天）。仍是**只服务 examples/ 的 dev 边**——生产
-# 依赖图（`cargo tree -p tianyan-storage-vector --edges normal`）不受影响。
-tianyan-provider-embed = { path = "../provider-embed" }
-tianyan-provider-llm = { path = "../provider-llm" }
-# 同一理由（ADR-049 期 3-T4）：配置加载器搬去 `tianyan-service-config` 后，运维脚本
-# 仍要读真实配置（`~/.tianyan/tianyan.toml`）。仍是**只服务 examples/ 的 dev 边**——
-# 生产依赖图（`cargo tree -p tianyan-storage-vector --edges normal`）不受影响。
-tianyan-service-config = { path = "../../service/config" }
