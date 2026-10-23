@@ -84,10 +84,12 @@ cargo test -p tianyan-core vfs::backend::local -- --nocapture  # 指定测试模
 **依赖铁律**（破一条拆包收益全部回吐）：插件只依赖 `core`（kernel-api）；插件之间零互赖；
 `core`/`server` 不认识任何插件 crate。**认识具体插件 crate 的只有三处**：`assembly/`
 （清单与其唯一实现，ADR-049 期 4）+ `app/`、`tauri/`（两个装配器，只写启动编排）。
-装配经 `server/src/assembly.rs` 的类型擦除插槽
-（`ToolPluginFactory` / `VectorStorageFactory` / `StorageBackendFactory` / `TaskFactory` /
-`ApprovalGateFactory` / `ContextFactory` / `TaskReviewerFactory` / `SkillReviewFactory` /
-`ProviderLlmFactory` / `ProviderEmbedFactory` / `ToolPipelineFactory`，共 11 个；
+装配经 `server/src/assembly/` 的类型擦除插槽——**11 个插槽按「变化原因」分 4 组**
+（ADR-049 期 4b，分组理由见该模块 crate 文档）：
+`manifests`（`ToolPluginFactory` / `TaskFactory` / `ToolPipelineFactory`——三份有序清单）、
+`storage`（`StorageBackendFactory` / `VectorStorageFactory`）、
+`policies`（`ApprovalGateFactory` / `ContextFactory` / `TaskReviewerFactory` / `SkillReviewFactory`）、
+`providers`（`ProviderLlmFactory` / `ProviderEmbedFactory`）；
 `TaskFactory` 由装配层把 `task-builtin::tasks()` 与 `task-evolution::tasks()` 拼接成一份
 清单——`splice(1..1, …)` 让演化任务紧跟 `summary_generation`，跨插件顺序只有装配清单知道；
 `ApprovalGateFactory` 把 `policy-approval::gate()` 包成 `Arc<dyn ApprovalGate>`——

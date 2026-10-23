@@ -33,29 +33,25 @@
 //! 装配清单有两个真实消费者，它们的**严格度不同**：
 //!
 //! ```text
-//!   policies()  = 9 个「策略 / 基础设施」插槽          ← 集成测试（test_assembly）也用它
-//!   ┌──────────────────────────────────────────┐
-//!   │ storage          （Sqlite / LocalFile）   │
-//!   │ task             （builtin + evolution）  │
-//!   │ approval         （policy-approval）      │
-//!   │ context          （policy-context）       │
-//!   │ task_reviewer    （policy-review）        │
-//!   │ skill_review     （policy-review）        │
-//!   │ provider_llm     （provider-llm）         │
-//!   │ provider_embed   （provider-embed）       │
-//!   │ tool_pipeline    （tool-pipeline）        │
-//!   └──────────────────────────────────────────┘
+//!   policies()  = 9 个「策略 / 基础设施」插槽        ← 集成测试（test_assembly）也用它
+//!     manifests : task（builtin + evolution）/ tool_pipeline（tool-pipeline）
+//!     storage   : storage            （Sqlite / LocalFile）
+//!     policies  : approval（policy-approval）/ context（policy-context）/
+//!                 task_reviewer、skill_review（policy-review）
+//!     providers : provider_llm（provider-llm）/ provider_embed（provider-embed）
 //!                        +
-//!   full()      = policies() + 2 个「环境相关」插槽    ← app / tauri 用它
-//!   ┌──────────────────────────────────────────┐
-//!   │ plugin_factory   （动态工具清单；需真    │
-//!   │                   ToolContext + Plugin-   │
-//!   │                   Services 才能执行）     │
-//!   │ vector_factory   （LanceDB；集成测试走    │
-//!   │                   NoopVectorStorage，      │
-//!   │                   避免每个测试建目录）     │
-//!   └──────────────────────────────────────────┘
+//!   full()      = policies() + 2 个「环境相关」插槽  ← app / tauri 用它
+//!     manifests : plugin_factory     （动态工具清单；需真 ToolContext +
+//!                                      PluginServices 才能执行）
+//!     storage   : vector_factory     （LanceDB；集成测试走 NoopVectorStorage，
+//!                                      避免每个测试建目录）
 //! ```
+//!
+//! 上面两张表里的 `manifests` / `storage` / `policies` / `providers` 是
+//! `AssemblyServices` 的**四个组**（ADR-049 期 4b 按「变化原因」分组）；四组的分组理由
+//! 逐条写在 `tianyan_server::assembly` 的 crate 文档里，本 crate 只负责「哪一组该装
+//! 什么」。`full() = policies() + 2` 的表述保持有效——只是这 2 个插槽分别追加到
+//! `manifests`（`plugin_factory`）与 `storage`（`vector_factory`）两组。
 //!
 //! 为什么不是「一份 full() + 测试自己删两个插槽」：`AssemblyServices` 的字段只有
 //! `with_*` 没有 `without_*`（那是**降级路径**的语义污染——「装配了又拿掉」与
@@ -100,8 +96,9 @@ use std::sync::Arc;
 
 use tianyan::vfs::{StorageBackend, VectorStorage};
 use tianyan_server::{
-    ApprovalGateFactory, AssemblyServices, ContextFactory, PluginServices, ProviderEmbedFactory,
-    ProviderLlmFactory, SkillReviewFactory, StorageBackendFactory, TaskFactory, TaskRegistration,
+    ApprovalGateFactory, AssemblyServices, ContextFactory, ManifestAssemblies, PluginServices,
+    PolicyAssemblies, ProviderAssemblies, ProviderEmbedFactory, ProviderLlmFactory,
+    SkillReviewFactory, StorageAssemblies, StorageBackendFactory, TaskFactory, TaskRegistration,
     TaskReviewerFactory, ToolPipelineFactory, ToolPluginFactory, VectorStorageFactory,
 };
 use tianyan_storage_sqlite::{LocalFileBackend, SqliteBackend};
@@ -321,17 +318,26 @@ fn tool_pipeline_factory() -> ToolPipelineFactory {
 /// 未装入的两个插槽是 [`full`] 追加的**环境相关**能力：动态工具清单（`create_app`
 /// 路径不注册）与真实向量存储（LanceDB 会为每个测试建目录）。这是**测试剖面**，
 /// 不是「生产少装两块」。
+///
+/// 期 4b 起清单按**四组**显式构造（`manifests` / `storage` / `policies` /
+/// `providers`）：分组理由见 `tianyan_server::assembly` 的 crate 文档，本函数只声明
+/// 「哪一组装什么」——`manifests` 装 `task_factory` 与 `tool_pipeline_factory`（两份
+/// 有序清单；第三份 `plugin_factory` 是环境相关的，只在 [`full`] 里追加）。
 pub fn policies() -> AssemblyServices {
-    AssemblyServices::new()
-        .with_storage_factory(storage_factory())
-        .with_task_factory(task_factory())
-        .with_approval_factory(approval_factory())
-        .with_context_factory(context_factory())
-        .with_task_reviewer_factory(task_reviewer_factory())
-        .with_skill_review_factory(skill_review_factory())
-        .with_provider_llm_factory(provider_llm_factory())
-        .with_provider_embed_factory(provider_embed_factory())
-        .with_tool_pipeline_factory(tool_pipeline_factory())
+    AssemblyServices {
+        manifests: ManifestAssemblies::default()
+            .with_task_factory(task_factory())
+            .with_tool_pipeline_factory(tool_pipeline_factory()),
+        storage: StorageAssemblies::default().with_storage_factory(storage_factory()),
+        policies: PolicyAssemblies::default()
+            .with_approval_factory(approval_factory())
+            .with_context_factory(context_factory())
+            .with_task_reviewer_factory(task_reviewer_factory())
+            .with_skill_review_factory(skill_review_factory()),
+        providers: ProviderAssemblies::default()
+            .with_provider_llm_factory(provider_llm_factory())
+            .with_provider_embed_factory(provider_embed_factory()),
+    }
 }
 
 /// **完整生产装配**（11 个插槽）：`app` bin 与 `tauri` 桌面端用它。
@@ -341,16 +347,31 @@ pub fn policies() -> AssemblyServices {
 ///
 /// 装配顺序对语义无影响（`AssemblyServices` 是字段独立的 builder），但**注册**顺序
 /// 有影响——见 crate 文档的三条顺序纪律。
+///
+/// 实现上**解构** [`policies`] 的四个组再显式重建（而不是 `..policies()`）：
+/// `AssemblyServices` 的字段是四个组结构，部分移动的写法在「给某组追加插槽、其余组
+/// 原样带走」时会踩到部分移动歧义，显式解构让「哪组多了什么」在代码里可见——期 4b
+/// 追加的 2 个插槽分别落在 `manifests`（`plugin_factory`）与 `storage`
+/// （`vector_factory`），两组的分组理由见 `tianyan_server::assembly` 的 crate 文档。
 pub fn full() -> AssemblyServices {
-    policies()
-        .with_plugin_factory(plugin_factory())
-        .with_vector_factory(vector_factory())
+    let AssemblyServices {
+        manifests,
+        storage,
+        policies,
+        providers,
+    } = policies();
+    AssemblyServices {
+        manifests: manifests.with_plugin_factory(plugin_factory()),
+        storage: storage.with_vector_factory(vector_factory()),
+        policies,
+        providers,
+    }
 }
 
 #[cfg(test)]
 mod tests {
     // 测试里 `expect` 是断言手段（失败即测试失败并带消息），与项目其余测试文件
-    // （`app/tests/assembly.rs` / `server/src/assembly.rs` 等）同口径。
+    // （`app/tests/assembly.rs` / `server/src/assembly/tests.rs` 等）同口径。
     #![allow(clippy::unwrap_used, clippy::expect_used)]
 
     use super::*;

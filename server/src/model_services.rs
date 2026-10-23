@@ -173,7 +173,7 @@ pub fn create_model_services(
 ) -> TianyanResult<ModelServices> {
     ModelServices::from_factories(
         &config.models,
-        assembly.provider_llm_factory().as_ref(),
-        assembly.provider_embed_factory().as_ref(),
+        assembly.providers().llm_factory().as_ref(),
+        assembly.providers().embed_factory().as_ref(),
     )
 }

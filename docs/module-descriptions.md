@@ -131,8 +131,8 @@ Core 是天演的核心库，提供 AI Agent 的全部基础能力。4 crate wor
 | `VfsSearch` (trait) | 向量检索：查询 embed → LanceDB RRF 融合 abstract_vector + overview_vector |
 | `VirtualFileSystemImpl` | VFS 默认实现 |
 | `VirtualFileSystemBuilder` | VFS 构建器 |
-| ~~`SqliteBackend`~~ | **已迁出** → `plugins/storage-sqlite`（ADR-049 序 4；`LocalFileBackend` 同迁）；装配层经 `StorageBackendFactory` 注入（`server/src/assembly.rs`） |
-| ~~`LanceDbVectorStore`~~ | **已迁出** → `plugins/storage-vector`（ADR-049 序 3）；装配层经 `VectorStorageFactory` 注入（`server/src/assembly.rs`） |
+| ~~`SqliteBackend`~~ | **已迁出** → `plugins/storage-sqlite`（ADR-049 序 4；`LocalFileBackend` 同迁）；装配层经 `StorageBackendFactory` 注入（`server/src/assembly/storage.rs`，期 4b 按组拆文件） |
+| ~~`LanceDbVectorStore`~~ | **已迁出** → `plugins/storage-vector`（ADR-049 序 3）；装配层经 `VectorStorageFactory` 注入（`server/src/assembly/storage.rs`，期 4b 按组拆文件） |
 | `SummaryEngine` | 分层摘要生成引擎（L0: ~100 tokens, L1: ~2K tokens） |
 | `UriMapper` | URI 到文件系统路径映射 |
 

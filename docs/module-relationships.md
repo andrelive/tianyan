@@ -288,7 +288,7 @@ React Frontend：增量按 chunk_type 渲染；历史/流式共用服务端 segm
 
 > **注**：`SqliteDb` 已移入 `db` 模块（`core/src/db/sqlite_db.rs`，`backend/sqlite_db.rs` 仅 re-export 兼容）——全系统唯一 SQLite 连接（ADR-005 单连接语义），经 `db::Database` 门面统一访问（ADR-020）。`SummaryEngine` 经 `model::ChatService` 生成 L0/L1 摘要，是 vfs→model 的残留单向依赖（非环）。
 >
-> **向量存储实现已出 core**（ADR-049 期 2 序 3）：core 只留 `VectorStorage` 契约，`LanceDbVectorStore` 在 `plugins/storage-vector`，由装配层（`app` bin / `tauri`）经 `VectorStorageFactory` 注入 `server/src/assembly.rs`。**依赖方向**：`plugins/storage-vector → core`（单向），core/server 不认识该插件 crate。
+> **向量存储实现已出 core**（ADR-049 期 2 序 3）：core 只留 `VectorStorage` 契约，`LanceDbVectorStore` 在 `plugins/storage-vector`，由装配层（`app` bin / `tauri`）经 `VectorStorageFactory` 注入 `server/src/assembly/storage.rs`（期 4b 起插槽按组拆文件）。**依赖方向**：`plugins/storage-vector → core`（单向），core/server 不认识该插件 crate。
 >
 > **存储后端实现也已出 core**（ADR-049 期 2 序 4）：core 只留 `StorageBackend` 契约（`vfs/backend/mod.rs`），`SqliteBackend` / `LocalFileBackend` 在 `plugins/storage-sqlite`，经 `StorageBackendFactory` 注入。**性质不同于序 3**：`rusqlite` 仍留 core（`db/*` + `session/*` 80 处、ADR-020 写入门面），本序收窄的是**重编面积**而非依赖面。core 单测要构造真实后端，而 dev-dep 会因 core 被编译两份导致 trait/类型双实例（实测 E0308/E0277），故测试期以 `#[path]` **同源包含**插件源码——**代价**：这两个源码文件内禁止 `crate::…`（只允许 `tianyan::…`）。
 

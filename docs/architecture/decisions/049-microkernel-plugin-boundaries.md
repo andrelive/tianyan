@@ -1617,6 +1617,108 @@ policies()  = 9 个策略 / 基础设施插槽                                �
    `pub(crate)`，本 crate 无法直接断言「`policies()` 缺的正是那两个插槽」。现有断言是
    行为级（server 侧插槽测试已覆盖「未装配 → 空清单 / Noop 兜底」），本批不造第二套。
 
+### 期 4b 实施记录（插槽平铺表治理，2026-10-23）
+
+**目标**：ADR-049 期 3-T5 遗留 1——「11 个平铺字段 + 11 个 `with_*` + 11 个访问器，
+查一眼要滚三屏」。
+
+#### ① 分组维度 = 变化原因（D7 同一把尺子），四组而非「一个插件一份结构」
+
+```text
+AssemblyServices
+├── manifests  三份「有序清单」：plugin_factory / task_factory / tool_pipeline_factory
+├── storage    结构化存储 + 向量存储：storage_factory / vector_factory
+├── policies   策略实现：approval / context / task_reviewer / skill_review
+└── providers  模型 provider：provider_llm / provider_embed
+```
+
+- **manifests**：`plugin_factory`（工具注册顺序）+ `task_factory`（任务扫描顺序）+
+  `tool_pipeline_factory`（监听器顺序）——**三条顺序纪律的载体**（见 4a 记录 ③），
+  都是「插件提供的有序清单」（D6：清单是有序数据，顺序即语义），新增/调整清单时一起动；
+- **storage**：两个工厂读同一份 `StorageConfig`，换后端 / 向量库时一起动；
+- **policies**：内核能力的**策略实现**（审批 / 上下文注入与压缩 / 两个评审端口）；
+- **providers**：聊天视觉与嵌入共用同一套客户端构造语义（UA / 方言 / 双预算超时 /
+  动态会话头 / 重试）。
+
+**为什么不是「一个插件一份结构」（11 组）**：那会把 `AssemblyServices` 变成插件目录的
+镜像——每加一个插件就多一个字段，而 `policy-review` 的两个端口、`provider-*` 的两个能力
+本来就在同一处构造。分组判据必须是**变化原因**，不是插件清单。
+
+#### ② 目录模块：分组同时是文件边界（一页可查）
+
+```text
+server/src/assembly/          原 server/src/assembly.rs（1773 行）
+├── mod.rs        364   crate 文档（四组 + 理由）+ 9 个类型别名 + AssemblyServices
+├── manifests.rs  109   ManifestAssemblies + tasks()
+├── storage.rs    377   StorageAssemblies + backend() / vector() + 两个降级实现
+├── policies.rs   111   PolicyAssemblies
+├── providers.rs   44   ProviderAssemblies
+└── tests.rs     1029   20 个插槽测试（断言逐字保留）
+```
+
+对外路径不变（`crate::assembly::X` / `tianyan_server::X`）：`assembly.rs` → `assembly/mod.rs`
+是 Rust 的等价形态。**「滚三屏」的根因是「一个文件里 11 + 11 + 12 个成员」**——拆文件后
+单文件最大 377 行（且是含两个降级实现的 `storage.rs`）。
+
+生产行 812 → 1005（+193：组结构样板 + 模块声明与组文档）；测试 961 → 1029（构造点改
+组语法，**断言一条未改**）。
+
+#### ③ 单一构造路径：删掉 11 个转发 `with_*`
+
+`AssemblyServices` 上**不保留**转发方法（那会形成两套构造路径，与 4a 要消灭的形态同类）。
+构造只剩一条路——组 builder + 结构体更新语法：
+
+```rust
+AssemblyServices {
+    manifests: ManifestAssemblies::default().with_task_factory(t),
+    storage: StorageAssemblies::default().with_storage_factory(s),
+    policies: PolicyAssemblies::default().with_approval_factory(a),
+    providers: ProviderAssemblies::default().with_provider_llm_factory(l),
+}
+```
+
+删掉的 23 个旧成员：11 个平铺 `with_*` + 12 个平铺访问器（`storage_backend` /
+`vector_storage` 在组内改名为 `backend` / `vector`，`tasks` 移入 `manifests`）。
+
+**组字段是 `pub`、组访问器是 `pub(crate)`**：外部装配层需要结构体更新语法构造（字段
+可见），内部组合根只取用（访问器不外泄）。
+
+#### ④ AppState：7 个工厂字段 → 3 组；`new` 形参 10 → 6
+
+| 指标 | 改造前 | 改造后 |
+|---|---|---|
+| `AssemblyServices` 字段 / `with_*` / 访问器 | 11 / 11 / 12 | **4 组** / 组上 11 / 4 组访问器 |
+| `AppState` 工厂字段 | 7 | **3**（manifests / policies / providers） |
+| `AppState::new` 形参 | 10（其中插槽 7） | **6（其中插槽 3）** |
+| `#[allow(clippy::too_many_arguments)]` | 挂在 `AppState::new` 上 | **删除**（6 ≤ clippy 阈值 7） |
+| 插槽组数（反指标 ≤4） | — | **4** ✅ |
+| `AppState::new` 插槽形参（反指标 ≤3） | 7 | **3** ✅ |
+
+#### ⑤ 明确不做：`build_agent` / `build_agent_or_wizard` 的 24 形参
+
+它们不是「未构造能力的注入插槽」，而是**已构造对象的转发**（`AppState::new` 内先造好
+usage_stats / execution_log / session_* / usage_log / role_* / working_sets /
+user_questions / task_event_sink 等，再递给 builder）。两类问题的判据不同：
+
+- **插槽**：变化原因 = 「换实现」→ 装配层注入 → 多一处副本就是漂移风险（4a 已消灭）；
+- **已构造对象**：变化原因 = 「内核多了一个能力」→ 只有 2 个构造点（`AppState::new` /
+  `reload_agent`）且都在同一个组合根内 → **不构成分叉风险**，只是局部可读性问题。
+
+它的正确解法也不同（按内核能力域分组：核心 / 存储 / 运行时 / 策略），改动面是 400+ 行
+内部引用 + 2 个构造点；且 24 个变量会被改成 `inputs.xxx` 形式，**可读性未必更好**——
+这是它与插槽治理的关键差别。因此本批不做，留待后续（若做，判据仍是「同组字段是否一起变」）。
+
+#### ⑥ 验收
+
+- fmt 干净；`cargo clippy -p tianyan-server --all-targets` 零 warning；`cargo doc` 新增
+  **0 条**链接告警（实施中引入的 6 条「links to private item」已改成普通代码格式）；
+- `cargo test -p tianyan-server`：lib **197 passed + 1 ignored**（与改造前逐项一致）、
+  集成 6 / 16 / 1 / 2 passed；`cargo test -p tianyan-assembly` 6 passed；
+- `cargo check -p tianyan-app` / `-p tianyan-tauri --all-targets` 零 warning；
+  `cargo catalog-check` OK；
+- **文档保真度自检**：老文件与新目录的全部 `///` / `//!` 行做归一化逐行比对，仅 24 行
+  不再逐字出现，全部可解释为「随四组更新」的 6 类改动（**0 处语义删除**）。
+
 ---
 
 ## 分期与闸门
@@ -1628,7 +1730,7 @@ policies()  = 9 个策略 / 基础设施插槽                                �
 | **1** | 工具插件试点（**装配器二分 + tools-fs 骨架已完成**） | ✅ `tianyan-app` bin 包（**清单住 bin**）+ `ToolPluginFactory` 类型擦除 + `create_app_with_plugins` / `start_server_with_plugins*`；✅ `plugins/tools-fs` 独立 crate（`executor::fs` 实现整体迁入）。待续：**整域迁移**——`read_file` 目录模式反向依赖 `executor::fs::execute_list_dir`，故 fs 域必须 6 工具一起搬（read/write/edit/patch/glob/list_dir）才能删 core 侧 | 闸门 A **首测 512 行 ✅**（判据 ≤3.5K）；core 侧暂留（双路径过渡，重名注册自动跳过） |
 | **2** | 适配器与任务插件（**期 2 全部完成（序 0–6）**） | 迁移顺序（按 自包含度×收益）：**0 清 core 死依赖** → 1 `tools-todo`+`tools-goal` → 2 `tools-web` → 3 `storage-vector` → 4 `storage-sqlite` → 5 `task-*`（2 crate）→ **6 `provider-llm`+`provider-embed`（+ 共享基底 `provider-client`，2026-10-21 补做）**。详见下方「期 2 普查结论」与「实施记录（期 2 序 6）」 | 各领域 ≤ 2K；全量 release 不劣化 >10% |
 | **3** | 策略分离（最难一刀） | 抽 `kernel-impl`（loop/cancel/rollback/stream_forward/working_set）；**`context`→`policy-context`（T2 ✅ 2026-10-21，见下方实施记录；`assembler.rs` 按普查修订留 kernel-impl）**；**审批→`policy-approval`（T1 ✅ 2026-10-21）**；`role_learning`→已删除（零消费者，2026-10-21 裁决）；**`judge` + `skills/reviewer`→`policy-review`（T3 ✅ 2026-10-21，475 生产行；`TaskReviewer` / `SkillReviewPort` 契约留 core）**；**配置加载/持久化/迁移/校验/向导→`service-config`（T4 ✅ 2026-10-21，644 生产行净减；结构与预设表留 core，`get_config` 槽位化）** | **闸门 B**：api ≤ 6K && impl ≤ 15K——**✅ 期 3 末实测 `api 4,587 / impl 14,957`**（期 3-T5 收口后；口径 = 四件套文件归属。`agent/background.rs` 1,300 行经裁决算 K1，不可外移）；改策略不重编内核 ✅；S 级零变更 ✅ |
-| **4** | 清单收敛与发行版（**清单收敛已完成 = 4a**；插槽治理 = 4b 未做；发行版收尾待 1.0 前） | ✅ `tianyan-assembly`：11 个插件工厂的**唯一实现** + `full()` / `policies()` 双清单（前缀关系）+ 跨插件顺序断言 4 条（详见下方「期 4 实施记录」）；⏳ 插槽平铺表治理（见 ⑤ 遗留 1）；⏳ 安装验收 / `latest.json` / 签名 | 装配清单 1 页可查 ✅（`assembly/src/lib.rs` crate 文档三张图）；headless 可构建 ✅（`app` bin 即 headless）；**原「desktop/headless/minimal 三份清单」被实证推翻**（desktop ≡ headless，minimal = `policies()`——见 期 4 记录 ①） |
+| **4** | 清单收敛与发行版（**4a 清单收敛 ✅ / 4b 插槽治理 ✅**；发行版收尾待 1.0 前） | ✅ **4a** `tianyan-assembly`：11 个插件工厂的**唯一实现** + `full()` / `policies()` 双清单（前缀关系）+ 跨插件顺序断言 4 条（见「期 4 实施记录」）；✅ **4b** `server/src/assembly/`：11 个平铺插槽按变化原因收敛成 **4 组**（`manifests` / `storage` / `policies` / `providers`）+ 按组拆文件 + `AppState` 工厂字段 7→3 / `new` 形参 10→6（见「期 4b 实施记录」）；⏳ 安装验收 / `latest.json` / 签名 | 装配清单 1 页可查 ✅（`assembly/src/lib.rs` crate 文档三张图 + `server/src/assembly/` 六个文件全 ≤377 行）；headless 可构建 ✅（`app` bin 即 headless）；**原「desktop/headless/minimal 三份清单」被实证推翻**（desktop ≡ headless，minimal = `policies()`——见 期 4 记录 ①）；插槽组数 **4**（≤4 ✅）/ `AppState::new` 插槽形参 **3**（≤3 ✅） |
 
 **反指标**（防拆过头）：每 crate ≥ 300 行且至少 2 个真实消费者；每期净增 pub trait ≤ 3；
 每插件 crate 公开符号 ≤ 15；全量构建不劣化 >10%。

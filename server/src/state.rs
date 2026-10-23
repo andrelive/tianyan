@@ -32,6 +32,7 @@ use tianyan::{Result as TianyanResult, TianyanError};
 use crate::agent_builder::AgentBuilderFactory;
 use crate::api::clipboard::tool::ClipboardWriteTool;
 use crate::api::clipboard::types::PendingCapture;
+use crate::assembly::{ManifestAssemblies, PolicyAssemblies, ProviderAssemblies};
 use crate::mcp_bridge::McpToolManager;
 use crate::scheduled_tasks::tool::{CreateTaskRequest, ScheduleTaskTool};
 
@@ -282,46 +283,44 @@ pub struct AppState {
     /// 会话工作集注册表（ADR-035：读侧缓存 + **写侧收口**——API 会话写路径
     /// 唯一通道；与 Agent 共享同一 Arc）。
     working_sets: Arc<tianyan::agent::working_set::WorkingSetRegistry>,
-    /// 审批门控工厂（ADR-049 期 3-T1：实现已出 core，`plugins/policy-approval`）。
+    /// 清单组工厂（ADR-049 期 4b；组内三根插槽的语义见 `crate::assembly`）。
     ///
-    /// 存下来供 [`Self::reload_agent`] 复用：配置热重载会重建 agent，审批规则
-    /// （`approval_mode` / 黑名单 / 白名单 / 总是询问）必须跟着**新配置**走，
-    /// 不能沿用旧实例。`None` = 未装配（工具走「未装配直接放行」分支）。
-    approval_factory: Option<crate::ApprovalGateFactory>,
-    /// 上下文策略工厂（ADR-049 期 3-T2：实现已出 core，`plugins/policy-context`）。
+    /// 存下来供 [`Self::reload_agent`] 复用——**为什么存**（逐根插槽的原话）：
     ///
-    /// 存下来供 [`Self::reload_agent`] 复用：配置热重载会重建 agent，注入顺序 /
-    /// 压缩窗口 / 检索参数必须跟着**新配置与新模型规格**走。`None` = 未装配
-    /// （`AgentBuilder` 用 `NullContextPort` 兜底 + 告警；`start_server*` 入口另有硬守卫）。
-    context_factory: Option<crate::ContextFactory>,
-    /// 任务结果自审器工厂（ADR-049 期 3-T3：实现已出 core，`plugins/policy-review`）。
+    /// - 工具管线（ADR-049 期 3-T5：观测监听器 + 输出落盘的实现已出 core，
+    ///   `plugins/tool-pipeline`）：配置热重载会重建 agent，落盘预算
+    ///   （`[tool_output]`）与观测接线必须跟着**新配置**走。`None` = 未装配 →
+    ///   不注册任何 post-execute 监听器（不落盘 + 观测全停）+ 装配期告警。
+    /// - `task_factory` 只在 `start_server_inner` 注册定时任务时用（本结构不持有它）；
+    ///   `plugin_factory` 另有自己的槽位（[`Self::plugin_factory`]，可热插拔）。
+    manifests: ManifestAssemblies,
+    /// 策略组工厂（ADR-049 期 4b；实现均已出 core，见 `plugins/policy-*`）。
     ///
-    /// 存下来供 [`Self::reload_agent`] 复用：评审模型名来自配置（`resolve_chat_model`），
-    /// 配置热重载后必须用**新模型**重建自审器。`None` = 未装配（`background_self_review`
-    /// 为真时不装配自审器 + 装配期告警）。
-    task_reviewer_factory: Option<crate::TaskReviewerFactory>,
-    /// 技能使用复审工厂（ADR-049 期 3-T3：实现已出 core，`plugins/policy-review`）。
+    /// 存下来供 [`Self::reload_agent`] 复用——**为什么存**（逐根插槽的原话）：
     ///
-    /// 供 [`Self::create_skill_reviewer`] 逐次构造读端口（旧实现也是逐次 `new`，语义等同）。
-    /// `None` = 未装配 → 该函数返回 `None`，技能统计的 `reviews` 为空数组。
-    skill_review_factory: Option<crate::SkillReviewFactory>,
-    /// 工具管线工厂（ADR-049 期 3-T5：观测监听器 + 输出落盘的实现已出 core，
-    /// `plugins/tool-pipeline`）。
+    /// - 审批门控（期 3-T1）：配置热重载会重建 agent，审批规则
+    ///   （`approval_mode` / 黑名单 / 白名单 / 总是询问）必须跟着**新配置**走，
+    ///   不能沿用旧实例。`None` = 未装配（工具走「未装配直接放行」分支）。
+    /// - 上下文策略（期 3-T2）：配置热重载会重建 agent，注入顺序 / 压缩窗口 /
+    ///   检索参数必须跟着**新配置与新模型规格**走。`None` = 未装配
+    ///   （`AgentBuilder` 用 `NullContextPort` 兜底 + 告警；`start_server*` 入口另有硬守卫）。
+    /// - 任务结果自审器（期 3-T3）：评审模型名来自配置（`resolve_chat_model`），
+    ///   配置热重载后必须用**新模型**重建自审器。`None` = 未装配（`background_self_review`
+    ///   为真时不装配自审器 + 装配期告警）。
+    /// - 技能使用复审（期 3-T3）：供 [`Self::create_skill_reviewer`] 逐次构造读端口
+    ///   （旧实现也是逐次 `new`，语义等同）。`None` = 未装配 → 该函数返回 `None`，
+    ///   技能统计的 `reviews` 为空数组。
+    policies: PolicyAssemblies,
+    /// provider 组工厂（ADR-049 期 4b；实现均已出 core，见 `plugins/provider-*`）。
     ///
-    /// 存下来供 [`Self::reload_agent`] 复用：配置热重载会重建 agent，落盘预算
-    /// （`[tool_output]`）与观测接线必须跟着**新配置**走。`None` = 未装配 →
-    /// 不注册任何 post-execute 监听器（不落盘 + 观测全停）+ 装配期告警。
-    tool_pipeline_factory: Option<crate::ToolPipelineFactory>,
-    /// 聊天 / 视觉 provider 工厂（ADR-049 期 2 序 6：实现已出 core，`plugins/provider-llm`）。
+    /// 存下来供 [`Self::reload_agent`] 复用——**为什么存**（逐根插槽的原话）：
     ///
-    /// 存下来供 [`Self::reload_agent`] 复用：配置热重载会重建模型服务，模型 / API Key /
-    /// 方言 / 头绑定都可能已改，客户端池必须跟着**新配置**走（不能沿用旧实例）。
-    /// `None` = 未装配（`ModelServices` 用 core 的「未配置」降级服务 + 装配期告警）。
-    provider_llm_factory: Option<crate::ProviderLlmFactory>,
-    /// 嵌入 provider 工厂（ADR-049 期 2 序 6：实现已出 core，`plugins/provider-embed`）。
-    ///
-    /// 与 [`Self::provider_llm_factory`] 同一理由（嵌入模型切换后 VFS 检索必须立即生效）。
-    provider_embed_factory: Option<crate::ProviderEmbedFactory>,
+    /// - 聊天 / 视觉 provider（期 2 序 6）：配置热重载会重建模型服务，模型 / API Key /
+    ///   方言 / 头绑定都可能已改，客户端池必须跟着**新配置**走（不能沿用旧实例）。
+    ///   `None` = 未装配（`ModelServices` 用 core 的「未配置」降级服务 + 装配期告警）。
+    /// - 嵌入 provider（期 2 序 6）：与聊天 / 视觉同一理由（嵌入模型切换后 VFS 检索
+    ///   必须立即生效）。
+    providers: ProviderAssemblies,
     usage_log: Arc<UsageLog>,
     /// 工作区快照管理器（配置了 working_directory 时启用）
     /// 工作区快照管理器（配置了 working_directory 时启用）。
@@ -400,23 +399,22 @@ impl AppState {
     /// * 模型服务注册失败时返回 ModelService 错误
     /// * Agent 构建失败时返回 AgentCreation 错误
     ///
-    /// `#[allow(clippy::too_many_arguments)]`：六个 `Option<Factory>` 参数是**装配插槽的
-    /// 平铺表**（ADR-049 期 3-T3 遗留 3 / 期 3-T5 遗留 1：期 4 清单收敛时应按插件分组）。
-    /// 这里保持与
-    /// 其余启动入口同形的显式传参，而不是把整个 `AssemblyServices` 塞进组合根——后者
-    /// 会让「组合根到底用了哪些能力」变得不可见。
-    #[allow(clippy::too_many_arguments)]
+    /// 插槽形参 3 个（三组），ADR-049 期 4b：`manifests`（清单组）/ `policies`
+    /// （策略组）/ `providers`（模型 provider 组）。期 4b 之前这里是 7 个平铺的
+    /// `Option<Factory>`（审批 / 上下文 / 自审 / 复审 / 聊天视觉 / 嵌入 / 工具管线），
+    /// 收敛成组后形参降到 6 个（含 `config` / `vfs` / `database`），`too_many_arguments`
+    /// 豁免随之删除。
+    ///
+    /// 仍保持与其余启动入口同形的显式传参，而不是把整个 `AssemblyServices` 塞进
+    /// 组合根——后者会让「组合根到底用了哪些能力」变得不可见（`storage` 组在 VFS
+    /// 初始化时就用完了，不该出现在这里）。
     pub async fn new(
         config: TianyanConfig,
         vfs: Arc<VirtualFileSystemImpl>,
         database: Arc<Database>,
-        approval_factory: Option<crate::ApprovalGateFactory>,
-        context_factory: Option<crate::ContextFactory>,
-        skill_review_factory: Option<crate::SkillReviewFactory>,
-        task_reviewer_factory: Option<crate::TaskReviewerFactory>,
-        provider_llm_factory: Option<crate::ProviderLlmFactory>,
-        provider_embed_factory: Option<crate::ProviderEmbedFactory>,
-        tool_pipeline_factory: Option<crate::ToolPipelineFactory>,
+        manifests: ManifestAssemblies,
+        policies: PolicyAssemblies,
+        providers: ProviderAssemblies,
     ) -> TianyanResult<Self> {
         // VFS 技能管理器（技能 = VFS 方法论文档；列表/详情/执行 API 数据源）
         let skill_manager = Arc::new(SkillManager::new(vfs.clone()));
@@ -469,10 +467,13 @@ impl AppState {
 
         // 构建 Agent（传入 vfs + 技能组件 + 共享模型服务 + MCP 动态工具；
         // session_manager / trace_collector 与 API 层共享同一实例——组合根收敛）
+        // 两个 provider 插槽取自 `providers` 组（ADR-049 期 4b）。
+        let llm_factory = providers.llm_factory();
+        let embed_factory = providers.embed_factory();
         let model_services = crate::model_services::ModelServices::from_factories(
             &config.models,
-            provider_llm_factory.as_ref(),
-            provider_embed_factory.as_ref(),
+            llm_factory.as_ref(),
+            embed_factory.as_ref(),
         )
         .map_err(model_services_error)?;
         // 嵌入用量入账（Agent 侧实例：摘要任务/角色路由等也调嵌入）。
@@ -529,7 +530,7 @@ impl AppState {
         // 「未装配直接放行」分支（默认配置本就是 `ApprovalMode::Autonomous`，
         // 且命令黑名单在 `SecurityPolicy` 守卫层另有拦截——降级代价比存储低一个量级）。
         let notification_sink = crate::notification::global_notification_sink();
-        let approval_gate = approval_factory.as_ref().map(|factory| {
+        let approval_gate = policies.approval_factory().as_ref().map(|factory| {
             factory(
                 &config.security,
                 working_sets.clone(),
@@ -543,7 +544,7 @@ impl AppState {
         // 窗口 128_000——缺省值判定住在插件里，属于压缩策略）。
         // `None`（未装配）→ builder 用 `NullContextPort` 兜底 + `warn!`；
         // `start_server*` 入口另有硬守卫（`has_context_factory`）。
-        let context_port = context_factory.as_ref().map(|factory| {
+        let context_port = policies.context_factory().as_ref().map(|factory| {
             factory(&crate::ContextServices {
                 config: config.clone(),
                 vfs: vfs.clone() as Arc<dyn tianyan::vfs::VirtualFileSystem>,
@@ -558,7 +559,8 @@ impl AppState {
         // （`resolve_chat_model`），聊天客户端是共享实例的克隆（不重复建 HTTP 客户端池）。
         // `None`（未装配）→ builder 打 `warn!`，任务完成通知直接投递（不带 [自审未通过] 标记）。
         // 是否自审（`background_self_review`）仍由 `AgentBuilder` 判——那是成本开关，属内核。
-        let task_reviewer = task_reviewer_factory
+        let task_reviewer = policies
+            .task_reviewer_factory()
             .as_ref()
             .map(|factory| factory(model_services.chat.clone(), &resolve_chat_model(&config)));
         let agent = AgentBuilderFactory::build_agent_or_wizard(
@@ -585,7 +587,7 @@ impl AppState {
             approval_gate.clone(),
             context_port,
             task_reviewer,
-            tool_pipeline_factory.clone(),
+            manifests.tool_pipeline_factory(),
         )
         .await?;
 
@@ -621,13 +623,9 @@ impl AppState {
             clipboard_pending: Arc::new(RwLock::new(None)),
             user_questions,
             plugin_factory: Arc::new(RwLock::new(None)),
-            approval_factory,
-            context_factory,
-            task_reviewer_factory,
-            skill_review_factory,
-            provider_llm_factory,
-            provider_embed_factory,
-            tool_pipeline_factory,
+            manifests,
+            policies,
+            providers,
             session_leases: crate::session_leases::SessionLeases::new(),
             shutdown_tx: Arc::new(Mutex::new(None)),
         })
@@ -762,10 +760,12 @@ impl AppState {
         dynamic_tools.extend(self.component_dynamic_tools().await);
         // 配置可能已变化（模型/API Key/方言/头绑定），重建共享模型服务
         // （经存下来的两个 provider 工厂：客户端池必须跟着新配置走）
+        let llm_factory = self.providers.llm_factory();
+        let embed_factory = self.providers.embed_factory();
         let model_services = crate::model_services::ModelServices::from_factories(
             &config.models,
-            self.provider_llm_factory.as_ref(),
-            self.provider_embed_factory.as_ref(),
+            llm_factory.as_ref(),
+            embed_factory.as_ref(),
         )
         .map_err(model_services_error)?;
         // 嵌入用量入账（Agent 侧实例：摘要任务/角色路由等也调嵌入）。
@@ -795,7 +795,7 @@ impl AppState {
         // 走（`approval_mode` / 黑名单 / 白名单 / 总是询问都可能已改）。工作集复用
         // **同一** Arc（状态不能在 reload 时分裂；与下方传参同一份）。
         let notification_sink = crate::notification::global_notification_sink();
-        let approval_gate = self.approval_factory.as_ref().map(|factory| {
+        let approval_gate = self.policies.approval_factory().as_ref().map(|factory| {
             factory(
                 &config.security,
                 self.working_sets.clone(),
@@ -804,7 +804,7 @@ impl AppState {
         });
         // 上下文策略随新配置与**新模型规格**重建（ADR-049 期 3-T2）：压缩窗口联动
         // `chat_spec.context_length`，模型切换后必须跟着变（否则窗口停留在旧模型）。
-        let context_port = self.context_factory.as_ref().map(|factory| {
+        let context_port = self.policies.context_factory().as_ref().map(|factory| {
             factory(&crate::ContextServices {
                 config: config.clone(),
                 vfs: self.vfs.clone() as Arc<dyn tianyan::vfs::VirtualFileSystem>,
@@ -817,7 +817,8 @@ impl AppState {
         // 任务结果自审器随新配置重建（ADR-049 期 3-T3）：评审模型名可能已改
         // （`resolve_chat_model` 取决于 preferences），沿用旧实例会继续用旧模型。
         let task_reviewer = self
-            .task_reviewer_factory
+            .policies
+            .task_reviewer_factory()
             .as_ref()
             .map(|factory| factory(model_services.chat.clone(), &resolve_chat_model(&config)));
         let new_agent = AgentBuilderFactory::build_agent_or_wizard(
@@ -850,7 +851,7 @@ impl AppState {
             task_reviewer,
             // 工具管线工厂跨热重载复用：落盘预算来自 `[tool_output]`（新配置），
             // 由 `AgentBuilder` 在 build 时读 builder 侧的新配置值。
-            self.tool_pipeline_factory.clone(),
+            self.manifests.tool_pipeline_factory(),
         )
         .await?;
 
@@ -1106,7 +1107,7 @@ impl AppState {
     pub async fn create_skill_reviewer(
         &self,
     ) -> TianyanResult<Option<Arc<dyn tianyan::skills::SkillReviewPort>>> {
-        let Some(factory) = self.skill_review_factory.as_ref() else {
+        let Some(factory) = self.policies.skill_review_factory() else {
             return Ok(None);
         };
         let config = self.config.read().await.clone();

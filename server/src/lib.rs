@@ -50,8 +50,9 @@ use state::AppState;
 
 pub use assembly::{
     ApprovalGateFactory, AssemblyServices, ContextFactory, ContextPort, ContextServices,
-    ProviderEmbedFactory, ProviderEmbedServices, ProviderLlmFactory, ProviderLlmServices,
-    SkillReviewFactory, StorageBackendFactory, TaskFactory, TaskRegistration, TaskReviewerFactory,
+    ManifestAssemblies, PolicyAssemblies, ProviderAssemblies, ProviderEmbedFactory,
+    ProviderEmbedServices, ProviderLlmFactory, ProviderLlmServices, SkillReviewFactory,
+    StorageAssemblies, StorageBackendFactory, TaskFactory, TaskRegistration, TaskReviewerFactory,
     TaskServices, ToolPipelineFactory, ToolPipelineWiring, VectorStorageFactory,
 };
 pub use model_services::{create_model_services, ModelServices};
@@ -185,11 +186,11 @@ fn get_static_dir() -> std::path::PathBuf {
 /// 创建并初始化单一的 VFS 实例，供整个应用使用。
 /// `sqlite_db` 为全系统共享连接（ADR-005：禁止第二个 SQLite 连接）。
 ///
-/// `assembly` 提供向量存储实现（[`AssemblyServices::vector_storage`]）：
+/// `assembly` 提供向量存储实现（[`StorageAssemblies::vector`]）：
 /// 本库**不认识任何具体向量实现**（LanceDB 等），实现由装配层注入
 /// （ADR-049 期 2 序 3：lancedb/arrow/datafusion 依赖链不进 core）。
 ///
-/// `assembly` 同时提供结构化存储实现（[`AssemblyServices::storage_backend`]）：
+/// `assembly` 同时提供结构化存储实现（[`StorageAssemblies::backend`]）：
 /// `config.storage.backend`（`Local` / `Sqlite`）**选择哪个 adapter 也由装配层
 /// 决定**（ADR-049 D5 / 期 2 序 4）——本库只把配置与共享连接递过去。
 async fn initialize_vfs_for_app(
@@ -201,15 +202,16 @@ async fn initialize_vfs_for_app(
 
     // 1. 创建存储后端（实现与 adapter 选择都在装配层；clone：database 还需用于
     //    嵌入用量入账——UsageLog 共享同一连接）
-    let storage: Arc<dyn StorageBackend> =
-        assembly.storage_backend(&config.storage, database.clone())?;
+    let storage: Arc<dyn StorageBackend> = assembly
+        .storage()
+        .backend(&config.storage, database.clone())?;
     info!(
         backend = ?config.storage.backend,
         "VFS 存储后端已装配（实现由装配层注入）"
     );
 
     // 向量存储由装配层注入（async 初始化：LanceDB 建连/建表）
-    let vector_storage = assembly.vector_storage(&config.storage).await?;
+    let vector_storage = assembly.storage().vector(&config.storage).await?;
 
     // 2. 创建模型服务（用于嵌入服务），无配置时跳过
     let mut vfs_builder = VirtualFileSystemBuilder::new()
@@ -475,7 +477,7 @@ async fn create_app_inner(
     );
     tianyan::executor::shell::install(shell_spec);
 
-    // Create shared application state（传入 VFS + 共享 SqliteDb + 审批门控工厂）
+    // Create shared application state（传入 VFS + 共享 SqliteDb + 三个插槽组）
     //
     // 审批门控（ADR-049 期 3-T1）：工厂交给组合根 `AppState::new`——门控要绑定
     // **与 Agent 同一个**会话工作集（ADR-039 单写入口）与通知通道，而工作集是
@@ -489,17 +491,18 @@ async fn create_app_inner(
     // 工具管线（ADR-049 期 3-T5）：观测 / 落盘的实现已出 core，工厂同样交给组合根
     // → `AgentBuilder`（接线值 `usage_stats` / `trace_collector` / `execution_log`
     // 都是 `AppState`/builder 内部的同一份实例）。
+    //
+    // 期 4b：7 个平铺的 `Option<Factory>` 收敛成 3 个**组**（`manifests` /
+    // `policies` / `providers`；`storage` 组在 `initialize_vfs_for_app` 就用完了）。
+    // 传 clone 而不是 move：`assembly` 下面还要取 `plugin_factory` 注入插件工具
+    // （组是若干 `Arc` 的集合，克隆只加引用计数）。
     let state = AppState::new(
         config,
         vfs,
         database,
-        assembly.approval_factory(),
-        assembly.context_factory(),
-        assembly.skill_review_factory(),
-        assembly.task_reviewer_factory(),
-        assembly.provider_llm_factory(),
-        assembly.provider_embed_factory(),
-        assembly.tool_pipeline_factory(),
+        assembly.manifests.clone(),
+        assembly.policies.clone(),
+        assembly.providers.clone(),
     )
     .await?;
 
@@ -508,7 +511,7 @@ async fn create_app_inner(
     //
     // `PluginServices` 携带 AppState 的 store 实例（`todo` / `goal` 工具需要）：
     // 装配清单是唯一知道「哪个插件需要哪份 store」的地方，本库只负责递过去。
-    if let Some(factory) = assembly.plugin_factory() {
+    if let Some(factory) = assembly.manifests().plugin_factory() {
         // 工厂存进 AppState：`reload_agent` 重建 agent 时用**同一份**清单重新注入
         // （否则插件工具在热重载后永久丢失，直到重启进程）。
         state.attach_plugin_factory(factory).await;
@@ -693,7 +696,7 @@ async fn start_server_inner(
     //
     // `create_app`（测试/嵌入式构造对象图）**不经过**此守卫，仍允许内存后端：那条路径
     // 的实例生命周期由调用方自己负责，且 47 处单测依赖它。
-    if !assembly.has_storage_factory() {
+    if !assembly.storage().has_storage_factory() {
         return Err(tianyan::TianyanError::invalid_input(
             "装配缺陷：启动服务器必须注入 StorageBackendFactory（结构化存储是启动必需项；\
              缺失会静默使用进程内存后端 → 内容不落盘、重启即丢）。生产装配请用 app/tauri \
@@ -710,7 +713,7 @@ async fn start_server_inner(
     //
     // `create_app`（测试/嵌入式构造对象图）**不经过**此守卫，仍允许空直通兜底：那条路径
     // 的实例生命周期由调用方自己负责，且 47 处单测依赖它。
-    if !assembly.has_context_factory() {
+    if !assembly.policies().has_context_factory() {
         return Err(tianyan::TianyanError::invalid_input(
             "装配缺陷：启动服务器必须注入 ContextFactory（上下文策略是启动必需项；\
              缺失会让 agent 失去全部 system 前缀且上下文永不压缩）。生产装配请用 app/tauri \
@@ -718,8 +721,8 @@ async fn start_server_inner(
         ));
     }
     let has_providers = tianyan_config.models.providers.iter().any(|p| p.enabled);
-    // clone：`AssemblyServices` 是 4 个 `Arc`（克隆只加引用计数），而任务清单工厂
-    // 在应用构造之后才用到（见下方「内置定时任务」块）。
+    // clone：`AssemblyServices` 是 4 个**组**，每组的工厂都是 `Arc`（克隆只加引用
+    // 计数），而任务清单工厂在应用构造之后才用到（见下方「内置定时任务」块）。
     let task_assembly = assembly.clone();
     let (app, state) = create_app_inner(tianyan_config, assembly).await?;
     let task_scheduler: Option<Arc<TaskScheduler>> = if has_providers {
@@ -794,7 +797,7 @@ async fn start_server_inner(
                 },
             };
 
-            for registration in task_assembly.tasks(&task_services) {
+            for registration in task_assembly.manifests().tasks(&task_services) {
                 scheduler
                     .register_task(TaskDefinition::new(
                         registration.name,
@@ -1157,7 +1160,10 @@ mod tests {
             listener,
             tianyan::config::TianyanConfig::default(),
             None,
-            AssemblyServices::new().with_storage_factory(storage_factory),
+            AssemblyServices {
+                storage: StorageAssemblies::default().with_storage_factory(storage_factory),
+                ..Default::default()
+            },
         )
         .await
         .expect_err("未装配 ContextFactory 时启动必须失败");
