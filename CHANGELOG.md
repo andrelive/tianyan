@@ -8,6 +8,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [0.8.0] - 2026-10-22
 
 ### Changed
+- **依赖现代化（期 5）**——1.0 前的最后窗口。Rust 侧：semver 内 360 包 + `thiserror 2` /
+  `rusqlite 0.33` / `image 0.25` / `calamine 0.28` / `config 0.15` / `dirs 6` /
+  `pulldown-cmark 0.13` / `schemars 1.0`。前端：semver 内 118 包 + **`vite 8`（Rolldown 内核，
+  构建 21s → 1.5s）** / `vitest 5` / `@vitejs/plugin-react 6` / `jsdom 30` /
+  **`React 19`** / `zustand 5`。
+  **三处刻意不升**（依据见 [`docs/operations/dependency-upgrade.md`](docs/operations/dependency-upgrade.md)）：
+  `lancedb`（0.39/0.40 上游 `job.rs` 的 cfg gate 缺失，未启用 `remote` 时编译失败；启用则拉进
+  gRPC 远程客户端整套依赖，我们用不到）、`msw 3`（异步管道与 `vi.useFakeTimers()` 组合不完成，
+  测试工具升级收益为零）、`tailwindcss 4`（配置体系重写影响全部视觉，而当前无视觉回归测试）。
+  升级期间唯一的行为变化：xlsx 内错误单元格文本从 `#DIV/0!` 变 `Div0`（calamine 0.28 移除
+  `CellErrorType` 的 `Display`，罕见路径）
 - **微内核化：编译期插件化（ADR-049 期 1–3）**——把「改一行实现要重编 5.6 万行」拆成「改插件只重编插件 + 装配包」。新增 **15 个 crate**：`tools-fs` / `tools-code` / `tools-todo` / `tools-web`（工具）、`storage-vector` / `storage-sqlite`（存储适配器）、`task-builtin` / `task-evolution`（定时任务）、`policy-approval` / `policy-context` / `policy-review`（策略）、`provider-client` / `provider-llm` / `provider-embed`（模型 provider）、`tool-pipeline`（工具管线出口）；另有 `service-config`（配置加载/迁移/校验）。`core/src` 生产源码 42,382 → **36,584 行**，`lancedb`/`arrow`/`tree-sitter ×6`/`async-openai` 依赖全部离开 core
 - **装配器二分**：`app`（bin）+ `tauri`（桌面端）是唯一认识具体插件的两处；`tianyan-server` 库经 10 个**类型擦除插槽**接收能力（工具清单 / 向量存储 / 结构化存储 / 任务清单 / 审批 / 上下文 / 任务评审 / 技能评审 / LLM / Embedding / 工具管线），零插件依赖
 - **闸门 B 收口**：内核四件套 `api 4,587 ≤ 6K && impl 14,957 ≤ 15K`；期 3 净增 pub trait 仅 3 个（`ApprovalGate` / `ContextPort` / `SkillReviewPort`，每个方法都有生产调用点证据）
