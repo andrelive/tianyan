@@ -1719,6 +1719,107 @@ user_questions / task_event_sink 等，再递给 builder）。两类问题的判
 - **文档保真度自检**：老文件与新目录的全部 `///` / `//!` 行做归一化逐行比对，仅 24 行
   不再逐字出现，全部可解释为「随四组更新」的 6 类改动（**0 处语义删除**）。
 
+### 期 4c 实施记录（技能反馈回路收敛，2026-10-23）
+
+**起因**：清理待办时用户一句反问——「记忆这里，不是被自演化综述统一接管了么？」——把
+两处**同性质断链**与一个**旧范式遗留**一起挖了出来。
+
+#### ① 普查：两条回路的写 / 读侧状态（实测）
+
+| 回路 | 写侧 | 读侧 | 结论 |
+|---|---|---|---|
+| **技能调用统计**（次数 / 处理异常 / 均耗时 / 最后调用） | ✅ `tool-pipeline/observability.rs`（`call_skill` 时以 `skill:{id}` 为键 `record_skill_call`） | ✅ `SkillStats` → `SkillsPanel` 在展示 | **通**，但没进演化材料 |
+| **技能质量评审**（score / verdict / user_feedback） | ❌ `review_conversation` 零生产调用者 | ⚠️ `SkillsPanel` 有**两处**渲染（列表行内「使用复审 x/10」+ 详情头整块）——但写侧无生产者，两块 UI 从未显示过内容 | **断** |
+
+#### ② 定性：`review_conversation` 是 ADR-017 搬家时漏下的旧范式遗留（不是「不同域」）
+
+三条证据：
+
+1. **它原本挂在 `memory_extraction` 任务上顺路调用**，ADR-017 把该任务并入演化任务时**没跟过去**；
+2. ADR-017 §3 已把**全部机械评分/阈值**删除（Jaccard 去重 / G2b 打分 / `verify_preference` /
+   成功率门控），理由是「生成与判断并入演化智能体」——`review_conversation` 的「LLM 打分 +
+   score/verdict」正是同类的**机械评分**；
+3. 它的输入（含 assistant `tool_calls` 的会话原文）恰好是 §2.1 刻意排除在演化材料外的东西
+   （防自我强化），硬接得起一条「只给评审、不进材料」的旁路——能用，但架构上别扭。
+
+#### ③ 决策：不接线，改为「统计事实 + 智能体判断」
+
+```text
+演化综述的材料（阶段 0 采集）
+├── 近期会话增量（user 原话 + 压缩点摘要）      ← 用户偏好 / 事实（一手）
+├── 当前注册表清单（VFS L0）                    ← 有哪些记忆 / 技能 / 规则 / 角色
+├── 技能使用统计（近 30 天，★ 新增）            ← 技能被用得多不多 / handler 健康度
+└── 综述指令（★ 新增一条纪律）
+```
+
+- **统计口径**：`UsageStats::query_top_skills_since(days, limit)`（新增；`StatsRepo` 同名方法
+  在 SQL 层用 `datetime(recorded_at)` **归一化后比较**——`recorded_at` 历史上存在 RFC3339
+  与 `datetime('now')` 两种格式，直接字符串比较会在同一天内判错）。累计口径的
+  `query_top_skills` **一字未改**（前端技能面板仍用它）。
+- **材料渲染**：固定五列「技能 / 调用 / 处理异常 / 均耗时(ms) / 最后调用」。用「处理异常」
+  而非「失败率」——`success` 只表示 handler 未抛异常，不是技能成功率（`SkillStats` 文档与
+  `skills/handlers.rs` 早已明确这一口径）。
+- **零调用靠交叉发现**：统计表按调用次数降序、**不列零调用技能**；材料另一节「注册表清单」
+  列出全部技能，智能体交叉比对即得「清单里有、统计里没有 = 期间零调用」。刻意**不查全量技能、
+  不做集合差**——那会引入第二份「技能清单」口径。
+- **提示词纪律（无机械阈值，符合 ADR-017）**：「调用多但处理异常多 → 描述或实现有问题；
+  清单里有、统计零调用 → 先判断描述是否让人找不到该用它，否则列入 `deletions`。
+  **不要凭感觉删技能**。」
+
+#### ④ 退役：机械评分链整条下线（净删 829 行，插槽 11 → 10）
+
+| 删除项 | 位置 | 行数 |
+|---|---|---|
+| `review_conversation` + `SkillReviewer` | `plugins/policy-review/src/reviewer.rs` | −300 |
+| 其测试 | `reviewer_tests.rs` | −164 |
+| 契约（`SkillReview` / `SkillReviewPort`） | `core/src/skills/review.rs` | −63 |
+| 前端两处渲染 + 类型 | `SkillsPanel.tsx` / `types.ts` | −61 |
+| `reviews` 字段构造 / `create_skill_reviewer` | `server/src/api/skills/handlers.rs`、`state.rs` | −53 |
+| 插槽字段 + 类型别名 + 装配工厂 | `assembly/{mod,policies}.rs`、`tianyan-assembly` | −77 |
+| 其余（测试桩、re-export、Cargo 描述、文档） | — | −111 |
+
+- **`REVIEWS_PREFIX` 保留**（迁到 `skills/mod.rs`）：`SkillManager` 靠它把 `_reviews` 排除在
+  技能列表外——契约退役了，但存量目录还在，否则某天会冒出一个叫 `_reviews` 的技能。
+- **插槽 11 → 10**（`policies` 组 4 → 3）；`full() = policies() + 2` 关系不变。
+  契约登记表里的编号 37 **留空不重排**（重排会牵动全表引用），标注「已退役」。
+- `plugins/policy-review` 瘦身到只剩任务结果自审（≈ 170 生产行 + 9 个迁移测试 + 1 个装配门禁，
+  仍满足「每 crate ≥300」反指标）。
+
+#### ⑤ 数据与验收
+
+- `cargo test --workspace`：**1750 passed / 0 failed / 1 ignored**（改造前 1754；**−4 全部落在
+  `tianyan_policy_review` 14 → 10**，即被删的两个会话证据用例 + 两个技能端口装配门禁）；
+  期 4c-① 另新增 core +2（窗口过滤 / 参数化窗口）、task-evolution +3（材料节渲染 / 空占位 /
+  提示词纪律）。
+- 演化材料实际渲染（测试实跑抓取）：
+  ```text
+  【技能使用统计】（近 30 天，按调用次数降序；**未出现在本表的技能 = 该期间零调用**，请与上面的技能清单交叉比对）
+  | 技能 | 调用 | 处理异常 | 均耗时(ms) | 最后调用 |
+  |---|---|---|---|---|
+  | code_review | 12 | 1 | 820 | 2026-10-22 14:03 |
+  | planning | 3 | 0 | 16 | 2026-10-21 09:00 |
+  ```
+- fmt / clippy `--workspace --all-targets` 零 warning；`cargo catalog-check` OK；
+  前端 `tsc` 零错、vitest 62 文件 506 用例全绿。
+
+#### ⑥ 一处实现偏差（记录）
+
+`TaskContext` **没有** `usage_stats` 字段（只有 `vfs` / `summary_engine` / `session_recall` /
+`config` / `task_state`），而给调度器加字段会牵动 server 装配主干。按 `task_assembly.rs`
+自己的纪律（「`TaskServices` 是装配期一次性注入的依赖，任务实现把它们**存在自己的字段里**」
+——`evolution_executor` 就是这么走的），改为 `EvolutionTask::with_usage_stats(...)` 加成式注入，
+`EvolutionTask::new` 签名不变（30 处既有测试调点零改动）。
+
+#### ⑦ 教训（写给未来的自己）
+
+**「未接线」「不同域」「搬家漏项」是三件不同的事，而这次我先判成了第二件。**
+用户一句反问才让我去对账 ADR-017。判据修正：**遇到「实现完整但零调用者」的代码，第一件事是
+对照最近一次架构收敛（ADR）看它是否本该被搬走**——`git log` 只看代码历史，看不出「设计上
+应该在哪」。同一个教训在本期还出现了第二次：我据「`grep` 前端未命中」判定
+「UI 从未渲染 reviews」，实际是 `SkillsPanel` 有两处渲染（PowerShell 的 `**` 通配不递归、
+`plugins/` 与 `gui-vite/src/components/` 都没被扫到）——**跨目录 grep 必须逐个目录显式列举，
+不要依赖 `**`**。
+
 ---
 
 ## 分期与闸门
@@ -1730,7 +1831,7 @@ user_questions / task_event_sink 等，再递给 builder）。两类问题的判
 | **1** | 工具插件试点（**装配器二分 + tools-fs 骨架已完成**） | ✅ `tianyan-app` bin 包（**清单住 bin**）+ `ToolPluginFactory` 类型擦除 + `create_app_with_plugins` / `start_server_with_plugins*`；✅ `plugins/tools-fs` 独立 crate（`executor::fs` 实现整体迁入）。待续：**整域迁移**——`read_file` 目录模式反向依赖 `executor::fs::execute_list_dir`，故 fs 域必须 6 工具一起搬（read/write/edit/patch/glob/list_dir）才能删 core 侧 | 闸门 A **首测 512 行 ✅**（判据 ≤3.5K）；core 侧暂留（双路径过渡，重名注册自动跳过） |
 | **2** | 适配器与任务插件（**期 2 全部完成（序 0–6）**） | 迁移顺序（按 自包含度×收益）：**0 清 core 死依赖** → 1 `tools-todo`+`tools-goal` → 2 `tools-web` → 3 `storage-vector` → 4 `storage-sqlite` → 5 `task-*`（2 crate）→ **6 `provider-llm`+`provider-embed`（+ 共享基底 `provider-client`，2026-10-21 补做）**。详见下方「期 2 普查结论」与「实施记录（期 2 序 6）」 | 各领域 ≤ 2K；全量 release 不劣化 >10% |
 | **3** | 策略分离（最难一刀） | 抽 `kernel-impl`（loop/cancel/rollback/stream_forward/working_set）；**`context`→`policy-context`（T2 ✅ 2026-10-21，见下方实施记录；`assembler.rs` 按普查修订留 kernel-impl）**；**审批→`policy-approval`（T1 ✅ 2026-10-21）**；`role_learning`→已删除（零消费者，2026-10-21 裁决）；**`judge` + `skills/reviewer`→`policy-review`（T3 ✅ 2026-10-21，475 生产行；`TaskReviewer` / `SkillReviewPort` 契约留 core）**；**配置加载/持久化/迁移/校验/向导→`service-config`（T4 ✅ 2026-10-21，644 生产行净减；结构与预设表留 core，`get_config` 槽位化）** | **闸门 B**：api ≤ 6K && impl ≤ 15K——**✅ 期 3 末实测 `api 4,587 / impl 14,957`**（期 3-T5 收口后；口径 = 四件套文件归属。`agent/background.rs` 1,300 行经裁决算 K1，不可外移）；改策略不重编内核 ✅；S 级零变更 ✅ |
-| **4** | 清单收敛与发行版（**4a 清单收敛 ✅ / 4b 插槽治理 ✅**；发行版收尾待 1.0 前） | ✅ **4a** `tianyan-assembly`：11 个插件工厂的**唯一实现** + `full()` / `policies()` 双清单（前缀关系）+ 跨插件顺序断言 4 条（见「期 4 实施记录」）；✅ **4b** `server/src/assembly/`：11 个平铺插槽按变化原因收敛成 **4 组**（`manifests` / `storage` / `policies` / `providers`）+ 按组拆文件 + `AppState` 工厂字段 7→3 / `new` 形参 10→6（见「期 4b 实施记录」）；⏳ 安装验收 / `latest.json` / 签名 | 装配清单 1 页可查 ✅（`assembly/src/lib.rs` crate 文档三张图 + `server/src/assembly/` 六个文件全 ≤377 行）；headless 可构建 ✅（`app` bin 即 headless）；**原「desktop/headless/minimal 三份清单」被实证推翻**（desktop ≡ headless，minimal = `policies()`——见 期 4 记录 ①）；插槽组数 **4**（≤4 ✅）/ `AppState::new` 插槽形参 **3**（≤3 ✅） |
+| **4** | 清单收敛、插槽治理与技能回路（**4a / 4b / 4c 均 ✅**；发行版收尾待 1.0 前） | ✅ **4a** `tianyan-assembly`：11 个插件工厂的**唯一实现** + `full()` / `policies()` 双清单（前缀关系）+ 跨插件顺序断言 4 条（见「期 4 实施记录」）；✅ **4b** `server/src/assembly/`：11 个平铺插槽按变化原因收敛成 **4 组**（`manifests` / `storage` / `policies` / `providers`）+ 按组拆文件 + `AppState` 工厂字段 7→3 / `new` 形参 10→6（见「期 4b 实施记录」）；✅ **4c** 技能反馈回路收敛：演化材料接入**技能使用统计**（近 30 天）+ 判断纪律，机械评分链整条退役（**净删 829 行、插槽 11→10**，见「期 4c 实施记录」）；⏳ 安装验收 / `latest.json` / 签名 | 装配清单 1 页可查 ✅（`assembly/src/lib.rs` crate 文档三张图 + `server/src/assembly/` 六个文件全 ≤377 行）；headless 可构建 ✅（`app` bin 即 headless）；**原「desktop/headless/minimal 三份清单」被实证推翻**（desktop ≡ headless，minimal = `policies()`——见 期 4 记录 ①）；插槽组数 **4**（≤4 ✅）/ `AppState::new` 插槽形参 **3**（≤3 ✅）；技能质量判断从「机械评分」改为「统计事实 + 智能体判断」（与 ADR-017 统一接管对齐） |
 
 **反指标**（防拆过头）：每 crate ≥ 300 行且至少 2 个真实消费者；每期净增 pub trait ≤ 3；
 每插件 crate 公开符号 ≤ 15；全量构建不劣化 >10%。

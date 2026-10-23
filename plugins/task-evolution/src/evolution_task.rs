@@ -22,6 +22,8 @@ use tianyan::common::types::{
     memory_paths, AgentPath, ContentLevel, ContextNamespace, MemoryCategory, MemoryEntry,
     TianyanUri,
 };
+use tianyan::db::stats::SkillStats;
+use tianyan::observability::usage_stats::UsageStats;
 use tianyan::role_store::RoleStore;
 use tianyan::roles::{AgentRole, RoleSource, RoleStatus};
 use tianyan::scheduler::{EvolutionReviewExecutor, TaskContext, TaskHandler, TaskResult};
@@ -50,6 +52,12 @@ const DIGEST_MAX_SUMMARY_CHARS: usize = 1200;
 const DIGEST_MAX_TOTAL_CHARS: usize = 12000;
 /// 无水位线（首次运行）时的增量回看窗口（小时）。
 const DIGEST_INITIAL_WINDOW_HOURS: i64 = 72;
+
+/// 技能使用统计的回看窗口（天）。与演化任务自身日频匹配：太短（1 天）会因技能使用稀疏
+/// 而恒为空，太长（90 天）会让「最近写得怎么样」被老数据淹没。
+const SKILL_USAGE_WINDOW_DAYS: u32 = 30;
+/// 材料中最多列出的技能条数（按调用次数降序；零调用的技能不在表内，靠「与清单交叉」发现）。
+const SKILL_USAGE_LIMIT: usize = 50;
 
 /// 记忆 diff 计划项。
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -128,6 +136,12 @@ struct EvolutionPlan {
 pub struct EvolutionTask {
     executor: Arc<dyn EvolutionReviewExecutor>,
     max_items_per_run: usize,
+    /// 使用统计读数来源（技能调用统计材料用；`None` = 未装配 → 材料标注不可用）。
+    ///
+    /// 从 [`tianyan::scheduler::TaskServices::usage_stats`] 注入：演化任务要在材料里
+    /// 带「本期技能使用统计」，而这个能力属于**装配期注入的依赖**（与 `executor`
+    /// 同类），因此存在任务自己的字段里，而不是从 [`TaskContext`] 取。
+    usage_stats: Option<Arc<UsageStats>>,
 }
 
 impl EvolutionTask {
@@ -139,7 +153,17 @@ impl EvolutionTask {
         Self {
             executor,
             max_items_per_run,
+            usage_stats: None,
         }
+    }
+
+    /// 注入使用统计（技能调用统计材料的读数来源）。
+    ///
+    /// 不传时任务照常运行，只是【技能使用统计】一节降级为「无技能调用记录」占位
+    /// ——材料缺一节不等于任务失败（与 `session_recall` 未装配同款降级）。
+    pub fn with_usage_stats(mut self, stats: Arc<UsageStats>) -> Self {
+        self.usage_stats = Some(stats);
+        self
     }
 }
 
@@ -162,12 +186,14 @@ impl EvolutionTask {
     async fn run_evolution(&self, ctx: &TaskContext) -> Result<usize> {
         tracing::info!("开始执行自演化任务（ADR-017）");
 
-        // 阶段 0：采集（水位线 + 注册表清单 + 近期会话增量）
+        // 阶段 0：采集（水位线 + 注册表清单 + 近期会话增量 + 技能使用统计）
         let (last_run_at, last_run_summary) = self.read_watermark(ctx).await;
         let inventory = self.collect_inventory(ctx).await?;
         let consolidate = ctx.config.memory.auto_consolidation;
         let digest = self.collect_recent_digest(ctx, &last_run_at).await;
-        let input = self.build_review_input(&last_run_at, &inventory, consolidate, &digest);
+        let skill_usage = self.collect_skill_usage().await;
+        let input =
+            self.build_review_input(&last_run_at, &inventory, consolidate, &digest, &skill_usage);
 
         // 阶段 1：综述（智能体产出 diff 计划）
         let plan_text = self
@@ -307,6 +333,25 @@ impl EvolutionTask {
 
         Ok(out)
     }
+
+    /// 采集技能使用统计（近 [`SKILL_USAGE_WINDOW_DAYS`] 天）。
+    ///
+    /// **零调用的技能不在本表里**——这是刻意的：材料的另一节「注册表清单」列出了全部技能，
+    /// 智能体交叉比对即可得出「清单里有、统计里没有 = 期间零调用」。因此本方法不查全量技能、
+    /// 不做集合差（那会引入第二份「技能清单」口径）。
+    async fn collect_skill_usage(&self) -> String {
+        let Some(stats) = self.usage_stats.as_ref() else {
+            tracing::warn!("演化：usage_stats 未装配，技能使用统计材料降级为占位");
+            return format!(
+                "（近 {} 天无技能调用记录：usage_stats 未装配）",
+                SKILL_USAGE_WINDOW_DAYS
+            );
+        };
+        let top = stats
+            .query_top_skills_since(SKILL_USAGE_WINDOW_DAYS, SKILL_USAGE_LIMIT)
+            .await;
+        render_skill_usage(&top)
+    }
 }
 
 impl EvolutionTask {
@@ -320,6 +365,7 @@ impl EvolutionTask {
         inventory: &str,
         consolidate: bool,
         digest: &str,
+        skill_usage: &str,
     ) -> String {
         let last = last_run_at.as_deref().unwrap_or("从未运行（首次演化综述）");
         let consolidation_principle = if consolidate {
@@ -343,6 +389,9 @@ impl EvolutionTask {
 
 【当前注册表清单】（L0 摘要首行；如需详情用 vfs_read 查看）
 {inventory}
+
+【技能使用统计】（近 {window_days} 天，按调用次数降序；**未出现在本表的技能 = 该期间零调用**，请与上面的技能清单交叉比对）
+{skill_usage}
 
 【本期材料构成】（务必区分一手与二手信号）
 - `[对话摘要]` 开头的是**压缩点摘要**（二手）：对之前整段会话的概括，用来了解"做过什么"；
@@ -370,6 +419,9 @@ impl EvolutionTask {
 - 只把稳定、跨会话可复用的偏好 / 事实 / 教训 / 决策写入记忆与画像；临时性、一次性内容
   与过程记录（版本发布、功能完成、例行里程碑）不写记忆——它们在演化报告与项目文档中留痕；
 - 写新技能前先查现有技能（语义重复则完善而非新建）；
+- **技能改进 / 删除必须参照上面的【技能使用统计】**：调用多但「处理异常」多 → 描述或实现有问题
+  （改 abstract 让人知道何时该用，或重写正文）；清单里有、统计表中零调用 → 先判断是不是描述
+  让人找不到该用它（改 abstract），否则列入 deletions 归档。**不要凭感觉删技能**；
 {consolidation_principle}- 删除必须有证据（被取代 / 已过时 / 低分评审）——过时、被证伪、重复的条目（含记忆）
   应主动列入 deletions；
 - 不确定的内容宁可少写，不要污染注册表。
@@ -377,6 +429,8 @@ impl EvolutionTask {
             last = last,
             inventory = inventory,
             digest = digest,
+            skill_usage = skill_usage,
+            window_days = SKILL_USAGE_WINDOW_DAYS,
             merge_example = merge_example,
             consolidation_principle = consolidation_principle,
         )
@@ -892,6 +946,42 @@ fn format_ts_ms(ms: i64) -> String {
     chrono::DateTime::from_timestamp_millis(ms)
         .map(|dt| dt.format("%m-%d %H:%M").to_string())
         .unwrap_or_else(|| ms.to_string())
+}
+
+/// 渲染技能使用统计材料（纯函数；空列表 → 占位说明，不输出空表格）。
+///
+/// 措辞纪律：「处理异常」= `total_calls - success_calls`，**不叫「失败率」**——
+/// `success` 只表示 handler 未抛异常，不代表技能「成功解决了任务」（`SkillStats`
+/// 文档与 `handlers.rs` 的统计口径如此）；材料必须用同一措辞，否则综述智能体会把
+/// 「handler 抛异常」误读成「技能不好用」。
+fn render_skill_usage(stats: &[SkillStats]) -> String {
+    if stats.is_empty() {
+        return format!("（近 {} 天无技能调用记录）", SKILL_USAGE_WINDOW_DAYS);
+    }
+    let mut out = String::from("| 技能 | 调用 | 处理异常 | 均耗时(ms) | 最后调用 |\n");
+    out.push_str("|---|---|---|---|---|\n");
+    for s in stats {
+        out.push_str(&format!(
+            "| {} | {} | {} | {:.0} | {} |\n",
+            s.skill_id,
+            s.total_calls,
+            s.total_calls.saturating_sub(s.success_calls),
+            s.avg_time_ms,
+            format_last_called(&s.last_called_at),
+        ));
+    }
+    out
+}
+
+/// 时间戳裁剪：RFC3339（`2026-10-22T14:03:05.123+00:00`）截到「日期 时:分」——
+/// 材料里不需要秒与纳秒。短于 16 字节或 16 不是字符边界时原样返回（`datetime('now')`
+/// 形态的历史行本来就已是「日期 时:分」）。
+fn format_last_called(raw: &str) -> String {
+    if raw.len() >= 16 && raw.is_char_boundary(16) {
+        raw[..16].replace('T', " ")
+    } else {
+        raw.to_string()
+    }
 }
 
 /// 将记忆格式化为 Markdown（写入 VFS 前的统一序列化）。
@@ -1764,12 +1854,14 @@ mod tests {
             }),
             10,
         );
-        let on = task.build_review_input(&None, "memory/x: y", true, "（示例增量）");
+        let on =
+            task.build_review_input(&None, "memory/x: y", true, "（示例增量）", "（技能统计）");
         assert!(on.contains("merge_from"), "启用巩固时输出格式含 merge 示例");
         assert!(on.contains("记忆治理（巩固）"));
         assert!(on.contains("过程记录"), "写前原则含过程记录约束");
         assert!(on.contains("（示例增量）"), "输入包含近期会话增量材料");
-        let off = task.build_review_input(&None, "memory/x: y", false, "（示例增量）");
+        let off =
+            task.build_review_input(&None, "memory/x: y", false, "（示例增量）", "（技能统计）");
         assert!(!off.contains("merge_from"), "关闭巩固时不含 merge 指导");
         assert!(!off.contains("记忆治理（巩固）"));
         assert!(off.contains("（示例增量）"), "增量材料与巩固开关无关");
@@ -1844,7 +1936,8 @@ mod tests {
             }),
             10,
         );
-        let input = task.build_review_input(&None, "memory/x: y", true, "（近况材料）");
+        let input =
+            task.build_review_input(&None, "memory/x: y", true, "（近况材料）", "（技能统计）");
         assert!(
             !input.contains("consolidation_principle ="),
             "不得含内联垃圾行"
@@ -2027,5 +2120,136 @@ mod tests {
         let md = format_memory_as_markdown(&memory);
         assert!(md.contains("**来源会话**: session-1"));
         assert!(md.contains("**来源消息**: msg-1, msg-2"));
+    }
+
+    // ── 技能使用统计材料（ADR-049 期 4c-①）───────────────────────────
+
+    /// 构造一条技能统计（`SkillStats` 全字段公开；纯函数测试不碰数据库）。
+    fn skill_stats(id: &str, calls: u64, successes: u64, avg_ms: f64, last: &str) -> SkillStats {
+        SkillStats {
+            skill_id: id.to_string(),
+            total_calls: calls,
+            success_calls: successes,
+            success_rate: if calls > 0 {
+                successes as f64 / calls as f64
+            } else {
+                0.0
+            },
+            avg_time_ms: avg_ms,
+            last_called_at: last.to_string(),
+        }
+    }
+
+    /// 材料渲染：表头列名固定 + 「处理异常」= total - success（**不是**失败率）+ 时间截断。
+    #[test]
+    fn test_skill_usage_section_rendered() {
+        let stats = vec![
+            skill_stats(
+                "code_review",
+                12,
+                11,
+                820.4,
+                "2026-10-22T14:03:05.123456+00:00",
+            ),
+            // 短时间戳（`datetime('now')` 形态的历史行）原样保留
+            skill_stats("planning", 3, 3, 15.6, "2026-10-21 09:00:00"),
+        ];
+        let rendered = render_skill_usage(&stats);
+        assert!(
+            rendered.contains("| 技能 | 调用 | 处理异常 | 均耗时(ms) | 最后调用 |"),
+            "表头列名固定: {rendered}"
+        );
+        assert!(
+            rendered.contains("| code_review | 12 | 1 | 820 | 2026-10-22 14:03 |"),
+            "行内容：调用 12 / 处理异常 1 / 均耗时取整 / 时间截到分: {rendered}"
+        );
+        assert!(
+            rendered.contains("| planning | 3 | 0 | 16 | 2026-10-21 09:00 |"),
+            "零异常 + 短时间戳原样: {rendered}"
+        );
+        assert!(
+            !rendered.contains("失败率"),
+            "口径措辞必须是「处理异常」（success 只表示 handler 未抛异常）: {rendered}"
+        );
+
+        // 纯函数组装：节标题 + 窗口天数（常量拼出，不是写死的 30）+ 交叉比对纪律
+        let task = EvolutionTask::new(
+            Arc::new(FakeExecutor {
+                response: "{}".to_string(),
+            }),
+            10,
+        );
+        let input = task.build_review_input(&None, "skill/x: y", true, "（增量）", &rendered);
+        assert!(
+            input.contains("【技能使用统计】（近 30 天，按调用次数降序"),
+            "节标题含窗口天数（常量 {SKILL_USAGE_WINDOW_DAYS}）: {input}"
+        );
+        assert!(
+            input.contains("未出现在本表的技能 = 该期间零调用"),
+            "零调用需靠「与清单交叉」发现: {input}"
+        );
+        assert!(
+            input.contains("| code_review | 12 | 1 | 820 | 2026-10-22 14:03 |"),
+            "统计表进材料: {input}"
+        );
+        // 阅读顺序：清单 → 统计 → 材料构成说明（对照关系相邻）
+        let inv_pos = input.find("【当前注册表清单】").unwrap();
+        let usage_pos = input.find("【技能使用统计】").unwrap();
+        let comp_pos = input.find("【本期材料构成】").unwrap();
+        assert!(
+            inv_pos < usage_pos && usage_pos < comp_pos,
+            "统计节应紧跟清单、位于材料构成说明之前"
+        );
+    }
+
+    /// 空统计：给占位说明，**不输出空表格**（空表会被智能体误读成「统计坏了」）。
+    #[test]
+    fn test_skill_usage_empty_placeholder() {
+        let rendered = render_skill_usage(&[]);
+        assert!(
+            rendered.contains("无技能调用记录"),
+            "空统计应有占位说明: {rendered}"
+        );
+        assert!(
+            !rendered.contains("|---|"),
+            "空统计不得输出空表格: {rendered}"
+        );
+
+        let task = EvolutionTask::new(
+            Arc::new(FakeExecutor {
+                response: "{}".to_string(),
+            }),
+            10,
+        );
+        let input = task.build_review_input(&None, "skill/x: y", true, "（增量）", &rendered);
+        assert!(
+            input.contains("【技能使用统计】") && input.contains("无技能调用记录"),
+            "占位说明随节进入材料: {input}"
+        );
+        assert!(!input.contains("|---|"), "材料中不得出现空表格: {input}");
+    }
+
+    /// 提示词纪律：技能改进/删除必须引用统计证据（防未来重构顺手删掉这一条）。
+    #[test]
+    fn test_prompt_requires_skill_usage_evidence() {
+        let task = EvolutionTask::new(
+            Arc::new(FakeExecutor {
+                response: "{}".to_string(),
+            }),
+            10,
+        );
+        let input = task.build_review_input(&None, "skill/x: y", true, "（增量）", "（统计）");
+        assert!(
+            input.contains("**技能改进 / 删除必须参照上面的【技能使用统计】**"),
+            "写前原则必须要求技能改动引用统计证据: {input}"
+        );
+        assert!(
+            input.contains("清单里有、统计表中零调用"),
+            "零调用技能的处理路径须写明: {input}"
+        );
+        assert!(
+            input.contains("不要凭感觉删技能"),
+            "删除纪律须显式否定「凭感觉」: {input}"
+        );
     }
 }

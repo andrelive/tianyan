@@ -274,11 +274,11 @@ soul → rules+memories → history(from compression_marker，含当前用户输
 **模块组织**：
 - `skills/manager.rs` — 技能管理器（VFS 发现 `list_available_skills` + 读取 `read_skill`）
 - `skills/manager.rs` — 技能发现/读取（L0 摘要 + L2 详情）
-- `skills/review.rs` — 复审**契约**：`SkillReviewPort`（只读 `latest_review`，唯一真实调用点
-  `server/src/api/skills/handlers.rs`）、`SkillReview`（记录形状）、`REVIEWS_PREFIX`
-  （既是插件的落盘路径，也是 `manager.rs` 技能发现时的过滤条件）。**实现已迁
-  `plugins/policy-review`**（ADR-049 期 3-T3：会话证据提取 / 评分提示词 / JSONL 落盘）；
-  产生评审的 `review_conversation` 今天**零生产调用者**，留在插件的具体类型上待接线
+- `skills/review.rs` — **已退役（ADR-049 期 4c）**：复审契约（`SkillReviewPort` 只读端口 /
+  `SkillReview` 记录形状）与「LLM 打分 + score/verdict」旧范式整体删除（写侧零生产者、
+  读侧永远读到空、输入恰是 ADR-017 §2.1 排除的会话原文）。只剩 `mod.rs` 的
+  `REVIEWS_PREFIX`（`manager.rs` 技能发现时过滤 `_reviews` 目录）；技能质量判断归
+  演化智能体（技能使用统计 + 用户原话材料 + 技能清单）
 
 > **已删除（T2 清理）**：`skills/learning/`（GEPA 技能自学习引擎，~1100 行）已删除——
 > 全仓无生产消费方（ADR-017 已决策移除 LLM 生成路径），且其 `apply_evaluation` 的
@@ -291,7 +291,7 @@ soul → rules+memories → history(from compression_marker，含当前用户输
 |------|------|
 | `SkillManager` | 技能管理器，`list_available_skills()` 读取所有技能的 abstract，`read_skill()` 读取 L2 详情 |
 | `ExecutionHistory` | 执行历史记录（定义在 `observability`；供角色学习与工具观测消费） |
-| `SkillReviewPort` / `SkillReview` | 技能使用复审读端口（某技能的最新一条评审）+ 记录形状；实现 `SkillReviewer` 在 `tianyan_policy_review` |
+| `SkillReviewPort` / `SkillReview` | **已退役（ADR-049 期 4c）**：技能使用复审读端口 + 记录形状已删除（实现 `SkillReviewer` 同批删除）；技能质量判断归演化智能体 |
 
 **执行语义已移除**：技能没有 handler、没有执行器——文件/命令/网络等能力由 Agent 内置工具直接覆盖，`call_skill` 工具读 VFS 技能文档返回，由 LLM 参考后自行用工具执行。planning 为预置技能（bootstrap 写入 VFS）；外部导入的技能同构。
 

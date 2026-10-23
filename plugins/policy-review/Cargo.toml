@@ -5,7 +5,7 @@ edition.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "天演评审策略插件：后台任务结果自审（LLM-as-Judge）+ 技能使用复审（会话证据打分落 VFS）"
+description = "天演评审策略插件：后台任务结果自审（LLM-as-Judge）"
 
 [dependencies]
 tianyan = { path = "../../core", package = "tianyan-core" }

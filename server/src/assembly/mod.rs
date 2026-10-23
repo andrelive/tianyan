@@ -37,7 +37,7 @@
 //! `EphemeralStorageBackend` 在 `storage.rs`），插槽测试仍在 `tests.rs`。对外路径
 //! 不变（`crate::assembly::X` 与 `tianyan_server::X`）。
 //!
-//! ## 插槽逐条语义（共十一根）
+//! ## 插槽逐条语义（共十根）
 //!
 //! - [`ToolPluginFactory`]（`crate::ToolPluginFactory`）：工具清单，**可重复调用**
 //!   （agent 会因配置热重载 / 模型切换反复重建，每次都要重新注入插件工具）。
@@ -58,10 +58,10 @@
 //! - [`ContextFactory`]：上下文策略实现（`tianyan-policy-context`，ADR-049 期 3-T2）。
 //!   **同步**：管线/压缩器/检索器的构造都只存字段（无 IO）；「注入顺序 / 压缩阈值 /
 //!   摘要提示词 / 检索参数 / 压缩窗口与模型规格联动」的映射随之进插件（单一事实源）。
-//! - [`TaskReviewerFactory`] / [`SkillReviewFactory`]：评审策略实现
-//!   （`tianyan-policy-review`，ADR-049 期 3-T3）。**同步**：两个实现都只存句柄与字段；
-//!   「判定提示词 / `VERDICT:` 解析口径 / 评分标准 / 截断预算」随之进插件
-//!   （任务自审走 [`TaskReviewerFactory`]，技能复审读端口走 [`SkillReviewFactory`]）。
+//! - [`TaskReviewerFactory`]：任务结果自审实现（`tianyan-policy-review`，ADR-049 期
+//!   3-T3）。**同步**：实现只存句柄与字段；「判定提示词 / `VERDICT:` 解析口径 / 截断
+//!   预算」随之进插件。（同批的**技能复审读端口插槽**已退役——ADR-049 期 4c：技能质量
+//!   判断改由演化智能体依据「技能使用统计 + 用户原话材料 + 技能清单」完成。）
 //! - [`ProviderLlmFactory`] / [`ProviderEmbedFactory`]：provider 实现
 //!   （`tianyan-provider-llm` / `tianyan-provider-embed`，ADR-049 期 2 序 6）。**同步**：
 //!   客户端构造与三个服务的组装都只存字段（无 IO）；「按能力解析 provider/model」「每
@@ -238,11 +238,14 @@ pub type ContextFactory = Arc<dyn Fn(&ContextServices) -> Arc<dyn ContextPort> +
 ///   客户端池）；
 /// - 第二个参数是评审模型名（`resolve_chat_model` 的结果，装配层解析）。
 ///
-/// 为什么需要**两个**评审插槽（与任务书初稿的「只加一个 `skill_review_factory`」的偏差，
-/// 理由是硬的）：`LlmTaskReviewer` 的实现今天由 **core** 的
+/// 为什么这个插槽是**必需**的：`LlmTaskReviewer` 的实现原由 **core** 的
 /// `AgentBuilder::build` 构造（`background_self_review` 为真时内联 `new`）。实现搬进
-/// 插件后，builder 若没有注入路径就只能把实现留在 core——那等于没搬。因此第二个插槽是
-/// 这次搬移的**必要配套**，不是范围扩张；形状与 [`ApprovalGateFactory`] 同款。
+/// 插件后，builder 若没有注入路径就只能把实现留在 core——那等于没搬。因此插槽是这次
+/// 搬移的**必要配套**，不是范围扩张；形状与 [`ApprovalGateFactory`] 同款。
+///
+/// **历史说明**（ADR-049 期 4c）：期 3-T3 那次搬移同时装了两个评审插槽，第二个是技能
+/// 复审读端口（`SkillReviewFactory`）；它已随「技能质量评审」旧范式退役删除，本插槽
+/// 现在是 `policies` 组里唯一的评审插槽。
 ///
 /// **同步**（与其余插槽同理）：`LlmTaskReviewer::new` 只存两个字段，没有任何 IO。
 ///
@@ -252,29 +255,6 @@ pub type TaskReviewerFactory = Arc<
             Arc<dyn tianyan::model::ChatService>,
             &str,
         ) -> Arc<dyn tianyan::executor::review::TaskReviewer>
-        + Send
-        + Sync,
->;
-
-/// 技能使用复审工厂（**装配层注入**，ADR-049 期 3-T3）。
-///
-/// `Arc<dyn Fn(Arc<dyn ChatService>, &str, Arc<dyn VirtualFileSystem>)
-///   -> Arc<dyn SkillReviewPort>>`：聊天客户端（共享克隆）+ 评审模型名 + VFS
-///   （**与 `SkillManager` 同一个实例**——评审写下的记录与面板读的必须同一份内容）。
-///
-/// 只产出**读端口**（`latest_review`）：产生评审的完整逻辑（`review_conversation`）
-/// 今天零生产调用者，属「未接线」而不是死代码，因此留在插件的具体类型上、不进契约
-/// （见 `plugins/policy-review` 的 crate 文档与 ADR-049 期 3-T3 遗留）。
-///
-/// **同步**：`SkillReviewer::new` 只存三个字段。用 `Arc<dyn Fn>` 而非
-/// `Box<dyn FnOnce>`：每次技能统计请求都要现造一个（旧实现 `create_skill_reviewer`
-/// 就是逐次构造，语义等同）。
-pub type SkillReviewFactory = Arc<
-    dyn Fn(
-            Arc<dyn tianyan::model::ChatService>,
-            &str,
-            Arc<dyn tianyan::vfs::VirtualFileSystem>,
-        ) -> Arc<dyn tianyan::skills::SkillReviewPort>
         + Send
         + Sync,
 >;
@@ -301,12 +281,12 @@ mod tests;
 
 /// 装配所需的外部能力集合（`None` = 该扩展点未装配，走降级路径）。
 ///
-/// 目前十一个插槽，按**变化原因**分四组（ADR-049 期 4b，分组理由见 crate 文档）：
+/// 目前十个插槽，按**变化原因**分四组（ADR-049 期 4b，分组理由见 crate 文档）：
 /// 插件工具清单（[`ToolPluginFactory`]）+ 内置任务清单（[`TaskFactory`]）+ 工具管线
 /// （[`ToolPipelineFactory`]）→ `manifests`；向量存储（[`VectorStorageFactory`]）+
 /// 结构化存储（[`StorageBackendFactory`]）→ `storage`；审批门控
 /// （[`ApprovalGateFactory`]）+ 上下文策略（[`ContextFactory`]）+ 任务自审
-/// （[`TaskReviewerFactory`]）+ 技能复审（[`SkillReviewFactory`]）→ `policies`；
+/// （[`TaskReviewerFactory`]）→ `policies`；聊天/视觉 provider（[`ProviderLlmFactory`]）+ 嵌入 provider
 /// 聊天/视觉 provider（[`ProviderLlmFactory`]）+ 嵌入 provider
 /// （[`ProviderEmbedFactory`]）→ `providers`。用**一个结构**而不是给每个启动入口再加
 /// 一个参数：入口变体的数量是组合爆炸（listener × 关闭信号 × 插件 × 向量 × 存储 ×
@@ -330,7 +310,7 @@ pub struct AssemblyServices {
     pub manifests: ManifestAssemblies,
     /// 结构化存储 + 向量存储工厂。
     pub storage: StorageAssemblies,
-    /// 策略实现（审批 / 上下文 / 两个评审端口）。
+    /// 策略实现（审批 / 上下文 / 任务自审）。
     pub policies: PolicyAssemblies,
     /// 模型 provider 实现（聊天视觉 + 嵌入）。
     pub providers: ProviderAssemblies,
@@ -352,7 +332,7 @@ impl AssemblyServices {
         &self.storage
     }
 
-    /// 策略组（审批 / 上下文 / 两个评审端口）。
+    /// 策略组（审批 / 上下文 / 任务自审）。
     pub(crate) fn policies(&self) -> &PolicyAssemblies {
         &self.policies
     }

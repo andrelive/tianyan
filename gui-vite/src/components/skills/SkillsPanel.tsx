@@ -5,7 +5,7 @@ import { getSkillDetail, getSkills, getSkillsStats } from '@/lib/api-client';
 import type { Skill } from '@/lib/types';
 import { Wrench, Loader2, AlertCircle, ChevronRight, Clock, Search } from 'lucide-react';
 import ListDetailPanel from '@/components/ui/ListDetailPanel';
-import { formatDateTime, formatTimestamp } from '@/lib/utils';
+import { formatDateTime } from '@/lib/utils';
 
 /**
  * 技能面板：展示 VFS 方法论文档技能（planning 预置 + GEPA 学习技能）。
@@ -172,29 +172,6 @@ export default function SkillsPanel() {
                           </p>
                         );
                       })()}
-                      {(() => {
-                        const rv = stats?.reviews.find((r) => r.skill_id === skill.id);
-                        if (!rv) return null;
-                        return (
-                          <p className="text-xs mt-1 flex items-center gap-2">
-                            <span className="text-[var(--color-text-tertiary)]">使用复审</span>
-                            <span
-                              className={
-                                rv.score >= 7
-                                  ? 'text-emerald-600 dark:text-emerald-400'
-                                  : rv.score >= 4
-                                    ? 'text-amber-600 dark:text-amber-400'
-                                    : 'text-red-600 dark:text-red-400'
-                              }
-                            >
-                              {rv.score}/10
-                            </span>
-                            {rv.verdict === 'negative' && (
-                              <span className="text-red-600 dark:text-red-400">效果不佳</span>
-                            )}
-                          </p>
-                        );
-                      })()}
                       {skill.updated_at && (
                         <p className="text-xs text-[var(--color-text-tertiary)]/80 flex items-center gap-1 mt-1">
                           <Clock size={11} />
@@ -244,33 +221,6 @@ export default function SkillsPanel() {
                     </span>
                   )}
                 </div>
-                {(() => {
-                  const rv = stats?.reviews.find((r) => r.skill_id === selectedSkill.id);
-                  if (!rv) return null;
-                  return (
-                    <div className="mt-2 p-3 rounded-lg bg-[var(--color-bg-secondary)] border border-[var(--color-border)] text-xs">
-                      <div className="flex items-center gap-2">
-                        <span className="text-[var(--color-text-secondary)]">
-                          使用复审（基于会话证据：执行结果 + 用户反馈）
-                        </span>
-                        <span
-                          className={`font-semibold ${rv.score >= 7 ? 'text-emerald-600 dark:text-emerald-400' : rv.score >= 4 ? 'text-amber-600 dark:text-amber-400' : 'text-red-600 dark:text-red-400'}`}
-                        >
-                          {rv.score}/10
-                        </span>
-                        {rv.user_feedback === 'negative' && (
-                          <span className="text-red-600 dark:text-red-400">用户反馈负面</span>
-                        )}
-                        <span className="text-[var(--color-text-tertiary)]">
-                          复审于 {formatTimestamp(rv.ts)}
-                        </span>
-                      </div>
-                      {rv.reason && (
-                        <p className="mt-1.5 text-[var(--color-text-secondary)]">{rv.reason}</p>
-                      )}
-                    </div>
-                  );
-                })()}
               </div>
 
               {/* Content */}

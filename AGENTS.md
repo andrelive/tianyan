@@ -75,7 +75,7 @@ cargo test -p tianyan-core vfs::backend::local -- --nocapture  # 指定测试模
 | `plugins/task-evolution/` | `tianyan-task-evolution` | 插件：自演化综述任务（ADR-017 三阶段编排，含 29 个内联测试）；契约 `EvolutionReviewExecutor` 留 core，实现 `AgentEvolutionExecutor` 留 server（ADR-049 序 5b） |
 | `plugins/policy-approval/` | `tianyan-policy-approval` | 插件：**审批策略**（`ApprovalWorkflow`：风险定级 / 自动规则引擎（Deny 优先）/ `ApprovalMode` 三态短路 / 「总是询问」命令 / 人工审批挂起通道 / 审计，含 23 个迁移测试）；契约 `ApprovalGate` 与全部领域类型留 core（期 3-T1） |
 | `plugins/policy-context/` | `tianyan-policy-context` | 插件：**上下文策略**（注入管线 / 双层检索 RRF / 意图分类 / 分层压缩，1,729 生产行 + 65 个迁移测试）；`assembler.rs` 留 core（K1 组装机制）——ADR-049 期 3-T2，**期 3 的主体收益** |
-| `plugins/policy-review/` | `tianyan-policy-review` | 插件：**评审策略**（`LlmTaskReviewer` 后台任务结果自审 / `SkillReviewer` 技能使用复审，475 生产行 + 11 个迁移测试 + 3 个装配门禁）；契约 `TaskReviewer` / `SkillReviewPort` / `SkillReview` 留 core（期 3-T3） |
+| `plugins/policy-review/` | `tianyan-policy-review` | 插件：**评审策略**（`LlmTaskReviewer` 后台任务结果自审，约 170 生产行 + 9 个迁移测试 + 1 个装配门禁）；契约 `TaskReviewer` / `Judgment` / `Verdict` 留 core（期 3-T3）。技能使用复审（`SkillReviewer`）已于**期 4c 退役**——技能质量判断改由演化智能体依据「技能使用统计 + 用户原话材料 + 技能清单」完成（ADR-049） |
 | `plugins/provider-client/` | `tianyan-provider-client` | **provider 基底 crate**（不是能力插件、无插槽）：`AsyncOpenAIClient`（UA 单点 / 方言解析 / 双预算超时 / 动态会话头 / 重试策略一次构造）+ `RetryableFailure` / `classify_http_status`；被下面两个 provider 插件共用（孤儿规则不允许把 `impl EmbeddingService for 外部类型` 写在第三方 crate，故共用的客户端必须独立成 crate） |
 | `plugins/provider-llm/` | `tianyan-provider-llm` | 插件：**聊天 + 视觉 provider**（`chat` / `vision` / `discovery` / 日志装饰，约 2,450 行 + 39 个迁移测试）+ 连通性探针（配置页「测试连接」）；`async-openai` 随之离开 core（ADR-049 期 2 序 6） |
 | `plugins/provider-embed/` | `tianyan-provider-embed` | 插件：**文本嵌入 provider**（宽容 usage 解析 / 用量上报 / 查询缓存 FIFO 256，约 700 行 + 10 个迁移测试）；用量上报**契约** `EmbeddingUsageSink` 留 core（实现方在通道层）（期 2 序 6） |
@@ -84,11 +84,13 @@ cargo test -p tianyan-core vfs::backend::local -- --nocapture  # 指定测试模
 **依赖铁律**（破一条拆包收益全部回吐）：插件只依赖 `core`（kernel-api）；插件之间零互赖；
 `core`/`server` 不认识任何插件 crate。**认识具体插件 crate 的只有三处**：`assembly/`
 （清单与其唯一实现，ADR-049 期 4）+ `app/`、`tauri/`（两个装配器，只写启动编排）。
-装配经 `server/src/assembly/` 的类型擦除插槽——**11 个插槽按「变化原因」分 4 组**
-（ADR-049 期 4b，分组理由见该模块 crate 文档）：
+装配经 `server/src/assembly/` 的类型擦除插槽——**10 个插槽按「变化原因」分 4 组**
+（ADR-049 期 4b 分组，理由见该模块 crate 文档；**原 11 个**，期 4c 退役「技能质量评审」
+后 `policies` 组少一根 `SkillReviewFactory`——判断改由演化智能体依据技能使用统计 +
+用户原话完成）：
 `manifests`（`ToolPluginFactory` / `TaskFactory` / `ToolPipelineFactory`——三份有序清单）、
 `storage`（`StorageBackendFactory` / `VectorStorageFactory`）、
-`policies`（`ApprovalGateFactory` / `ContextFactory` / `TaskReviewerFactory` / `SkillReviewFactory`）、
+`policies`（`ApprovalGateFactory` / `ContextFactory` / `TaskReviewerFactory`）、
 `providers`（`ProviderLlmFactory` / `ProviderEmbedFactory`）；
 `TaskFactory` 由装配层把 `task-builtin::tasks()` 与 `task-evolution::tasks()` 拼接成一份
 清单——`splice(1..1, …)` 让演化任务紧跟 `summary_generation`，跨插件顺序只有装配清单知道；
@@ -100,12 +102,15 @@ cargo test -p tianyan-core vfs::backend::local -- --nocapture  # 指定测试模
 **未装配 = `NullContextPort`**（空可注入上下文 + 永不压缩）+ 启动期 `warn!`，
 而 `start_server*` 对它设了**启动期硬前置**（与结构化存储同手法：缺了上下文策略，
 agent 没有 system 前缀、上下文只增不减，服务起得来但行为已不成立）。
-`TaskReviewerFactory` / `SkillReviewFactory` 把 `policy-review::{task_reviewer, skill_reviewer}`
-包成 `Arc<dyn TaskReviewer>` / `Arc<dyn SkillReviewPort>`（两个插槽是**一次搬移的必要
-配套**：`LlmTaskReviewer` 的构造点在 core 的 `AgentBuilder::build`，没有注入路径就等于
-没搬）——**未装配 = 不自审**（`background_self_review` 为真时也直接投递通知 + `warn!`）
-与 **技能统计 `reviews` 为空数组**（响应结构不变，与「有评审器但无记录」不可区分）。
-「是否自审」这个**成本开关**仍由内核判；提示词 / 解析口径 / 评分标准 / 截断预算全在插件。
+`TaskReviewerFactory` 把 `policy-review::task_reviewer()` 包成 `Arc<dyn TaskReviewer>`
+（插槽是**一次搬移的必要配套**：`LlmTaskReviewer` 的构造点在 core 的
+`AgentBuilder::build`，没有注入路径就等于没搬）——**未装配 = 不自审**
+（`background_self_review` 为真时也直接投递通知 + `warn!`）。
+「是否自审」这个**成本开关**仍由内核判；提示词 / 解析口径 / 截断预算全在插件。
+**历史（期 4c 退役）**：期 3-T3 同批装的第二根评审插槽 `SkillReviewFactory`（把
+`policy-review::skill_reviewer` 包成 `Arc<dyn SkillReviewPort>`，供技能统计的 `reviews`
+字段）**已删除**——它的写侧零生产者（前端只可能读到空数组），而技能质量判断改由演化
+智能体依据「技能使用统计 + 用户原话材料 + 技能清单」自主完成。
 `ProviderLlmFactory` / `ProviderEmbedFactory` 把 `provider-llm::services()` /
 `provider-embed::services()` 包成能力集合（`ProviderLlmServices` / `ProviderEmbedServices`，
 **定义在 core** 的 `model::assembly`，三方共用），本库再用它们拼 `ModelServices`
@@ -207,7 +212,7 @@ Harness 工程 → [`docs/harness核心思路/harness-engineering-overview.md`](
 | `agent` | `core/src/agent/` | Agent 协调器 + AgentLoop + ToolRegistry + 后台任务（ADR-026：委托只支持异步、双信号量排队 20+40、SQL 权威 + 3 天 TTL）；**统一循环框架（ADR-030）**：主 agent 与子代理同构（`TurnPolicy` 配置——工具执行器 Global/RoleFiltered、持久化 FTS 开关、max_turns 策略、请求工具集），收尾统一"无工具调用"（submit_result 降级为可选结果落盘工具，主 agent 用 task_status 查询）；子智能体会话消息落库不索引 FTS（`add_structured_message_no_fts`）+ 流式事件同一通道（ADR-031：消息不再广播，chat_stream 带 session_id=task_id 路由）；**流式转发统一（ADR-032）**：`stream_forward.rs` 单点（建通道即消费防死锁 + 字段注入），用户轮/唤醒轮/子代理共用，映射器与送达目标可插拔；**结构性取消（ADR-036）**：`cancel.rs` 等待原语（`wait_cancelled`/`cancellable`）覆盖请求在飞/流式 recv/组装/压缩等待盲区；**排他写事务（ADR-040）**：`working_set::with_session_exclusive`（取锁 → 锁内 `rebuild` 最新链 → 闭包）+ `rollback.rs`（`rollback_to` / `redo_to`——回退「先文件、后链」全或无，session handler 退化为薄壳）；工具执行走可插拔管线（`tool_registry/pipeline.rs`：pre-execute 监听器 / 单调守卫 / post-execute 监听器，DSH 吸收）+ **接线契约**（`ToolPipelineWiring` / `ToolPipelineFactory`）；**监听器实现已出 core**（ADR-049 期 3-T5 → `plugins/tool-pipeline`：观测 = 统计/Trace/GEPA/规则学习，落盘 = ADR-047，工具目录渲染）——注册表不再自带任何监听器，未装配 = 不落盘 + 无观测 + 装配期告警 | 所有工具操作通过 VFS |
 | `context` | `core/src/context/` | 上下文工程**契约 + 组装机制**：`ContextAssembler`（K1 组装，纯静态函数，ADR-043 工具对规范化 + 前缀零漂移）、`ContextPort`（3 方法 seam）、`ContextServices`（装配能力集合）、`NullContextPort`（未装配兜底）。**策略实现已出 core**（ADR-049 期 3-T2）：管线 / 压缩 / 双层检索 → `plugins/policy-context` | 检索仅通过 `DualLayerRetriever`（在 `tianyan_policy_context`） |
 | `knowledge` | `core/src/knowledge/` | 知识库导入管道 | ❌ **不建独立检索管道**，导入→VFS→SummaryEngine |
-| `skills` | `core/src/skills/` | 技能 = VFS 方法论文档（发现/读取；无执行语义）：`SkillManager`（发现/读取）+ 复审**契约**（`SkillReviewPort` 只读 `latest_review` / `SkillReview` 记录形状 / `REVIEWS_PREFIX`——它同时是插件的落盘路径与技能发现时的过滤条件）。**复审实现已出 core**（ADR-049 期 3-T3）：会话证据提取 / 评分提示词 / JSONL 落盘 → `plugins/policy-review`；`SkillManager` 因 3a 业务复用（`api/skills/services.rs` 直接持具体类型）留 core | ❌ **不全量加载**，L0 发现→L2 按需 |
+| `skills` | `core/src/skills/` | 技能 = VFS 方法论文档（发现/读取；无执行语义）：`SkillManager`（发现/读取）+ `REVIEWS_PREFIX`（评审记录目录名，技能发现时排除它——复审**契约已退役**，常量保留只为防存量 `_reviews` 目录被当成一个技能列出）。技能质量评审整体退役（ADR-049 期 4c），判断归演化智能体；`SkillManager` 因 3a 业务复用（`api/skills/services.rs` 直接持具体类型）留 core | ❌ **不全量加载**，L0 发现→L2 按需 |
 | `session` | `core/src/session/` | `SessionStore`（SQLite 权威存储，ADR-018；SQL 收敛本模块，经 db 单连接）+ `PersistentSessionManager` + `SessionRecall`（FTS 回忆） | ⚠️ 例外：会话内容不经 VFS（ADR-018）；`tianyan://session/{id}` 仅作逻辑标识 |
 | `model` | `core/src/model/` | 模型服务**契约 + 数据**：`ChatService`/`EmbeddingService`/`VlmService`/`ServiceDiscovery`（S 级）、载荷（`types/`）、模型规格（`spec`）、重试策略（`retry`）、装配原语（`assembly`：`ProviderLlmServices`/`ProviderEmbedServices`/`ConnectionProbe`）、降级服务（`unconfigured`）、用量上报契约（`usage`）。**实现已全部出 core**（ADR-049 期 2 序 6）：聊天/视觉 → `plugins/provider-llm`，嵌入 → `plugins/provider-embed`，共享客户端 → `plugins/provider-client`；容器 `ModelServices` → `server/src/model_services.rs` | — |
 | `scheduler` | `core/src/scheduler/` | 定时任务**机制 + 装配原语**：`TaskScheduler`（间隔+补跑）、`TaskHandler`/`TaskContext`/`TaskDefinition`、`TaskRegistration`/`TaskServices`、`EvolutionReviewExecutor`（综述执行器契约）；**core 已无任何具体任务实现**（5 个内置任务 → `plugins/task-builtin` 序 5a，演化任务 → `plugins/task-evolution` 序 5b） | 定时任务产物写入 VFS |

@@ -664,7 +664,7 @@ async fn test_context_factory_is_injected_and_repeatable() {
     );
 }
 
-// ── 评审策略插槽（ADR-049 期 3-T3）──────────────────────────────────
+// ── 评审策略插槽（ADR-049 期 3-T3；技能复审插槽已于期 4c 退役）────────
 
 /// 只用于装配测试的自审器桩（本库的插槽测试只关心「工厂是否被使用」）。
 struct StubTaskReviewer {
@@ -688,33 +688,8 @@ impl tianyan::executor::review::TaskReviewer for StubTaskReviewer {
     }
 }
 
-/// 只用于装配测试的复审端口桩。
-struct StubSkillReviewPort {
-    /// 判别标记：写进记录的 `reason`，用来证明用的是注入的实例。
-    marker: &'static str,
-}
-
-#[async_trait]
-impl tianyan::skills::SkillReviewPort for StubSkillReviewPort {
-    async fn latest_review(
-        &self,
-        skill_id: &str,
-    ) -> tianyan::Result<Option<tianyan::skills::SkillReview>> {
-        Ok(Some(tianyan::skills::SkillReview {
-            ts: 0,
-            skill_id: skill_id.to_string(),
-            session_id: String::new(),
-            score: 0,
-            verdict: "neutral".to_string(),
-            user_feedback: "none".to_string(),
-            reason: self.marker.to_string(),
-            evidence: String::new(),
-        }))
-    }
-}
-
-/// 未装配工厂时两个评审插槽都为空：`AgentBuilder` 因此拿到 `None`（不装配自审器
-/// + 装配期告警），`create_skill_reviewer` 返回 `None`（`reviews` 为空数组）。
+/// 未装配工厂时自审插槽为空：`AgentBuilder` 因此拿到 `None`（不装配自审器
+/// + 装配期告警）。
 ///
 /// 判别力：若把 `AssemblyServices::default()` 改成「兜底造一个评审器」，本断言必红
 /// ——而兜底评审器会让「未装配」与「装配了真实现」在日志与响应上**无法区分**
@@ -728,25 +703,17 @@ fn test_default_assembly_has_no_review_factories() {
             .is_none(),
         "未装配时自审插槽必须为空（降级由 AgentBuilder 的 None 分支承担）"
     );
-    assert!(
-        AssemblyServices::new()
-            .policies()
-            .skill_review_factory()
-            .is_none(),
-        "未装配时复审插槽必须为空（降级由 create_skill_reviewer 的 None 承担）"
-    );
 }
 
-/// 装配了工厂时**只用工厂**，且工厂可重复调用（配置热重载重建 agent、以及每次
-/// 技能统计请求都现造复审器——两者都要求「不是 FnOnce」）。
+/// 装配了工厂时**只用工厂**，且工厂可重复调用（配置热重载重建 agent 要求
+/// 「不是 FnOnce」）。
 ///
-/// 判别力：两个桩都把 `marker` 写进返回值（自审的 `reason` / 复审记录的 `reason`）
-/// —— 插槽没被使用（`*_factory()` 恒 `None`）时 `expect` 直接 panic；若实现被换成
+/// 判别力：桩把 `marker` 写进返回值的 `reason` —— 插槽没被使用
+/// （`task_reviewer_factory()` 恒 `None`）时 `expect` 直接 panic；若实现被换成
 /// 「总是通过」的桩，`NeedsChanges` 的断言也会红。
 #[tokio::test]
 async fn test_review_factories_are_injected_and_repeatable() {
     let task_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let skill_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
 
     let task_counter = task_calls.clone();
     let task_factory: TaskReviewerFactory = Arc::new(
@@ -756,26 +723,12 @@ async fn test_review_factories_are_injected_and_repeatable() {
                 as Arc<dyn tianyan::executor::review::TaskReviewer>
         },
     );
-    let skill_counter = skill_calls.clone();
-    let skill_factory: SkillReviewFactory = Arc::new(
-        move |_chat: Arc<dyn tianyan::model::ChatService>,
-              _model: &str,
-              _vfs: Arc<dyn tianyan::vfs::VirtualFileSystem>| {
-            skill_counter.fetch_add(1, Ordering::SeqCst);
-            Arc::new(StubSkillReviewPort { marker: "injected" })
-                as Arc<dyn tianyan::skills::SkillReviewPort>
-        },
-    );
 
     let assembly = AssemblyServices {
-        policies: PolicyAssemblies::default()
-            .with_task_reviewer_factory(task_factory)
-            .with_skill_review_factory(skill_factory),
+        policies: PolicyAssemblies::default().with_task_reviewer_factory(task_factory),
         ..Default::default()
     };
     let chat: Arc<dyn tianyan::model::ChatService> = Arc::new(StubChatService);
-    let vfs: Arc<dyn tianyan::vfs::VirtualFileSystem> =
-        Arc::new(tianyan::test_utils::MockVfs::new());
 
     let reviewer = assembly
         .policies()
@@ -796,30 +749,6 @@ async fn test_review_factories_are_injected_and_repeatable() {
         !judgment.verdict.is_pass(),
         "桩给的是 NeedsChanges——若判为通过说明走的不是注入的实例"
     );
-
-    let port = assembly
-        .policies()
-        .skill_review_factory()
-        .expect("装配后必须有工厂")(chat, "stub-model", vfs);
-    let _ = assembly
-        .policies()
-        .skill_review_factory()
-        .expect("装配后必须有工厂")(
-        Arc::new(StubChatService),
-        "stub-model",
-        Arc::new(tianyan::test_utils::MockVfs::new()),
-    );
-    assert_eq!(
-        skill_calls.load(Ordering::SeqCst),
-        2,
-        "工厂应可重复调用（不是 FnOnce）"
-    );
-    let latest = port
-        .latest_review("probe")
-        .await
-        .expect("桩不该失败")
-        .expect("桩恒回 Some");
-    assert_eq!(latest.reason, "injected", "应使用注入的复审实例");
 }
 
 // ── provider 插槽（ADR-049 期 2 序 6）────────────────────────────────

@@ -237,6 +237,18 @@ impl UsageStats {
         self.repo.query_top_skills(limit).await
     }
 
+    /// 技能调用统计（近 `days` 天，按调用次数降序）。
+    ///
+    /// 先 `flush_pending()`（内存计数器落盘）再查——与 [`Self::query_top_skills`] 同一原因：
+    /// 否则最近若干次调用还在内存里，统计会「看起来没涨」。
+    ///
+    /// 与 [`Self::query_top_skills`] 的差别只有时间窗口（累计 vs 近 N 天）；口径
+    /// （只统计 `skill:` 前缀键、返回剥离前缀的 skill_id）与之一致。
+    pub async fn query_top_skills_since(&self, days: u32, limit: usize) -> Vec<SkillStats> {
+        self.flush_pending().await;
+        self.repo.query_top_skills_since(days, limit).await
+    }
+
     /// 查询访问最少的冷门文档列表。
     pub async fn query_cold_documents(&self, limit: usize) -> Vec<DocStats> {
         self.flush_pending().await;
@@ -285,6 +297,21 @@ mod tests {
         // planning 1 成功 1 失败 → 成功率 0.5
         let p = top.iter().find(|s| s.skill_id == "planning").unwrap();
         assert_eq!(p.total_calls, 2);
+        assert_eq!(p.success_calls, 1);
+    }
+
+    /// `query_top_skills_since` 先刷盘再查：热路径只写内存，不先落盘就查会
+    /// 「看起来没涨」——本断言锁住这条顺序契约（与 `query_top_skills` 同规则）。
+    #[tokio::test]
+    async fn test_query_top_skills_since_flushes_pending_first() {
+        let stats = setup().await;
+        stats.record_skill_call("skill:planning", true, 4000); // 仅内存，未 flush
+        let top = stats.query_top_skills_since(30, 10).await;
+        let p = top
+            .iter()
+            .find(|s| s.skill_id == "planning")
+            .expect("查询前应自动刷盘，内存计数必须可见");
+        assert_eq!(p.total_calls, 1);
         assert_eq!(p.success_calls, 1);
     }
 

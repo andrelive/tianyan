@@ -84,7 +84,7 @@ core/src/
 ├── role_store.rs (角色 VFS 存储，独立存储层)
 ├── scheduler/   (task_scheduler, tasks/)
 ├── session/     (store/search 直接实现 SQL（ADR-018 专属），manager, types)
-├── skills/      (manager（发现/读取）+ review.rs 复审契约：SkillReviewPort / SkillReview / REVIEWS_PREFIX；实现 → plugins/policy-review)
+├── skills/      (manager（发现/读取）+ REVIEWS_PREFIX（复审契约已于 ADR-049 期 4c 退役；常量保留用于排除历史 _reviews 目录）)
 ├── vfs/         (traits, vfs_impl, backend/ 含 sqlite.rs；SqliteDb 已移入 db/)
 └── lib.rs
 ```
@@ -387,7 +387,7 @@ TaskScheduler 触发
 | `SessionManager` | `core/src/session/manager.rs` | `PersistentSessionManager`（基于 `SessionStore`，ADR-018） | `server/state.rs`, `agent/coordinator.rs` |
 | `SkillManager` | `core/src/skills/manager.rs` | `SkillManager` | `server/state.rs`, `server/api/skills/`（VFS 技能发现/读取） |
 | `TaskReviewer` | `core/src/executor/review.rs` | `LlmTaskReviewer`（`plugins/policy-review`，装配层经 `TaskReviewerFactory` 注入；**未装配 → 不自审（通知直接投递）+ `warn!`**） | `agent/background.rs`（`task_reviewer` 字段 / `with_task_reviewer`）、`agent/tool_registry/mod.rs`、`AgentBuilder::with_task_reviewer` |
-| `SkillReviewPort` | `core/src/skills/review.rs` | `SkillReviewer`（`plugins/policy-review`，装配层经 `SkillReviewFactory` 注入；**未装配 → `None`，技能统计 `reviews` 为空数组**） | `server/src/api/skills/handlers.rs`（`latest_review`，技能统计面板） |
+| ~~`SkillReviewPort`~~ | ~~`core/src/skills/review.rs`~~ | **已退役（ADR-049 期 4c）**：技能质量判断改由演化智能体依据「技能使用统计 + 用户原话 + 技能清单」承担；契约 / 实现（`SkillReviewer`）/ 插槽（`SkillReviewFactory`）/ `reviews` 字段与前端渲染全部下线 | —（原消费方 `server/src/api/skills/handlers.rs` 的字段已删除） |
 
 > **注意**：`ModelServices` 不是 trait，是 **`server/src/model_services.rs`** 中的 struct（ADR-049 期 2 序 6 从 core 搬来：core 内零生产使用者 + D5 装配职责），聚合 `Arc<dyn ChatService>` + `Arc<dyn EmbeddingService>` + `Arc<dyn VlmService>` + 每 provider 的聊天路由池 + 连通性探针。它由装配层注入的两个工厂产出（`ProviderLlmServices` / `ProviderEmbedServices`，契约在 `core/src/model/assembly.rs`）拼装。
 

@@ -33,11 +33,11 @@
 //! 装配清单有两个真实消费者，它们的**严格度不同**：
 //!
 //! ```text
-//!   policies()  = 9 个「策略 / 基础设施」插槽        ← 集成测试（test_assembly）也用它
+//!   policies()  = 8 个「策略 / 基础设施」插槽        ← 集成测试（test_assembly）也用它
 //!     manifests : task（builtin + evolution）/ tool_pipeline（tool-pipeline）
 //!     storage   : storage            （Sqlite / LocalFile）
 //!     policies  : approval（policy-approval）/ context（policy-context）/
-//!                 task_reviewer、skill_review（policy-review）
+//!                 task_reviewer（policy-review）
 //!     providers : provider_llm（provider-llm）/ provider_embed（provider-embed）
 //!                        +
 //!   full()      = policies() + 2 个「环境相关」插槽  ← app / tauri 用它
@@ -62,7 +62,7 @@
 //! 这也解释了 `server/tests/common/factory.rs::test_assembly()` 为什么能直接用
 //! `policies()`：集成测试驱动 `create_app_with_assembly` 时**不需要**插件工具清单
 //! （`create_app` 路径本就不注册动态工具）与真实向量存储（LanceDB 会为每个测试
-//! 建目录、拉全链编译）。但**其余 9 个插槽必须与生产同形**——否则测的就不是生产
+//! 建目录、拉全链编译）。但**其余 8 个插槽必须与生产同形**——否则测的就不是生产
 //! 形态（「不要用 `AssemblyServices::default()` 驱动集成测试」是同一条纪律）。
 //!
 //! ## 三条顺序纪律（只有本 crate 知道）
@@ -98,8 +98,8 @@ use tianyan::vfs::{StorageBackend, VectorStorage};
 use tianyan_server::{
     ApprovalGateFactory, AssemblyServices, ContextFactory, ManifestAssemblies, PluginServices,
     PolicyAssemblies, ProviderAssemblies, ProviderEmbedFactory, ProviderLlmFactory,
-    SkillReviewFactory, StorageAssemblies, StorageBackendFactory, TaskFactory, TaskRegistration,
-    TaskReviewerFactory, ToolPipelineFactory, ToolPluginFactory, VectorStorageFactory,
+    StorageAssemblies, StorageBackendFactory, TaskFactory, TaskRegistration, TaskReviewerFactory,
+    ToolPipelineFactory, ToolPluginFactory, VectorStorageFactory,
 };
 use tianyan_storage_sqlite::{LocalFileBackend, SqliteBackend};
 use tianyan_storage_vector::LanceDbVectorStore;
@@ -258,22 +258,6 @@ fn task_reviewer_factory() -> TaskReviewerFactory {
     })
 }
 
-/// 技能使用复审工厂（`plugins/policy-review`）。
-///
-/// 评审记录落 VFS `skill/_reviews/<id>.jsonl`——路径与技能发现时的过滤条件
-/// （core 的 `REVIEWS_PREFIX`）同源，因此面板读得到插件写下的内容。
-///
-/// 同步工厂：`SkillReviewer::new` 只存（chat, vfs, 模型名）三个字段。
-fn skill_review_factory() -> SkillReviewFactory {
-    Arc::new(
-        |chat: Arc<dyn tianyan::model::ChatService>,
-         model: &str,
-         vfs: Arc<dyn tianyan::vfs::VirtualFileSystem>| {
-            tianyan_policy_review::skill_reviewer(chat, model, vfs)
-        },
-    )
-}
-
 /// 聊天 / 视觉 provider 工厂（`plugins/provider-llm`）。
 ///
 /// 客户端构造 + 按能力解析 + 每 provider 的聊天路由池 + 连通性探针全在插件里
@@ -306,7 +290,7 @@ fn tool_pipeline_factory() -> ToolPipelineFactory {
 // 两份清单
 // ============================================================================
 
-/// **生产清单的前缀**：9 个「策略 / 基础设施」插槽。
+/// **生产清单的前缀**：8 个「策略 / 基础设施」插槽。
 ///
 /// 集成测试（`server/tests/common/factory.rs::test_assembly()`）直接用它——这些
 /// 插槽的严格度与生产**完全一致**：存储后端按 `config.storage.backend` 分发到真实
@@ -332,17 +316,16 @@ pub fn policies() -> AssemblyServices {
         policies: PolicyAssemblies::default()
             .with_approval_factory(approval_factory())
             .with_context_factory(context_factory())
-            .with_task_reviewer_factory(task_reviewer_factory())
-            .with_skill_review_factory(skill_review_factory()),
+            .with_task_reviewer_factory(task_reviewer_factory()),
         providers: ProviderAssemblies::default()
             .with_provider_llm_factory(provider_llm_factory())
             .with_provider_embed_factory(provider_embed_factory()),
     }
 }
 
-/// **完整生产装配**（11 个插槽）：`app` bin 与 `tauri` 桌面端用它。
+/// **完整生产装配**（10 个插槽）：`app` bin 与 `tauri` 桌面端用它。
 ///
-/// = [`policies`]（9 个） + 动态工具清单 + 向量存储。写成前缀关系是刻意的：
+/// = [`policies`]（8 个） + 动态工具清单 + 向量存储。写成前缀关系是刻意的：
 /// 两份清单不可能分叉（加一个策略插槽只需改 `policies()`，两个消费者同时得到）。
 ///
 /// 装配顺序对语义无影响（`AssemblyServices` 是字段独立的 builder），但**注册**顺序
@@ -510,7 +493,7 @@ mod tests {
 
     /// 两份清单的前缀关系：`full()` 比 `policies()` 多且只多两个环境相关插槽。
     ///
-    /// 判别力：若有人在 `full()` 里重复写一遍 9 个 `with_*`（而不是复用
+    /// 判别力：若有人在 `full()` 里重复写一遍 8 个 `with_*`（而不是复用
     /// `policies()`），两份清单就会各自漂移——本测试无法直接看见字段（`private`），
     /// 因此用**行为**断言：两者都能构造成功，且 `policies()` 不含插件工具 / 向量
     /// 存储（`plugin_factory` 访问器是 `pub(crate)`，只能从 server 侧看；这里以

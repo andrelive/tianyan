@@ -60,7 +60,6 @@ const STATS: SkillsStatsResponse = {
       last_called_at: '2026-08-01T00:00:00Z',
     },
   ],
-  reviews: [],
   total_calls: 5,
   total_success: 4,
   success_rate: 0.8,
@@ -138,7 +137,6 @@ describe('SkillsPanel', () => {
       http.get(`${API_BASE}/skills/stats`, () =>
         HttpResponse.json({
           skills: [],
-          reviews: [],
           total_calls: 0,
           total_success: 0,
           success_rate: 0,

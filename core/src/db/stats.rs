@@ -179,6 +179,46 @@ impl StatsRepo {
         .unwrap_or_default()
     }
 
+    /// 按时间窗口查询技能调用统计（演化任务材料用）。
+    ///
+    /// 与 [`Self::query_top_skills`] 的差别**只有时间窗口**：后者是累计口径（前端技能面板用），
+    /// 本方法只统计最近 `days` 天。`recorded_at` 历史上存在两种格式（写入走 RFC3339，
+    /// 表默认值 `datetime('now')`），因此过滤用 SQLite 的 ` datetime(recorded_at)` **归一化后再比**
+    /// ——直接字符串比较会在「同一天内的两种格式」上判错（' ' 与 'T' 的码位差）。
+    pub async fn query_top_skills_since(&self, days: u32, limit: usize) -> Vec<SkillStats> {
+        let conn = self.db.lock().await;
+        let mut stmt = match conn.prepare(
+            "SELECT substr(skill_id, 7), COUNT(*), SUM(success),
+                CAST(SUM(success) AS REAL) / MAX(COUNT(*),1),
+                AVG(time_us)/1000.0, MAX(recorded_at)
+         FROM skill_calls WHERE skill_id LIKE 'skill:%'
+           AND datetime(recorded_at) >= datetime('now', ?2)
+         GROUP BY skill_id ORDER BY 2 DESC LIMIT ?1",
+        ) {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::warn!(error = %e, "统计查询 prepare 失败");
+                return Vec::new();
+            }
+        };
+        let window = format!("-{days} days");
+        Self::log_query_err(
+            stmt.query_map(rusqlite::params![limit as i64, window], |row| {
+                Ok(SkillStats {
+                    skill_id: row.get(0)?,
+                    total_calls: row.get::<_, i64>(1)? as u64,
+                    success_calls: row.get::<_, i64>(2)? as u64,
+                    success_rate: row.get(3)?,
+                    avg_time_ms: row.get(4)?,
+                    last_called_at: row.get(5)?,
+                })
+            })
+            .map(|rows| rows.filter_map(|r| r.ok()).collect()),
+            "query_top_skills_since",
+        )
+        .unwrap_or_default()
+    }
+
     /// 查询访问最少的冷门文档列表。
     pub async fn query_cold_documents(&self, limit: usize) -> Vec<DocStats> {
         let conn = self.db.lock().await;
@@ -295,5 +335,86 @@ impl StatsRepo {
         )
         .unwrap_or(0);
         serde_json::json!({"total_skills_tracked":skills,"total_skill_calls":calls,"total_tools_tracked":tools,"total_tool_calls":tool_calls,"total_docs_tracked":docs,"total_searches":searches})
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 内存库 + 已初始化 schema 的仓储（与 `usage_stats::tests::setup` 同款）。
+    async fn setup() -> (Arc<Database>, StatsRepo) {
+        let db = Database::open_in_memory().unwrap();
+        db.init_schemas().await.unwrap();
+        let repo = StatsRepo::new(db.clone());
+        (db, repo)
+    }
+
+    /// 时间窗口：`query_top_skills_since` 只统计窗口内的调用，累计口径
+    /// （`query_top_skills`）不受影响。
+    ///
+    /// 判别力：窗口外的记录用 `datetime('now','-40 days')`（**表默认值格式**）落盘，
+    /// 窗口内的用 `flush_counts` 的 RFC3339 写入路径——两种格式并存是生产实况
+    /// （历史行是 `datetime('now')`、新行是 RFC3339）。过滤必须归一化后比较。
+    #[tokio::test]
+    async fn test_query_top_skills_since_filters_by_window() {
+        let (db, repo) = setup().await;
+        // 两条近期调用（RFC3339 写入路径）：1 成功 1 失败
+        repo.flush_counts(&[("skill:code_review".to_string(), 2, 1, 12_000)], &[])
+            .await
+            .unwrap();
+        // 一条 40 天前的调用（改成表默认值的 `datetime('now')` 格式）
+        repo.flush_counts(&[("skill:legacy".to_string(), 1, 1, 3_000)], &[])
+            .await
+            .unwrap();
+        db.lock()
+            .await
+            .execute(
+                "UPDATE skill_calls SET recorded_at = datetime('now','-40 days')
+                 WHERE skill_id = 'skill:legacy'",
+                [],
+            )
+            .unwrap();
+
+        let recent = repo.query_top_skills_since(30, 10).await;
+        assert_eq!(recent.len(), 1, "40 天前的调用应落在窗口外: {recent:?}");
+        assert_eq!(recent[0].skill_id, "code_review", "应剥离 skill: 前缀");
+        assert_eq!(recent[0].total_calls, 2);
+        assert_eq!(recent[0].success_calls, 1);
+        assert!(
+            (recent[0].avg_time_ms - 6.0).abs() < 1e-6,
+            "均耗时应为 12000us/2/1000 = 6ms，实际 {}",
+            recent[0].avg_time_ms
+        );
+
+        // 累计口径（前端技能面板）两种都含——`query_top_skills` 语义未变
+        let all = repo.query_top_skills(10).await;
+        assert_eq!(all.len(), 2, "累计口径应含窗口外的历史调用: {all:?}");
+        assert!(all.iter().any(|s| s.skill_id == "legacy"));
+    }
+
+    /// 窗口宽度是参数：40 天前的记录在 90 天窗口内可见（不是恒为「近 30 天」）。
+    #[tokio::test]
+    async fn test_query_top_skills_since_window_is_parameter() {
+        let (db, repo) = setup().await;
+        repo.flush_counts(&[("skill:old".to_string(), 1, 1, 1_000)], &[])
+            .await
+            .unwrap();
+        db.lock()
+            .await
+            .execute(
+                "UPDATE skill_calls SET recorded_at = datetime('now','-40 days')",
+                [],
+            )
+            .unwrap();
+        assert!(
+            repo.query_top_skills_since(30, 10).await.is_empty(),
+            "30 天窗口应排除 40 天前的调用"
+        );
+        assert_eq!(
+            repo.query_top_skills_since(90, 10).await.len(),
+            1,
+            "90 天窗口应包含 40 天前的调用"
+        );
     }
 }

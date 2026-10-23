@@ -73,13 +73,14 @@ Rust 下「契约 = 成本」：契约变更会穿透依赖图，改动成本随
 | 34 | `SummaryService` | `core/src/vfs/summary/engine.rs:51` | 摘要策略插件内部 |
 | 35 | `ApprovalGate` | `core/src/executor/approval/gate.rs:44` | 审批门控 seam（**ADR-049 期 3-T1 新增**）：内核只认 `Arc<dyn ApprovalGate>`，实现在 `plugins/policy-approval`。按 B 级管理的理由——只有一个消费者面（内核的 4 个审批调用点）与一个实现（`ApprovalWorkflow`），属「插件自有的小契约」而非跨插件公共协议；方法集按**调用点证据**最小化到 4 个（`authorize` / `status` / `respond_to_approval` / `record_user_confirmation_by_fingerprint`），冻结时点（期 3 结束）再评估升不升 A 级 |
 | 36 | `ContextPort` | `core/src/context/port.rs` | 上下文工程 seam（**ADR-049 期 3-T2 新增**）：内核只认 `Arc<dyn ContextPort>`，实现在 `plugins/policy-context`（`ContextPipeline`）。按 B 级管理的理由——一个消费者面（内核 3 个调用点：`agent_core.rs:478` 加载注入 / `:783` 会话压缩 / `:751` 压缩点摘要提取）+ 一个实现，属「插件自有的小契约」；方法集按调用点证据最小化到 3 个，**没有** `run()` / `compress_if_needed()` / `compressor()` 之类无生产调用点的方法。**顺序契约 `compress_for_session` → 落库成功 → `ws.reshape_after_compression()`（ADR-035 §2）留在内核执行**，不进本 trait——插件只产出压缩结果。未装配时内核用 `NullContextPort` 兜底（`start_server*` 另有启动期硬守卫）。冻结时点（期 3 结束）再评估升不升 A 级 |
-| 37 | `SkillReviewPort` | `core/src/skills/review.rs` | 技能复审 seam（**ADR-049 期 3-T3 新增**）：通道层只认 `Arc<dyn SkillReviewPort>`，实现在 `plugins/policy-review`（`SkillReviewer`），装配层经 `SkillReviewFactory` 注入。按 B 级管理的理由——一个消费者（`server/src/api/skills/handlers.rs` 的技能统计）+ 一个实现；方法集按调用点证据最小化到 **1 个**（只读的 `latest_review`）。**产生评审的 `review_conversation` 不进契约**：它今天零生产调用者（属「未接线」而非死代码），留在插件的具体类型上，接线后才考虑以 `record_review` 之类的方法进契约。伴随类型 `SkillReview`（记录形状）与常量 `REVIEWS_PREFIX`（插件落盘路径 = 内核技能发现过滤条件，**一处定义两处用**）同留 core。未装配时 `create_skill_reviewer` 返回 `None`（技能统计 `reviews` 为空数组）。冻结时点（期 3 结束）再评估升不升 A 级 |
+| ~~37~~ | ~~`SkillReviewPort`~~ | — | **已退役（ADR-049 期 4c）**：技能质量判断改由**演化智能体**依据「技能使用统计（近 30 天调用次数 / 处理异常 / 均耗时 / 最后调用）+ 用户原话材料 + 技能清单」承担；契约 `SkillReviewPort` / `SkillReview`、实现 `SkillReviewer`（`review_conversation`）与插槽 `SkillReviewFactory` 一并删除，`/api/v1/skills/stats` 的 `reviews` 字段与前端两处渲染同步下线。**编号留空不重排**（重排会牵动全表引用）。`REVIEWS_PREFIX` 常量保留在 `core/src/skills/mod.rs`（历史 `_reviews` 目录仍须排除在技能列表外）。原为 B 级（期 3-T3 新增，1 个消费者 + 1 个实现） |
 | 38 | `ConnectionProbe` | `core/src/model/assembly.rs` | 连通性探测 seam（**ADR-049 期 2 序 6 新增，期 2 唯一新增 trait**）：通道层只认 `Arc<dyn ConnectionProbe>`，实现 `ProviderConnectionProbe` 在 `plugins/provider-llm`，随 `ProviderLlmServices::probe` 由工厂产出。方法集 **1 个**（`probe(endpoint, api_key, model) -> Result<Vec<String>>`）。**为什么不给探针单开插槽**：探测用用户当场输入的 endpoint/key 造**临时**客户端，必须复用插件那套构造语义（UA 单点 / 方言解析 / 双预算超时 / 动态会话头 / 重试策略）；独立插槽会让装配层多一个必填项，或让第二个工厂复制这套语义。**错误分类不进契约**：`is_permission` / `is_not_found` / `is_timeout` → 用户文案仍是通道层的事（ADR-014 消费端）。未装配 provider 工厂时探针为 `None` → `POST /api/config/test-connection` 返回「连接测试不可用」 |
 
-> 小计：S 14 / A 11 / B 13 = **38**（含期 3-T1 新增的 `ApprovalGate`、期 3-T2 新增的
-> `ContextPort`、期 3-T3 新增的 `SkillReviewPort`、期 2 序 6 补做的 `ConnectionProbe`）。
-> 反指标「每期净增 pub trait ≤ 3」：期 3 净增 **3**（T1 / T2 / T3 各一——正好用满）；
-> 期 2 序 6（补做）净增 **1**。期 4 起不得再增。
+> 小计：S 14 / A 11 / **B 12** = **37**（含期 3-T1 新增的 `ApprovalGate`、期 3-T2 新增的
+> `ContextPort`、期 2 序 6 补做的 `ConnectionProbe`；期 3-T3 新增的 `SkillReviewPort`
+> 已于期 4c 退役，编号留空不重排）。
+> 反指标「每期净增 pub trait ≤ 3」：期 3 净增 **3**（T1 / T2 / T3 各一——正好用满），
+> 其中 T3 那根已于期 4c 退役；期 2 序 6（补做）净增 **1**。期 4 起不得再增。
 
 ---
 

@@ -146,10 +146,10 @@ pub fn tasks(services: &TaskServices) -> Vec<TaskRegistration> {
         "evolution",
         "自演化综述",
         evolution_interval,
-        Arc::new(EvolutionTask::new(
-            executor,
-            cfg.evolution.max_items_per_run,
-        )),
+        Arc::new(
+            EvolutionTask::new(executor, cfg.evolution.max_items_per_run)
+                .with_usage_stats(services.usage_stats.clone()),
+        ),
     )]
 }
 

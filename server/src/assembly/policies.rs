@@ -1,13 +1,16 @@
 //! `policies` 组（ADR-049 期 4b）：内核能力的**策略实现**插槽。
 //!
-//! 四个插槽都是「内核留出端口、装配层决定实现」的同一手法（ADR-049 期 3-T1/T2/T3，
-//! D5 装配器二分）：审批门控、上下文注入与压缩、任务结果自审、技能使用复审。它们的
-//! 共同点是——**改「策略」时一起动**（换审批口径 / 调压缩窗口 / 换评审提示词都属于
-//! 同一类改动，且能力集合都是装配期 `await` 好的句柄与配置快照），因此同组。
-//! 没有插槽时的降级都由**消费侧**承担（`AgentBuilder` 的 `None` 分支 /
-//! `create_skill_reviewer` 的 `None`），本组不兜底造实现（ADR-038 可见失败）。
+//! 三个插槽都是「内核留出端口、装配层决定实现」的同一手法（ADR-049 期 3-T1/T2/T3，
+//! D5 装配器二分）：审批门控、上下文注入与压缩、任务结果自审。它们的共同点是——
+//! **改「策略」时一起动**（换审批口径 / 调压缩窗口 / 换评审提示词都属于同一类改动，
+//! 且能力集合都是装配期 `await` 好的句柄与配置快照），因此同组。
+//! 没有插槽时的降级都由**消费侧**承担（`AgentBuilder` 的 `None` 分支），本组不兜底
+//! 造实现（ADR-038 可见失败）。
+//!
+//! 曾经的第四根插槽（技能使用复审读端口，期 3-T3）已随旧范式退役（ADR-049 期 4c）：
+//! 技能质量判断改由演化智能体依据「技能使用统计 + 用户原话材料 + 技能清单」完成。
 
-use super::{ApprovalGateFactory, ContextFactory, SkillReviewFactory, TaskReviewerFactory};
+use super::{ApprovalGateFactory, ContextFactory, TaskReviewerFactory};
 
 /// 策略实现工厂（`None` = 该策略未装配，走消费侧的降级分支）。
 #[derive(Clone, Default)]
@@ -15,7 +18,6 @@ pub struct PolicyAssemblies {
     approval_factory: Option<ApprovalGateFactory>,
     context_factory: Option<ContextFactory>,
     task_reviewer_factory: Option<TaskReviewerFactory>,
-    skill_review_factory: Option<SkillReviewFactory>,
 }
 
 impl PolicyAssemblies {
@@ -34,12 +36,6 @@ impl PolicyAssemblies {
     /// 装配任务结果自审器工厂（`app` / `tauri` 用：`tianyan-policy-review`）。
     pub fn with_task_reviewer_factory(mut self, factory: TaskReviewerFactory) -> Self {
         self.task_reviewer_factory = Some(factory);
-        self
-    }
-
-    /// 装配技能使用复审工厂（`app` / `tauri` 用：`tianyan-policy-review`）。
-    pub fn with_skill_review_factory(mut self, factory: SkillReviewFactory) -> Self {
-        self.skill_review_factory = Some(factory);
         self
     }
 
@@ -88,16 +84,6 @@ impl PolicyAssemblies {
     /// 且该开关默认关闭（opt-in，每任务多一次模型调用）。
     pub(crate) fn task_reviewer_factory(&self) -> Option<TaskReviewerFactory> {
         self.task_reviewer_factory.clone()
-    }
-
-    /// 技能使用复审工厂（`None` = 不装配读端口）。
-    ///
-    /// **未装配时的降级语义**：`AppState::create_skill_reviewer` 返回 `None`，
-    /// `GET /api/v1/skills/stats` 的 `reviews` 字段为空数组——响应结构不变。今天
-    /// 「没有评审器」与「有评审器但没有记录」在该接口上本来都表现为空数组，因此
-    /// 降级不改变可观测形状（判别力由插槽测试锁定：装配了就一定用工厂）。
-    pub(crate) fn skill_review_factory(&self) -> Option<SkillReviewFactory> {
-        self.skill_review_factory.clone()
     }
 
     /// 是否装配了上下文策略工厂（**启动服务的硬前置**，见 `start_server_inner`）。

@@ -307,9 +307,6 @@ pub struct AppState {
     /// - 任务结果自审器（期 3-T3）：评审模型名来自配置（`resolve_chat_model`），
     ///   配置热重载后必须用**新模型**重建自审器。`None` = 未装配（`background_self_review`
     ///   为真时不装配自审器 + 装配期告警）。
-    /// - 技能使用复审（期 3-T3）：供 [`Self::create_skill_reviewer`] 逐次构造读端口
-    ///   （旧实现也是逐次 `new`，语义等同）。`None` = 未装配 → 该函数返回 `None`，
-    ///   技能统计的 `reviews` 为空数组。
     policies: PolicyAssemblies,
     /// provider 组工厂（ADR-049 期 4b；实现均已出 core，见 `plugins/provider-*`）。
     ///
@@ -1088,33 +1085,6 @@ impl AppState {
         let summary_engine = SummaryEngine::new(model_services.chat, &chat_model);
 
         Ok(Arc::new(summary_engine))
-    }
-
-    /// 创建技能使用复审读端口（`Arc<dyn SkillReviewPort>`）。
-    ///
-    /// ADR-049 期 3-T3：实现已出 core（`plugins/policy-review` 的 `SkillReviewer`），
-    /// 本库经装配插槽 [`crate::SkillReviewFactory`] 构造，只认 `tianyan::skills::SkillReviewPort`
-    /// 这一个契约面（唯一方法 `latest_review`）。
-    ///
-    /// # Returns
-    /// * `Ok(None)` —— **未装配**复审工厂（`create_app` / 嵌入式 / 未注入的测试）：
-    ///   调用方（技能统计接口）跳过附加字段，响应结构不变。今天「没有评审器」与
-    ///   「有评审器但没有记录」在该接口上都表现为空数组，因此这条降级不改变可观测形状。
-    /// * `Ok(Some(port))` —— 已装配：构造成功（`SkillReviewer::new` 只存字段，不会失败）。
-    ///
-    /// # Errors
-    /// 仅在取共享模型服务失败时返回（与迁移前一致）。
-    pub async fn create_skill_reviewer(
-        &self,
-    ) -> TianyanResult<Option<Arc<dyn tianyan::skills::SkillReviewPort>>> {
-        let Some(factory) = self.policies.skill_review_factory() else {
-            return Ok(None);
-        };
-        let config = self.config.read().await.clone();
-        let model_services = self.shared_model_services().await?;
-        let chat_model = resolve_chat_model(&config);
-        let vfs: Arc<dyn tianyan::vfs::VirtualFileSystem> = self.vfs.clone();
-        Ok(Some(factory(model_services.chat, &chat_model, vfs)))
     }
 
     /// 创建知识导入器（复用共享模型服务与唯一构造点 [`build_knowledge_ingestor`]）。
