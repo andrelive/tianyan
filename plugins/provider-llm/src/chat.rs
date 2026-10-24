@@ -1,19 +1,11 @@
+// 请求体不再经 async-openai 的类型构造（见 `convert_messages` 的文档）：
+// 只保留**响应解析**与角色转换所需的类型。
 use async_openai::types::chat::{
-    ChatCompletionMessageToolCall, ChatCompletionMessageToolCalls, ChatCompletionNamedToolChoice,
-    ChatCompletionRequestAssistantMessage, ChatCompletionRequestAssistantMessageContent,
-    ChatCompletionRequestMessage, ChatCompletionRequestMessageContentPartImage,
-    ChatCompletionRequestMessageContentPartText, ChatCompletionRequestSystemMessage,
-    ChatCompletionRequestSystemMessageContent, ChatCompletionRequestToolMessage,
-    ChatCompletionRequestToolMessageContent, ChatCompletionRequestUserMessage,
-    ChatCompletionRequestUserMessageContent, ChatCompletionRequestUserMessageContentPart,
-    ChatCompletionStreamOptions, ChatCompletionTool, ChatCompletionToolChoiceOption,
-    ChatCompletionTools, CreateChatCompletionRequestArgs, CreateChatCompletionResponse,
-    FunctionCall as OaFunctionCall, FunctionName, FunctionObject, ImageDetail as OaImageDetail,
-    ImageUrl as OaImageUrl, Role as OaRole, ToolChoiceOptions,
+    ChatCompletionMessageToolCalls, CreateChatCompletionResponse, Role as OaRole,
 };
 use async_trait::async_trait;
 use futures::StreamExt;
-use serde_json::Value;
+use serde_json::{json, Value};
 use tokio::sync::mpsc;
 
 use tianyan::common::error::{Result, TianyanError};
@@ -46,27 +38,9 @@ impl ChatService for ChatClient {
             &self.retry_policy,
             |e: &RetryableFailure| e.retryable,
             || async {
-                let mut builder = CreateChatCompletionRequestArgs::default();
-                builder.model(&request.model);
-                builder.messages(convert_messages(&request.messages));
-                builder.stream(false);
-                if let Some(n) = request.n {
-                    builder.n(n.min(u8::MAX as usize) as u8);
-                }
-                Self::apply_shared_params(&mut builder, &request);
-                let oa_request = builder.build().map_err(|e| RetryableFailure {
-                    retryable: false,
-                    message: format!("构建请求失败：{}", e),
-                })?;
-                // 统一走 JSON 层发送：async-openai 0.34 类型无 reasoning_content
-                // 字段，序列化后注入历史思考内容（DeepSeek 思考模型要求：携带
-                // tools 的请求必须完整回传 reasoning_content，即使该轮未实际
-                // 进行工具调用），再附加思考强度参数。
-                let mut body = serde_json::to_value(&oa_request).map_err(|e| RetryableFailure {
-                    retryable: false,
-                    message: format!("序列化请求失败：{}", e),
-                })?;
-                inject_reasoning_content(&mut body, &request.messages, self.dialect.thinking_field);
+                // 请求体直接以 JSON 构造（见 `convert_messages` 的文档）：没有
+                // 「类型 → to_value → 方言改写」的中间态，方言层就在这份 JSON 上作业。
+                let mut body = Self::build_body(self.dialect, &request, false);
                 if let Some(effort) = request.thinking_effort.as_deref() {
                     if effort != "off" {
                         apply_thinking_params(
@@ -156,36 +130,15 @@ impl ChatService for ChatClient {
         &self,
         request: ChatCompletionRequest,
     ) -> Result<mpsc::Receiver<Result<ChatCompletionChunk>>> {
-        let messages = convert_messages(&request.messages);
-
-        let mut builder = CreateChatCompletionRequestArgs::default();
-        builder.model(&request.model);
-        builder.messages(messages);
-        builder.stream(true);
-        // 显式请求流式 usage（对齐 DSH/OpenAI 规范）：流式响应默认不返回
-        // usage，除非请求携带 stream_options: {include_usage: true}——
-        // 否则 ollama 等严格遵守规范的网关永远不返回 usage，上下文占用
-        // 只能走估算。
-        builder.stream_options(ChatCompletionStreamOptions {
-            include_usage: Some(true),
-            include_obfuscation: None,
-        });
-        Self::apply_shared_params(&mut builder, &request);
-
-        let oa_request = builder
-            .build()
-            .map_err(|e| TianyanError::Custom(format!("模型服务错误：构建流式请求失败：{}", e)))?;
-
-        // 一律走手写 SSE 解析（create_raw_stream）：async-openai 0.34 不解析
-        // DeepSeek 思考模型的 reasoning_content 增量字段——推理内容在反序列化时
-        // 被静默丢弃，模型"想完没说话"（content 空 + 仅 reasoning）会被误判为
-        // 空响应。思考模型天然携带该字段（与 enable_thinking 开关无关），
-        // 非思考模型不携带，行为与原有 async-openai 路径一致。
-        let mut body = serde_json::to_value(&oa_request)
-            .map_err(|e| TianyanError::Custom(format!("模型服务错误：序列化请求失败: {}", e)))?;
-        // 回传历史思考内容（DeepSeek 思考模型要求：携带 tools 的请求必须
-        // 完整回传 reasoning_content，即使该轮未实际进行工具调用）。
-        inject_reasoning_content(&mut body, &request.messages, self.dialect.thinking_field);
+        // 显式请求流式 usage（对齐 DSH/OpenAI 规范）：流式响应默认不返回 usage，
+        // 除非请求携带 stream_options: {include_usage: true}——否则 ollama 等严格
+        // 遵守规范的网关永远不返回 usage，上下文占用只能走估算。
+        //
+        // 请求体直接以 JSON 构造（见 `convert_messages` 的文档）。下面一律走手写
+        // SSE 解析（create_raw_stream）：async-openai 0.34 不解析 DeepSeek 思考模型的
+        // reasoning_content 增量字段——推理内容在反序列化时被静默丢弃，模型"想完
+        // 没说话"（content 空 + 仅 reasoning）会被误判为空响应。
+        let mut body = Self::build_body(self.dialect, &request, true);
         if let Some(effort) = request.thinking_effort.as_deref() {
             if effort != "off" {
                 apply_thinking_params(&mut body, effort, self.thinking_param_for(&request.model));
@@ -393,58 +346,93 @@ impl ChatClient {
         Ok(response)
     }
 
-    fn apply_shared_params(
-        builder: &mut CreateChatCompletionRequestArgs,
-        request: &ChatCompletionRequest,
-    ) {
+    /// 把请求的通用参数写入请求体（JSON 直接构造，理由见 `convert_messages`）。
+    ///
+    /// 字段名与取值形态对齐 OpenAI Chat Completions wire 格式；`None` 一律不写
+    /// 字段（不写 null）——与改造前 `Option` + `skip_serializing_if` 的字节一致。
+    fn apply_shared_params(body: &mut Value, request: &ChatCompletionRequest) {
         if let Some(max_tokens) = request.max_tokens {
-            builder.max_completion_tokens(max_tokens as u32);
+            body["max_completion_tokens"] = json!(max_tokens);
         }
         if let Some(temperature) = request.temperature {
-            builder.temperature(temperature);
+            body["temperature"] = json!(temperature);
         }
         if let Some(top_p) = request.top_p {
-            builder.top_p(top_p);
+            body["top_p"] = json!(top_p);
         }
         if let Some(ref stop) = request.stop {
-            builder.stop(stop.clone());
+            body["stop"] = json!(stop);
         }
         if let Some(presence_penalty) = request.presence_penalty {
-            builder.presence_penalty(presence_penalty);
+            body["presence_penalty"] = json!(presence_penalty);
         }
         if let Some(frequency_penalty) = request.frequency_penalty {
-            builder.frequency_penalty(frequency_penalty);
+            body["frequency_penalty"] = json!(frequency_penalty);
         }
         if let Some(ref tools) = request.tools {
-            let oa_tools: Vec<ChatCompletionTools> = tools
+            let tools_json: Vec<Value> = tools
                 .iter()
                 .map(|t| {
-                    ChatCompletionTools::Function(ChatCompletionTool {
-                        function: FunctionObject {
-                            name: t.function.name.clone(),
-                            description: Some(t.function.description.clone()),
-                            parameters: Some(t.function.parameters.clone()),
-                            strict: None,
+                    json!({
+                        "type": "function",
+                        "function": {
+                            "name": t.function.name,
+                            "description": t.function.description,
+                            "parameters": t.function.parameters,
                         },
                     })
                 })
                 .collect();
-            builder.tools(oa_tools);
+            body["tools"] = Value::Array(tools_json);
         }
         if let Some(ref tool_choice) = request.tool_choice {
-            let oa_choice = match tool_choice {
-                ToolChoice::Auto => ChatCompletionToolChoiceOption::Mode(ToolChoiceOptions::Auto),
-                ToolChoice::None => ChatCompletionToolChoiceOption::Mode(ToolChoiceOptions::None),
-                ToolChoice::Function { function } => {
-                    ChatCompletionToolChoiceOption::Function(ChatCompletionNamedToolChoice {
-                        function: FunctionName {
-                            name: function.name.clone(),
-                        },
-                    })
-                }
+            body["tool_choice"] = match tool_choice {
+                ToolChoice::Auto => json!("auto"),
+                ToolChoice::None => json!("none"),
+                ToolChoice::Function { function } => json!({
+                    "type": "function",
+                    "function": { "name": function.name },
+                }),
             };
-            builder.tool_choice(oa_choice);
         }
+    }
+
+    /// 构造一份请求体（流式/非流式共用；**测试直接断言它的 wire 形态**——
+    /// `stream_options` 这类硬编码字段只有在这里才守得住）。
+    ///
+    /// 只负责「消息 + 通用参数 + 思考内容回传」；思考强度参数由调用方按方言
+    /// 追加（`apply_thinking_params`），因为它的形态解析需要 `self` 的模型级配置。
+    fn build_body(
+        dialect: ProviderDialect,
+        request: &ChatCompletionRequest,
+        stream: bool,
+    ) -> Value {
+        let mut body = if stream {
+            // 显式请求流式 usage（OpenAI 规范：流式默认不返回 usage）——否则
+            // ollama 等严格网关永远不返回 usage，上下文占用只能走估算。
+            json!({
+                "model": request.model,
+                "messages": convert_messages(&request.messages),
+                "stream": true,
+                "stream_options": { "include_usage": true },
+            })
+        } else {
+            json!({
+                "model": request.model,
+                "messages": convert_messages(&request.messages),
+                "stream": false,
+            })
+        };
+        if !stream {
+            if let Some(n) = request.n {
+                body["n"] = json!(n.min(u8::MAX as usize));
+            }
+        }
+        Self::apply_shared_params(&mut body, request);
+        // 历史思考内容回传（DeepSeek 思考模型要求：携带 tools 的请求必须完整
+        // 回传 reasoning_content，即使该轮未实际进行工具调用）。
+        inject_reasoning_content(&mut body, &request.messages, dialect.thinking_field);
+        body
     }
 }
 
@@ -629,50 +617,49 @@ fn extract_cache_tokens(usage_value: &Value, usage: &mut TokenUsage, dialect: Pr
 }
 
 /// 构造用户消息内容：携带多模态片段时输出数组格式（文本 + 图片），
-/// 否则保持纯文本（与旧行为一致）。
-fn user_content(m: &Message) -> ChatCompletionRequestUserMessageContent {
+/// 否则保持纯文本（与旧行为一致——纯文本走字符串形式，上游兼容性最好）。
+///
+/// 返回 [`Value`] 而非类型化请求消息：OpenAI 兼容生态的方言差异（字段名、
+/// 数组元素形状、非标准扩展字段）无法被任何库的类型枚举穷举——例如
+/// `role: "tool"` 的 `content` 在 DeepSeek Chat Completions 上可以是内容块数组
+/// （实测 200），而严格实现的兼容网关只接受字符串。请求体一律以 JSON 构造，
+/// 方言修饰层（[`inject_reasoning_content`] / [`apply_thinking_params`]）直接
+/// 在同一份 `Value` 上作业，不再有「类型 → JSON → 改写」的中间态。
+fn user_content(m: &Message) -> Value {
     let Some(parts) = &m.content_parts else {
-        return ChatCompletionRequestUserMessageContent::Text(m.content.clone());
+        return Value::String(m.content.clone());
     };
     if parts.is_empty() {
-        return ChatCompletionRequestUserMessageContent::Text(m.content.clone());
+        return Value::String(m.content.clone());
     }
 
-    let oa_parts: Vec<ChatCompletionRequestUserMessageContentPart> = parts
+    let parts_json: Vec<Value> = parts
         .iter()
         .map(|p| {
             if p.content_type == "image_url" {
                 match &p.image_url {
-                    Some(url) => ChatCompletionRequestUserMessageContentPart::ImageUrl(
-                        ChatCompletionRequestMessageContentPartImage {
-                            image_url: OaImageUrl {
-                                url: url.url.clone(),
-                                detail: url.detail.clone().and_then(|d| match d.as_str() {
-                                    "low" => Some(OaImageDetail::Low),
-                                    "high" => Some(OaImageDetail::High),
-                                    "auto" => Some(OaImageDetail::Auto),
-                                    _ => None,
-                                }),
-                            },
-                        },
-                    ),
-                    None => ChatCompletionRequestUserMessageContentPart::Text(
-                        ChatCompletionRequestMessageContentPartText {
-                            text: "[图片（内容缺失）]".to_string(),
-                        },
-                    ),
+                    Some(url) => {
+                        let mut image_url = json!({ "url": url.url });
+                        // 只透传标准档位：未知取值不透传——严格上游会因枚举外取值
+                        // 拒绝整个请求（与改造前的行为一致）。
+                        if let Some(detail) = url
+                            .detail
+                            .as_deref()
+                            .filter(|d| matches!(*d, "low" | "high" | "auto"))
+                        {
+                            image_url["detail"] = Value::String(detail.to_string());
+                        }
+                        json!({ "type": "image_url", "image_url": image_url })
+                    }
+                    None => json!({ "type": "text", "text": "[图片（内容缺失）]" }),
                 }
             } else {
-                ChatCompletionRequestUserMessageContentPart::Text(
-                    ChatCompletionRequestMessageContentPartText {
-                        text: p.text.clone().unwrap_or_default(),
-                    },
-                )
+                json!({ "type": "text", "text": p.text.clone().unwrap_or_default() })
             }
         })
         .collect();
 
-    ChatCompletionRequestUserMessageContent::Array(oa_parts)
+    Value::Array(parts_json)
 }
 
 /// 把历史 assistant 消息的 reasoning_content 注入序列化后的请求体。
@@ -705,25 +692,32 @@ fn inject_reasoning_content(body: &mut Value, messages: &[Message], dialect: Thi
     }
 }
 
-fn convert_messages(messages: &[Message]) -> Vec<ChatCompletionRequestMessage> {
+/// 把内部消息转换为 OpenAI 兼容请求消息（JSON 构造，不依赖库类型）。
+///
+/// 为什么脱离类型化构造（阶段 1 的核心动机）：
+/// - **方言差异无法穷举**：`role: "tool"` 的 `content` 在 DeepSeek 上可以是内容块
+///   数组，而库的类型（`ChatCompletionRequestToolMessageContentPart` 仅有 `Text`）
+///   把这条能力直接堵死；
+/// - **少一层中间态**：过去是「类型构造 → `serde_json::to_value` → 方言改写」，
+///   现在直接构造目标 JSON，方言层在同一份 `Value` 上作业。
+///
+/// **逐字节兼容纪律**（改这里前先读）：空 assistant 正文**省略 `content` 字段**
+/// （与 async-openai `skip_serializing_if = "Option::is_none"` 的既有序列化一致）——
+/// 写成 `null` 会被部分网关拒绝，写成 `""` 会让请求与历史字节不一致。
+fn convert_messages(messages: &[Message]) -> Vec<Value> {
     messages
         .iter()
         .map(|m| match m.role {
-            MessageRole::System => {
-                ChatCompletionRequestMessage::System(ChatCompletionRequestSystemMessage {
-                    content: ChatCompletionRequestSystemMessageContent::Text(m.content.clone()),
-                    name: None,
-                })
-            }
-            MessageRole::User => {
-                ChatCompletionRequestMessage::User(ChatCompletionRequestUserMessage {
-                    content: user_content(m),
-                    name: None,
-                })
-            }
+            MessageRole::System => json!({ "role": "system", "content": m.content }),
+            MessageRole::User => json!({ "role": "user", "content": user_content(m) }),
             MessageRole::Assistant => {
-                let tool_calls = m.tool_calls.as_ref().map(|calls| {
-                    calls
+                let mut msg = json!({ "role": "assistant" });
+                // 空正文省略该字段（纯工具调用轮的原样回放；见函数文档）
+                if !m.content.is_empty() {
+                    msg["content"] = Value::String(m.content.clone());
+                }
+                if let Some(calls) = &m.tool_calls {
+                    let tool_calls: Vec<Value> = calls
                         .iter()
                         .map(|c| {
                             // 健壮性：历史中的工具调用参数若为非法 JSON（如流式截断/
@@ -740,36 +734,25 @@ fn convert_messages(messages: &[Message]) -> Vec<ChatCompletionRequestMessage> {
                                     );
                                     "{}".to_string()
                                 };
-                            ChatCompletionMessageToolCalls::Function(
-                                ChatCompletionMessageToolCall {
-                                    id: c.id.clone(),
-                                    function: OaFunctionCall {
-                                        name: c.function.name.clone(),
-                                        arguments,
-                                    },
+                            json!({
+                                "id": c.id,
+                                "type": "function",
+                                "function": {
+                                    "name": c.function.name,
+                                    "arguments": arguments,
                                 },
-                            )
+                            })
                         })
-                        .collect()
-                });
-                ChatCompletionRequestMessage::Assistant(ChatCompletionRequestAssistantMessage {
-                    content: if m.content.is_empty() {
-                        None
-                    } else {
-                        Some(ChatCompletionRequestAssistantMessageContent::Text(
-                            m.content.clone(),
-                        ))
-                    },
-                    tool_calls,
-                    ..Default::default()
-                })
+                        .collect();
+                    msg["tool_calls"] = Value::Array(tool_calls);
+                }
+                msg
             }
-            MessageRole::Tool => {
-                ChatCompletionRequestMessage::Tool(ChatCompletionRequestToolMessage {
-                    content: ChatCompletionRequestToolMessageContent::Text(m.content.clone()),
-                    tool_call_id: m.tool_call_id.clone().unwrap_or_default(),
-                })
-            }
+            MessageRole::Tool => json!({
+                "role": "tool",
+                "content": m.content,
+                "tool_call_id": m.tool_call_id.clone().unwrap_or_default(),
+            }),
         })
         .collect()
 }
@@ -806,48 +789,31 @@ mod convert_tests {
 
     #[test]
     fn test_convert_user_message_with_images_produces_array() {
-        use async_openai::types::chat::{
-            ChatCompletionRequestMessage, ChatCompletionRequestUserMessageContent,
-            ChatCompletionRequestUserMessageContentPart,
-        };
-
         let msg =
             Message::user_with_images("描述这张图", vec!["data:image/png;base64,AAAA".to_string()]);
         let converted = convert_messages(&[msg]);
-        let ChatCompletionRequestMessage::User(user) = &converted[0] else {
-            panic!("应生成 User 消息");
-        };
-        let ChatCompletionRequestUserMessageContent::Array(parts) = &user.content else {
-            panic!("带图片的 User 消息应为 Array 格式");
-        };
+        assert_eq!(converted[0]["role"], serde_json::json!("user"));
+        let parts = converted[0]["content"]
+            .as_array()
+            .expect("带图片的 User 消息应为数组格式");
         assert_eq!(parts.len(), 2, "文本 + 图片共 2 个片段");
-        assert!(matches!(
-            parts[0],
-            ChatCompletionRequestUserMessageContentPart::Text(_)
-        ));
-        assert!(matches!(
-            parts[1],
-            ChatCompletionRequestUserMessageContentPart::ImageUrl(_)
-        ));
+        assert_eq!(parts[0]["type"], serde_json::json!("text"));
+        assert_eq!(parts[0]["text"], serde_json::json!("描述这张图"));
+        assert_eq!(parts[1]["type"], serde_json::json!("image_url"));
+        assert_eq!(
+            parts[1]["image_url"]["url"],
+            serde_json::json!("data:image/png;base64,AAAA")
+        );
     }
 
     #[test]
     fn test_convert_user_message_plain_text_unchanged() {
-        use async_openai::types::chat::{
-            ChatCompletionRequestMessage, ChatCompletionRequestUserMessageContent,
-        };
-
         let msg = Message::user("Hello");
         let converted = convert_messages(&[msg]);
-        let ChatCompletionRequestMessage::User(user) = &converted[0] else {
-            panic!("应生成 User 消息");
-        };
-        assert!(
-            matches!(
-                user.content,
-                ChatCompletionRequestUserMessageContent::Text(_)
-            ),
-            "无图片时保持纯文本格式（向后兼容）"
+        assert_eq!(
+            converted[0]["content"],
+            serde_json::json!("Hello"),
+            "无图片时保持纯文本字符串形式（向后兼容）"
         );
     }
 
@@ -884,14 +850,11 @@ mod convert_tests {
             }],
         );
         let converted = convert_messages(&[msg]);
-        let ChatCompletionRequestMessage::Assistant(assistant) = &converted[0] else {
-            panic!("应生成 Assistant 消息");
-        };
-        let calls = assistant.tool_calls.as_ref().expect("应有 tool_calls");
-        let ChatCompletionMessageToolCalls::Function(f) = &calls[0] else {
-            panic!("应为 Function 调用");
-        };
-        assert_eq!(f.function.arguments, "{}");
+        let calls = converted[0]["tool_calls"]
+            .as_array()
+            .expect("应有 tool_calls");
+        assert_eq!(calls[0]["type"], serde_json::json!("function"));
+        assert_eq!(calls[0]["function"]["arguments"], serde_json::json!("{}"));
     }
 
     #[test]
@@ -1021,24 +984,23 @@ mod convert_tests {
         // 流式请求必须携带 stream_options.include_usage=true（OpenAI 规范：
         // 流式默认不返回 usage，除非显式请求）——否则 ollama 等规范网关
         // 永远不返回 usage，上下文占用只能走估算。
+        //
+        // 断言的是 `build_body`——`chat_completion_stream` 的真实生产者。阶段 1
+        // 去掉 builder 中间层后请求体就是 JSON，所以这里守的是 wire 字节本身。
         let request =
             ChatCompletionRequest::new("test-model", vec![Message::user("hi")]).with_stream(true);
-        // 序列化后的请求体应包含 stream_options
-        let mut builder = CreateChatCompletionRequestArgs::default();
-        builder.model(&request.model);
-        builder.messages(convert_messages(&request.messages));
-        builder.stream(true);
-        builder.stream_options(ChatCompletionStreamOptions {
-            include_usage: Some(true),
-            include_obfuscation: None,
-        });
-        let oa_request = builder.build().unwrap();
-        let body = serde_json::to_value(&oa_request).unwrap();
+        let body = ChatClient::build_body(
+            ProviderDialect::for_preset(tianyan::config::DialectPreset::OpenAiCompatible),
+            &request,
+            true,
+        );
         assert_eq!(
             body["stream_options"]["include_usage"],
             serde_json::json!(true),
             "流式请求必须显式请求 usage"
         );
+        assert_eq!(body["stream"], serde_json::json!(true));
+        assert_eq!(body["model"], serde_json::json!("test-model"));
     }
 }
 
