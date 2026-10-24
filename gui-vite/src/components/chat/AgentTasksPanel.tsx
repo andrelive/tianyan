@@ -2,9 +2,8 @@ import { useCallback, useRef, useState } from 'react';
 import { usePolling } from '@/hooks/use-polling';
 import { useUnifiedEvents, subscribeSession, type UnifiedEvent } from '@/hooks/use-unified-events';
 import { cancelTask, fetchTasks } from '@/lib/api-client';
-import { useAppStore } from '@/lib/store';
-import type { BackgroundTask, ChatMessage } from '@/lib/types';
-import { SegmentBlocks } from './MessageSegments';
+import type { BackgroundTask } from '@/lib/types';
+import DelegateActivity, { TaskLiveStep } from './DelegateActivity';
 import {
   ChevronDown,
   ChevronLeft,
@@ -19,20 +18,6 @@ import {
 
 /** 轮询间隔（后台任务状态变化）。 */
 const POLL_INTERVAL_MS = 3000;
-
-/**
- * 空消息数组的**稳定引用**。
- *
- * zustand 5 的 `useStore` 走 `useSyncExternalStore`：选择器的返回值必须**引用稳定**，
- * 否则 React 每次渲染都判定「store 变了」→ 强制重渲染 → 再次调用选择器又得到新引用
- * → **无限循环**（React #185 `Maximum update depth exceeded`）。
- *
- * 反例（本组件曾如此）：`useAppStore((s) => s.sessionMessages[taskId] ?? [])` ——
- * `?? []` 在 key 不存在时**每次调用都新建数组**。表现：点击一个**尚未收到快照**的
- * 委托任务（子会话消息还没进 store）→ `<DelegateMessages>` 挂载即进入死循环 →
- * 整页被 ErrorBoundary 兜住（0.7.0 的 zustand 4 对此宽容，升 5 后必崩）。
- */
-const EMPTY_MESSAGES: ChatMessage[] = [];
 
 /**
  * 会话后台任务面板（ADR-026，DSH 式右侧 dock）：展示当前会话发起的
@@ -171,8 +156,14 @@ export default function AgentTasksPanel({ sessionId }: { sessionId: string | nul
           >
             {t.kind === 'command' ? '终端' : '委托'}
           </span>
-          <span className="min-w-0 flex-1 truncate text-xs font-medium text-[var(--color-text-primary)]">
-            {t.description || t.id}
+          <span className="min-w-0 flex-1">
+            <span className="block truncate text-left text-xs font-medium text-[var(--color-text-primary)]">
+              {t.description || t.id}
+            </span>
+            {/* 当前在做什么（并行可读性：一屏内看出各任务各自进行到哪一步）。
+                只显示"最新一步"，**不显示「3/7」式进度分数**——总数会暗示
+                既定计划，那是隐性约束（见 DelegateActivity 文件头设计约束）。 */}
+            {!terminal && <TaskLiveStep taskId={t.id} />}
           </span>
           {label && (
             <span
@@ -216,7 +207,7 @@ export default function AgentTasksPanel({ sessionId }: { sessionId: string | nul
         {open && (
           <div className="border-t border-[var(--color-border)] px-2.5 py-2 space-y-2">
             {t.kind === 'delegate' ? (
-              <DelegateMessages taskId={t.id} status={t.status} />
+              <DelegateActivity taskId={t.id} status={t.status} />
             ) : (
               <>
                 {/* 终端输出：实时增量（command_output 事件累积）优先，
@@ -291,33 +282,5 @@ export default function AgentTasksPanel({ sessionId }: { sessionId: string | nul
         </button>
       )}
     </div>
-  );
-}
-
-/**
- * 委托任务消息（ADR-030：子智能体 = 主会话同构——消息读 store
- * sessionMessages[task_id]，历史（订阅快照）+ 实时（流式归约器/落库广播）
- * 天然合并，渲染复用 SegmentBlocks）。
- */
-export function DelegateMessages({ taskId, status }: { taskId: string; status: string }) {
-  // 引用必须稳定（见 EMPTY_MESSAGES 的文档）：不能用 `?? []`。
-  const messages = useAppStore((s) => s.sessionMessages[taskId] ?? EMPTY_MESSAGES);
-  if (messages.length === 0) {
-    return (
-      <p className="text-xs text-[var(--color-text-tertiary)]">
-        {status === 'running' || status === 'pending' ? '子智能体工作中…' : '无过程记录'}
-      </p>
-    );
-  }
-  return (
-    <>
-      {messages.map((m, i) => (
-        <div key={m.id ?? i} className="space-y-1">
-          {m.segments && m.segments.length > 0 && (
-            <SegmentBlocks segments={m.segments} toolCalls={m.tool_calls} isUser={false} />
-          )}
-        </div>
-      ))}
-    </>
   );
 }

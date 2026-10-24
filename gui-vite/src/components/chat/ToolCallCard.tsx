@@ -1,44 +1,8 @@
-import { useState, memo, type ComponentType } from 'react';
-import {
-  ChevronDown,
-  ChevronRight,
-  Terminal,
-  FileText,
-  Search,
-  Globe,
-  PenLine,
-  FilePlus2,
-  Brain,
-  GitBranch,
-  Code2,
-  Wrench,
-  CheckCircle2,
-  XCircle,
-  Clock,
-  Loader2,
-} from 'lucide-react';
+import { useState, memo } from 'react';
+import { ChevronDown, ChevronRight, CheckCircle2, XCircle, Clock, Loader2 } from 'lucide-react';
 import type { ToolCallEvent } from '@/lib/types';
 import { TOOL_PRESENTATION_LABELS } from '@/lib/types';
-
-/** 展示意图 → 图标 */
-const PRESENTATION_ICONS: Record<string, ComponentType<{ className?: string }>> = {
-  read: FileText,
-  write: FilePlus2,
-  terminal: Terminal,
-  diff: PenLine,
-  search: Search,
-  web: Globe,
-  skill: Brain,
-  knowledge: FilePlus2,
-  delegate: GitBranch,
-  code: Code2,
-};
-
-/** 毫秒 → 人类可读耗时。 */
-function formatDuration(ms: number): string {
-  if (ms >= 1000) return `${(ms / 1000).toFixed(2)}s`;
-  return `${ms}ms`;
-}
+import { formatArguments, formatDuration, presentationIcon } from '@/lib/tool-presentation';
 
 interface Props {
   /** 工具调用事件（名称/参数/展示意图） */
@@ -56,7 +20,7 @@ interface Props {
 function ToolCallCard({ event, result }: Props) {
   const [expanded, setExpanded] = useState(false);
   const [resultOpen, setResultOpen] = useState(false);
-  const Icon = PRESENTATION_ICONS[event.presentation] ?? Wrench;
+  const Icon = presentationIcon(event.presentation);
   const label = TOOL_PRESENTATION_LABELS[event.presentation] ?? '工具';
   // 计时/成败元数据：observation 事件实时填充（流式）或后端透传（历史）
   const hasStatus = event.success !== undefined || event.duration_ms !== undefined;
@@ -166,15 +130,6 @@ function ToolCallCard({ event, result }: Props) {
       )}
     </div>
   );
-}
-
-/** 参数 JSON 美化（非法 JSON 时原样显示） */
-function formatArguments(raw: string): string {
-  try {
-    return JSON.stringify(JSON.parse(raw), null, 2);
-  } catch {
-    return raw;
-  }
 }
 
 export default memo(ToolCallCard);

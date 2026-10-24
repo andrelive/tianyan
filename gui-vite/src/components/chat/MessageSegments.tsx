@@ -5,7 +5,7 @@ import remarkGfm from 'remark-gfm';
 import { oneDark } from 'react-syntax-highlighter/dist/esm/styles/prism';
 import { ChevronDown, ChevronRight } from 'lucide-react';
 import type { MessageSegment, ToolCallWithResult } from '@/lib/types';
-import { cn } from '@/lib/utils';
+import { cn, lastNonEmptyLine } from '@/lib/utils';
 import remarkAutolinkFix from '@/lib/remark-autolink-fix';
 import { isTauri, openExternal } from '@/lib/tauri';
 import ToolCallCard from './ToolCallCard';
@@ -17,16 +17,6 @@ import ToolCallCard from './ToolCallCard';
  * tool_call → ToolCallCard。子智能体消息流（面板展开区）复用同一套
  * 渲染，视觉与主对话流完全一致。
  */
-
-/** 取文本的最后一行非空行（思考横幅用；流式期间即"当前思考"）。 */
-function lastNonEmptyLine(text: string): string {
-  const lines = text.split('\n');
-  for (let i = lines.length - 1; i >= 0; i -= 1) {
-    const line = lines[i].trim();
-    if (line !== '') return line;
-  }
-  return '';
-}
 
 /** 可折叠思考块（默认收起；收起时在 header 上以横幅形式显示思考输出的最后一行）。 */
 export function ThinkingBlock({ text }: { text: string }) {

@@ -1,7 +1,8 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import AgentTasksPanel, { DelegateMessages } from '../AgentTasksPanel';
+import AgentTasksPanel from '../AgentTasksPanel';
+import DelegateActivity from '../DelegateActivity';
 import { mockTaskCancelCalls, resetTaskMocks } from '@/test/mocks/handlers';
 import { useAppStore } from '@/lib/store';
 
@@ -105,10 +106,10 @@ describe('AgentTasksPanel', () => {
    *
    * 判别力：把选择器改回 `?? []`，本用例会在渲染期抛 #185 而失败。
    */
-  it('renders DelegateMessages with an empty store without infinite re-render (React #185)', () => {
+  it('renders DelegateActivity with an empty store without infinite re-render (React #185)', () => {
     useAppStore.setState({ sessionMessages: {} });
     // 若有 bug，render 本身会在渲染期抛 #185（Maximum update depth）→ 用例直接失败。
-    const r = render(<DelegateMessages taskId="bt_not_in_store" status="completed" />);
+    const r = render(<DelegateActivity taskId="bt_not_in_store" status="completed" />);
     expect(screen.getByText('无过程记录')).toBeInTheDocument();
     r.unmount();
   });

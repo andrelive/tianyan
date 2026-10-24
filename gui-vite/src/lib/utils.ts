@@ -70,3 +70,21 @@ export function groupByCategory<T extends { category: string }>(items: T[]): Map
 export function cn(...classes: (string | boolean | undefined | null)[]): string {
   return classes.filter(Boolean).join(' ');
 }
+
+/** 文本的**首个非空行**（去掉首尾空白；全文皆空返回 ''）。 */
+export function firstNonEmptyLine(text: string): string {
+  for (const line of text.split('\n')) {
+    if (line.trim() !== '') return line.trim();
+  }
+  return '';
+}
+
+/** 文本的**最后一个非空行**（思考横幅用：流式期间即"当前思考"）。 */
+export function lastNonEmptyLine(text: string): string {
+  const lines = text.split('\n');
+  for (let i = lines.length - 1; i >= 0; i -= 1) {
+    const line = lines[i].trim();
+    if (line !== '') return line;
+  }
+  return '';
+}
