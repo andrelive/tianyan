@@ -5,6 +5,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.1] - 2026-10-24
+
+### Fixed
+- **会话待办面板切换会话时旧数据滞留 2-3 秒**（用户实测）：切到别的会话，上一个会话的待办要 2-3 秒才消失；切回来同样要等。**与后端无关**（`/todos?session_id=` + `/goals` 串行实测 2-12ms，首次 158ms 是建连），延迟是三处前端逻辑叠加：
+  - `usePolling` 的 effect 依赖里**没有「拉取目标」**——`fn` 走 ref 更新（调用方无需稳定身份，组件重渲染不重启轮询），effect 因此看不见 `sessionId` 变化：切会话既不重启轮询也不立即拉，只能等下一个 `setInterval` tick（`POLL_INTERVAL_MS = 3000`）；
+  - 面板的 `todos`/`goals` 是**组件本地 state**，切会话不清空 → 旧数据滞留到下一次 tick 被覆盖；
+  - 没有按会话缓存 → 切回来必须重走「等 tick + 等请求」。
+  修复：`usePolling` 增加 `resetKeys`（键变化即清旧计时器 + **立即执行一次**；数组按内容比较，调用方每次渲染传新数组不会误重启）；新增 `lib/session-todo-cache.ts` 会话快照缓存（stale-while-revalidate，上限 50 会话 LRU 淘汰）；面板视图改为「会话键 + 数据」，切会话**在渲染期同步换**（不走 effect——否则会先 paint 一帧上个会话的待办，正是要修的症状），请求返回用 `sessionId` 做**竞态守卫**（迟到响应只写缓存、不覆盖当前会话视图）。效果：切换 **0ms**（缓存命中）/ **~20ms**（首次，等于一次往返），切回 **0ms**。
+- **智能体推进待办时面板最多滞后 3 秒**：`todo`/`goal` 工具改完待办，面板要等下一个轮询 tick 才更新。`chat-slice` 新增 `todosRevision`（`todo`/`goal` 工具结果落库时递增），面板以它为 resetKey → 工具一改待办面板**立即重取**（~20ms），不必等 tick。**未动后端一行**（ADR-028 的事件推送是尽力而为、有界通道会丢，所以不新增推送事件——那样轮询兜底仍删不掉，收益与成本不匹配）。
+- **顺带修正一处误判**：`AgentTasksPanel` 形似同病（同样是 `usePolling(poll, 3000, { enabled: !!sessionId })`），核实后**无需改动**——它 `fetchTasks()` 拉的是全量任务、按 `parent_session_id` 在渲染期过滤，切会话同一帧就换掉了。
+
+### 工程
+- `usePolling` 的 `resetKeys` 是通用能力：「按 id 轮询」的其它面板可直接复用（目标一变立即拉，不必各自手写 effect 重启逻辑）。
+- 回归测试 +6（resetKeys 1 / 面板 4 / store 1），并对其中 5 个做过**判别力自证**：把旧实现注回去（effect 依赖去掉 `resetKey`、读缓存直接返回空、去掉竞态守卫）→ 5 个用例全部变红，还原后全绿。
+
 ## [1.0.0] - 2026-10-23
 
 > **1.0 定位**：架构稳定的基线版本。本版**没有面向用户的新功能**——它的全部内容是「把 5.6 万行的单体内核拆成编译期插件 + 把依赖栈推到现代版本 + 收敛装配形状」。用户可感知的变化集中在两处：技能面板去掉一块**从未显示过内容**的「使用复审」占位；**启动从约 13.6 秒降到约 1.7 秒**（MCP 改为后台连接）。另修掉首发自测发现的 3 个问题（见 Fixed）。**不需要任何数据迁移**：数据目录、配置格式、向量库文件与 0.7.0 完全一致（`lancedb` 刻意未升，见下）。
