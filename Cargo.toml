@@ -77,7 +77,6 @@ async-trait = "0.1"
 futures = "0.3"
 
 # OpenAI API client
-async-openai = { version = "0.34", features = ["byot", "chat-completion-types", "chat-completion", "embedding-types", "embedding", "model"] }
 
 # Time handling
 chrono = { version = "0.4", features = ["serde"] }

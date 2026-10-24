@@ -10,7 +10,6 @@ description = "天演 provider-embed 插件：OpenAI 兼容 provider 的文本�
 [dependencies]
 tianyan = { path = "../../core", package = "tianyan-core" }
 tianyan-provider-client = { path = "../provider-client", package = "tianyan-provider-client" }
-async-openai.workspace = true
 async-trait.workspace = true
 reqwest.workspace = true
 serde.workspace = true

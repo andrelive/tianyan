@@ -363,43 +363,6 @@ mod tests {
         assert!(sent.contains("\"dimensions\":1024"), "{sent}");
     }
 
-    /// 成因锁定：async-openai 0.34 的类型化路径在 DashScope 形状上**必然失败**
-    /// （`usage.prompt_tokens` 为必填字段）。
-    ///
-    /// 该测试把「为何必须绕开库类型」固化为可验证事实。若将来上游把该字段改为
-    /// 可选（本断言转红），即可据此评估移除本模块的手写解析。
-    #[tokio::test]
-    async fn test_upstream_typed_path_fails_on_dashscope_usage() {
-        use async_openai::types::embeddings::{
-            CreateEmbeddingRequestArgs, EmbeddingInput as OaInput,
-        };
-
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let captured = Arc::new(Mutex::new(String::new()));
-        let body = r#"{"object":"list","data":[{"object":"embedding","index":0,"embedding":[0.1]}],"model":"text-embedding-v4","usage":{"total_tokens":17}}"#.to_string();
-        let addr = spawn_mock(listener, body, captured);
-        let client = client("dashscope", addr);
-
-        let mut builder = CreateEmbeddingRequestArgs::default();
-        builder.model("text-embedding-v4");
-        builder.input(OaInput::String("你好".to_string()));
-        let request = builder.build().unwrap();
-
-        // newtype 的内层就是 `AsyncOpenAIClient`：这里刻意穿透到 async-openai 的类型化
-        // 客户端，把「上游库在 DashScope 形状上必然失败」固化为可验证事实。
-        let err = client
-            .client
-            .embeddings()
-            .create(request)
-            .await
-            .expect_err("库类型化路径必须在 DashScope 形状上失败（手写解析的存在理由）");
-        let message = format!("{err}");
-        assert!(
-            message.contains("prompt_tokens"),
-            "失败原因应为缺 prompt_tokens 字段，实际：{message}"
-        );
-    }
-
     /// **OCP 判别测试**：假想 provider「零 Rust 代码改动」接入。
     ///
     /// 场景：自建网关（端点与名称均嗅探不到任何预设）+ 仅靠配置声明方言与

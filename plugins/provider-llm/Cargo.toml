@@ -10,7 +10,6 @@ description = "天演 provider-llm 插件：OpenAI 兼容 provider 的聊天与�
 [dependencies]
 tianyan = { path = "../../core", package = "tianyan-core" }
 tianyan-provider-client = { path = "../provider-client", package = "tianyan-provider-client" }
-async-openai.workspace = true
 async-trait.workspace = true
 futures.workspace = true
 reqwest.workspace = true

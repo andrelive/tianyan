@@ -9,7 +9,6 @@ description = "天演 provider 基底：OpenAI 兼容客户端（一次构造、
 
 [dependencies]
 tianyan = { path = "../../core", package = "tianyan-core" }
-async-openai.workspace = true
 reqwest.workspace = true
 serde_json.workspace = true
 

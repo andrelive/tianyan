@@ -1,6 +1,3 @@
-use async_openai::types::chat::FinishReason;
-use async_openai::{config::OpenAIConfig, Client};
-
 use tianyan::common::error::{Result, TianyanError};
 use tianyan::config::{ProviderConfig, ProviderDialect, ThinkingParam};
 use tianyan::model::retry::RetryPolicy;
@@ -13,9 +10,6 @@ use tianyan::model::retry::RetryPolicy;
 pub struct AsyncOpenAIClient {
     /// 提供商名称（`ProviderConfig.name`；日志与 `ServiceDiscovery::service_name` 用）。
     pub service_name: String,
-    /// async-openai 的类型化客户端（仅 `ServiceDiscovery` 的模型目录路径使用；
-    /// 聊天 / 嵌入 / 视觉都走手写 reqwest 请求，以便携带 per-request 头与宽容解析）。
-    pub client: Client<OpenAIConfig>,
     /// 原始 HTTP 客户端（手写流式解析用：async-openai 0.34 不解析
     /// DeepSeek 思考模型的 `reasoning_content` 增量字段）。
     pub http: reqwest::Client,
@@ -60,13 +54,7 @@ impl AsyncOpenAIClient {
             .get_endpoint()
             .map_err(|e| TianyanError::config(format!("获取 endpoint 失败: {}", e)))?;
 
-        let mut oa_config = OpenAIConfig::default().with_api_base(&base_url);
-
         let api_key = config.resolve_api_key();
-        if !api_key.is_empty() {
-            oa_config = oa_config.with_api_key(&api_key);
-        }
-
         // 双预算（ADR-044）：块间空闲（`timeout`）与首 token 预算
         // （`first_token_timeout`）**分开**；传输层 read_timeout 取两者中
         // 更宽的作兜底——reqwest 的读超时同时约束「等响应头」与「字节间」，
@@ -84,8 +72,6 @@ impl AsyncOpenAIClient {
                 // 模型 API 端点来自用户配置（可信），保持默认重定向跟随
                 redirect_policy: None,
             })?;
-
-        let client = Client::with_config(oa_config).with_http_client(http_client.clone());
 
         // 模型级覆盖表：仅收集显式声明项（缺省走模型名嗅探，不占表）。
         let model_thinking_params = config
@@ -114,7 +100,6 @@ impl AsyncOpenAIClient {
 
         Ok(Self {
             service_name: config.name.clone(),
-            client,
             http: http_client,
             base_url,
             api_key,
@@ -163,17 +148,6 @@ impl AsyncOpenAIClient {
     /// 获取服务名称。
     pub fn service_name(&self) -> &str {
         &self.service_name
-    }
-
-    /// `finish_reason` 枚举 → wire 字符串（与 OpenAI 规范的字段值逐字一致）。
-    pub fn finish_reason_str(reason: &FinishReason) -> &'static str {
-        match reason {
-            FinishReason::Stop => "stop",
-            FinishReason::Length => "length",
-            FinishReason::ToolCalls => "tool_calls",
-            FinishReason::ContentFilter => "content_filter",
-            FinishReason::FunctionCall => "function_call",
-        }
     }
 }
 
@@ -286,30 +260,6 @@ mod tests {
         assert!(
             AsyncOpenAIClient::from_provider(&config).is_err(),
             "非 http(s) endpoint 应报错"
-        );
-    }
-
-    #[test]
-    fn test_finish_reason_str_mapping() {
-        assert_eq!(
-            AsyncOpenAIClient::finish_reason_str(&FinishReason::Stop),
-            "stop"
-        );
-        assert_eq!(
-            AsyncOpenAIClient::finish_reason_str(&FinishReason::Length),
-            "length"
-        );
-        assert_eq!(
-            AsyncOpenAIClient::finish_reason_str(&FinishReason::ToolCalls),
-            "tool_calls"
-        );
-        assert_eq!(
-            AsyncOpenAIClient::finish_reason_str(&FinishReason::ContentFilter),
-            "content_filter"
-        );
-        assert_eq!(
-            AsyncOpenAIClient::finish_reason_str(&FinishReason::FunctionCall),
-            "function_call"
         );
     }
 
