@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [1.0.1] - 2026-10-24
 
+### Added
+- **模型能看本机图片了：新增 `view_image` 工具**（ADR-050）。此前模型只知道「这里有张图」——`read_file` 只读文本（二进制被拦），MCP 截图只落盘，模型看不见内容。现在 `view_image(path)`：读文件 → 按 magic bytes **严格**校验（png/jpeg/gif/bmp/webp，单张 ≤ 5MB，不看扩展名）→ 按内容 sha256 落一份**冻结副本**到 `{data_dir}/session_images/`（同图只存一份、重复调用幂等）→ 返回引用 `{image, sha256, mime, bytes, path}`。**图片随该条工具结果一起发给模型**——模型直接看到像素，不需要任何转述。
+  - 关键技术前提：`role: "tool"` 的 `content` 可以是**内容块数组**。对三家真实上游（ollama cloud / opencode go / deepseek 官方）实测 12 个组合（同一张 `HELLO 42` 探针图，图放 user 与图放 tool 各一遍）**全部成功**，tool 路径的回答带具体视觉细节。因此**不做**图片改道到用户消息、**不做**视觉模型转述——直通即可，历史自洽（依据在同一位置，不会出现「结论在历史、依据不在」）。
+  - 冻结副本而非直接引用原文件：原图被移动/改名/覆盖后历史回放照常（同一内容永远对应同一份字节），也避免「同一段对话两次请求看到不同的图」。
+  - 明确不支持的形态：URL 图片；provider/模型视觉能力探测（模型无视觉能力时的表现是上游 400，错误可见——不引入静默降级）。
+  - 代价（诚实记账）：带图的工具结果在历史里**每轮重传**（图片 token 本来就贵）。**不做**「事后剥离旧图」——改历史会让前缀缓存从该处起全部分叉（ADR-048 的教训），要优化只能落在压缩点旁边。
+
 ### Fixed
 - **会话待办面板切换会话时旧数据滞留 2-3 秒**（用户实测）：切到别的会话，上一个会话的待办要 2-3 秒才消失；切回来同样要等。**与后端无关**（`/todos?session_id=` + `/goals` 串行实测 2-12ms，首次 158ms 是建连），延迟是三处前端逻辑叠加：
   - `usePolling` 的 effect 依赖里**没有「拉取目标」**——`fn` 走 ref 更新（调用方无需稳定身份，组件重渲染不重启轮询），effect 因此看不见 `sessionId` 变化：切会话既不重启轮询也不立即拉，只能等下一个 `setInterval` tick（`POLL_INTERVAL_MS = 3000`）；
@@ -17,6 +24,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **顺带修正一处误判**：`AgentTasksPanel` 形似同病（同样是 `usePolling(poll, 3000, { enabled: !!sessionId })`），核实后**无需改动**——它 `fetchTasks()` 拉的是全量任务、按 `parent_session_id` 在渲染期过滤，切会话同一帧就换掉了。
 
 ### 工程
+- **`view_image` 的实现分四层**（ADR-050）：工具与门控在 `plugins/tools-fs`（`ViewImageTool`）；magic bytes 严格识别与冻结副本在 core（`common::binary::sniff_image_mime` / `executor::image::prepare_session_image`，后者顺手把 `hex_sha256` 提到 `common::hash` 供快照与图片共用一份 SHA-256 实现）；组装期加载在 core（`context::SessionImages`，路径逃逸**结构上**不可能：只认 `session_images/` 前缀 + 文件名禁分隔符）；传输层在 `plugins/provider-llm`（`content_value` 让 user/tool 共用一份 content 编码）。模块边界沿用 ADR-049 的「定义在插件、算法在 core」。
+- **实施期撞出的两个隐含前提都是错的**（都已修，并写进 ADR-050「实施期发现」）：
+  - **只做组装期加载不够**：agent loop 在一轮内直接复用消息 Vec（工具结果 `push` 后立刻作为下一次请求），不经 `assemble`。只做组装层时，模型拿到的是引用 JSON、看不到图——实测它会转而用 `execute_command` + Python/PIL 逐像素猜内容。修法：`SessionImages::hydrate` 在入 Vec 前补图，形状由 `Message::attach_images` 单点保证（本轮与下一轮逐字节一致，不产生前缀分叉；单测直接断言两者序列化相等）。
+  - **ollama 的 HTTP/2 会挂死**：对「32 个工具定义 + tool 图（49KB）+ SSE」的请求，reqwest **等 400s 无响应头、无错误、无重试日志**；同一份请求体逐字节重放（h1.1）只要 1.5–2s 且模型正常读到图，同进程切 h1.1 后立即恢复。修法：`HttpClientSpec.http1_only`（默认 false），**仅模型 provider 置 true**——对话是一问一答、不需要 h2 多路复用，web_fetch 等其他用途保持 h2。
 - `usePolling` 的 `resetKeys` 是通用能力：「按 id 轮询」的其它面板可直接复用（目标一变立即拉，不必各自手写 effect 重启逻辑）。
 - 回归测试 +6（resetKeys 1 / 面板 4 / store 1），并对其中 5 个做过**判别力自证**：把旧实现注回去（effect 依赖去掉 `resetKey`、读缓存直接返回空、去掉竞态守卫）→ 5 个用例全部变红，还原后全绿。
 

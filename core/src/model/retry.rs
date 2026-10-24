@@ -212,6 +212,7 @@ mod tests {
             connect_timeout: std::time::Duration::from_secs(2),
             user_agent: None,
             redirect_policy: None,
+            http1_only: false,
         })
         .unwrap();
         let err = client

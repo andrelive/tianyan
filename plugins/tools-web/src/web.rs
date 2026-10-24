@@ -132,6 +132,7 @@ impl WebSearchClient {
             tianyan::common::http::build_http_client(tianyan::common::http::HttpClientSpec {
                 timeout: Duration::from_secs(config.timeout_secs.max(1)),
                 connect_timeout: Duration::from_secs(config.timeout_secs.clamp(1, 15)),
+                http1_only: false,
                 user_agent: Some(
                     concat!(
                         "Mozilla/5.0 (compatible; tianyan-agent/",

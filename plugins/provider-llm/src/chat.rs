@@ -258,6 +258,7 @@ impl ChatClient {
         if !self.api_key.is_empty() && !self.headers.contains_key("Authorization") {
             req = req.bearer_auth(&self.api_key);
         }
+        let started = std::time::Instant::now();
         let response = req.send().await.map_err(|e| {
             let retryable = tianyan::model::retry::should_retry_transport(&e);
             let raw = format!("{err_prefix}：请求失败：{e}");
@@ -269,6 +270,13 @@ impl ChatClient {
             RetryableFailure { retryable, message }
         })?;
         let status = response.status();
+        tracing::debug!(
+            url = %url,
+            status = %status,
+            version = ?response.version(),
+            elapsed_ms = started.elapsed().as_millis() as u64,
+            "chat 请求已收到响应头（等响应头耗时 = elapsed_ms）"
+        );
         if !status.is_success() {
             let detail = response.text().await.unwrap_or_default();
             let detail: String = detail.chars().take(300).collect();
@@ -552,8 +560,13 @@ fn extract_cache_tokens(usage_value: &Value, usage: &mut TokenUsage, dialect: Pr
     }
 }
 
-/// 构造用户消息内容：携带多模态片段时输出数组格式（文本 + 图片），
-/// 否则保持纯文本（与旧行为一致——纯文本走字符串形式，上游兼容性最好）。
+/// 构造一条消息的 `content` 值（**user 与 tool 两个角色共用**）：携带多模态
+/// 片段时输出数组格式（文本 + 图片），否则保持纯文本（与旧行为一致——纯文本
+/// 走字符串形式，上游兼容性最好）。
+///
+/// tool 结果带图时（ADR-050），tool 消息的 `content` 就是这份内容块数组
+/// （`[{type:"text"},{type:"image_url"},…]`）；纯文本工具结果仍是字符串，
+/// 与改造前逐字节一致。
 ///
 /// 返回 [`Value`] 而非类型化请求消息：OpenAI 兼容生态的方言差异（字段名、
 /// 数组元素形状、非标准扩展字段）无法被任何库的类型枚举穷举——例如
@@ -561,7 +574,7 @@ fn extract_cache_tokens(usage_value: &Value, usage: &mut TokenUsage, dialect: Pr
 /// （实测 200），而严格实现的兼容网关只接受字符串。请求体一律以 JSON 构造，
 /// 方言修饰层（[`inject_reasoning_content`] / [`apply_thinking_params`]）直接
 /// 在同一份 `Value` 上作业，不再有「类型 → JSON → 改写」的中间态。
-fn user_content(m: &Message) -> Value {
+fn content_value(m: &Message) -> Value {
     let Some(parts) = &m.content_parts else {
         return Value::String(m.content.clone());
     };
@@ -645,7 +658,7 @@ fn convert_messages(messages: &[Message]) -> Vec<Value> {
         .iter()
         .map(|m| match m.role {
             MessageRole::System => json!({ "role": "system", "content": m.content }),
-            MessageRole::User => json!({ "role": "user", "content": user_content(m) }),
+            MessageRole::User => json!({ "role": "user", "content": content_value(m) }),
             MessageRole::Assistant => {
                 let mut msg = json!({ "role": "assistant" });
                 // 空正文省略该字段（纯工具调用轮的原样回放；见函数文档）
@@ -684,11 +697,16 @@ fn convert_messages(messages: &[Message]) -> Vec<Value> {
                 }
                 msg
             }
-            MessageRole::Tool => json!({
-                "role": "tool",
-                "content": m.content,
-                "tool_call_id": m.tool_call_id.clone().unwrap_or_default(),
-            }),
+            MessageRole::Tool => {
+                let mut msg = json!({
+                    "role": "tool",
+                    "tool_call_id": m.tool_call_id.clone().unwrap_or_default(),
+                });
+                // ADR-050：tool 结果带图时 content 是内容块数组；纯文本仍是字符串
+                // （与改造前逐字节一致）
+                msg["content"] = content_value(m);
+                msg
+            }
         })
         .collect()
 }
@@ -1036,6 +1054,46 @@ mod convert_tests {
         let msg = Message::tool("call_abc", r#"{"result":"ok"}"#);
         let converted = convert_messages(&[msg]);
         assert_eq!(converted.len(), 1);
+    }
+
+    #[test]
+    fn test_convert_plain_tool_message_content_is_string() {
+        // ADR-050 改造后纯文本工具结果的 content 仍是**字符串**，与改造前一致
+        let original = r#"{"result":"ok","path":"a.rs"}"#;
+        let msg = Message::tool("call_abc", original);
+        let converted = convert_messages(&[msg]);
+        assert_eq!(converted[0]["role"], serde_json::json!("tool"));
+        assert_eq!(
+            converted[0]["content"],
+            serde_json::json!(original),
+            "纯文本工具结果 content 必须是字符串"
+        );
+        assert_eq!(converted[0]["tool_call_id"], serde_json::json!("call_abc"));
+    }
+
+    #[test]
+    fn test_convert_tool_message_with_images_produces_array() {
+        // ADR-050：tool 结果直通图片——content 是内容块数组（文本 + 图片）
+        let original = r#"{"image":"session_images/a.png"}"#;
+        let msg = Message::tool_with_images(
+            "call_img",
+            original,
+            vec!["data:image/png;base64,AAAA".to_string()],
+        );
+        let converted = convert_messages(&[msg]);
+        assert_eq!(converted[0]["role"], serde_json::json!("tool"));
+        assert_eq!(converted[0]["tool_call_id"], serde_json::json!("call_img"));
+        let parts = converted[0]["content"]
+            .as_array()
+            .expect("带图片的 tool 消息 content 应为数组");
+        assert_eq!(parts.len(), 2, "文本 + 图片共 2 个片段");
+        assert_eq!(parts[0]["type"], serde_json::json!("text"));
+        assert_eq!(parts[0]["text"], serde_json::json!(original));
+        assert_eq!(parts[1]["type"], serde_json::json!("image_url"));
+        assert_eq!(
+            parts[1]["image_url"]["url"],
+            serde_json::json!("data:image/png;base64,AAAA")
+        );
     }
 
     #[test]

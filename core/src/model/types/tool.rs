@@ -35,6 +35,8 @@ pub enum ToolPresentation {
     Delegate,
     /// 符号（symbol_outline / repo_map）。
     Code,
+    /// 图片查看（view_image）：展示图片卡片。
+    Image,
 }
 
 impl ToolPresentation {
@@ -52,6 +54,7 @@ impl ToolPresentation {
             Self::Knowledge => "knowledge",
             Self::Delegate => "delegate",
             Self::Code => "code",
+            Self::Image => "image",
         }
     }
 }
@@ -187,6 +190,7 @@ mod tests {
         assert_eq!(ToolPresentation::Knowledge.as_str(), "knowledge");
         assert_eq!(ToolPresentation::Delegate.as_str(), "delegate");
         assert_eq!(ToolPresentation::Code.as_str(), "code");
+        assert_eq!(ToolPresentation::Image.as_str(), "image");
         // serde 序列化与 as_str 一致（snake_case）
         let json = serde_json::to_value(ToolPresentation::Read).unwrap();
         assert_eq!(json, serde_json::json!("read"));

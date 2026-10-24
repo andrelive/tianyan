@@ -20,6 +20,8 @@ pub mod types;
 pub mod edit;
 /// 文件系统浏览工具核心逻辑（glob 查找 / list_dir 目录列出）。
 pub mod fs;
+/// 工具结果图片的冻结副本（ADR-050：`view_image` 落 `session_images/`）。
+pub mod image;
 /// 统一 diff 补丁解析与应用（apply_patch：codex 风格 `*** Update File` 信封）。
 pub mod patch;
 /// 代码搜索的**参数契约**（`OutputMode` / `SearchOptions`）——实现迁插件后

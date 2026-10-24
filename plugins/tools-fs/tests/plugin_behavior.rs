@@ -10,7 +10,7 @@ use std::sync::Arc;
 use tianyan::agent::{DynamicToolExecutor, ToolContext};
 use tianyan::executor::SecurityPolicy;
 
-use tianyan_tools_fs::{tools, GlobTool, ListDirTool};
+use tianyan_tools_fs::{tools, GlobTool, ListDirTool, ViewImageTool};
 
 /// 宽松策略的上下文（测试只用临时目录，不做路径限制断言）。
 fn test_ctx() -> ToolContext {
@@ -31,6 +31,7 @@ async fn test_plugin_exposes_two_tools_in_stable_order() {
             "apply_patch",
             "glob",
             "list_dir",
+            "view_image",
         ],
         "注册顺序即前缀顺序，必须稳定"
     );
@@ -99,5 +100,47 @@ async fn test_glob_and_list_dir_share_one_context_handle() {
     // 装配层语义：两个工具共享同一份 ToolContext（Arc 内部字段，克隆廉价）
     let ctx = test_ctx();
     let list: Vec<Arc<dyn DynamicToolExecutor>> = tools(&ctx);
-    assert_eq!(list.len(), 6);
+    assert_eq!(list.len(), 7);
+}
+
+/// `view_image` 对非图片文件报错（按内容识别，不看扩展名），错误带 `view_image` 前缀。
+#[tokio::test]
+async fn test_view_image_rejects_non_image_file() {
+    let work = tempfile::tempdir().expect("tempdir");
+    let data_dir = tempfile::tempdir().expect("tempdir");
+    let txt = work.path().join("note.txt");
+    std::fs::write(&txt, "hello world, not an image").expect("write txt");
+
+    let mut ctx = test_ctx();
+    ctx.data_dir = Some(data_dir.path().to_path_buf());
+    let tool = ViewImageTool::new(ctx);
+    let args = serde_json::json!({ "path": txt.to_string_lossy() });
+    let err = tool
+        .execute("session-test", &args.to_string())
+        .await
+        .expect_err("非图片应报错");
+    assert!(
+        err.to_string().contains("view_image"),
+        "错误消息必须带 view_image 前缀：{err}"
+    );
+}
+
+/// 未注入 `data_dir` → 明确报装配错误（不 panic、不静默成功）。
+#[tokio::test]
+async fn test_view_image_without_data_dir_reports_wiring_error() {
+    let work = tempfile::tempdir().expect("tempdir");
+    let png = work.path().join("shot.png");
+    std::fs::write(&png, b"\x89PNG\r\n\x1A\nrest").expect("write png");
+
+    let ctx = test_ctx();
+    assert!(ctx.data_dir.is_none(), "测试前应未注入数据目录");
+    let tool = ViewImageTool::new(ctx);
+    let args = serde_json::json!({ "path": png.to_string_lossy() });
+    let err = tool
+        .execute("session-test", &args.to_string())
+        .await
+        .expect_err("缺 data_dir 应报装配错误");
+    let msg = err.to_string();
+    assert!(msg.contains("view_image"), "错误消息带工具前缀：{msg}");
+    assert!(msg.contains("data_dir"), "错误消息点明缺件：{msg}");
 }

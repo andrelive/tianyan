@@ -91,6 +91,9 @@ pub struct AgentBuilder {
     command_logs_dir: Option<PathBuf>,
     /// 委托结果落盘目录（U2：完整结果写 `{dir}/{id}.md`；None 时不落盘）。
     task_results_dir: Option<PathBuf>,
+    /// 数据目录（ADR-050：`view_image` 冻结副本目录 `session_images/` 的根；
+    /// None 时该能力不可用——工具报装配错误，组装层不加载 tool 结果图片）。
+    data_dir: Option<PathBuf>,
     /// 工具输出落盘（ADR-047：超预算结果落盘目录 + 预算；None 时不落盘）。
     tool_output: Option<(PathBuf, crate::config::ToolOutputConfig)>,
     /// 工具管线工厂（ADR-049 期 3-T5：观测监听器 + 输出落盘的实现已出 core；
@@ -134,6 +137,7 @@ impl AgentBuilder {
             chat_model_spec: None,
             command_logs_dir: None,
             task_results_dir: None,
+            data_dir: None,
             tool_output: None,
             tool_pipeline: None,
             role_registry: None,
@@ -223,6 +227,15 @@ impl AgentBuilder {
     /// 设置委托结果落盘目录（U2：完整结果写 `{dir}/{id}.md`，完成通知携带路径）。
     pub fn with_task_results_dir(mut self, dir: PathBuf) -> Self {
         self.task_results_dir = Some(dir);
+        self
+    }
+
+    /// 设置数据目录（ADR-050：`view_image` 的冻结副本写到
+    /// `{dir}/session_images/`，组装层按同一目录把引用回读为图片）。
+    ///
+    /// 未调用 = 该能力不可用（`view_image` 报装配错误，历史 tool 结果保持纯文本）。
+    pub fn with_data_dir(mut self, dir: impl Into<PathBuf>) -> Self {
+        self.data_dir = Some(dir.into());
         self
     }
 
@@ -503,6 +516,10 @@ impl AgentBuilder {
         // 委托结果落盘目录（U2：完整结果写文件，完成通知携带路径）
         if let Some(dir) = self.task_results_dir {
             tool_registry = tool_registry.with_task_results_dir(dir);
+        }
+        // 数据目录（ADR-050：view_image 冻结副本目录的根）
+        if let Some(ref dir) = self.data_dir {
+            tool_registry = tool_registry.with_data_dir(dir.clone());
         }
         // 并发配置（ADR-026）：委托双信号量（运行/排队）+ 终端命令上限
         tool_registry = tool_registry.with_concurrency(

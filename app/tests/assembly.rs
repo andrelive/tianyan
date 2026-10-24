@@ -80,6 +80,8 @@ async fn test_plugin_tools_registered_with_presentation() {
         // tools-web（ADR-049 期 2）：网络检索/抓取工具
         ("web_search", ToolPresentation::Web),
         ("web_fetch", ToolPresentation::Web),
+        // ADR-050：图片查看（冻结副本 + tool 结果直通）
+        ("view_image", ToolPresentation::Image),
     ];
     for (name, presentation) in expected {
         assert!(names.contains(&name), "插件工具未注册：{name}");

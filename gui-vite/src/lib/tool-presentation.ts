@@ -14,6 +14,7 @@ import {
   FileText,
   GitBranch,
   Globe,
+  Image as ImageIcon,
   PenLine,
   Search,
   Terminal,
@@ -32,6 +33,7 @@ export const PRESENTATION_ICONS: Record<string, LucideIcon> = {
   knowledge: FilePlus2,
   delegate: GitBranch,
   code: Code2,
+  image: ImageIcon,
 };
 
 /** 按展示意图取图标（未登记的类型回退通用扳手）。 */

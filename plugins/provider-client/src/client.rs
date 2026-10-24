@@ -71,6 +71,14 @@ impl AsyncOpenAIClient {
                 user_agent: Some(config.resolve_user_agent()),
                 // 模型 API 端点来自用户配置（可信），保持默认重定向跟随
                 redirect_policy: None,
+                // 强制 HTTP/1.1（2026-10-24 实测，ADR-050 实施期）：ollama.com 在
+                // **HTTP/2** 下对「大请求体（≈49KB，32 个工具 + tool 结果携带图片）+
+                // SSE」的请求**不返回任何响应头**（reqwest 等 400s+ 无反应，无错误、
+                // 无重试日志）；同一份请求体（落盘后逐字节重放）用 h1.1 只花 1.5–2s
+                // 返回 200 且模型读到图中文字，同进程内切成 h1.1 后立即正常。属上游
+                // 网关的 h2 缺陷，客户端侧规避；对话请求没有 h2 多路复用需求（一问一答），
+                // 连接池 keep-alive 在 h1.1 下照常复用。
+                http1_only: true,
             })?;
 
         // 模型级覆盖表：仅收集显式声明项（缺省走模型名嗅探，不占表）。

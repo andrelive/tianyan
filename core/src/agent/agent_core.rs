@@ -656,7 +656,18 @@ impl Agent {
 
         let s = state.read().await;
         let sid = s.session_id.clone();
-        let mut messages = ContextAssembler::assemble(&s.structured_messages, &injectable);
+        // ADR-050：注入了数据目录时，tool 结果里的图片引用按 `session_images/`
+        // 加载为 data URL（与落盘侧同一目录）；未注入则保持纯文本组装。
+        let data_dir = self.agent_loop.tool_registry().data_dir.clone();
+        let mut messages = match data_dir {
+            Some(dir) => {
+                let images = crate::context::SessionImages::new(
+                    dir.join(crate::executor::image::SESSION_IMAGES_DIR),
+                );
+                ContextAssembler::assemble_with(&s.structured_messages, &injectable, Some(&images))
+            }
+            None => ContextAssembler::assemble(&s.structured_messages, &injectable),
+        };
 
         // 注入会话定位信息：早期对话被压缩后，摘要字段可能不足以恢复细节，
         // 告知 LLM 当前会话 URI，使其可用 vfs_read 检索被压缩的原始记录。
@@ -767,7 +778,9 @@ impl Agent {
         let conversation: Vec<Message> =
             ContextAssembler::normalize_tool_pairs(&messages_since_marker)
                 .iter()
-                .flat_map(|sm| ContextAssembler::structured_to_messages(sm.as_ref()))
+                // 压缩摘要请求不带图（ADR-050 只为正常组装链路注入图片；
+                // 摘要是"把历史压缩成文字"，重传图片字节纯属浪费预算）
+                .flat_map(|sm| ContextAssembler::structured_to_messages(sm.as_ref(), None))
                 .collect();
 
         // 真实上下文占用：最近一次请求的 prompt 侧 token（取数口径单点见

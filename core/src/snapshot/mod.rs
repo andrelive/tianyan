@@ -24,11 +24,11 @@ use std::path::{Path, PathBuf};
 use flate2::read::GzDecoder;
 use flate2::write::GzEncoder;
 use flate2::Compression;
-use ring::digest::{digest, SHA256};
 use tokio::fs;
 
 use crate::common::binary::sniff_binary;
 use crate::common::error::{Result, TianyanError};
+use crate::common::hash::hex_sha256;
 
 /// 单文件最大纳入快照的字节数（2MB，与 opencode 一致）。
 const MAX_FILE_BYTES: u64 = 2 * 1024 * 1024;
@@ -1024,16 +1024,6 @@ async fn write_atomic(path: &Path, content: &str) -> Result<()> {
         .await
         .map_err(|e| TianyanError::Custom(format!("snapshot: 原子替换失败: {e}")))?;
     Ok(())
-}
-
-/// 计算内容的 SHA256 十六进制摘要。
-fn hex_sha256(bytes: &[u8]) -> String {
-    let digest = digest(&SHA256, bytes);
-    let mut hex = String::with_capacity(digest.as_ref().len() * 2);
-    for b in digest.as_ref() {
-        hex.push_str(&format!("{:02x}", b));
-    }
-    hex
 }
 
 /// gzip 魔数（前 2 字节）,用于区分压缩对象与 legacy 未压缩对象。

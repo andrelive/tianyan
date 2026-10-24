@@ -65,6 +65,9 @@ pub struct ToolContext {
     pub approval_gate: Option<Arc<dyn ApprovalGate>>,
     /// 待用户确认的操作指纹（审批拒绝 → 询问用户 → 用户回答后确认/放弃）。
     pub pending_approval_fingerprints: Arc<Mutex<Vec<String>>>,
+    /// 数据目录（ADR-050：`view_image` 的冻结副本写到 `{data_dir}/session_images/`；
+    /// 组装层按同一目录回读）。未注入 = 该能力不可用（工具报错，不 panic）。
+    pub data_dir: Option<std::path::PathBuf>,
 }
 
 impl ToolContext {
@@ -80,6 +83,7 @@ impl ToolContext {
             session_recall: None,
             approval_gate: None,
             pending_approval_fingerprints: Arc::new(Mutex::new(Vec::new())),
+            data_dir: None,
         }
     }
 

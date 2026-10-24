@@ -31,6 +31,13 @@ pub struct HttpClientSpec {
     /// 需要逐跳安全校验的调用方（如 web_fetch 的 SSRF 防护）传入自定义
     /// 策略——默认跟随会让“初始 URL 已校验、302 到内网”绕过校验。
     pub redirect_policy: Option<reqwest::redirect::Policy>,
+    /// 强制 HTTP/1.1（关闭 ALPN 的 h2 协商）。
+    ///
+    /// **模型 provider 传 `true`**（实测依据见 `provider-client::client.rs` 的
+    /// 构造注释：ollama.com 在 h2 下对「大请求体 + SSE + tool 结果携带图片」
+    /// 的请求不返回任何响应头——同字节请求体用 h1 或在同一进程内切 h1 后
+    /// 1.5s 返回 200）。其他用途（web_fetch 等）保持默认 `false`，不受影响。
+    pub http1_only: bool,
 }
 
 /// 构建 HTTP 客户端（统一连接池策略：每主机空闲连接 5、空闲超时 45s）。
@@ -46,6 +53,9 @@ pub fn build_http_client(spec: HttpClientSpec) -> Result<reqwest::Client> {
         .connect_timeout(spec.connect_timeout)
         .pool_max_idle_per_host(5)
         .pool_idle_timeout(Duration::from_secs(45));
+    if spec.http1_only {
+        builder = builder.http1_only();
+    }
     if let Some(ua) = &spec.user_agent {
         builder = builder.user_agent(ua);
     }
@@ -97,6 +107,7 @@ mod tests {
             connect_timeout: Duration::from_secs(1),
             user_agent: None,
             redirect_policy: None,
+            http1_only: false,
         })
         .unwrap();
 

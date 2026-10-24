@@ -26,10 +26,13 @@
 pub mod assembler;
 pub mod assembly;
 mod port;
+/// 组装期按引用加载 tool 结果图片（ADR-050：`session_images/` → data URL）。
+pub mod tool_images;
 
 pub use assembler::ContextAssembler;
 pub use assembly::ContextServices;
 pub use port::{ContextPort, NullContextPort};
+pub use tool_images::SessionImages;
 
 // ── 测试期同源包含：策略实现的**唯一副本仍在插件里** ────────────────────────
 //

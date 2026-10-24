@@ -229,6 +229,7 @@ export const TOOL_PRESENTATION_LABELS: Record<string, string> = {
   knowledge: '导入知识',
   delegate: '委托子代理',
   code: '代码分析',
+  image: '查看图片',
 };
 
 // ========== Session Types ==========

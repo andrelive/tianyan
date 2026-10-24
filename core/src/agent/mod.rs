@@ -52,7 +52,7 @@ pub use tool_params::{
     ApplyEditParams, ApplyPatchParams, AskUserParams, CallSkillParams, DelegateToAgentParams,
     ExecuteCommandParams, GlobParams, ListDirParams, ReadFileParams, RepoMapParams,
     SearchCodeParams, SearchVfsParams, SelfCheckParams, SymbolOutlineParams, VfsListParams,
-    VfsReadParams, WebFetchParams, WebSearchParams, WriteFileParams,
+    VfsReadParams, ViewImageParams, WebFetchParams, WebSearchParams, WriteFileParams,
 };
 pub use tool_registry::{
     builtin_tool_names, known_tool_names, parse_params, safety_violation, wrap_tool_error,

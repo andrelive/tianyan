@@ -37,8 +37,8 @@ pub struct Message {
     pub role: MessageRole,
     /// 消息内容
     pub content: String,
-    /// 多模态内容片段（当前仅用户消息携带图片时使用；
-    /// `content` 保持为纯文本（可为空），片段中的图片对 LLM 可见）。
+    /// 多模态内容片段（用户消息携带图片时使用；ADR-050 之后 tool 结果携带图片
+    /// 时也用它——`content` 保持为纯文本（可为空），片段中的图片对 LLM 可见）。
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub content_parts: Option<Vec<ContentPart>>,
     /// 当 role 为 Assistant 时，模型发出的工具调用列表。
@@ -167,6 +167,42 @@ impl Message {
             tool_error: error,
             reasoning_content: None,
         }
+    }
+
+    /// 创建携带图片的工具结果消息（ADR-050：tool 结果直通图片）。
+    /// `content_parts = [text(content), image(…), …]`（content 是 tool 结果原文，
+    /// 空时也保留 text 片段——tool 消息必须有 content）。
+    ///
+    /// - `tool_call_id` - 对应 Assistant 消息中 `ToolCall.id`
+    /// - `content` - 工具执行结果原文（通常为 JSON 字符串）
+    /// - `images` - 图片 data URL 列表（`data:image/png;base64,...`），按顺序
+    ///   排在文本片段之后
+    pub fn tool_with_images(
+        tool_call_id: impl Into<String>,
+        content: impl Into<String>,
+        images: Vec<String>,
+    ) -> Self {
+        let mut msg = Self::tool(tool_call_id, content);
+        msg.attach_images(images);
+        msg
+    }
+
+    /// 给消息附加图片片段（ADR-050）：`content_parts = [text(self.content), image(…)]`。
+    ///
+    /// **形状单点**：本轮工具循环直接复用消息 Vec（不经 `assemble`），
+    /// `SessionImages::hydrate` 因此在写入 Vec 前调本方法；组装层的
+    /// `tool_with_images` 也委托本方法——两处必须逐字节一致，否则同一段历史
+    /// 在"本轮"与"下一轮重新组装"之间会产生前缀分叉。
+    ///
+    /// `images` 为空时不改动消息（纯文本工具结果保持原样）。
+    pub fn attach_images(&mut self, images: Vec<String>) {
+        if images.is_empty() {
+            return;
+        }
+        let mut parts: Vec<ContentPart> = Vec::with_capacity(images.len() + 1);
+        parts.push(ContentPart::text(&self.content));
+        parts.extend(images.into_iter().map(ContentPart::image));
+        self.content_parts = Some(parts);
     }
 
     /// 提取多模态片段中的图片 URL 列表（无则返回空）。
@@ -311,5 +347,45 @@ mod tests {
         let restored: Message = serde_json::from_str(&json).unwrap();
         assert_eq!(restored.content, "hello");
         assert_eq!(restored.image_urls(), vec!["data:image/png;base64,AAAA"]);
+    }
+
+    #[test]
+    fn test_message_tool_with_images_keeps_text_and_image_parts() {
+        // ADR-050：tool 结果直通图片——原文是 text 片段，图片按序排在后面
+        let original = r#"{"image":"session_images/a.png","mime":"image/png"}"#;
+        let msg = Message::tool_with_images(
+            "call_img",
+            original,
+            vec![
+                "data:image/png;base64,AAAA".to_string(),
+                "data:image/jpeg;base64,BBBB".to_string(),
+            ],
+        );
+        assert_eq!(msg.role, MessageRole::Tool);
+        assert_eq!(msg.tool_call_id.as_deref(), Some("call_img"));
+        assert_eq!(msg.content, original, "content 保留 tool 结果原文");
+        let parts = msg.content_parts.as_ref().expect("应携带 content_parts");
+        assert_eq!(parts.len(), 3, "1 个文本片段 + 2 个图片片段");
+        assert_eq!(parts[0].content_type, "text");
+        assert_eq!(parts[0].text.as_deref(), Some(original));
+        assert_eq!(
+            msg.image_urls(),
+            vec![
+                "data:image/png;base64,AAAA".to_string(),
+                "data:image/jpeg;base64,BBBB".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn test_message_tool_with_images_empty_content_keeps_text_part() {
+        // tool 消息必须有 content：原文为空时也保留 text 片段
+        let msg =
+            Message::tool_with_images("call_x", "", vec!["data:image/png;base64,CCCC".to_string()]);
+        let parts = msg.content_parts.as_ref().unwrap();
+        assert_eq!(parts.len(), 2);
+        assert_eq!(parts[0].content_type, "text");
+        assert_eq!(parts[0].text.as_deref(), Some(""));
+        assert_eq!(parts[1].content_type, "image_url");
     }
 }

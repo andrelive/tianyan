@@ -212,6 +212,8 @@ pub const MIGRATED_TOOL_PRESENTATIONS: &[(&str, ToolPresentation)] = &[
     ("grep", ToolPresentation::Search),
     ("web_search", ToolPresentation::Web),
     ("web_fetch", ToolPresentation::Web),
+    // ADR-050：view_image（tools-fs 新工具）——历史消息里的卡片不能退化为通用样式
+    ("view_image", ToolPresentation::Image),
 ];
 
 /// 已知工具名全集（内置 + 已迁插件），供跨 crate 一致性门禁校验。
@@ -373,6 +375,12 @@ impl ToolRegistry {
     /// 设置会话权威存储（vfs_read 对 tianyan://session/{id} 的兼容读取）。
     pub fn with_session_store(mut self, store: Arc<crate::session::store::SessionStore>) -> Self {
         self.ctx.session_store = Some(store);
+        self
+    }
+
+    /// 设置数据目录（ADR-050：`view_image` 冻结副本目录的根）。
+    pub fn with_data_dir(mut self, dir: PathBuf) -> Self {
+        self.ctx.data_dir = Some(dir);
         self
     }
 

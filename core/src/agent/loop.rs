@@ -282,6 +282,18 @@ impl AgentLoop {
         &self.tool_registry
     }
 
+    /// 会话图片加载器（ADR-050）：`{data_dir}/session_images`；未注入数据目录 → `None`。
+    ///
+    /// 工具循环在一轮内直接复用消息 Vec（工具结果 `push` 后立刻作为下一次请求），
+    /// **不经过** `assemble` 的组装期加载——所以工具结果在入 Vec 前要在这里补一次
+    /// 图片，否则模型在看到该结果的那一轮根本看不到图（只能再调一次工具或绕路猜）。
+    fn session_images(&self) -> Option<crate::context::SessionImages> {
+        let dir = self.tool_registry().data_dir.as_ref()?;
+        Some(crate::context::SessionImages::new(
+            dir.join(crate::executor::image::SESSION_IMAGES_DIR),
+        ))
+    }
+
     /// 轮边界增量注入（ADR-035 §4，**取代 T1-23 的通知投递水位**）。
     ///
     /// 判定「读到哪了」的唯一依据是**推导值**：`ws.last_seq() > ws.last_consumed_seq()`
@@ -1396,6 +1408,13 @@ impl AgentLoop {
                 );
                 self.persist_message(ctx, &tool_msg, None, None).await;
 
+                // ADR-050：本轮内也要让模型看到图。落库只存原文（`from_message`
+                // 对 tool 角色只取 content），图片片段只加在**这次请求的视图**上；
+                // 形状与下一轮 `assemble` 的组装结果逐字节一致（`attach_images` 单点）。
+                let mut tool_msg = tool_msg;
+                if let Some(images) = self.session_images() {
+                    images.hydrate(&mut tool_msg);
+                }
                 ctx.messages.push(tool_msg);
 
                 // 流式下发工具结果事件（耗时/成败结构化，前端卡片实时显示）

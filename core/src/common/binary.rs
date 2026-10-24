@@ -22,6 +22,32 @@ pub fn sniff_binary(bytes: &[u8]) -> bool {
     !bytes.is_empty() && non_printable * 100 > bytes.len() * 30
 }
 
+/// 按 magic bytes 识别图片 MIME（严格：未知格式返回 `None`）。
+///
+/// 支持 png / jpeg / gif / bmp / webp。**刻意不复用** `knowledge::image::analyzer`
+/// 的 `infer_mime_type`：那里的语义是"宽容推断 + 未知回退 image/png"（知识导入
+/// 不能因为认不出就丢图），这里必须严格——`view_image` 认不出就该报错。
+pub fn sniff_image_mime(bytes: &[u8]) -> Option<&'static str> {
+    // jpeg：3 字节 SOI + 标记前缀
+    if bytes.starts_with(&[0xFF, 0xD8, 0xFF]) {
+        return Some("image/jpeg");
+    }
+    if bytes.starts_with(b"\x89PNG\r\n\x1A\n") {
+        return Some("image/png");
+    }
+    if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") {
+        return Some("image/gif");
+    }
+    if bytes.starts_with(b"BM") {
+        return Some("image/bmp");
+    }
+    // webp：RIFF 容器，偏移 8 起为 "WEBP"
+    if bytes.len() >= 12 && bytes.starts_with(b"RIFF") && &bytes[8..12] == b"WEBP" {
+        return Some("image/webp");
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -81,5 +107,35 @@ mod tests {
             *b = 0x7f;
         }
         assert!(sniff_binary(&bytes));
+    }
+
+    // ── 图片 magic bytes 识别（ADR-050）────────────────────────────
+
+    #[test]
+    fn test_sniff_image_mime_known_formats() {
+        assert_eq!(
+            sniff_image_mime(b"\x89PNG\r\n\x1A\n\x00\x00"),
+            Some("image/png")
+        );
+        assert_eq!(
+            sniff_image_mime(&[0xFF, 0xD8, 0xFF, 0xE0]),
+            Some("image/jpeg")
+        );
+        assert_eq!(sniff_image_mime(b"GIF87a...."), Some("image/gif"));
+        assert_eq!(sniff_image_mime(b"GIF89a...."), Some("image/gif"));
+        assert_eq!(sniff_image_mime(b"BM\x00\x00\x00\x00"), Some("image/bmp"));
+        assert_eq!(
+            sniff_image_mime(b"RIFF\x24\x00\x00\x00WEBPVP8 "),
+            Some("image/webp")
+        );
+    }
+
+    #[test]
+    fn test_sniff_image_mime_rejects_non_image() {
+        assert_eq!(sniff_image_mime(b"hello world"), None);
+        assert_eq!(sniff_image_mime(b""), None, "空切片不是图片");
+        // webp 需要长度 ≥ 12：截断的 RIFF 头不算
+        assert_eq!(sniff_image_mime(b"RIFF\x00\x00WEB"), None);
+        assert_eq!(sniff_image_mime(b"RIFF\x00\x00\x00\x00PNG "), None);
     }
 }

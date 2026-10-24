@@ -56,6 +56,7 @@ fn presentation_name(p: ToolPresentation) -> &'static str {
         ToolPresentation::Knowledge => "knowledge",
         ToolPresentation::Delegate => "delegate",
         ToolPresentation::Code => "code",
+        ToolPresentation::Image => "image",
     }
 }
 

@@ -183,6 +183,7 @@ Core 是天演的核心库，提供 AI Agent 的全部基础能力。4 crate wor
 - `executor/project.rs` — 项目探测（`probe_project` walk-up 标记检测：Cargo.toml > pyproject.toml > tsconfig.json；`ProjectFormat` / `verification_command`）
 - `executor/test_discovery.rs` — 测试发现与结果解析（`discover_tests` 解析 cargo/pytest/vitest 列表，上限 500；`parse_test_output` 失败 ≤20 + 回溯头 30/尾 20 行、按文件分组；`resolve_test_command` / `run_tests_action`）
 - `executor/web.rs` — Web 工具执行器（`WebSearchClient`：web_search 结构化结果 + web_fetch 可读正文提取；360（默认，国内可达）/ DuckDuckGo HTML / SearXNG JSON / DeepSeek 官方搜索（`/v1/tools/search`，需 Key）多后端；SSRF 防护 `validate_public_url`（与 http_request 同策略）+ 响应大小上限 + TTL 缓存）
+- `executor/image.rs` — 工具结果图片的**冻结副本**（ADR-050）：`prepare_session_image` 读文件 → magic bytes 严格校验（png/jpeg/gif/bmp/webp，`MAX_IMAGE_BYTES = 5MB`）→ sha256 命名写入 `{data_dir}/session_images/{sha256}.{ext}`（已存在不重写，幂等）→ 返回 `PreparedImage { reference, sha256, mime, bytes }`；`view_image` 的**定义**在 `plugins/tools-fs`（同 read_file 的「定义在插件、算法在 core」）
 
 **核心类型**：
 
@@ -227,6 +228,7 @@ Core 是天演的核心库，提供 AI Agent 的全部基础能力。4 crate wor
 - `context/assembler.rs` — `ContextAssembler`，纯函数：存储层 `StructuredMessage` → 传输层 `Message`（K1 组装机制，ADR-043 工具对规范化 + 前缀零漂移）
 - `context/port.rs` — `ContextPort`（3 方法 seam：`load_injectable` / `compress_for_session` / `extract_marker_summary`）+ `NullContextPort`（未装配兜底：空可注入上下文 + 永不压缩）
 - `context/assembly.rs` — `ContextServices`（装配能力集合：配置快照 / VFS / 统计 / 摘要模型客户端 / 模型名 / 模型规格）
+- `context/tool_images.rs` — `SessionImages`（ADR-050）：把 tool 结果原文里的图片引用（`session_images/<name>`）加载为 `data:{mime};base64,…`；路径逃逸**结构上**不可能（只认单前缀 + 文件名禁分隔符），副本缺失/超限/magic 不符一律降级纯文本（best effort，绝不报错）；`assemble_with(…, Some(&images))` 才启用
 
 **插件侧（`plugins/policy-context/src/context/`，模块路径形状与 core 一致）**：
 - `retrieval/` — 意图分析、双层向量检索（DualLayerRetriever）、内容加载（ContentLoadStrategy）（检索轨迹已于 ADR-025 移除）
@@ -245,7 +247,8 @@ Core 是天演的核心库，提供 AI Agent 的全部基础能力。4 crate wor
 | `CompressionConfig` | 压缩配置（preserve_recent_messages 默认 6） |
 | `CompressionResult` | 压缩结果（含 `summary_usage`——生成摘要的 LLM 请求真实 token 用量） |
 | `CompressionOutcome` | 管线输出的摘要文本 + 压缩请求真实用量（`compress_for_session` 消费） |
-| `ContextAssembler` | 存储层/传输层消息格式转换（纯函数） |
+| `ContextAssembler` | 存储层/传输层消息格式转换（纯函数；`assemble_with` 额外按 `SessionImages` 把 tool 结果图片加载为内容块） |
+| `SessionImages` | tool 结果图片的组装期加载器（ADR-050：引用 → data URL，best effort） |
 | `DualLayerRetriever` | 双层向量检索器（Intent 分析 + 向量搜索 + 内容加载） |
 | `ContentLoadStrategy` (enum) | 基于分数的内容加载策略：Full(大于0.85→L2) / Overview(0.6~0.85→L1) / Abstract(小于等于0.6→L0) |
 | `IntentAnalyzer` | 意图分析器：LLM 分析查询意图 + 目标命名空间 |

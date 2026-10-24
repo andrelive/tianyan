@@ -217,6 +217,7 @@ pub async fn test_provider_connection(
         connect_timeout: std::time::Duration::from_secs(10),
         user_agent: Some(format!("tianyan/{}", tianyan::VERSION)),
         redirect_policy: None,
+        http1_only: false,
     })
     .map_err(http_client_error)?;
 
@@ -323,6 +324,7 @@ pub async fn scan_provider_models(
         connect_timeout: std::time::Duration::from_secs(10),
         user_agent: Some(format!("tianyan/{}", tianyan::VERSION)),
         redirect_policy: None,
+        http1_only: false,
     })
     .map_err(http_client_error)?;
 

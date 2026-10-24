@@ -150,6 +150,8 @@ impl AgentBuilderFactory {
             )
             .with_command_logs_dir(config.storage.data_dir.join("command_logs"))
             .with_task_results_dir(config.storage.data_dir.join("task_results"))
+            // ADR-050：view_image 冻结副本目录（组装层按同一数据目录回读图片）
+            .with_data_dir(config.storage.data_dir.clone())
             .with_tool_output(
                 config.storage.data_dir.join("tool_output"),
                 config.tool_output.clone(),

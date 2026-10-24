@@ -1,4 +1,5 @@
-//! tools-fs 插件：文件系统浏览工具（`glob` / `list_dir`）。
+//! tools-fs 插件：文件系统工具（`read_file` / `write_file` / `apply_edit` /
+//! `apply_patch` / `glob` / `list_dir` / `view_image`）。
 //!
 //! ## 为什么是独立 crate（ADR-049 期 1）
 //!
@@ -11,7 +12,8 @@
 //! 只依赖 `tianyan-core`（kernel-api 抽取在期 3）：
 //! - [`ToolContext`]——路径归属解析（会话工作目录）+ 安全策略
 //! - [`DynamicToolExecutor`]——既有插件契约（ADR-049 D8：不新建 Plugin 四件套）
-//! - [`GlobParams`] / [`ListDirParams`]——参数 schema 单一事实源（core 侧定义）
+//! - [`GlobParams`] / [`ListDirParams`]（以及 `ViewImageParams`）——参数 schema
+//!   单一事实源（core 侧定义）
 //! - `parse_params` / `safety_violation` / `wrap_tool_error`——工具错误口径单点
 //!
 //! ## 实现归属（过渡形态，ADR-049 期 1 记录）
@@ -34,6 +36,10 @@ use tianyan::agent::{
 use tianyan::common::error::TianyanError;
 use tianyan::executor::fs::{execute_glob, execute_list_dir};
 use tianyan::model::types::{FunctionDefinition, ToolDefinition, ToolPresentation};
+
+mod view_image;
+
+pub use view_image::ViewImageTool;
 
 /// `glob` 工具：按模式查找文件（遵循 `.gitignore`，按修改时间倒序）。
 pub struct GlobTool {
@@ -141,7 +147,9 @@ impl DynamicToolExecutor for ListDirTool {
 /// 本插件提供的全部工具（装配层一行注册用）。
 ///
 /// 顺序即注册顺序：`glob` 在前、`list_dir` 在后，与迁移前内置表顺序一致
-/// （前缀稳定性：工具定义是提示词前缀的一部分）。
+/// （前缀稳定性：工具定义是提示词前缀的一部分）。**新工具一律追加末尾**
+/// （重排既有前缀会让工具 schema 前缀变化 → prompt 缓存失效），例如
+/// `view_image`（ADR-050）排在最后。
 pub fn tools(ctx: &ToolContext) -> Vec<std::sync::Arc<dyn DynamicToolExecutor>> {
     vec![
         std::sync::Arc::new(ReadFileTool::new(ctx.clone())),
@@ -150,6 +158,7 @@ pub fn tools(ctx: &ToolContext) -> Vec<std::sync::Arc<dyn DynamicToolExecutor>> 
         std::sync::Arc::new(ApplyPatchTool::new(ctx.clone())),
         std::sync::Arc::new(GlobTool::new(ctx.clone())),
         std::sync::Arc::new(ListDirTool::new(ctx.clone())),
+        std::sync::Arc::new(ViewImageTool::new(ctx.clone())),
     ]
 }
 

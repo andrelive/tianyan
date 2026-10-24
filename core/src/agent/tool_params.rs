@@ -18,6 +18,13 @@ pub struct ReadFileParams {
     pub limit: Option<usize>,
 }
 
+/// 查看图片参数。
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct ViewImageParams {
+    /// 图片文件路径（绝对路径或相对会话工作目录）。
+    pub path: String,
+}
+
 /// 写入文件参数。
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct WriteFileParams {
