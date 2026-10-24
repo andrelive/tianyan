@@ -521,6 +521,10 @@ async fn create_app_inner(
 
     info!("Application state initialized successfully");
     let state = Arc::new(state);
+    // MCP 后台预热（启动时延治理，1.0.1）：不阻塞 `create_app` 与 `/health`；
+    // 连上后把 MCP 工具注入运行中的 agent（不重建 agent，见
+    // `AppState::spawn_mcp_warmup` 文档）。没配 MCP 时该任务立即返回。
+    AppState::spawn_mcp_warmup(&state);
 
     // Configure CORS - 仅允许本地来源访问
     let cors = CorsLayer::new()

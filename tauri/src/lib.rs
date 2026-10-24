@@ -614,7 +614,11 @@ pub async fn wait_for_server_ready(port: u16) -> anyhow::Result<()> {
     while start_time.elapsed() < HEALTH_CHECK_TIMEOUT {
         match client
             .get(&health_url)
-            .timeout(Duration::from_secs(2))
+            // 300ms 而非 2s：启动初期端口已监听（listener 已绑定）但 Router 尚未就绪，
+            // 此时每次探测都会走满超时——2s 超时 + 500ms 间隔 = 每轮 2.5s，会把
+            // 「服务刚就绪」的时刻最多推迟 2.5s。300ms + 500ms = 0.8s/轮，
+            // 就绪即被发现（失败只是重试，总超时 30s 不变）。
+            .timeout(Duration::from_millis(300))
             .send()
             .await
         {

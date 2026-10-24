@@ -5,6 +5,38 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.1] - 2026-10-24
+
+### Fixed
+- **点委托子任务 → 整页「页面渲染出错」（React #185，**1.0.0 回归**）**：
+  `AgentTasksPanel` 的选择器 `useAppStore((s) => s.sessionMessages[taskId] ?? [])` 在
+  子会话消息**尚未进 store** 时（点开一个还没收到快照的委托）会**每次调用都新建数组**
+  —— zustand 5 直接走 React 的 `useSyncExternalStore`（v4 经 `use-sync-external-store`
+  shim 对 selector 结果有 memo，v5 移除了这层）→ React 每次渲染都判定「store 变了」
+  → 无限重渲染 → `Maximum update depth exceeded` → 整页被 ErrorBoundary 兜住。
+  修复：模块级 `EMPTY_MESSAGES` 常量（**引用稳定**）；全仓 57 处 `?? []`/`?? {}` 排查确认
+  **仅此一处**在选择器中。新增判别力测试（注入旧写法必红）。
+- **查配置状态失败 → 误进配置向导**：`App.tsx` 把「暂时查不到」当成未配置
+  （`.catch(() => setConfigured(false))`）—— 后端启动中或网络抖动时用户会被踢进配置
+  向导（配置与数据其实都在，向导还可能覆盖设置）。改为**有限重试**（5 次 × 600ms），
+  全部失败才按未配置处理并 `console.error` 留痕。
+- **启动被 MCP 连接阻塞（窗口出现 13.6 秒 → 约 1.7 秒）**：`AppState::new` 里
+  `mcp_tools.sync(&config.mcp.servers).await` 同步等待**所有** MCP 服务器
+  （`npx -y @playwright/mcp` 冷启动实测 **12 秒**、缓存热 3 秒），它阻塞 `create_app`
+  → Axum 不开始服务 → tauri 侧 `/health` 探测一直失败 → **窗口延迟显示**。
+  启动日志实测：前置 1.5s + MCP 12.04s = **13.6s**（0.7.0 同场景 13.8s，即本问题与微内核化无关，
+  是 MCP 同步连接的历史设计）。MCP 是**可选增强**（连不上不影响对话），不该卡启动：
+  - 启动期动态工具只装剪贴板；MCP 改由 `AppState::spawn_mcp_warmup` 在服务就绪后
+    **后台连接**，连上即把工具**注入运行中的 agent**（`register_dynamic_tools`，
+    与插件工具同一注入路径）——**不重建 agent**，因此不与用户此刻的对话争 agent 写锁；
+  - `tauri::wait_for_server_ready` 的探测超时 `2s` → **`300ms`**：此前「端口已监听但
+    Router 未就绪」时每轮探测都走满 2s 超时（+500ms 间隔 = 2.5s/轮），把「刚就绪」的时刻
+    最多推迟 2.5s；改后 0.8s/轮，就绪即被发现（失败只是重试，总超时 30s 不变）。
+  - 效果：窗口出现 13.6s（npx 冷）/ 5.9s（npx 热）→ **约 1.7s**；MCP 工具在后台就绪后
+    自动可用（日志出现「MCP 后台预热完成：工具已注入运行中的 agent」）。
+  - **配置热重载不受影响**：`reload_agent` 内部仍 `mcp_tools.sync` 对齐连接、`bridges()`
+    取工具，重建后的 agent 依旧带 MCP 工具；预热失败后若用户改配置触发重载，那条路径会顺带重试。
+
 ## [1.0.0] - 2026-10-23
 
 > **1.0 定位**：架构稳定的基线版本。本版**没有面向用户的新功能**——它的全部内容是「把 5.6 万行的单体内核拆成编译期插件 + 把依赖栈推到现代版本 + 收敛装配形状」。用户可感知的变化只有一处：技能面板去掉一块**从未显示过内容**的「使用复审」占位。**不需要任何数据迁移**：数据目录、配置格式、向量库文件与 0.7.0 完全一致（`lancedb` 刻意未升，见下）。

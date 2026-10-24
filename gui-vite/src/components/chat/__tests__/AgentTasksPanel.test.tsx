@@ -1,8 +1,9 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import AgentTasksPanel from '../AgentTasksPanel';
+import AgentTasksPanel, { DelegateMessages } from '../AgentTasksPanel';
 import { mockTaskCancelCalls, resetTaskMocks } from '@/test/mocks/handlers';
+import { useAppStore } from '@/lib/store';
 
 /** 会话后台任务面板（ADR-026：活跃在上、完成沉底、可展开、可取消）。 */
 
@@ -90,5 +91,25 @@ describe('AgentTasksPanel', () => {
     await waitFor(() => {
       expect(mockTaskCancelCalls).toEqual([{ taskId: 'task-1' }]);
     });
+  });
+
+  /**
+   * 回归（zustand 5 升级引入，1.0.1 修复）：选择器返回值必须**引用稳定**。
+   *
+   * 旧实现 `useAppStore((s) => s.sessionMessages[taskId] ?? [])` 在 key 不存在时
+   * 每次调用都返回新数组 → React 的 `useSyncExternalStore` 每次渲染都判定
+   * 「store 变了」→ 无限重渲染 → `Maximum update depth exceeded`（React #185）
+   * → 整页被 ErrorBoundary 兜住。
+   *
+   * 触发条件很日常：点开一个**尚未收到快照**的委托任务（子会话消息还没进 store）。
+   *
+   * 判别力：把选择器改回 `?? []`，本用例会在渲染期抛 #185 而失败。
+   */
+  it('renders DelegateMessages with an empty store without infinite re-render (React #185)', () => {
+    useAppStore.setState({ sessionMessages: {} });
+    // 若有 bug，render 本身会在渲染期抛 #185（Maximum update depth）→ 用例直接失败。
+    const r = render(<DelegateMessages taskId="bt_not_in_store" status="completed" />);
+    expect(screen.getByText('无过程记录')).toBeInTheDocument();
+    r.unmount();
   });
 });

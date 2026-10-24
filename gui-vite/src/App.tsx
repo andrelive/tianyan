@@ -52,10 +52,33 @@ function App() {
   }, [fontSize]);
 
   // Check config status on mount
+  //
+  // **查询失败 ≠ 未配置**：后端可能仍在启动（如 MCP 连接期）或网络抖动，此时把
+  // `configured` 置 false 会把用户**踢进配置向导**（配置与数据其实都在，向导还会
+  // 覆盖用户设置）。这里改成有限重试：全部失败才按未配置处理，并打日志便于排查。
   useEffect(() => {
-    apiGet<ConfigStatus>('/config/status')
-      .then((status) => setConfigured(status.configured))
-      .catch(() => setConfigured(false));
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const attempt = (n: number): void => {
+      apiGet<ConfigStatus>('/config/status')
+        .then((status) => {
+          if (!cancelled) setConfigured(status.configured);
+        })
+        .catch((err: unknown) => {
+          if (cancelled) return;
+          if (n < 5) {
+            timer = setTimeout(() => attempt(n + 1), 600);
+            return;
+          }
+          console.error('[App] 配置状态查询连续失败（后端可能未就绪），按未配置处理：', err);
+          setConfigured(false);
+        });
+    };
+    attempt(0);
+    return () => {
+      cancelled = true;
+      if (timer) clearTimeout(timer);
+    };
   }, [setConfigured]);
 
   useKeyboardShortcuts({

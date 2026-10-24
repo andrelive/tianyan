@@ -444,23 +444,30 @@ impl AppState {
         // 与 reload_agent 共用同一构造助手）
         let snapshot_manager = build_snapshot_manager(&config);
 
-        // MCP 工具桥接：连接配置中的 MCP 服务器，生成动态工具
-        // （图片类返回，如浏览器截图，落盘到 {data_dir}/mcp_images/）
+        // MCP 工具桥接：**后台连接**（启动时延治理，1.0.1）
+        //
+        // 此前这里是 `mcp_tools.sync(&config.mcp.servers).await`——同步等待所有 MCP
+        // 服务器，而 `npx` 冷启动实测 **12 秒**、缓存热 3 秒。它在 `AppState::new` 里
+        // await 的后果是：阻塞 `create_app` → Axum 不开始服务 → tauri 侧 `/health`
+        // 探测一直失败 → **窗口延迟显示十几秒**（实测日志：前置 1.5s + MCP 12s）。
+        //
+        // MCP 是**可选增强**（连不上不影响对话），不该卡启动。因此启动期动态工具
+        // 只有剪贴板（组件工具由 `component_dynamic_tools` 单独注入），MCP 工具交给
+        // [`Self::spawn_mcp_warmup`] 在服务就绪后后台连接、**注入运行中的 agent**
+        // ——不重建 agent，也不与用户此刻的对话争锁。
         let mcp_tools = Arc::new(McpToolManager::with_image_dir(
             config.storage.data_dir.join("mcp_images"),
         ));
-        mcp_tools.sync(&config.mcp.servers).await;
         // 剪贴板 outbox（组合根收敛：ClipboardWriteTool 与 API 层共享同一实例；
         // 配置热更新只重建 agent，此状态跨请求/跨重载保持）
         let clipboard_outbox = Arc::new(Mutex::new(Vec::new()));
-        let mut dynamic_tools = mcp_tools.bridges().await;
-        dynamic_tools.push(Arc::new(ClipboardWriteTool::new(clipboard_outbox.clone())));
-        if !dynamic_tools.is_empty() {
-            tracing::info!(
-                tool_count = dynamic_tools.len(),
-                "动态工具已就绪（含剪贴板写入）"
-            );
-        }
+        let dynamic_tools: Vec<Arc<dyn tianyan::agent::DynamicToolExecutor>> =
+            vec![Arc::new(ClipboardWriteTool::new(clipboard_outbox.clone()))];
+        tracing::info!(
+            tool_count = dynamic_tools.len(),
+            mcp_pending = config.mcp.servers.iter().filter(|s| s.enabled).count(),
+            "启动期动态工具已就绪（MCP 工具由后台预热补充，不阻塞启动）"
+        );
 
         // 构建 Agent（传入 vfs + 技能组件 + 共享模型服务 + MCP 动态工具；
         // session_manager / trace_collector 与 API 层共享同一实例——组合根收敛）
@@ -1044,6 +1051,56 @@ impl AppState {
         }
         tracing::info!(count = tools.len(), "插件工具已注册");
         agent.register_dynamic_tools(tools).await;
+    }
+
+    /// 后台预热 MCP 连接（启动时延治理，1.0.1）。
+    ///
+    /// 启动路径**不再同步等待 MCP**（`npx` 冷启动实测 12 秒）：服务先起来、窗口先
+    /// 出现；本方法在后台完成连接，然后把 MCP 动态工具**注入运行中的 agent**
+    /// （与 [`Self::register_plugin_tools`] 同一条注入路径 `register_dynamic_tools`），
+    /// **不重建 agent**——因此不会与用户此刻的对话争 agent 写锁。
+    ///
+    /// 与配置热重载的关系：`reload_agent` 内部仍会 `mcp_tools.sync` 对齐连接、
+    /// `bridges()` 取工具，所以重建后的 agent **依旧带 MCP 工具**，本方法无需被重载
+    /// 路径再次调用；若预热失败而用户随后改了配置触发重载，那条路径会顺带重试连接。
+    ///
+    /// 失败只 `warn`（MCP 连不上不影响对话——与「插件是可选增强」同一档语义）。
+    pub(crate) fn spawn_mcp_warmup(state: &Arc<Self>) {
+        let weak = Arc::downgrade(state);
+        tokio::spawn(async move {
+            let Some(state) = weak.upgrade() else {
+                return;
+            };
+            // 先看配置：没配「已启用」的 MCP 服务器就不必预热（省一次无用连接尝试）。
+            // 读锁在块内取、块内释放——`reload_agent` 自己也要读 config，避免读写交错。
+            let servers = {
+                let config = state.config.read().await;
+                if !config.mcp.servers.iter().any(|s| s.enabled) {
+                    return;
+                }
+                config.mcp.servers.clone()
+            };
+            let started = std::time::Instant::now();
+            tracing::info!("MCP 后台预热开始（不阻塞启动）");
+
+            state.mcp_tools.sync(&servers).await;
+            let tools = state.mcp_tools.bridges().await;
+            if tools.is_empty() {
+                tracing::warn!(
+                    elapsed_ms = started.elapsed().as_millis() as u64,
+                    "MCP 后台预热结束：未取得任何工具（连接失败或服务端无工具）"
+                );
+                return;
+            }
+            let count = tools.len();
+            let agent = state.agent().await;
+            agent.register_dynamic_tools(tools).await;
+            tracing::info!(
+                tools = count,
+                elapsed_ms = started.elapsed().as_millis() as u64,
+                "MCP 后台预热完成：工具已注入运行中的 agent（无需重启）"
+            );
+        });
     }
 
     /// 获取定时智能体任务管理器（未装配时为 None）。
