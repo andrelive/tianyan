@@ -172,6 +172,45 @@ Tool 分支对每条 `Part::ToolResult` 调 `SessionImages::resolve(content)`：
 只是它被本功能的端到端验证撞出来了——首 token 预算（300s）都没等到响应头，
 表现为"对话卡死且无任何日志"，是最难查的一类故障。
 
+### 3. 与 DSH `read_image` 对账（补齐 4 项，1 项刻意不同）
+
+首版实现没查 DSH 源码（照 ADR-047 的同构思路 + 协议实测推导）。事后对账
+（`deepseek-harness/packages/fs/tool-fs/`）结论：
+
+**结构同源**——DSH 的 `read` 是 `Model-facing UTF-8 read`（全文无 image 逻辑），
+`read_image` 是**独立工具**；与本 ADR 的 `read_file` / `view_image` 一一对应。
+「把 read 做成多模态」在 DSH 也不成立。
+
+**补齐的 4 项**（都是「能识别 ≠ 上游能接收」的缺口）：
+
+| 项 | 实现 |
+|---|---|
+| 尺寸/像素上限 + 降采样 | 长边 >2048 或像素 >2048² → `Lanczos3` 等比缩；**解码前**按 `MAX_DECODE_PIXELS`（6400 万）硬拒（100MP 图解码要数百 MB） |
+| 16-bit PNG 规范化 | 读 IHDR 位深（偏移 24）→ 16-bit 解码后转 8-bit 重编码（少数 provider 直接 400） |
+| 坐标乘数 | 结果回带 `original_dimensions` + `scale_hint`（`original/副本`，两轴差 <1% 只给一个数）——模型在原图坐标定位特征时换算 |
+| 能力门控 | `ToolContext::chat_model_capabilities`（会话选择 > `preferences.chat`）→ 明确声明了能力但不含 `vision` 时**早失败**，省一次往返与一条误导性 400 |
+
+**刻意不同（1 项）**：DSH 对 `inputModalities === undefined` 也拒绝（它的
+undefined = 路由解析不到模型，属异常）；天演的 `capabilities` 是**可选**的用户
+标签（`serde(default)` → 空数组，旧配置与新加模型都可能未标注），空数组只说明
+"没标"而不是"不能"，因此放行——门控只在"标了能力但没标 vision"时拦。这是本次
+对账里唯一一处不能照抄的地方：**能力标签的语义取决于它怎么产生、以及缺失意味着
+什么**（DSH 来自 provider 目录，缺失 = 解析失败；天演来自用户勾选，缺失 = 未标注）。
+
+> **实施期教训（记录在案）**：判断"某个模型有没有标 vision"时，我用 PowerShell
+> 手搓了一个 TOML 解析，把 `capabilities`（**字母序在 `name` 之前**）归到了上一条
+> 模型名下，于是 `deepseek-v4.1-flash:1017` 被误读成"空数组"，还据此写进了代码
+> 注释与本文档。已修正：解析逻辑抽成纯函数
+> `lookup_model_capabilities`（core `agent::tool_context`）+ 6 个单测（含"未标
+> 能力 ≠ 查不到"与 provider 作用域），配置形态用 TOML 字面量**逐字节模拟落盘
+> 顺序**。**纪律：判定配置事实一律走代码序列化/反序列化，不手搓解析**。
+
+**不做（有证据再上）**：`compaction-image-offload`（上游返回
+`IMAGE_OFFLOAD_REQUIRED` → 追加持久事件 `image/offload` → 最早输入图投影成
+占位文本 → 重试）。它是**事件溯源式**的（不改历史内容，故不产生 ADR-048 那类
+前缀分叉），形态是对的；但需要 provider 侧错误码识别 + 请求错误瀑布 seam，
+而天演目前没有任何"上游要求卸载"的实测证据——按「不为假设的需求加机制」搁置。
+
 ## 与既有决策对账
 
 - **ADR-001 / VFS**：图片字节是**运行期产物**（与快照 ADR-006、spill ADR-047、

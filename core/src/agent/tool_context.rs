@@ -185,4 +185,155 @@ impl ToolContext {
     pub async fn pending_approval_fingerprints(&self) -> Vec<String> {
         self.pending_approval_fingerprints.lock().await.clone()
     }
+
+    /// 当前会话生效的**聊天模型能力标签**（ADR-050 的图片能力门控）。
+    ///
+    /// 解析顺序与会话路由一致：`SessionHeader.model_selection`（会话级选择）
+    /// 优先，缺失时回落 `models.preferences.chat`（全局默认）。
+    ///
+    /// 返回 `None` 的三种情形都**不门控**（调用方放行、让上游兜底）：未注入会话
+    /// 管理器、配置槽位未初始化、该模型不在配置里（未知模型）。门控数据缺失时
+    /// 不该凭空拦截用户——与「未装配不阻塞」同一档语义。
+    pub async fn chat_model_capabilities(
+        &self,
+        session_id: &str,
+    ) -> Option<(String, Vec<crate::config::ModelCapability>)> {
+        let config = crate::config::try_get_config()?;
+        let session_selection = match &self.session_manager {
+            Some(manager) => manager
+                .get_session(session_id)
+                .await
+                .ok()
+                .flatten()
+                .and_then(|session| session.header.model_selection),
+            None => None,
+        };
+        let (provider, model) = match session_selection {
+            Some(selection) => (Some(selection.provider), selection.model),
+            None => {
+                let pref = config.models.preferences.chat.as_ref()?;
+                (Some(pref.provider.clone()), pref.model.clone())
+            }
+        };
+        lookup_model_capabilities(config, provider.as_deref(), &model)
+    }
+}
+
+/// 从配置里按 `provider + model` 查能力标签（ADR-050 门控的纯函数核心）。
+///
+/// `provider` 为 `None` 时跨 provider 找第一个同名模型（配置里同名模型可挂在
+/// 多个 provider 上，此时按 provider 列表顺序取第一个——与模型路由的兜底同向）。
+/// 查不到返回 `None`：未知模型属"数据缺失"，调用方放行、由上游兜底。
+///
+/// **为什么抽成纯函数**：门控数据源是配置里的可选标签，判错方向（误拦 vs 误放）
+/// 直接影响用户能否看图——这段解析必须可单测，而不是靠手搓脚本读 TOML 推断
+/// （2026-10-24 实错：人工解析把字母序靠前的 `capabilities` 归到了上一条模型）。
+pub(crate) fn lookup_model_capabilities(
+    config: &crate::config::TianyanConfig,
+    provider: Option<&str>,
+    model: &str,
+) -> Option<(String, Vec<crate::config::ModelCapability>)> {
+    let entry = config
+        .models
+        .providers
+        .iter()
+        .filter(|p| provider.is_none_or(|want| p.name == want))
+        .flat_map(|p| p.models.iter())
+        .find(|m| m.name == model)?;
+    Some((model.to_string(), entry.capabilities.clone()))
+}
+
+#[cfg(test)]
+mod capability_lookup_tests {
+    use super::*;
+    use crate::config::{ModelCapability, TianyanConfig};
+
+    /// 用 TOML 构造配置（**逐字节模拟落盘形态**：字段按字母序，`capabilities`
+    /// 在 `name` 之前——2026-10-24 正是这一点让手工解析读错）。
+    fn config_with_models() -> TianyanConfig {
+        toml::from_str(
+            r#"
+[models.preferences.chat]
+model = "pref-model"
+provider = "prov-a"
+
+[[models.providers]]
+endpoint = "http://localhost:11434/v1"
+name = "prov-a"
+
+[[models.providers.models]]
+capabilities = ["chat", "vision"]
+name = "vision-model"
+
+[[models.providers.models]]
+capabilities = ["chat"]
+name = "text-model"
+
+[[models.providers.models]]
+name = "unlabeled-model"
+
+[[models.providers]]
+endpoint = "http://localhost:11435/v1"
+name = "prov-b"
+
+[[models.providers.models]]
+capabilities = ["chat", "vision"]
+name = "pref-model"
+"#,
+        )
+        .expect("解析测试配置")
+    }
+
+    #[test]
+    fn test_lookup_finds_vision_model_by_provider() {
+        let config = config_with_models();
+        let (model, caps) =
+            lookup_model_capabilities(&config, Some("prov-a"), "vision-model").expect("应命中");
+        assert_eq!(model, "vision-model");
+        assert!(caps.contains(&ModelCapability::Vision));
+    }
+
+    #[test]
+    fn test_lookup_text_only_model_has_no_vision() {
+        let config = config_with_models();
+        let (_, caps) =
+            lookup_model_capabilities(&config, Some("prov-a"), "text-model").expect("应命中");
+        assert!(
+            !caps.contains(&ModelCapability::Vision),
+            "只标 chat 的模型无 vision"
+        );
+    }
+
+    #[test]
+    fn test_lookup_unlabeled_model_is_empty_not_missing() {
+        let config = config_with_models();
+        let (_, caps) = lookup_model_capabilities(&config, Some("prov-a"), "unlabeled-model")
+            .expect("未标能力的模型仍应命中（空数组，而非查不到）");
+        assert!(caps.is_empty(), "capabilities 缺省 = 空数组");
+    }
+
+    #[test]
+    fn test_lookup_respects_provider_scope() {
+        let config = config_with_models();
+        // prov-a 没有 pref-model，prov-b 有：限定 prov-a 时必须查不到
+        assert!(lookup_model_capabilities(&config, Some("prov-a"), "pref-model").is_none());
+        assert!(
+            lookup_model_capabilities(&config, Some("prov-b"), "pref-model").is_some(),
+            "prov-b 的 pref-model 存在"
+        );
+    }
+
+    #[test]
+    fn test_lookup_without_provider_uses_first_match() {
+        let config = config_with_models();
+        let (_, caps) =
+            lookup_model_capabilities(&config, None, "pref-model").expect("跨 provider 命中");
+        assert!(caps.contains(&ModelCapability::Vision));
+    }
+
+    #[test]
+    fn test_lookup_unknown_model_returns_none() {
+        let config = config_with_models();
+        assert!(lookup_model_capabilities(&config, Some("prov-a"), "nope").is_none());
+    }
 }
