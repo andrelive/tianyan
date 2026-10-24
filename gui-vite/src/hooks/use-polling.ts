@@ -19,6 +19,19 @@ export interface UsePollingOptions {
   onError?: (error: unknown) => void;
   /** 轮询启用开关（false 时暂停；默认 true）。 */
   enabled?: boolean;
+  /**
+   * 重置键（「拉取目标变了」/「数据变脏了」）：值变化时清掉旧计时器并
+   * **立即执行一次**（`immediate` 为真时，缺省即真），然后按原间隔重新计时。
+   *
+   * 为什么需要：`fn` 经 ref 读取（调用方无需稳定身份，组件重渲染不重启轮询），
+   * 代价是 effect **看不见** `fn` 里引用的目标变化——切换会话后仍等下一个
+   * tick 才去拉新目标，表现为「上一个会话的数据滞留一个轮询间隔」
+   * （SessionTodoPanel 实测 2-3 秒）。
+   *
+   * 取值须可序列化（string / number / null 等）：内部按 `JSON.stringify`
+   * 比较，调用方每次渲染传新数组也不会误重启轮询。
+   */
+  resetKeys?: readonly unknown[];
 }
 
 export interface UsePollingResult {
@@ -33,13 +46,16 @@ export function usePolling(
   intervalMs: number,
   options: UsePollingOptions = {},
 ): UsePollingResult {
-  const { immediate = true, onError, enabled = true } = options;
+  const { immediate = true, onError, enabled = true, resetKeys } = options;
   const [loading, setLoading] = useState(false);
 
   const fnRef = useRef(fn);
   fnRef.current = fn;
   const onErrorRef = useRef(onError);
   onErrorRef.current = onError;
+
+  // 重置键序列化：数组按内容比较（调用方每次渲染传新数组不应重启轮询）
+  const resetKey = resetKeys ? JSON.stringify(resetKeys) : '';
 
   const run = useCallback(async (forceLoading: boolean) => {
     if (forceLoading) setLoading(true);
@@ -57,7 +73,8 @@ export function usePolling(
     if (immediate) void run(true);
     const timer = setInterval(() => void run(false), intervalMs);
     return () => clearInterval(timer);
-  }, [enabled, immediate, intervalMs, run]);
+    // resetKey 进依赖：重置键变化 → effect 重跑 → 清旧计时器 + 立即执行一次
+  }, [enabled, immediate, intervalMs, run, resetKey]);
 
   const refresh = useCallback((forceLoading = false) => run(forceLoading), [run]);
   return { loading, refresh };

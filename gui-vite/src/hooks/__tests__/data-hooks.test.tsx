@@ -102,6 +102,34 @@ describe('usePolling', () => {
     });
     expect(fn).toHaveBeenCalledTimes(1);
   });
+
+  it('re-runs immediately when resetKeys change instead of waiting for the next tick', async () => {
+    vi.useFakeTimers();
+    const fn = vi.fn().mockResolvedValue(undefined);
+    const { rerender } = renderHook(
+      ({ key }: { key: string }) => usePolling(fn, 60_000, { resetKeys: [key] }),
+      { initialProps: { key: 'a' } },
+    );
+    expect(fn).toHaveBeenCalledTimes(1); // 挂载立即一次（immediate 默认 true）
+
+    // 换重置键 → 立即再执行一次（interval 60s，不可能靠 tick 走到）
+    await act(async () => {
+      rerender({ key: 'b' });
+    });
+    expect(fn).toHaveBeenCalledTimes(2);
+
+    // 同键重渲染（数组是新的，内容没变）不重启轮询——否则每次渲染都发一次请求
+    await act(async () => {
+      rerender({ key: 'b' });
+    });
+    expect(fn).toHaveBeenCalledTimes(2);
+
+    // 再次变化 → 又立即执行
+    await act(async () => {
+      rerender({ key: 'c' });
+    });
+    expect(fn).toHaveBeenCalledTimes(3);
+  });
 });
 
 describe('useChatStream', () => {

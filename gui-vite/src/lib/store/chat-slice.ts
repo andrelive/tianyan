@@ -97,6 +97,14 @@ export interface ChatSlice {
   // 会话消息缓存：本地真相源（历史加载只做一次；流式按 session_id 归属写入，
   // 切走会话流继续跑，切回直接显示累积内容）。messages 是当前会话投影。
   sessionMessages: Record<string, ChatMessage[]>;
+  /**
+   * 待办/目标数据的**变脏计数**（D）：`todo` / `goal` 工具结果落库时递增。
+   *
+   * 会话待办面板订阅它作为 `usePolling` 的 resetKey —— 智能体一改待办，面板
+   * 立即重取，不必等轮询 tick（否则最多滞后一个间隔 = 3 秒）。只作**信号**，
+   * 不承载数据（权威数据在服务端 todos/goals）；非持久化（partialize 不含）。
+   */
+  todosRevision: number;
   /** 分页元数据（按会话；上滚加载的状态）。 */
   sessionMessageMeta: Record<string, SessionMessageMeta>;
   /**
@@ -381,6 +389,7 @@ export const createChatSlice: StateCreator<ChatSlice, [], [], ChatSlice> = (set,
 
   // Messages
   sessionMessages: {},
+  todosRevision: 0,
   messages: [],
   setSessionMessages: (sessionId, messages) =>
     set((s) => {
@@ -645,14 +654,19 @@ export const createChatSlice: StateCreator<ChatSlice, [], [], ChatSlice> = (set,
       }),
     ),
   applyToolResult: (result, sessionId) =>
-    set((s) =>
-      updateSessionMessages(s, sessionId, (msgs) =>
+    set((s) => {
+      // D：本次结果若来自会改动待办/目标的工具（todo / goal），顺带 bump 变脏
+      // 计数 —— 会话待办面板以它为 resetKey，于是「智能体勾掉一项」在工具结果
+      // 到达的同一刻就能重取，而不是等下一个轮询 tick（最长 3 秒）。
+      let touchedTodoData = false;
+      const patch = updateSessionMessages(s, sessionId, (msgs) =>
         msgs.map((m) => {
           if (!m.tool_calls || m.tool_calls.length === 0) return m;
           let changed = false;
           const tool_calls = m.tool_calls.map((c) => {
             if (c.id !== result.tool_call_id) return c;
             changed = true;
+            if (c.name === 'todo' || c.name === 'goal') touchedTodoData = true;
             return {
               ...c,
               duration_ms: result.duration_ms,
@@ -664,8 +678,9 @@ export const createChatSlice: StateCreator<ChatSlice, [], [], ChatSlice> = (set,
           });
           return changed ? { ...m, tool_calls } : m;
         }),
-      ),
-    ),
+      );
+      return touchedTodoData ? { ...patch, todosRevision: s.todosRevision + 1 } : patch;
+    }),
   appendThinking: (delta, sessionId) =>
     set((s) =>
       updateSessionMessages(s, sessionId, (msgs) =>

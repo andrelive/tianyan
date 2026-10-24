@@ -436,6 +436,36 @@ describe('useAppStore', () => {
     expect(useAppStore.getState().messages[1].tool_calls?.[0]?.duration_ms).toBe(120);
   });
 
+  it('bumps todosRevision only for todo/goal tool results (D：工具改待办 → 面板立即重取)', () => {
+    useAppStore.setState({
+      messages: [
+        { role: 'user', segments: [{ type: 'text', text: 'go' }] },
+        { role: 'assistant', segments: [] },
+      ],
+    });
+    useAppStore.getState().appendToolCalls([
+      { id: 'call_todo', name: 'todo', arguments: '{}', presentation: 'generic' },
+      { id: 'call_glob', name: 'glob', arguments: '{}', presentation: 'search' },
+    ]);
+    expect(useAppStore.getState().todosRevision).toBe(0);
+
+    // 非 todo/goal 工具的结果：不动变脏计数（否则每次工具调用都会打一次 todo 接口）
+    useAppStore.getState().applyToolResult({
+      tool_call_id: 'call_glob',
+      duration_ms: 3,
+      success: true,
+    });
+    expect(useAppStore.getState().todosRevision).toBe(0);
+
+    // todo / goal 工具结果落库：递增（会话待办面板以它为 resetKey 立即重取）
+    useAppStore.getState().applyToolResult({
+      tool_call_id: 'call_todo',
+      duration_ms: 3,
+      success: true,
+    });
+    expect(useAppStore.getState().todosRevision).toBe(1);
+  });
+
   // ── Streaming ──
 
   it('setStreamStatus updates streamStatus per session', () => {

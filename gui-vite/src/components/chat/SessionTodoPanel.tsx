@@ -1,7 +1,8 @@
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useRef } from 'react';
 import { usePolling } from '@/hooks/use-polling';
 import { fetchTodos, fetchGoals } from '@/lib/api-client';
-import type { GoalWithProgress, TodoItem } from '@/lib/types';
+import { readTodoSnapshot, writeTodoSnapshot, type TodoSnapshot } from '@/lib/session-todo-cache';
+import { useAppStore } from '@/lib/store';
 import {
   ChevronDown,
   ChevronUp,
@@ -27,21 +28,54 @@ const POLL_INTERVAL_MS = 3000;
  * 宽度与输入框对齐（同 max-w-4xl 居中容器）。
  */
 export default function SessionTodoPanel({ sessionId }: { sessionId: string | null }) {
-  const [todos, setTodos] = useState<TodoItem[]>([]);
-  const [goals, setGoals] = useState<GoalWithProgress[]>([]);
   const [expanded, setExpanded] = useState(true);
 
+  /**
+   * 视图 = 「这是哪个会话的数据 + 数据本身」。
+   *
+   * `sessionId` 变化时**在渲染期同步换**（React 官方「props 变化时调整 state」
+   * 模式）——先读缓存，命中即同帧换掉，未命中先清空。换成 effect 里换会先
+   * paint 一帧**上个会话**的待办，正是要修的症状。
+   */
+  const [view, setView] = useState<{ sid: string | null; data: TodoSnapshot }>(() => ({
+    sid: sessionId,
+    data: readTodoSnapshot(sessionId),
+  }));
+  if (view.sid !== sessionId) {
+    setView({ sid: sessionId, data: readTodoSnapshot(sessionId) });
+  }
+
+  // 轮询函数保持稳定身份（靠 ref 读最新目标），请求返回后用它做**竞态守卫**：
+  // 请求在飞时会话已切走 → 只更新缓存，不覆盖当前会话的视图。
+  const sessionRef = useRef(sessionId);
+  sessionRef.current = sessionId;
+
+  // D：「工具执行改动了待办/目标」的变脏计数（chat-slice 在 todo/goal 的
+  // 工具结果落库时递增）——作为 resetKey 触发立即重取，不必等下一个 tick。
+  const todosRevision = useAppStore((s) => s.todosRevision);
+
   const poll = useCallback(async () => {
+    const sid = sessionRef.current;
+    if (!sid) return;
     try {
-      const [t, g] = await Promise.all([fetchTodos(sessionId!), fetchGoals(sessionId!)]);
+      const [t, g] = await Promise.all([fetchTodos(sid), fetchGoals(sid)]);
       // 完成条目保留展示（划线）；目标只展示活跃条目
-      setTodos(t.todos);
-      setGoals(g.goals.filter((x) => x.goal.status === 'active'));
+      const snapshot: TodoSnapshot = {
+        todos: t.todos,
+        goals: g.goals.filter((x) => x.goal.status === 'active'),
+      };
+      writeTodoSnapshot(sid, snapshot);
+      if (sessionRef.current === sid) setView({ sid, data: snapshot });
     } catch {
       /* 轮询失败静默保留旧数据 */
     }
-  }, [sessionId]);
-  usePolling(poll, POLL_INTERVAL_MS, { enabled: !!sessionId });
+  }, []);
+  usePolling(poll, POLL_INTERVAL_MS, {
+    enabled: !!sessionId,
+    resetKeys: [sessionId, todosRevision],
+  });
+
+  const { todos, goals } = view.data;
 
   if (!sessionId || (todos.length === 0 && goals.length === 0)) return null;
 
