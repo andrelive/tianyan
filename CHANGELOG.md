@@ -5,10 +5,36 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [1.0.1] - 2026-10-24
+## [1.0.0] - 2026-10-23
+
+> **1.0 定位**：架构稳定的基线版本。本版**没有面向用户的新功能**——它的全部内容是「把 5.6 万行的单体内核拆成编译期插件 + 把依赖栈推到现代版本 + 收敛装配形状」。用户可感知的变化集中在两处：技能面板去掉一块**从未显示过内容**的「使用复审」占位；**启动从约 13.6 秒降到约 1.7 秒**（MCP 改为后台连接）。另修掉首发自测发现的 3 个问题（见 Fixed）。**不需要任何数据迁移**：数据目录、配置格式、向量库文件与 0.7.0 完全一致（`lancedb` 刻意未升，见下）。
+>
+> 关于版本号：`0.8.0` **从未对外发布**（无 tag、无产物），它的全部内容已并入本版；因此 CHANGELOG 里没有单独的 0.8.0 段。
+
+### Changed
+- **依赖现代化（期 5）**——1.0 前的最后窗口。Rust 侧：semver 内 360 包 + `thiserror 2` /
+  `rusqlite 0.33` / `image 0.25` / `calamine 0.28` / `config 0.15` / `dirs 6` /
+  `pulldown-cmark 0.13` / `schemars 1.0`。前端：semver 内 118 包 + **`vite 8`（Rolldown 内核，
+  构建 21s → 1.5s）** / `vitest 5` / `@vitejs/plugin-react 6` / `jsdom 30` /
+  **`React 19`** / `zustand 5`。
+  **三处刻意不升**（依据见 [`docs/operations/dependency-upgrade.md`](docs/operations/dependency-upgrade.md)）：
+  `lancedb`（0.39/0.40 上游 `job.rs` 的 cfg gate 缺失，未启用 `remote` 时编译失败；启用则拉进
+  gRPC 远程客户端整套依赖，我们用不到）、`msw 3`（异步管道与 `vi.useFakeTimers()` 组合不完成，
+  测试工具升级收益为零）、`tailwindcss 4`（配置体系重写影响全部视觉，而当前无视觉回归测试）。
+  升级期间唯一的行为变化：xlsx 内错误单元格文本从 `#DIV/0!` 变 `Div0`（calamine 0.28 移除
+  `CellErrorType` 的 `Display`，罕见路径）
+- **微内核化：编译期插件化（ADR-049 期 1–4）**——把「改一行实现要重编 5.6 万行」拆成「改插件只重编插件 + 装配包」。新增 **18 个 crate**：`tools-fs` / `tools-code` / `tools-todo` / `tools-web`（工具）、`storage-vector` / `storage-sqlite`（存储适配器）、`task-builtin` / `task-evolution`（定时任务）、`policy-approval` / `policy-context` / `policy-review`（策略）、`provider-client` / `provider-llm` / `provider-embed`（模型 provider）、`tool-pipeline`（工具管线出口）；另有 `service-config`（配置加载/迁移/校验）、`assembly`（装配清单，期 4a）、`tools-ops`（运维工具，期 4d）。`core/src` 生产源码 42,382 → **36,584 行**，`lancedb`/`arrow`/`tree-sitter ×6`/`async-openai` 依赖全部离开 core
+- **装配器三分与终端消费者**：`tianyan-assembly`（装配清单，期 4a）+ `app`（bin）/ `tauri`（桌面端）（启动编排）是全仓认识具体插件的三处；另有一个**终端消费者** `tianyan-tools-ops`（运维脚本，期 4d：依赖插件但**不被任何 crate 依赖**）。`tianyan-server` 库经 **10 个类型擦除插槽**接收能力（工具清单 / 向量存储 / 结构化存储 / 任务清单 / 审批 / 上下文 / 任务评审 / LLM / Embedding / 工具管线），零插件依赖
+- **装配清单收敛（ADR-049 期 4a）**：新增 `tianyan-assembly` —— **10 个插件工厂**与两份装配清单（`full()` 生产 **10 插槽** / `policies()` 集成测试用的 **8 插槽前缀**）的唯一实现，另含 4 条**跨插件顺序断言**（工具 `fs → code → todo/goal → web` 逐位、任务 `evolution` 紧跟 `summary_generation`、工厂可重复调用）。改造前同一份清单在 `app` / `tauri` / `server/tests` / `app/tests` / `app/examples` 共 **5 处副本**，顺序纪律只靠注释互相提醒（顺序漂移不会编译失败，只会让提示词前缀缓存悄悄失效）。结果：`app/src/main.rs` 277 → 101 行、`tauri/src/server.rs` 268 → 114 行、`server/tests/common/factory.rs` 240 → 158 行；`app` 对插件的**直接**依赖 15 → 1（仅工具目录渲染口径）、`tauri` 15 → 0
+- **插槽平铺表治理（ADR-049 期 4b）**：`server/src/assembly.rs`（1773 行、11 个平铺字段 + 11 个 `with_*` + 12 个访问器）按**变化原因**收敛为 4 组并拆成目录模块——`manifests`（三份有序清单：工具注册 / 任务扫描 / 监听器顺序）、`storage`（结构化 + 向量）、`policies`（审批 / 上下文 / 任务自审）、`providers`（聊天视觉 + 嵌入）；单文件最大 377 行，「查一眼要滚三屏」消失。`AppState` 的工厂字段 7 → 3 组、`AppState::new` 形参 10 → 6（插槽 7 → 3，`#[allow(clippy::too_many_arguments)]` 随之删除）。**不保留** `AssemblyServices` 上的 11 个平铺 `with_*` 转发（单一构造路径：组 builder + 结构体更新语法），避免形成第二套口径。`build_agent` 的 24 形参**刻意不动**（那是「已构造对象转发」而非「未构造能力注入」，只有 2 个构造点且同一组合根内，不构成分叉风险）
+- **技能反馈回路收敛（ADR-049 期 4c）**：技能质量的判断改由**演化综述智能体**承担，依据三条事实来源——**技能使用统计**（近 30 天：调用次数 / 处理异常 / 均耗时 / 最后调用）+ 用户原话材料 + 技能清单；材料提示词新增一条纪律（调用多但处理异常多 → 描述或实现有问题；清单里有、统计零调用 → 先改 abstract 再看是否归档；**不凭感觉删技能**）。零调用技能**不在统计表里**，靠与「注册表清单」交叉发现（刻意不做集合差，避免第二份「技能清单」口径）。同时**退役旧范式的机械评分链**：`review_conversation`（160 行实现 + 164 行测试）、`SkillReview` / `SkillReviewPort` 契约、`SkillReviewFactory` 插槽（**插槽 11 → 10**）、`GET /api/v1/skills/stats` 的 `reviews` 字段与前端类型。理由：ADR-017 已把全部机械评分/阈值交给智能体（Jaccard / G2b / verify_preference 全删），而这条链的写侧在「记忆提取任务」并入演化任务时**漏搬**（不是「语义不同域」）；读侧 `SkillsPanel` 原有两处渲染（列表行内「使用复审 x/10」+ 详情头整块），但因写侧零生产者而**从未显示过任何内容**，故一并删除。`REVIEWS_PREFIX` 常量保留（`SkillManager` 仍需把历史 `_reviews` 目录排除在技能列表外）
+- **运维工具独立成包（ADR-049 期 4d）**：新增 `tianyan-tools-ops` —— **服务停止后直接修数据**的终端脚本包（`skill_import` 把方法论 md 导入技能库 / `rebuild_overviews` 存量 L1 目录化迁移），**不被任何 crate 依赖**。迁出后 `plugins/storage-vector` 的 dev-dependencies 从 **5 条插件间 dev 边**（`storage-sqlite` / `provider-embed` / `provider-llm` / `service-config` / `chrono`）收敛到**只剩 `tempfile`**——「插件之间零互赖」不再需要注释豁免。同时删除 2 个已完成使命的一次性脚本（`memory_cleanup` 625 行 / `memory_path_repair` 408 行——它们针对的历史问题均已修复，且无任何现行引用）；`import-skills/` 12 个方法论 md 资产随迁到 `tools-ops/assets/`。两个迁入脚本的**业务逻辑零改动**，共用的「最小 VFS 装配」（配置加载 → SQLite 后端 → LanceDB 向量 → 嵌入 provider → `VirtualFileSystemBuilder`）抽到 `tools-ops/src/lib.rs`
+- **闸门 B 收口**：内核四件套 `api 4,587 ≤ 6K && impl 14,957 ≤ 15K`；期 3 净增 pub trait 仅 3 个（`ApprovalGate` / `ContextPort` / `SkillReviewPort`，每个方法都有生产调用点证据）——其中 `SkillReviewPort` 已于期 4c 退役（机械评分链下线），**1.0 实际净增 2 个**
+- **装配安全加固**：删除全部不带装配的启动入口（`start_server` / `start_server_default` / `create_app_with_plugins` 等，删除前确认全仓零调用者）+ `start_server_inner` 启动期硬守卫——结构化存储是启动必需项，缺失即启动失败并点明缺哪个工厂，而不是静默用进程内存后端（数据不落盘、重启即空）
+- **删除死代码**：`role_learning`（573 行，零生产消费者）；保留被角色面板复用的纯函数 `categorize_task_by_keyword`
 
 ### Fixed
-- **点委托子任务 → 整页「页面渲染出错」（React #185，**1.0.0 回归**）**：
+- **点委托子任务 → 整页「页面渲染出错」（React #185，`zustand 5` 升级引入）**：
   `AgentTasksPanel` 的选择器 `useAppStore((s) => s.sessionMessages[taskId] ?? [])` 在
   子会话消息**尚未进 store** 时（点开一个还没收到快照的委托）会**每次调用都新建数组**
   —— zustand 5 直接走 React 的 `useSyncExternalStore`（v4 经 `use-sync-external-store`
@@ -36,36 +62,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     自动可用（日志出现「MCP 后台预热完成：工具已注入运行中的 agent」）。
   - **配置热重载不受影响**：`reload_agent` 内部仍 `mcp_tools.sync` 对齐连接、`bridges()`
     取工具，重建后的 agent 依旧带 MCP 工具；预热失败后若用户改配置触发重载，那条路径会顺带重试。
-
-## [1.0.0] - 2026-10-23
-
-> **1.0 定位**：架构稳定的基线版本。本版**没有面向用户的新功能**——它的全部内容是「把 5.6 万行的单体内核拆成编译期插件 + 把依赖栈推到现代版本 + 收敛装配形状」。用户可感知的变化只有一处：技能面板去掉一块**从未显示过内容**的「使用复审」占位。**不需要任何数据迁移**：数据目录、配置格式、向量库文件与 0.7.0 完全一致（`lancedb` 刻意未升，见下）。
->
-> 关于版本号：`0.8.0` **从未对外发布**（无 tag、无产物），它的全部内容已并入本版；因此 CHANGELOG 里没有单独的 0.8.0 段。
-
-### Changed
-- **依赖现代化（期 5）**——1.0 前的最后窗口。Rust 侧：semver 内 360 包 + `thiserror 2` /
-  `rusqlite 0.33` / `image 0.25` / `calamine 0.28` / `config 0.15` / `dirs 6` /
-  `pulldown-cmark 0.13` / `schemars 1.0`。前端：semver 内 118 包 + **`vite 8`（Rolldown 内核，
-  构建 21s → 1.5s）** / `vitest 5` / `@vitejs/plugin-react 6` / `jsdom 30` /
-  **`React 19`** / `zustand 5`。
-  **三处刻意不升**（依据见 [`docs/operations/dependency-upgrade.md`](docs/operations/dependency-upgrade.md)）：
-  `lancedb`（0.39/0.40 上游 `job.rs` 的 cfg gate 缺失，未启用 `remote` 时编译失败；启用则拉进
-  gRPC 远程客户端整套依赖，我们用不到）、`msw 3`（异步管道与 `vi.useFakeTimers()` 组合不完成，
-  测试工具升级收益为零）、`tailwindcss 4`（配置体系重写影响全部视觉，而当前无视觉回归测试）。
-  升级期间唯一的行为变化：xlsx 内错误单元格文本从 `#DIV/0!` 变 `Div0`（calamine 0.28 移除
-  `CellErrorType` 的 `Display`，罕见路径）
-- **微内核化：编译期插件化（ADR-049 期 1–4）**——把「改一行实现要重编 5.6 万行」拆成「改插件只重编插件 + 装配包」。新增 **18 个 crate**：`tools-fs` / `tools-code` / `tools-todo` / `tools-web`（工具）、`storage-vector` / `storage-sqlite`（存储适配器）、`task-builtin` / `task-evolution`（定时任务）、`policy-approval` / `policy-context` / `policy-review`（策略）、`provider-client` / `provider-llm` / `provider-embed`（模型 provider）、`tool-pipeline`（工具管线出口）；另有 `service-config`（配置加载/迁移/校验）、`assembly`（装配清单，期 4a）、`tools-ops`（运维工具，期 4d）。`core/src` 生产源码 42,382 → **36,584 行**，`lancedb`/`arrow`/`tree-sitter ×6`/`async-openai` 依赖全部离开 core
-- **装配器三分与终端消费者**：`tianyan-assembly`（装配清单，期 4a）+ `app`（bin）/ `tauri`（桌面端）（启动编排）是全仓认识具体插件的三处；另有一个**终端消费者** `tianyan-tools-ops`（运维脚本，期 4d：依赖插件但**不被任何 crate 依赖**）。`tianyan-server` 库经 **10 个类型擦除插槽**接收能力（工具清单 / 向量存储 / 结构化存储 / 任务清单 / 审批 / 上下文 / 任务评审 / LLM / Embedding / 工具管线），零插件依赖
-- **装配清单收敛（ADR-049 期 4a）**：新增 `tianyan-assembly` —— **10 个插件工厂**与两份装配清单（`full()` 生产 **10 插槽** / `policies()` 集成测试用的 **8 插槽前缀**）的唯一实现，另含 4 条**跨插件顺序断言**（工具 `fs → code → todo/goal → web` 逐位、任务 `evolution` 紧跟 `summary_generation`、工厂可重复调用）。改造前同一份清单在 `app` / `tauri` / `server/tests` / `app/tests` / `app/examples` 共 **5 处副本**，顺序纪律只靠注释互相提醒（顺序漂移不会编译失败，只会让提示词前缀缓存悄悄失效）。结果：`app/src/main.rs` 277 → 101 行、`tauri/src/server.rs` 268 → 114 行、`server/tests/common/factory.rs` 240 → 158 行；`app` 对插件的**直接**依赖 15 → 1（仅工具目录渲染口径）、`tauri` 15 → 0
-- **插槽平铺表治理（ADR-049 期 4b）**：`server/src/assembly.rs`（1773 行、11 个平铺字段 + 11 个 `with_*` + 12 个访问器）按**变化原因**收敛为 4 组并拆成目录模块——`manifests`（三份有序清单：工具注册 / 任务扫描 / 监听器顺序）、`storage`（结构化 + 向量）、`policies`（审批 / 上下文 / 任务自审）、`providers`（聊天视觉 + 嵌入）；单文件最大 377 行，「查一眼要滚三屏」消失。`AppState` 的工厂字段 7 → 3 组、`AppState::new` 形参 10 → 6（插槽 7 → 3，`#[allow(clippy::too_many_arguments)]` 随之删除）。**不保留** `AssemblyServices` 上的 11 个平铺 `with_*` 转发（单一构造路径：组 builder + 结构体更新语法），避免形成第二套口径。`build_agent` 的 24 形参**刻意不动**（那是「已构造对象转发」而非「未构造能力注入」，只有 2 个构造点且同一组合根内，不构成分叉风险）
-- **技能反馈回路收敛（ADR-049 期 4c）**：技能质量的判断改由**演化综述智能体**承担，依据三条事实来源——**技能使用统计**（近 30 天：调用次数 / 处理异常 / 均耗时 / 最后调用）+ 用户原话材料 + 技能清单；材料提示词新增一条纪律（调用多但处理异常多 → 描述或实现有问题；清单里有、统计零调用 → 先改 abstract 再看是否归档；**不凭感觉删技能**）。零调用技能**不在统计表里**，靠与「注册表清单」交叉发现（刻意不做集合差，避免第二份「技能清单」口径）。同时**退役旧范式的机械评分链**：`review_conversation`（160 行实现 + 164 行测试）、`SkillReview` / `SkillReviewPort` 契约、`SkillReviewFactory` 插槽（**插槽 11 → 10**）、`GET /api/v1/skills/stats` 的 `reviews` 字段与前端类型。理由：ADR-017 已把全部机械评分/阈值交给智能体（Jaccard / G2b / verify_preference 全删），而这条链的写侧在「记忆提取任务」并入演化任务时**漏搬**（不是「语义不同域」）；读侧 `SkillsPanel` 原有两处渲染（列表行内「使用复审 x/10」+ 详情头整块），但因写侧零生产者而**从未显示过任何内容**，故一并删除。`REVIEWS_PREFIX` 常量保留（`SkillManager` 仍需把历史 `_reviews` 目录排除在技能列表外）
-- **运维工具独立成包（ADR-049 期 4d）**：新增 `tianyan-tools-ops` —— **服务停止后直接修数据**的终端脚本包（`skill_import` 把方法论 md 导入技能库 / `rebuild_overviews` 存量 L1 目录化迁移），**不被任何 crate 依赖**。迁出后 `plugins/storage-vector` 的 dev-dependencies 从 **5 条插件间 dev 边**（`storage-sqlite` / `provider-embed` / `provider-llm` / `service-config` / `chrono`）收敛到**只剩 `tempfile`**——「插件之间零互赖」不再需要注释豁免。同时删除 2 个已完成使命的一次性脚本（`memory_cleanup` 625 行 / `memory_path_repair` 408 行——它们针对的历史问题均已修复，且无任何现行引用）；`import-skills/` 12 个方法论 md 资产随迁到 `tools-ops/assets/`。两个迁入脚本的**业务逻辑零改动**，共用的「最小 VFS 装配」（配置加载 → SQLite 后端 → LanceDB 向量 → 嵌入 provider → `VirtualFileSystemBuilder`）抽到 `tools-ops/src/lib.rs`
-- **闸门 B 收口**：内核四件套 `api 4,587 ≤ 6K && impl 14,957 ≤ 15K`；期 3 净增 pub trait 仅 3 个（`ApprovalGate` / `ContextPort` / `SkillReviewPort`，每个方法都有生产调用点证据）——其中 `SkillReviewPort` 已于期 4c 退役（机械评分链下线），**1.0 实际净增 2 个**
-- **装配安全加固**：删除全部不带装配的启动入口（`start_server` / `start_server_default` / `create_app_with_plugins` 等，删除前确认全仓零调用者）+ `start_server_inner` 启动期硬守卫——结构化存储是启动必需项，缺失即启动失败并点明缺哪个工厂，而不是静默用进程内存后端（数据不落盘、重启即空）
-- **删除死代码**：`role_learning`（573 行，零生产消费者）；保留被角色面板复用的纯函数 `categorize_task_by_keyword`
-
-### Fixed
 - **Rust e2e 的 SPA 反向对照断言硬编码产物哈希**（期 5 升级后遗症）：`test_e2e_spa_subroute_serves_index_html` 断言 `/assets/index-CYF_pX8c.css` 返回 200，而 `vite 8`（Rolldown）重建产物后文件名变为 `index-1yA2WGf3.css` → 该断言在**任何**代码版本下都 404 失败（与业务代码无关，是断言自身脆弱）。改为从 `dist/assets` 现取一个 `.css` 文件名，不再硬编码哈希
 - **headless 独立启动在非 3000 端口整页白屏**：前端 `getApiBase()` 生产分支直接采信 store 出厂值 `http://localhost:3000`，后端端口一变即跨源 CORS 失败、`config/status` 拿不到 → React 挂载中断。改为三级优先：用户显式配置 > 同源 `location.origin` > 非 http 回退（Tauri 注入仍然最优先）
 - **SPA 子路由刷新 404 白屏**：前端是 history 路由，`/chat` 在磁盘上无对应文件，F5 直接 404。改为 `/assets/*` 交给 `ServeDir`、无扩展名路径回 `index.html`、带扩展名如实 404（不伪装成 HTML）；`/api/v1/**` 未知路径由兜底返回 **404 JSON**（否则会被 SPA fallback 吞成 HTML，前端 `json()` 报 `Unexpected token <`）
