@@ -1,8 +1,5 @@
-// 请求体不再经 async-openai 的类型构造（见 `convert_messages` 的文档）：
-// 只保留**响应解析**与角色转换所需的类型。
-use async_openai::types::chat::{
-    ChatCompletionMessageToolCalls, CreateChatCompletionResponse, Role as OaRole,
-};
+// 本模块已完全不依赖 async-openai：请求体与响应解析都是 JSON（见
+// `convert_messages` / `parse_chat_response` 的文档）。
 use async_trait::async_trait;
 use futures::StreamExt;
 use serde_json::{json, Value};
@@ -17,7 +14,7 @@ use tianyan::model::types::{
 };
 use tianyan::model::ChatService;
 
-use tianyan_provider_client::{classify_http_status, AsyncOpenAIClient, RetryableFailure};
+use tianyan_provider_client::{classify_http_status, RetryableFailure};
 
 use crate::client::ChatClient;
 
@@ -53,77 +50,16 @@ impl ChatService for ChatClient {
                 let resp = self
                     .send_chat_request(&url, &body, "模型服务错误", request.session_id.as_deref())
                     .await?;
-                resp.json::<CreateChatCompletionResponse>()
-                    .await
-                    .map_err(|e| RetryableFailure {
-                        retryable: false,
-                        message: format!("模型服务错误：解析响应失败：{}", e),
-                    })
+                resp.json::<Value>().await.map_err(|e| RetryableFailure {
+                    retryable: false,
+                    message: format!("模型服务错误：解析响应失败：{}", e),
+                })
             },
         )
         .await
         .map_err(|e| TianyanError::Custom(e.message))?;
 
-        let choices = response
-            .choices
-            .into_iter()
-            .map(|c| {
-                let msg = c.message;
-                let tool_calls = msg.tool_calls.map(|calls| {
-                    calls
-                        .into_iter()
-                        .filter_map(|tc| match tc {
-                            ChatCompletionMessageToolCalls::Function(f) => Some(ToolCall {
-                                id: f.id,
-                                call_type: ToolCallType::Function,
-                                function: tianyan::model::types::FunctionCall {
-                                    name: f.function.name,
-                                    arguments: f.function.arguments,
-                                },
-                            }),
-                            _ => None,
-                        })
-                        .collect()
-                });
-                ChatChoice {
-                    index: c.index as usize,
-                    message: Message {
-                        role: convert_role(&msg.role),
-                        content: msg.content.unwrap_or_default(),
-                        content_parts: None,
-                        tool_calls,
-                        tool_call_id: None,
-                        tool_duration_ms: None,
-                        tool_error: None,
-                        reasoning_content: None,
-                    },
-                    finish_reason: c
-                        .finish_reason
-                        .as_ref()
-                        .map(|r| AsyncOpenAIClient::finish_reason_str(r).to_string()),
-                }
-            })
-            .collect();
-
-        let usage = response.usage.map_or_else(TokenUsage::default, |u| {
-            let mut tu = TokenUsage::new(u.prompt_tokens as usize, u.completion_tokens as usize);
-            // 非流式路径走 async-openai 类型化反序列化：缓存命中只有 OpenAI 标准
-            // prompt_tokens_details.cached_tokens 可用（DeepSeek 顶层 prompt_cache_hit_tokens
-            // 会被丢弃；流式路径在 drain_sse_lines 中从原始 JSON 提取，见 extract_cache_tokens）。
-            if let Some(ref details) = u.prompt_tokens_details {
-                tu.cache_read = details.cached_tokens.unwrap_or(0) as usize;
-            }
-            tu
-        });
-
-        Ok(ChatCompletionResponse {
-            id: response.id,
-            object: "chat.completion".to_string(),
-            created: response.created as i64,
-            model: response.model,
-            choices,
-            usage,
-        })
+        Ok(parse_chat_response(&response))
     }
 
     async fn chat_completion_stream(
@@ -757,13 +693,251 @@ fn convert_messages(messages: &[Message]) -> Vec<Value> {
         .collect()
 }
 
-fn convert_role(role: &OaRole) -> MessageRole {
+/// 响应里的角色字符串转换为内部角色。
+///
+/// 未知取值（含旧的 `function` 角色）一律回退 assistant，与改造前库枚举映射的
+/// 兜底行为一致。
+fn parse_role(role: Option<&str>) -> MessageRole {
     match role {
-        OaRole::System => MessageRole::System,
-        OaRole::User => MessageRole::User,
-        OaRole::Assistant => MessageRole::Assistant,
-        OaRole::Tool => MessageRole::Tool,
-        OaRole::Function => MessageRole::Assistant,
+        Some("system") => MessageRole::System,
+        Some("user") => MessageRole::User,
+        Some("tool") => MessageRole::Tool,
+        _ => MessageRole::Assistant,
+    }
+}
+
+/// 解析非流式聊天响应（JSON 宽容提取）。
+///
+/// 为什么不反序列化成库类型：OpenAI 兼容生态的**响应**字段同样不可穷举，
+/// usage 的缓存计数在 DeepSeek / DashScope / OpenAI 三家各有形状（见
+/// [`extract_cache_tokens`]），任何未知扩展字段都会让严格类型反序列化整条失败，
+/// 而失败形态是「整轮对话不可用」。这里逐字段宽容取值：缺失走默认、类型不符
+/// 忽略、未知 `finish_reason` 原样透传。
+fn parse_chat_response(value: &Value) -> ChatCompletionResponse {
+    let choices = value
+        .get("choices")
+        .and_then(Value::as_array)
+        .map(|arr| {
+            arr.iter()
+                .map(|c| ChatChoice {
+                    index: c.get("index").and_then(Value::as_u64).unwrap_or(0) as usize,
+                    message: parse_assistant_message(c.get("message")),
+                    finish_reason: c
+                        .get("finish_reason")
+                        .and_then(Value::as_str)
+                        .map(str::to_string),
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    ChatCompletionResponse {
+        id: value
+            .get("id")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string(),
+        object: "chat.completion".to_string(),
+        created: value.get("created").and_then(Value::as_i64).unwrap_or(0),
+        model: value
+            .get("model")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string(),
+        choices,
+        usage: parse_usage(value.get("usage")),
+    }
+}
+
+/// 从响应 JSON 提取助手消息。
+///
+/// `tool_calls` 只接受 `type: "function"`（与改造前库枚举的 `Function` 分支一致），
+/// 其余类型静默跳过：不让一个未知调用类型毁掉整轮回复。
+fn parse_assistant_message(msg: Option<&Value>) -> Message {
+    let mut out = Message {
+        role: MessageRole::Assistant,
+        content: String::new(),
+        content_parts: None,
+        tool_calls: None,
+        tool_call_id: None,
+        tool_duration_ms: None,
+        tool_error: None,
+        reasoning_content: None,
+    };
+    let Some(msg) = msg else {
+        return out;
+    };
+    out.role = parse_role(msg.get("role").and_then(Value::as_str));
+    out.content = msg
+        .get("content")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    out.tool_calls = msg.get("tool_calls").and_then(Value::as_array).map(|arr| {
+        arr.iter()
+            .filter(|tc| tc.get("type").and_then(Value::as_str) == Some("function"))
+            .filter_map(|tc| {
+                let function = tc.get("function")?;
+                Some(ToolCall {
+                    id: tc
+                        .get("id")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_string(),
+                    call_type: ToolCallType::Function,
+                    function: tianyan::model::types::FunctionCall {
+                        name: function
+                            .get("name")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default()
+                            .to_string(),
+                        arguments: function
+                            .get("arguments")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default()
+                            .to_string(),
+                    },
+                })
+            })
+            .collect()
+    });
+    out
+}
+
+/// 解析 usage（缺失或类型不符一律默认值）。
+///
+/// 缓存命中只取 OpenAI 标准的 `prompt_tokens_details.cached_tokens`，与改造前一致。
+/// DeepSeek 顶层 `prompt_cache_hit_tokens` 在非流式路径尚未提取（流式路径已由
+/// [`extract_cache_tokens`] 覆盖三家形状）——这是重构前就存在的统计缺口，
+/// 不是本次引入，另行处理。
+fn parse_usage(usage: Option<&Value>) -> TokenUsage {
+    let Some(u) = usage else {
+        return TokenUsage::default();
+    };
+    let mut tu = TokenUsage::new(
+        u.get("prompt_tokens").and_then(Value::as_u64).unwrap_or(0) as usize,
+        u.get("completion_tokens")
+            .and_then(Value::as_u64)
+            .unwrap_or(0) as usize,
+    );
+    if let Some(cached) = u
+        .get("prompt_tokens_details")
+        .and_then(|d| d.get("cached_tokens"))
+        .and_then(Value::as_u64)
+    {
+        tu.cache_read = cached as usize;
+    }
+    tu
+}
+
+/// 响应解析的**宽容性基线**：这是阶段 2 的核心风险点——手写解析一旦对未知
+/// 扩展字段过敏，失败形态是「整轮对话不可用」。以下用例锁定四条契约：
+/// 完整响应正确提取、空/未知字段不 panic、未知 finish_reason 原样透传、
+/// 非 function 类型与残缺 tool_calls 静默跳过。
+#[cfg(test)]
+mod response_parse_tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_full_response() {
+        let v = serde_json::json!({
+            "id": "chatcmpl-1",
+            "created": 1700000000,
+            "model": "deepseek-v4.1-flash",
+            "choices": [{
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "content": "好的",
+                    "tool_calls": [{
+                        "id": "call_1",
+                        "type": "function",
+                        "function": { "name": "read_file", "arguments": "{\"path\":\"a.rs\"}" }
+                    }]
+                },
+                "finish_reason": "tool_calls"
+            }],
+            "usage": {
+                "prompt_tokens": 100,
+                "completion_tokens": 20,
+                "prompt_tokens_details": { "cached_tokens": 64 }
+            }
+        });
+        let r = parse_chat_response(&v);
+        assert_eq!(r.id, "chatcmpl-1");
+        assert_eq!(r.created, 1700000000);
+        assert_eq!(r.model, "deepseek-v4.1-flash");
+        assert_eq!(r.choices.len(), 1);
+        assert_eq!(r.choices[0].message.content, "好的");
+        assert_eq!(r.choices[0].message.role, MessageRole::Assistant);
+        assert_eq!(r.choices[0].finish_reason.as_deref(), Some("tool_calls"));
+        let calls = r.choices[0]
+            .message
+            .tool_calls
+            .as_ref()
+            .expect("应有工具调用");
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].function.name, "read_file");
+        assert_eq!(calls[0].id, "call_1");
+        assert_eq!(r.usage.prompt_tokens, 100);
+        assert_eq!(r.usage.completion_tokens, 20);
+        assert_eq!(r.usage.cache_read, 64);
+    }
+
+    #[test]
+    fn test_parse_tolerates_empty_and_unknown_fields() {
+        let r = parse_chat_response(&serde_json::json!({}));
+        assert_eq!(r.id, "");
+        assert!(r.choices.is_empty());
+        assert_eq!(r.usage.prompt_tokens, 0);
+
+        // 未知顶层字段不影响解析（方言扩展）
+        let r2 = parse_chat_response(&serde_json::json!({
+            "id": "x",
+            "future_field": { "a": 1 },
+            "choices": [{ "message": { "role": "assistant", "content": "y" } }]
+        }));
+        assert_eq!(r2.id, "x");
+        assert_eq!(r2.choices[0].message.content, "y");
+    }
+
+    #[test]
+    fn test_parse_unknown_finish_reason_passthrough() {
+        let v = serde_json::json!({
+            "choices": [{
+                "message": { "role": "assistant", "content": "x" },
+                "finish_reason": "some_new_reason"
+            }]
+        });
+        let r = parse_chat_response(&v);
+        assert_eq!(
+            r.choices[0].finish_reason.as_deref(),
+            Some("some_new_reason"),
+            "未知取值原样透传，不丢弃整条 choice"
+        );
+    }
+
+    #[test]
+    fn test_parse_skips_non_function_and_incomplete_tool_calls() {
+        let v = serde_json::json!({
+            "choices": [{
+                "message": {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [
+                        { "id": "c1", "type": "custom", "function": { "name": "x", "arguments": "{}" } },
+                        { "id": "c2", "type": "function" }
+                    ]
+                }
+            }]
+        });
+        let r = parse_chat_response(&v);
+        let calls = r.choices[0].message.tool_calls.as_ref();
+        assert_eq!(
+            calls.map(|c| c.len()),
+            Some(0),
+            "非 function 类型与缺 function 字段的调用都跳过"
+        );
     }
 }
 
