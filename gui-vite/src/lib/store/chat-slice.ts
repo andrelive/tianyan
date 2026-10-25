@@ -20,6 +20,7 @@ import type {
   ToolCallEvent,
   ToolResultEvent,
 } from '@/lib/types';
+import type { FileRef } from '@/lib/attachments';
 
 /** 待创建会话的本地消息键：新会话首条消息（user + assistant 占位）在服务端
  * 返回 session_id 前暂存于此，首个流式 chunk 到达时经 setCurrentSession
@@ -52,11 +53,15 @@ export interface PendingClarification {
   questions: { question: string; options: string[] }[];
 }
 
-/** 输入草稿（未发送内容）：文字 + 待发图片（data URL）。
- * 按会话键缓存在 store——路由切换（组件卸载）不丢失，发送后清空。 */
+/** 输入草稿（未发送内容）：文字 + 待发图片（data URL）+ 待发文件引用。
+ * 按会话键缓存在 store——路由切换（组件卸载）不丢失，发送后清空。
+ * `attachments` 为可选（缺省 = 无附件）：旧持久化数据与既有调用点不必补键，
+ * 所有读点用 `?? []` 兜底。 */
 export interface InputDraft {
   text: string;
   images: string[];
+  /** 文件引用（绝对路径 + 文件名；发送时并入 content 的 `@file:"..."` 行）。 */
+  attachments?: FileRef[];
 }
 
 /** 缺省空草稿（读取缺省单例；函数式更新基于它合成新对象，不修改本常量）。 */
@@ -358,7 +363,7 @@ export const createChatSlice: StateCreator<ChatSlice, [], [], ChatSlice> = (set,
       const prev = s.inputDrafts[key] ?? EMPTY_INPUT_DRAFT;
       const next = typeof updater === 'function' ? updater(prev) : updater;
       const inputDrafts = { ...s.inputDrafts };
-      if (!next.text && next.images.length === 0) {
+      if (!next.text && next.images.length === 0 && (next.attachments ?? []).length === 0) {
         delete inputDrafts[key];
       } else {
         inputDrafts[key] = next;

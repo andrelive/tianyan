@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { render } from '@testing-library/react';
-import { MarkdownContent } from '@/components/chat/MessageSegments';
+import { render, screen } from '@testing-library/react';
+import { MarkdownContent, SegmentBlocks } from '@/components/chat/MessageSegments';
 
 /** 顶层 mock：@tauri-apps/plugin-opener 仅被 Tauri 分支动态加载。 */
 const { openUrl } = vi.hoisted(() => ({ openUrl: vi.fn().mockResolvedValue(undefined) }));
@@ -193,5 +193,44 @@ describe('消息内链接：渲染修复 + 点击兜底（A+B）', () => {
     const e = clickLink(container.querySelector('a')!);
     expect(e.defaultPrevented).toBe(false);
     expect(openUrl).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * 文件引用通道（批次 1）的回显：正文里的 `@file:"..."` 行还原成只读 chip。
+ *
+ * 判别力：未接 parseAttachmentLines 的代码会把路径行当正文渲染（找不到
+ * chip、且正文里能读到 `@file:` 字面量）。
+ */
+describe('文件引用回显', () => {
+  it('正文中的引用行渲染为只读 chip（无删除按钮），其余正文仍走 Markdown', () => {
+    render(
+      <SegmentBlocks
+        segments={[
+          { type: 'text', text: '看这个\n\n@file:"C:\\a b\\main.ts"\n@file:"/x/readme.md"' },
+        ]}
+        isUser={true}
+      />,
+    );
+
+    const chips = screen.getAllByTestId('file-chip');
+    expect(chips).toHaveLength(2);
+    expect(chips[0]).toHaveTextContent('main.ts');
+    expect(chips[0]).toHaveAttribute('title', 'C:\\a b\\main.ts');
+    expect(chips[1]).toHaveTextContent('readme.md');
+    // 只读：消息区不提供删除（发出去的消息不该能改）
+    expect(screen.queryByRole('button', { name: /移除文件/ })).not.toBeInTheDocument();
+
+    // 正文不再泄露路径行，Markdown 结构保留
+    const body = screen.getByText(/看这个/);
+    expect(body.textContent).not.toContain('@file:');
+  });
+
+  it('普通文本（无引用行）渲染路径不变', () => {
+    const { container } = render(
+      <SegmentBlocks segments={[{ type: 'text', text: '第一行\n第二行' }]} isUser={false} />,
+    );
+    expect(screen.queryByTestId('file-chip')).not.toBeInTheDocument();
+    expect(container.querySelector('p')?.textContent).toContain('第一行');
   });
 });

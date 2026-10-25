@@ -440,6 +440,40 @@ async fn clipboard_io_loop(app_handle: tauri::AppHandle, api_base: String) {
     let _ = tokio::join!(monitor, outbox_poller);
 }
 
+/// 读取系统剪贴板中的文件路径列表（Windows `CF_HDROP`；macOS / Linux 由 clipboard-rs 归一）。
+///
+/// 前端「资源管理器 Ctrl+C 复制文件 → 粘贴到聊天框 → 显示文件 chip → 传绝对路径给模型」
+/// 的后端支撑：`clipboard-manager`（arboard）只支持 text/image，读不到文件集合，
+/// 故这里直接用 clipboard-rs（安全封装，无手写 FFI）。
+///
+/// 任何失败（剪贴板打不开 / 被其他进程占用 / 内容不含文件格式）**一律返回空数组**，
+/// 不 panic 也不抛 `Err`：本命令由粘贴事件触发，截屏、纯文本粘贴都是正常场景，
+/// 前端据此安静回退到图片 / 文本通道；弹错误只会干扰粘贴体验。
+///
+/// 保留剪贴板原始顺序、过滤空串；**不去重**（去重是前端 `toFileRefs` 的职责）。
+///
+/// 注：加 `(async)` 让函数体跑在 async runtime 而不是主线程——函数签名与前端契约不变，
+/// 只为避免 Win32 `OpenClipboard` 重试 / X11 剪贴板访问阻塞 UI（与 `clipboard_io_loop`
+/// 「剪贴板读写不应在主线程」的约定一致）。
+#[tauri::command(async)]
+fn read_clipboard_files() -> Vec<String> {
+    use clipboard_rs::{Clipboard, ClipboardContext, ContentFormat};
+
+    // Windows 上剪贴板可能被其他进程短暂占用 → `new()` 失败：直接降级为空数组
+    let Ok(ctx) = ClipboardContext::new() else {
+        return Vec::new();
+    };
+    // 先探格式再读：无文件格式时（截图 / 纯文本粘贴）不必尝试读取，也避开无谓的错误路径
+    if !ctx.has(ContentFormat::Files) {
+        return Vec::new();
+    }
+    ctx.get_files()
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|path| !path.is_empty())
+        .collect()
+}
+
 /// 分层日志过滤器（控制台 / 文件）——纯函数（可测）。
 ///
 /// - 控制台层：非空 `RUST_LOG` 优先，无效值时回退配置级别；
@@ -824,6 +858,19 @@ pub fn run() {
                 let _ = window.set_focus();
             }
         }))
+        // 应用自定义 command（invoke 通道）：剪贴板文件路径列表
+        // （粘贴文件到聊天框用；插件命令走 capabilities，自定义命令不经 ACL）
+        //
+        // ⚠️ 自定义 command 目前**不经 ACL 校验**，但这依赖三个前提（tauri 2.12
+        // `webview/mod.rs` 的判定逻辑）：
+        //   ① 命令名不带 `plugin:` 前缀（`read_clipboard_files` 满足）；
+        //   ② 没有 AppManifest——即 `tauri/permissions/` 目录不存在（当前不存在）；
+        //   ③ 页面源是本地（`tauri://localhost`，本应用从 frontendDist 加载，满足）。
+        // 一旦有人新增 `tauri/permissions/*.toml`，`has_app_acl_manifest` 立刻变 true，
+        // **所有**自定义命令都会在 invoke 时报「Command xxx not allowed by ACL」
+        // （**编译期不会有任何提示**，只在运行时粘贴失效）。届时必须为每个自定义
+        // 命令在 capability 里显式授权，否则这条通道会静默断掉。
+        .invoke_handler(tauri::generate_handler![read_clipboard_files])
         // 关闭窗口 → 最小化到托盘（退出流程中的窗口关闭放行）
         .on_window_event({
             let exiting = exiting.clone();

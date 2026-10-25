@@ -29,6 +29,12 @@ tauri-plugin-notification = "2"
 tauri-plugin-clipboard-manager = "2"
 tauri-plugin-updater = "2"
 rfd = "0.17"
+# 剪贴板「文件路径列表」（Windows CF_HDROP）：clipboard-manager 基于 arboard，
+# 只支持 text/image，读不到资源管理器里 Ctrl+C 出来的文件集合，故另加 clipboard-rs
+# （安全封装，无手写 FFI，满足 workspace `unsafe_code = "deny"`）。
+# 关掉默认的 `image` feature：本 crate 只取文件列表，图片解码由前端通道负责，
+# 不引入 bmp/png/jpeg 解码器（编译时间与体积）。
+clipboard-rs = { version = "0.3", default-features = false }
 
 # HTTP server
 axum = { version = "0.8", features = ["multipart"] }

@@ -12,6 +12,29 @@ import { applySnapshot } from '@/hooks/use-unified-events';
 import type { ChatMessage, ChatStreamEvent } from '@/lib/types';
 import { messageText } from '@/lib/types';
 
+/**
+ * 桌面壳桥接的可控替身（文件引用通道需要"绝对路径"这一桌面专属能力）：
+ * 默认浏览器语义，只有相关用例内切到桌面语义。
+ */
+const tauri = vi.hoisted(() => ({
+  desktop: false,
+  dropCallbacks: [] as Array<(paths: string[]) => void>,
+  pickFiles: vi.fn<() => Promise<string[]>>(async () => []),
+}));
+vi.mock('@/lib/tauri', () => ({
+  isTauri: () => tauri.desktop,
+  onFileDrop: async (cb: (paths: string[]) => void) => {
+    tauri.dropCallbacks.push(cb);
+    return () => {
+      const i = tauri.dropCallbacks.indexOf(cb);
+      if (i >= 0) tauri.dropCallbacks.splice(i, 1);
+    };
+  },
+  pickFiles: () => tauri.pickFiles(),
+  pickDirectory: async () => null,
+  openExternal: async () => false,
+}));
+
 function renderChatPanel(route = '/chat') {
   return render(
     <MemoryRouter initialEntries={[route]}>
@@ -38,6 +61,10 @@ function streamEvent(partial: Partial<ChatStreamEvent>): ChatStreamEvent {
 beforeEach(() => {
   useAppStore.setState(useAppStore.getInitialState());
   resetTaskMocks();
+  tauri.desktop = false;
+  tauri.dropCallbacks.length = 0;
+  tauri.pickFiles.mockReset();
+  tauri.pickFiles.mockResolvedValue([]);
 });
 
 describe('ChatPanel', () => {
@@ -1014,5 +1041,48 @@ describe('ChatPanel', () => {
     await waitFor(() => {
       expect(useAppStore.getState().sessionMessages['session-1']).toHaveLength(2);
     });
+  });
+
+  // ── 文件引用通道（批次 1）──
+
+  it('sends file references as @file lines in content (images untouched)', async () => {
+    // 桌面版：拖放/多选得到绝对路径 → chip；发送时路径并入正文，
+    // 图片仍走 images 数组（data URL），两条通道互不影响。
+    tauri.desktop = true;
+    tauri.pickFiles.mockResolvedValue(['C:\\work\\repo\\src\\main.ts']);
+    const sentBodies: Array<{ message?: { content?: string; images?: string[] } }> = [];
+    server.use(
+      http.post('/api/v1/chat/stream', async ({ request }) => {
+        sentBodies.push(
+          (await request.json()) as { message?: { content?: string; images?: string[] } },
+        );
+        return HttpResponse.json({ status: 'started', session_id: 'session-1' });
+      }),
+    );
+
+    const user = userEvent.setup();
+    renderChatPanel();
+
+    // 通过「添加文件」（原生对话框替身）加入一个文件引用
+    await user.click(screen.getByRole('button', { name: '添加文件' }));
+    expect(await screen.findByTestId('file-chip')).toHaveTextContent('main.ts');
+
+    await user.type(screen.getByPlaceholderText(/输入消息/), '看这个源码');
+    await user.click(screen.getByRole('button', { name: /发送/i }));
+
+    await waitFor(() => expect(sentBodies).toHaveLength(1));
+    // 正文 = 用户文本 + 空行 + 引用行（引号包裹，Windows 路径可含空格）
+    expect(sentBodies[0].message?.content).toBe(
+      '看这个源码\n\n@file:"C:\\work\\repo\\src\\main.ts"',
+    );
+    // 图片通道不受影响（本例无图片）
+    expect(sentBodies[0].message?.images).toBeUndefined();
+
+    // 乐观渲染与 payload 用同一份文本：消息区把路径行还原成只读 chip
+    const userMsg = useAppStore.getState().messages.find((m) => m.role === 'user');
+    expect(userMsg ? messageText(userMsg) : undefined).toBe(
+      '看这个源码\n\n@file:"C:\\work\\repo\\src\\main.ts"',
+    );
+    expect(await screen.findByTitle('C:\\work\\repo\\src\\main.ts')).toBeInTheDocument();
   });
 });

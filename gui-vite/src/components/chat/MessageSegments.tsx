@@ -8,7 +8,9 @@ import type { MessageSegment, ToolCallWithResult } from '@/lib/types';
 import { cn, lastNonEmptyLine } from '@/lib/utils';
 import remarkAutolinkFix from '@/lib/remark-autolink-fix';
 import { isTauri, openExternal } from '@/lib/tauri';
+import { parseAttachmentLines } from '@/lib/attachments';
 import ToolCallCard from './ToolCallCard';
+import FileChip from './FileChip';
 
 /**
  * 消息段渲染共享组件（ADR-026：主对话流与子智能体流共用）。
@@ -182,6 +184,29 @@ export const MarkdownContent = memo(function MarkdownContent({
   );
 });
 
+/**
+ * 文本段渲染：文件引用行还原成只读 chip，其余正文走 Markdown。
+ *
+ * 发送时附件路径以 `@file:"..."` 行并入正文（后端零改动），回显时必须还原
+ * 成 chip——否则用户看到的是自己的消息里冒出几行看不懂的路径。chip 置于
+ * Markdown **之前**（文件是这条消息的"输入附件"，先看附件再看正文），且
+ * 与正文块级并列（不嵌进 Markdown 容器）——避免影响段落/列表的块结构。
+ */
+function TextSegment({ text, isUser }: { text: string; isUser: boolean }) {
+  const { body, refs } = parseAttachmentLines(text);
+  if (refs.length === 0) return <MarkdownContent text={text} isUser={isUser} />;
+  return (
+    <>
+      <div className="mb-2 flex flex-wrap gap-1.5">
+        {refs.map((file) => (
+          <FileChip key={file.path} file={file} />
+        ))}
+      </div>
+      {body !== '' && <MarkdownContent text={body} isUser={isUser} />}
+    </>
+  );
+}
+
 /** 时间线段渲染：按到达顺序轮番展示（相邻同类段合并，保持 markdown 连续）。
  * toolCalls：当前消息的工具调用列表（含 observation 挂载的结果）——
  * 流式 tool 段按 id 关联 result（applyToolResult 更新在 tool_calls 上，
@@ -215,7 +240,7 @@ export function SegmentBlocks({
         texts.push(t.text);
         i++;
       }
-      blocks.push(<MarkdownContent key={key++} text={texts.join('')} isUser={isUser} />);
+      blocks.push(<TextSegment key={key++} text={texts.join('')} isUser={isUser} />);
     } else {
       // 按调用 ID 关联结果（observation 已回填到 tool_calls；无 ID 回退名称+参数）
       const segCall = seg.tool_call;

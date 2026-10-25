@@ -31,6 +31,7 @@ import { useUnifiedEvents, subscribeSession } from '@/hooks/use-unified-events';
 import { toErrorMessage } from '@/lib/errors';
 import { lastMessageUsage } from '@/lib/token-usage';
 import { refreshSessionTokenUsage } from '@/lib/session-usage';
+import { appendAttachments, parseAttachmentLines, type FileRef } from '@/lib/attachments';
 import { MessageSquare, Loader2, RotateCcw, Undo2, X } from 'lucide-react';
 import ChatInput from './ChatInput';
 import ClarificationBubble from './ClarificationBubble';
@@ -365,12 +366,15 @@ export default function ChatPanel() {
   // ─── Handlers ───────────────────────────────────────────────────
 
   const handleSend = useCallback(
-    async (content: string, images: string[] = []) => {
+    async (content: string, images: string[] = [], files: FileRef[] = []) => {
       // 同步守卫：读 store 最新值而非渲染闭包，防同一帧双击/连按并发两条流
       const st = useAppStore.getState();
       const activeKey = st.currentSessionId ?? PENDING_SESSION_KEY;
       if ((st.streamStatus[activeKey] ?? 'idle') === 'streaming') return;
-      const trimmed = content.trim();
+      // 文件引用通道：附件路径以 `@file:"..."` 行并入正文（后端零改动——
+      // 路径就是普通文本）。**乐观渲染与 payload 必须用同一份文本**，
+      // 故在此处一次算好（而非在 ChatInput 里先拼再传）。
+      const trimmed = appendAttachments(content.trim(), files);
       if (!trimmed && images.length === 0) return;
 
       // 发起新轮：回撤已被新工作取代，清空撤销回退横幅（否则残留到输出底部）
@@ -529,10 +533,15 @@ export default function ChatPanel() {
         st.setRollbackMessage(sessionId, target.id);
         // 回退点用户消息回填该会话草稿（编辑重发语义）：文本 + 图片（data
         // URL）随回退带出，输入框直接可编辑重发；两者皆空时 setInputDraft
-        // 自动删键（不产生空草稿）
+        // 自动删键（不产生空草稿）。
+        // 文件引用同理：正文里的 `@file:"..."` 行还原成 chip（否则输入框里
+        // 会出现用户看不出所以然的裸路径行）；无引用时不写该键（草稿结构
+        // 保持与既有调用点一致）。
+        const restored = parseAttachmentLines(messageText(target));
         st.setInputDraft(sessionId, {
-          text: messageText(target),
+          text: restored.body,
           images: target.images ?? [],
+          ...(restored.refs.length > 0 ? { attachments: restored.refs } : {}),
         });
       } catch (err: unknown) {
         st.showToast(`回退失败: ${controlOpErrorMessage(err)}`, 'error');

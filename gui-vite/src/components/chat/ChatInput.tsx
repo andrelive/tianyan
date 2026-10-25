@@ -1,15 +1,20 @@
 import { useState, useRef, useCallback, useEffect } from 'react';
-import { Send, Square, ImagePlus, X } from 'lucide-react';
+import { Send, Square, ImagePlus, Paperclip, X } from 'lucide-react';
 import { cn, formatNumber } from '@/lib/utils';
 import type { RequestPerf, StreamUsage } from '@/lib/types';
 import { useAppStore, PENDING_SESSION_KEY } from '@/lib/store';
+import { toFileRefs, type FileRef } from '@/lib/attachments';
+import { isTauri, onFileDrop, pickFiles, readClipboardFiles } from '@/lib/tauri';
 import ModelSelector from './ModelSelector';
 import ThinkingSelect from './ThinkingSelect';
 import ContextRing from './ContextRing';
+import FileChip from './FileChip';
 import ZoomableImage from '@/components/ui/ImageLightbox';
 
 interface Props {
-  onSend: (content: string, images: string[]) => void;
+  /** 发送：`content` 为输入框原文，`images` 为图片通道（data URL），
+   * `files` 为文件引用通道（绝对路径）——两者由调用方各自并入请求。 */
+  onSend: (content: string, images: string[], files: FileRef[]) => void;
   onStop: () => void;
   isStreaming: boolean;
   /** 当前会话上下文占用（近一轮完成的 token 用量；切会话随之更新） */
@@ -39,6 +44,15 @@ const MAX_IMAGE_BYTES = 4 * 1024 * 1024;
 const MAX_IMAGES = 4;
 
 /**
+ * 单次最多文件引用数（软上限）。
+ *
+ * chip 行会随文件数换行把输入卡片撑高，且每个引用都会变成模型侧一次
+ * `read_file`——20 个已是「一次对话里说得清」的量级。超出只丢弃多余项并
+ * 提示，不阻断已有项（与图片的 `MAX_IMAGES` 同一套手感）。
+ */
+const MAX_FILES = 20;
+
+/**
  * 图片通道的**类型白名单**（ADR-050 输入准入）。
  *
  * 只有 provider 真正接受的位图能进图片通道：SVG（`image/svg+xml`）、BMP 等
@@ -61,6 +75,9 @@ function isAcceptedImage(file: File): boolean {
 
 /** 空图片数组常量（草稿缺省值；引用稳定，避免每次渲染新建数组）。 */
 const EMPTY_IMAGES: string[] = [];
+
+/** 空文件引用数组常量（同上：草稿缺省值，保持渲染期引用稳定）。 */
+const EMPTY_FILES: FileRef[] = [];
 
 /** 读取 File → data URL；超过大小限制返回 null 并提示 */
 function fileToDataUrl(file: File): Promise<string | null> {
@@ -114,11 +131,15 @@ export default function ChatInput({
   const setInputDraft = useAppStore((s) => s.setInputDraft);
   const input = draft?.text ?? '';
   const images = draft?.images ?? EMPTY_IMAGES;
+  const attachments = draft?.attachments ?? EMPTY_FILES;
   const [rejected, setRejected] = useState<string | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const dragDepthRef = useRef(0);
   const [dragOver, setDragOver] = useState(false);
+  // 桌面壳判定（渲染期常量：运行环境不会中途切换）；浏览器里没有文件
+  // 绝对路径可言，入口整体隐藏
+  const desktop = isTauri();
 
   // Auto-resize textarea as content grows
   useEffect(() => {
@@ -138,7 +159,59 @@ export default function ChatInput({
   // （textarea/send 一并禁用，与 streaming 语义一致）
   // 控制面操作（回退/重做）期间同理禁发（ADR-041）。
   const canSend =
-    !isStreaming && !compressing && !busy && (input.trim().length > 0 || images.length > 0);
+    !isStreaming &&
+    !compressing &&
+    !busy &&
+    (input.trim().length > 0 || images.length > 0 || attachments.length > 0);
+
+  /**
+   * 追加文件引用（桌面版拖放 / 原生对话框共用）。
+   *
+   * 函数式更新 + 按 path 去重：读路径是异步回调，不能覆盖等待期间输入的
+   * 文字，也不该把同一个文件重复堆成两个 chip。
+   */
+  const addFiles = useCallback(
+    (paths: string[]) => {
+      const refs = toFileRefs(paths);
+      if (refs.length === 0) return;
+      setInputDraft(draftKey, (prev) => {
+        const existing = prev.attachments ?? EMPTY_FILES;
+        const known = new Set(existing.map((f) => f.path));
+        // 去重已在 toFileRefs（本批内）+ 这里（跨批次）各做一次，此处按 path 比对
+        const added = refs.filter((f) => !known.has(f.path));
+        if (added.length === 0) return prev;
+
+        // 软上限：只保留放得下的部分，其余丢弃并提示（文案与图片通道同风格）
+        const room = MAX_FILES - existing.length;
+        if (added.length > room) {
+          setRejected(`最多添加 ${MAX_FILES} 个文件`);
+        } else {
+          // 干净追加成功：清掉上一次的提示（与 addImages 的「全部通过才清」一致）
+          setRejected(null);
+        }
+        if (room <= 0) return prev;
+        return { ...prev, attachments: [...existing, ...added.slice(0, room)] };
+      });
+    },
+    [draftKey, setInputDraft],
+  );
+
+  // 桌面版文件拖放：Tauri 在 WebView 层拦截系统拖拽（drag_drop_enabled 默认
+  // true），HTML5 drop 收不到文件——只能订阅原生事件拿绝对路径。
+  // 浏览器环境 onFileDrop 返回空操作，无需分支。
+  useEffect(() => {
+    let unlisten: (() => void) | null = null;
+    let disposed = false;
+    void onFileDrop(addFiles).then((fn) => {
+      // 订阅未完成组件就卸载：立刻退订（否则监听挂在已卸载的草稿键上）
+      if (disposed) fn();
+      else unlisten = fn;
+    });
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, [addFiles]);
 
   const addImages = useCallback(
     async (files: FileList | File[]) => {
@@ -151,10 +224,12 @@ export default function ChatInput({
       const rejectedTypes = all.filter((f) => !isAcceptedImage(f));
       if (rejectedTypes.length > 0) {
         const names = rejectedTypes.map((f) => f.name || f.type || '未知文件').join('、');
-        setRejected(
-          `不支持的文件类型：${names}（图片通道仅支持 PNG/JPEG/WebP/GIF；` +
-            `SVG / HTML 等可以：① 截图或导出成 PNG；② 把文件路径发给我，我用 read_file 读源码）`,
-        );
+        // 非位图的出路按环境分岔：桌面版能拿绝对路径（拖放 / 「添加文件」），
+        // 浏览器只能用文本路径（`File.path` 是 Electron 扩展，Web 标准没有）。
+        const hint = desktop
+          ? '其他文件请直接拖到输入框，或点「添加文件」按路径引用'
+          : '浏览器环境拿不到文件绝对路径，请用桌面版拖拽，或直接把路径贴到输入框（我会用 read_file 读取）';
+        setRejected(`不支持的文件类型：${names}（图片通道仅支持 PNG/JPEG/WebP/GIF；${hint}）`);
       }
       if (accepted.length === 0) return;
       // 全部通过时才清旧提示（否则刚设的类型提示会被立刻覆盖）
@@ -184,21 +259,20 @@ export default function ChatInput({
         return { ...prev, images: [...prev.images, ...urls.slice(0, Math.max(room, 0))] };
       });
     },
-    [draftKey, setInputDraft],
+    [desktop, draftKey, setInputDraft],
   );
 
   const handleSend = useCallback(() => {
-    if (isStreaming || compressing || busy || (input.trim().length === 0 && images.length === 0)) {
-      return;
-    }
-    onSend(input, images);
+    if (isStreaming || compressing || busy) return;
+    if (input.trim().length === 0 && images.length === 0 && attachments.length === 0) return;
+    onSend(input, images, attachments);
     // 清空该会话草稿（键删除；已发送内容不再随页面/会话切换恢复）
-    setInputDraft(draftKey, { text: '', images: [] });
+    setInputDraft(draftKey, { text: '', images: [], attachments: [] });
     setRejected(null);
     if (textareaRef.current) {
       textareaRef.current.style.height = 'auto';
     }
-  }, [input, images, isStreaming, compressing, busy, onSend, draftKey, setInputDraft]);
+  }, [input, images, attachments, isStreaming, compressing, busy, onSend, draftKey, setInputDraft]);
 
   const handleKeyDown = useCallback(
     (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
@@ -210,22 +284,56 @@ export default function ChatInput({
     [handleSend],
   );
 
+  /**
+   * 粘贴分流：**文件 chip 通道**（资源管理器 Ctrl+C → Ctrl+V）优先，
+   * 原生侧明确「没有文件路径」时才回退到图片通道（截图）。
+   *
+   * 为什么不能按 MIME 分流（本功能最容易做错的地方）：截图和「复制的文件」
+   * 在 Web 层**长得一样**——都是 `kind: 'file'` 的项，`Win+Shift+S` 截图的
+   * MIME 也是 `image/png`，复制的 `.png` 文件更是同一个 MIME。只有原生侧能
+   * 分辨（剪贴板里有没有 `CF_HDROP` 文件列表）。所以顺序是「先问原生有没有
+   * 文件路径，没有才当图片」；反过来做（先看 MIME 是图片就当图片）会让粘贴
+   * 文件走错通道。
+   *
+   * 同步 / 异步的分界：`ClipboardEvent.clipboardData` 只在事件分发期间有效，
+   * 一进 `await` 就被回收（`items` 清空、`getAsFile()` 返回 null）。所以
+   * `File[]` 必须在**同步阶段**构造好并让异步闭包捕获，`preventDefault()`
+   * 也必须同步调用（否则默认粘贴已经发生了）。
+   */
   const handlePaste = useCallback(
     (e: React.ClipboardEvent<HTMLTextAreaElement>) => {
-      // 剪贴板里的**文件项**一律交给 addImages（内部按白名单过滤并给提示）：
-      // 过滤条件用 `kind === 'file'` 而不是 `type.startsWith('image/')`——
-      // 后者会放过 SVG（MIME `image/svg+xml`），前者能接住 HTML 等非图片文件，
-      // 让"粘贴了不支持的文件"给出明确提示而不是静默无反应。
-      const files = Array.from(e.clipboardData?.items ?? [])
+      // 【同步阶段】取出 items 与 File[]：异步之后 clipboardData 已回收
+      const items = Array.from(e.clipboardData?.items ?? []);
+      // 没有文件项 = 普通文本粘贴：一律不拦截，保持浏览器/WebView 默认行为
+      if (!items.some((it) => it.kind === 'file')) return;
+      const files = items
         .filter((it) => it.kind === 'file')
         .map((it) => it.getAsFile())
         .filter((f): f is File => f !== null);
-      if (files.length > 0) {
-        e.preventDefault();
-        void addImages(files);
-      }
+
+      // 文件项不走默认粘贴：WebView 默认行为会插入文件名文本或图片占位
+      e.preventDefault();
+
+      void (async () => {
+        // 问原生：剪贴板里有没有文件路径（CF_HDROP）。tauri 层已把失败降级成 []，
+        // 这里再兜一层 try——读取通道任何形式的失败都不能让粘贴「没反应」，
+        // 最差也走图片通道（截图场景本来就是这条）。
+        let paths: string[] = [];
+        try {
+          paths = await readClipboardFiles();
+        } catch {
+          paths = [];
+        }
+        if (paths.length > 0) {
+          // 复制的是「文件」→ 走绝对路径通道（chip 只显示文件名）
+          addFiles(paths);
+        } else if (files.length > 0) {
+          // 没有文件路径 → 剪贴板是位图（截图 / 复制图片位）→ 图片通道
+          await addImages(files);
+        }
+      })();
     },
-    [addImages],
+    [addFiles, addImages],
   );
 
   const handleDragEnter = useCallback((e: React.DragEvent) => {
@@ -263,6 +371,17 @@ export default function ChatInput({
     [draftKey, setInputDraft],
   );
 
+  /** 移除一个待发文件引用（按索引删除；路径可能重复出现于不同会话草稿）。 */
+  const removeAttachment = useCallback(
+    (idx: number) => {
+      setInputDraft(draftKey, (prev) => ({
+        ...prev,
+        attachments: (prev.attachments ?? EMPTY_FILES).filter((_, i) => i !== idx),
+      }));
+    },
+    [draftKey, setInputDraft],
+  );
+
   // 一体式输入卡片（DSH 布局）：字段、模型、思考、图片、圆环、发送都在同一个圆角矩形外框内，
   // 各组件不再独立戴框。
   return (
@@ -277,6 +396,15 @@ export default function ChatInput({
         onDragOver={(e) => e.preventDefault()}
         onDrop={handleDrop}
       >
+        {/* 文件引用预览（桌面版）：只显示图标+文件名，路径在 title 里 */}
+        {attachments.length > 0 && (
+          <div className="flex flex-wrap gap-2 px-3 pt-3 pb-1">
+            {attachments.map((file, i) => (
+              <FileChip key={file.path} file={file} onRemove={() => removeAttachment(i)} />
+            ))}
+          </div>
+        )}
+
         {/* 图片预览 */}
         {images.length > 0 && (
           <div className="flex flex-wrap gap-2 px-3 pt-3 pb-1">
@@ -358,6 +486,19 @@ export default function ChatInput({
                 >
                   <ImagePlus className="w-4 h-4" />
                 </button>
+                {/* 文件引用通道（仅桌面版）：浏览器拿不到绝对路径，入口不出现 */}
+                {desktop && (
+                  <button
+                    onClick={() => {
+                      void pickFiles().then(addFiles);
+                    }}
+                    className="p-2 rounded-lg text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-hover)] hover:text-[var(--color-text-primary)] transition-colors"
+                    aria-label="添加文件"
+                    title="添加文件（以绝对路径引用，可拖拽到输入框）"
+                  >
+                    <Paperclip className="w-4 h-4" />
+                  </button>
+                )}
               </>
             )}
           </div>
