@@ -13,6 +13,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - 冻结副本而非直接引用原文件：原图被移动/改名/覆盖后历史回放照常（同一内容永远对应同一份字节），也避免「同一段对话两次请求看到不同的图」。
   - 明确不支持的形态：URL 图片；provider/模型视觉能力探测（模型无视觉能力时的表现是上游 400，错误可见——不引入静默降级）。
   - 代价（诚实记账）：带图的工具结果在历史里**每轮重传**（图片 token 本来就贵）。**不做**「事后剥离旧图」——改历史会让前缀缓存从该处起全部分叉（ADR-048 的教训），要优化只能落在压缩点旁边。
+- **粘贴文件给模型：Ctrl+C 一个文件 → 输入框 Ctrl+V → 文件名 chip + 绝对路径引用**。此前非图片文件只能手工把路径敲进输入框（非位图被图片通道拒绝后，提示语就是「把文件路径发给我」）。现在：输入框只显示带图标的文件名 chip，实际发给模型的是 `@file:"<绝对路径>"` 文本行，**由模型自行 `read_file` 读取**——后端 core/server **零改动**（路径就是普通文本）。
+  - 通道分工由 **MIME 白名单**决定，**不是**「先问原生有没有路径」：截图（`Win+Shift+S`）和「复制一个 `.png` 文件」在 Web 层同形（都是 `kind:'file'`、MIME 都是 `image/png`），且**两者本来就都该走图片通道**（用户期望是「看到这张图」）。原生路径通道只在**存在非位图文件**时出场（顺带省一次 IPC）。反过来做会把复制的 `.png` 送进路径通道——模型 `read_file` 读二进制，图进不了上下文（这是实现期被用户指出并修正的真实缺陷）。
+  - 混合场景（一次复制 png+pdf）统一走路径通道：否则同一条消息里同一张图既有一份 base64 预览、又有一个指向它的 chip，模型侧重复入上下文。
+  - 兜底：`CF_HDROP` 来的 `File` 可能是「有 name/size 但读不出字节」的空壳（含 0 字节、`data:...,` 空载荷），此时回退路径通道，而不是弹「图片过大」这种误导提示。**超 4MB 不回退**——太大有明确出路（压缩后再传），转 chip 只会让模型去读一份读不出的二进制。
+  - 入口**只有粘贴**（用户裁决）：拖拽与文件选择对话框刻意不做——原生 drop / dialog 只给路径、拿不到字节，做出来必然与粘贴的通道语义分叉（拖 `.png` 出 chip、粘 `.png` 出图）。
+  - 片段形如 `@file:"C:\dir\报告.pdf"`（引号界定空格），消息区渲染为只读 chip（`title` 显示完整路径）；`parseAttachmentLines` 整行锚定解析 + 前置 `includes` 快速判定（消息每个文本段、流式每帧都会调用，不能做全量正则扫描）。
+  - 代价（诚实记账）：绝对路径**永久落库**，换机器 / 搬目录后历史里的路径失效（模型读时 `not found`，可接受）；会话历史外传会暴露目录结构。
 
 ### Fixed
 - **粘贴 SVG 会把整轮对话打挂**：输入框的粘贴/拖拽判定用 `file.type.startsWith('image/')`，`image/svg+xml` 也满足 → SVG 被读成 data URL 当图片发出去，而三家上游**全部 400**（ollama `invalid image input` / deepseek `You have uploaded an unsupported image` / opencode `Upstream request failed`）。修复：图片通道改为**类型白名单**（PNG/JPEG/JPG/WebP/GIF），前端在入口拦下并给可操作提示（截图或导出 PNG；或把文件路径发进来由 `read_file` 读源码），后端 `ChatRequest::validate` 同口径兜底（API 直连也拦得住），`view_image` 侧把 BMP 落盘前转 PNG（模型不认 BMP）。**刻意不做 SVG→PNG 栅格化**：SVG 的语义在结构（节点/分层/连线）里，栅格化后模型只能"识图"猜，更贵更不准——正路是读源码（依据见 ADR-050 §4）。
@@ -23,6 +30,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   修复：`usePolling` 增加 `resetKeys`（键变化即清旧计时器 + **立即执行一次**；数组按内容比较，调用方每次渲染传新数组不会误重启）；新增 `lib/session-todo-cache.ts` 会话快照缓存（stale-while-revalidate，上限 50 会话 LRU 淘汰）；面板视图改为「会话键 + 数据」，切会话**在渲染期同步换**（不走 effect——否则会先 paint 一帧上个会话的待办，正是要修的症状），请求返回用 `sessionId` 做**竞态守卫**（迟到响应只写缓存、不覆盖当前会话视图）。效果：切换 **0ms**（缓存命中）/ **~20ms**（首次，等于一次往返），切回 **0ms**。
 - **智能体推进待办时面板最多滞后 3 秒**：`todo`/`goal` 工具改完待办，面板要等下一个轮询 tick 才更新。`chat-slice` 新增 `todosRevision`（`todo`/`goal` 工具结果落库时递增），面板以它为 resetKey → 工具一改待办面板**立即重取**（~20ms），不必等 tick。**未动后端一行**（ADR-028 的事件推送是尽力而为、有界通道会丢，所以不新增推送事件——那样轮询兜底仍删不掉，收益与成本不匹配）。
 - **顺带修正一处误判**：`AgentTasksPanel` 形似同病（同样是 `usePolling(poll, 3000, { enabled: !!sessionId })`），核实后**无需改动**——它 `fetchTasks()` 拉的是全量任务、按 `parent_session_id` 在渲染期过滤，切会话同一帧就换掉了。
+- **tag 推送后从不出包（v1.0.0 / v1.0.1 均无 GitHub Release）**：根因链是 `server/tests/e2e_tests.rs::test_e2e_spa_subroute_serves_index_html` 硬断言 `gui-vite/dist/index.html` 存在（缺则 panic），而 `quality.yml` 的 `npm ci` 排在集成测试**之后**且**从不 build** → 全新 runner 必缺 `dist` → quality 红 → `release.build: needs: quality` 被整段跳过。本地永远绿（`dist` 一直在），开发机上**无法复现**。修复：`quality.yml` 把 `npm ci` + `npm run build` 前置到集成测试之前。教训：凡是「断言构建产物存在」的测试，都必须检查该产物在 CI 里的生成顺序。
 
 ### 工程
 - **`view_image` 的实现分四层**（ADR-050）：工具与门控在 `plugins/tools-fs`（`ViewImageTool`）；magic bytes 严格识别与冻结副本在 core（`common::binary::sniff_image_mime` / `executor::image::prepare_session_image`，后者顺手把 `hex_sha256` 提到 `common::hash` 供快照与图片共用一份 SHA-256 实现）；组装期加载在 core（`context::SessionImages`，路径逃逸**结构上**不可能：只认 `session_images/` 前缀 + 文件名禁分隔符）；传输层在 `plugins/provider-llm`（`content_value` 让 user/tool 共用一份 content 编码）。模块边界沿用 ADR-049 的「定义在插件、算法在 core」。
@@ -32,6 +40,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **与 DSH `read_image` 对账后补齐 4 项**（`view_image` 成熟度）：① 尺寸/像素上限 + `Lanczos3` 等比降采样（长边 >2048 缩；解码前按 6400 万像素硬拒，避免 100MP 图解码吃数百 MB）；② 16-bit PNG 规范化（读 IHDR 位深 → 转 8-bit 重编码，少数 provider 对 16-bit 直接 400）；③ 结果回带 `original_dimensions` + `scale_hint` 坐标乘数（模型在原图坐标定位特征时换算）；④ **模型能力门控**（`ToolContext::chat_model_capabilities`：会话选择 > `preferences.chat`，明确声明了能力但不含 `vision` 时早失败，省一次往返与一条误导性 400）。**一处刻意与 DSH 不同**：能力标签**为空数组时放行**——DSH 的 `inputModalities === undefined` 来自 provider 目录、缺失即解析失败；天演的 `capabilities` 是可选用户标签（`serde(default)` → 空数组，旧配置与新加模型都可能未标注），空数组只说明"没标"而不是"不能"。门控解析抽成纯函数 `lookup_model_capabilities` + 6 个单测（含"未标能力 ≠ 查不到"与 provider 作用域；配置形态用 TOML 字面量逐字节模拟落盘字母序）。**不做**图片卸载通道（`compaction-image-offload` 式事件溯源降级）——形态对，但需 provider 错误码识别 + 请求错误瀑布 seam，且目前没有"上游要求卸载"的实测证据。
 - `usePolling` 的 `resetKeys` 是通用能力：「按 id 轮询」的其它面板可直接复用（目标一变立即拉，不必各自手写 effect 重启逻辑）。
 - 回归测试 +6（resetKeys 1 / 面板 4 / store 1），并对其中 5 个做过**判别力自证**：把旧实现注回去（effect 依赖去掉 `resetKey`、读缓存直接返回空、去掉竞态守卫）→ 5 个用例全部变红，还原后全绿。
+- **`async-openai` 从全仓移除**（三阶段，净 −233 行）：它此前只承担 JSON 构造 + 类型检查（传输层早已自研 reqwest）。阶段 1 请求体改为直接构造 JSON（+176/−214）；阶段 2A 非流式响应改宽容提取（+252/−78）；阶段 2B/2C vision/discovery 改 JSON（+100/−333）。残留 0。收益：provider 域不再被上游 breaking change 绑架，两个能力插件的依赖面同时收窄。
+- **子智能体面板改「活动流」**（无损投影）：此前它复用主对话渲染器，在窄列里塞一份迷你对话——宽度不够、层级混乱。改为把子代理的思考 / 正文 / 工具调用投影成单列活动流（`DelegateActivity.tsx` + 与主流程共用的 `tool-presentation.ts` 口径），三条设计约束用测试钉死。**刻意不做**「3/7 进度」这类计数器：工具轮次不可预知，假进度比没有更糟。
+- **文件引用通道的通道判定写在 `ChatInput.handlePaste` 一处**：`File[]` 必须在**同步阶段**构造完（`ClipboardEvent.clipboardData` 一进 `await` 就被回收），`preventDefault()` 也必须同步调用；分流顺序（图片优先 / 原生兜底）与理由写在该函数 JSDoc，避免未来被「优化」回错的顺序。
+- **粘贴文件的 Tauri 通道**：新增 `#[tauri::command] read_clipboard_files`（`clipboard-rs` 读 `CF_HDROP`，关掉 `image` feature 不拉解码器）。任何失败（剪贴板被占用 / 无文件格式 / IPC 异常）一律返回空数组、不 panic 不抛 `Err`——它只是兜底通道，弹错误只会让粘贴「没反应」。**ACL 前提**已写进 `invoke_handler` 上方注释：自定义命令免 ACL 依赖「命令名不带 `plugin:` 前缀 + 无 `tauri/permissions/` 目录 + 页面源为本地」三条同时成立；一旦有人新增 `permissions/*.toml`，`has_app_acl_manifest` 立刻变 true，**所有**自定义命令都会在 invoke 时报 `not allowed by ACL`（编译期无任何提示）。
 
 ## [1.0.0] - 2026-10-23
 
