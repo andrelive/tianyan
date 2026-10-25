@@ -196,6 +196,20 @@ jobs:
           retention-days: 5
 
 
+      # ⚠️ 前端产物必须**先于**集成测试构建（顺序是语义，不是排版）：
+      # `server/tests/e2e_tests.rs` 的 SPA 回退用例
+      # （`test_e2e_spa_subroute_serves_index_html`，由 c1e70f6 引入）硬断言
+      # `gui-vite/dist/index.html` 存在——缺产物时 panic，不是跳过。
+      # 此前 `npm ci` 排在集成测试之后、且从不 `npm run build` → CI 全新 runner 上
+      # dist 必然缺失 → quality 红 → `release.build`（needs: quality）被跳过 →
+      # **tag 推送后不出包**。实测：v1.0.0（run 40056406065）与 v1.0.1 均因此失败，
+      # GitHub Release 页无产物（API 404）。本地不会发现——开发者通常已构建过 dist。
+      - name: Frontend deps
+        run: cd gui-vite && npm ci
+
+      - name: Frontend build (dist for server SPA e2e)
+        run: cd gui-vite && npm run build
+
       # 集成测试（core/tests + server/tests，含 HTTP 级 e2e）——此前只在本地
       # `test.ps1 integration` 跑，CI 从未覆盖；0.5.8 记录"三处 e2e 断言失效
       # 长期未被察觉"即该缺口所致。
@@ -211,9 +225,6 @@ jobs:
       # 被跳过（tag 推送后不出包）。换生成器位置现在只改 `.cargo/config.toml`。
       - name: Tool catalog freshness
         run: cargo catalog-check
-
-      - name: Frontend deps
-        run: cd gui-vite && npm ci
 
       - name: Frontend lint (eslint + prettier)
         run: cd gui-vite && npm run lint
