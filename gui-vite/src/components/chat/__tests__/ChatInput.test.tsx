@@ -6,27 +6,17 @@ import { useAppStore } from '@/lib/store';
 import ChatInput from '../ChatInput';
 
 /**
- * 桌面壳桥接的可控替身：默认浏览器语义（拿不到绝对路径、无原生拖放）；
- * 用例内切到桌面语义即可验证文件引用通道的交互。
+ * 桌面壳桥接的可控替身：默认浏览器语义（拿不到绝对路径）；
+ * 用例内切到桌面语义即可验证桌面专属的提示文案。
  * （用 vi.hoisted：vi.mock 工厂会被提升到 import 之前执行。）
  */
 const tauri = vi.hoisted(() => ({
   desktop: false,
-  dropCallbacks: [] as Array<(paths: string[]) => void>,
-  pickFiles: vi.fn<() => Promise<string[]>>(async () => []),
   // 剪贴板文件通道（粘贴 = 资源管理器 Ctrl+C 的文件）：默认「原生没看到文件」
   readClipboardFiles: vi.fn<() => Promise<string[]>>(async () => [] as string[]),
 }));
 vi.mock('@/lib/tauri', () => ({
   isTauri: () => tauri.desktop,
-  onFileDrop: async (cb: (paths: string[]) => void) => {
-    tauri.dropCallbacks.push(cb);
-    return () => {
-      const i = tauri.dropCallbacks.indexOf(cb);
-      if (i >= 0) tauri.dropCallbacks.splice(i, 1);
-    };
-  },
-  pickFiles: () => tauri.pickFiles(),
   readClipboardFiles: () => tauri.readClipboardFiles(),
   pickDirectory: async () => null,
   openExternal: async () => false,
@@ -40,6 +30,23 @@ class MockFileReader {
   readAsDataURL() {
     this.result = 'data:image/png;base64,dGVzdA==';
     this.onload?.();
+  }
+}
+
+/**
+ * 读不出字节的 FileReader 替身。
+ *
+ * 模拟 WebView2 对「从资源管理器复制（CF_HDROP）」的文件只给空壳 `File` 的情形：
+ * name/size 都在，但 `readAsDataURL` 拿不到内容。jsdom 里只能这样近似——
+ * 真实的 CF_HDROP 行为无法在单测中复现（见报告里的局限说明）。
+ */
+class FailingFileReader {
+  result: string | null = null;
+  onload: (() => void) | null = null;
+  onerror: (() => void) | null = null;
+  readAsDataURL() {
+    this.result = null;
+    this.onerror?.();
   }
 }
 
@@ -80,9 +87,6 @@ beforeEach(() => {
   useAppStore.setState(useAppStore.getInitialState());
   vi.stubGlobal('FileReader', MockFileReader);
   tauri.desktop = false;
-  tauri.dropCallbacks.length = 0;
-  tauri.pickFiles.mockReset();
-  tauri.pickFiles.mockResolvedValue([]);
   tauri.readClipboardFiles.mockReset();
   tauri.readClipboardFiles.mockResolvedValue([]);
 });
@@ -347,74 +351,56 @@ describe('ChatInput', () => {
 /**
  * 文件引用通道（批次 1）：非图片文件 → 带图标的文件名 chip，发给后端的是
  * 绝对路径；图片通道（位图 data URL）行为不变，两条通道互不干扰。
+ *
+ * 入口只有粘贴（资源管理器 Ctrl+C → 输入框 Ctrl+V）：拖拽与文件选择对话框
+ * 两个入口已按需求删除，chip 只能经 `readClipboardFiles` 通道产生。
  */
 describe('ChatInput / 文件引用通道', () => {
-  /** 等组件挂上原生拖放订阅（effect 内是异步的）。 */
-  async function waitForDropSubscription() {
-    await waitFor(() => expect(tauri.dropCallbacks.length).toBeGreaterThan(0));
-    return tauri.dropCallbacks[tauri.dropCallbacks.length - 1];
+  /** 粘贴一个文件项（jsdom 无真实剪贴板，只能手工构造 payload）。 */
+  function pasteFile(file: File) {
+    fireEvent.paste(screen.getByLabelText('输入消息'), {
+      clipboardData: {
+        items: [{ kind: 'file', type: file.type, getAsFile: () => file }],
+      },
+    });
   }
 
-  it('桌面版：原生拖放的绝对路径渲染成文件名 chip（完整路径只在 title）', async () => {
-    tauri.desktop = true;
+  it('粘贴得到绝对路径 → chip 只显示文件名，重复粘贴不堆 chip', async () => {
+    tauri.readClipboardFiles.mockResolvedValue(['/home/u/b.ts']);
     const { props } = renderChatInput();
-    const drop = await waitForDropSubscription();
 
-    act(() => drop(['C:\\repo\\src\\main.ts', '/home/u/notes.md']));
-
+    pasteFile(makeTypedFile('b.ts', 'text/plain'));
     const chips = await screen.findAllByTestId('file-chip');
-    expect(chips).toHaveLength(2);
-    // chip 文本只有文件名（长路径会把输入框撑开）
-    expect(chips[0]).toHaveTextContent('main.ts');
-    expect(chips[1]).toHaveTextContent('notes.md');
-    expect(chips[0]).not.toHaveTextContent('C:\\repo');
-    // 完整路径在悬停提示里
-    expect(chips[0]).toHaveAttribute('title', 'C:\\repo\\src\\main.ts');
+    expect(chips).toHaveLength(1);
+    // chip 文本只有文件名（长路径会把输入框撑开），完整路径在悬停提示里
+    expect(chips[0]).toHaveTextContent('b.ts');
+    expect(chips[0]).not.toHaveTextContent('/home/u');
+    expect(chips[0]).toHaveAttribute('title', '/home/u/b.ts');
+
+    // 再粘一次同一文件：跨批次按 path 去重，不会堆成两个 chip
+    await act(async () => {
+      pasteFile(makeTypedFile('b.ts', 'text/plain'));
+    });
+    expect(screen.getAllByTestId('file-chip')).toHaveLength(1);
 
     // 只有附件、没有文字也能发（附件并入正文由 ChatPanel 负责）
     await userEvent.setup().click(screen.getByRole('button', { name: '发送消息' }));
-    expect(props.onSend).toHaveBeenCalledWith(
-      '',
-      [],
-      [
-        { path: 'C:\\repo\\src\\main.ts', name: 'main.ts' },
-        { path: '/home/u/notes.md', name: 'notes.md' },
-      ],
-    );
+    expect(props.onSend).toHaveBeenCalledWith('', [], [{ path: '/home/u/b.ts', name: 'b.ts' }]);
   });
 
-  it('重复拖放同一文件不堆 chip；× 逐个删除后草稿随之清空', async () => {
-    tauri.desktop = true;
+  it('× 删除 chip：chip 消失且空草稿不残留键（与文本/图片同一条删除规则）', async () => {
+    tauri.readClipboardFiles.mockResolvedValue(['/home/u/b.ts']);
     renderChatInput();
-    const drop = await waitForDropSubscription();
 
-    act(() => drop(['C:\\a\\b.ts']));
-    act(() => drop(['C:\\a\\b.ts']));
-
-    expect(await screen.findAllByTestId('file-chip')).toHaveLength(1);
-
+    pasteFile(makeTypedFile('b.ts', 'text/plain'));
+    await waitFor(() => expect(screen.getAllByTestId('file-chip')).toHaveLength(1));
     fireEvent.click(screen.getByRole('button', { name: '移除文件 b.ts' }));
     await waitFor(() => expect(screen.queryAllByTestId('file-chip')).toHaveLength(0));
-    // 空草稿不残留键（与文本/图片同一条删除规则）
     expect(useAppStore.getState().inputDrafts).toEqual({});
   });
 
-  it('桌面版：「添加文件」走原生多选对话框并追加 chip', async () => {
-    tauri.desktop = true;
-    tauri.pickFiles.mockResolvedValue(['F:\\work\\tianyan\\README.md']);
-    const user = userEvent.setup();
+  it('浏览器环境：非图片文件提示指向「贴路径」而非静默忽略', async () => {
     renderChatInput();
-
-    await user.click(screen.getByRole('button', { name: '添加文件' }));
-
-    const chip = await screen.findByTestId('file-chip');
-    expect(chip).toHaveTextContent('README.md');
-    expect(chip).toHaveAttribute('title', 'F:\\work\\tianyan\\README.md');
-  });
-
-  it('浏览器环境：没有「添加文件」入口，非图片文件提示指向「贴路径」而非静默忽略', async () => {
-    renderChatInput();
-    expect(screen.queryByRole('button', { name: '添加文件' })).not.toBeInTheDocument();
 
     fireEvent.change(fileInput(), {
       target: { files: [makeTypedFile('源码.rs', 'text/plain')] },
@@ -428,14 +414,14 @@ describe('ChatInput / 文件引用通道', () => {
   });
 
   it('文件与图片并存：两条通道各自独立传递（图片仍是 data URL）', async () => {
-    tauri.desktop = true;
+    tauri.readClipboardFiles.mockResolvedValue(['/home/u/b.ts']);
     const user = userEvent.setup();
     const { props } = renderChatInput();
-    const drop = await waitForDropSubscription();
 
+    // 图片走「添加图片」（`<input type="file">`）；非位图文件走粘贴 → 路径 chip
     fireEvent.change(fileInput(), { target: { files: [makeImageFile('a.png')] } });
     await waitFor(() => expect(screen.getByAltText('待发送图片 1')).toBeInTheDocument());
-    act(() => drop(['C:\\a\\b.ts']));
+    pasteFile(makeTypedFile('b.ts', 'text/plain'));
     await waitFor(() => expect(screen.getAllByTestId('file-chip')).toHaveLength(1));
 
     await user.type(screen.getByLabelText('输入消息'), '看这两个');
@@ -444,7 +430,7 @@ describe('ChatInput / 文件引用通道', () => {
     expect(props.onSend).toHaveBeenCalledWith(
       '看这两个',
       ['data:image/png;base64,dGVzdA=='],
-      [{ path: 'C:\\a\\b.ts', name: 'b.ts' }],
+      [{ path: '/home/u/b.ts', name: 'b.ts' }],
     );
   });
 });
@@ -452,19 +438,31 @@ describe('ChatInput / 文件引用通道', () => {
 /**
  * 粘贴分流（本功能主路径）：资源管理器 Ctrl+C 复制文件 → 聊天框 Ctrl+V。
  *
- * 关键前提：截图与「复制的文件」在 Web 层同形（都是 `kind: 'file'`，
- * Win+Shift+S 的 MIME 也是 `image/png`），前端**不能**按 MIME 分流，只能
- * 「先问原生有没有文件路径（CF_HDROP），没有才回退图片通道」。
+ * 关键设计（**别“优化”回“先问原生”**）：图片优先，原生路径只兜底。
+ * 截图与「复制的位图文件」在 Web 层同形（都是 `kind: 'file'` + MIME `image/png`），
+ * 而且**两者都该进图片通道**——所以先按 MIME 白名单分流，只有存在非位图文件时
+ * 才去问原生要 CF_HDROP 路径。旧顺序（先问原生）会把复制的 `.png` 丢进 chip，
+ * 模型只能拿到路径去 read_file 读二进制，用户看不到图。
  */
-describe('ChatInput / 粘贴分流（文件 chip vs 截图）', () => {
-  /** 构造一个「粘贴事件里有文件项」的 payload（jsdom 无真实剪贴板）。 */
-  function pasteWithFile(file: File | null, type = 'application/pdf') {
+describe('ChatInput / 粘贴分流（图片优先，原生路径兜底）', () => {
+  /** 构造「粘贴事件里有 N 个文件项」的 payload（jsdom 无真实剪贴板）。 */
+  function pasteWithItems(items: Array<{ file: File | null; type?: string }>) {
     const textarea = screen.getByLabelText('输入消息');
     return fireEvent.paste(textarea, {
       clipboardData: {
-        items: [{ kind: 'file', type, getAsFile: () => file }],
+        items: items.map(({ file, type }) => ({
+          kind: 'file',
+          // 显式 type 优先（剪贴板项的 MIME 不一定等于 File 上的 type）
+          type: type ?? file?.type ?? 'application/octet-stream',
+          getAsFile: () => file,
+        })),
       },
     });
+  }
+
+  /** 单文件项（大多数用例）。 */
+  function pasteWithFile(file: File | null, type = 'application/pdf') {
+    return pasteWithItems([{ file, type }]);
   }
 
   it('原生返回文件路径 → 渲染文件 chip（title 含完整路径），不走图片通道', async () => {
@@ -484,18 +482,133 @@ describe('ChatInput / 粘贴分流（文件 chip vs 截图）', () => {
     expect(props.onSend).toHaveBeenCalledWith('', [], [{ path: 'C:\\work\\a.pdf', name: 'a.pdf' }]);
   });
 
-  it('原生返回空数组（截图场景）→ 回退图片通道，不出现文件 chip', async () => {
+  it('原生返回空数组（截图场景）→ 图片通道，且整个过程不问原生', async () => {
     tauri.readClipboardFiles.mockResolvedValue([]);
     renderChatInput();
 
-    // 截图：MIME 同样是 image/png，与「复制的 png 文件」在 Web 层无法区分
+    // 截图：MIME 是 image/png，直接命中位图白名单
     pasteWithFile(makeImageFile('image.png'), 'image/png');
 
     await waitFor(() => expect(screen.getByAltText('待发送图片 1')).toBeInTheDocument());
     expect(screen.queryByTestId('file-chip')).not.toBeInTheDocument();
+    // 全图片分支不问原生（省一次 IPC，也不靠它分辨截图与复制的位图）
+    expect(tauri.readClipboardFiles).not.toHaveBeenCalled();
   });
 
-  it('原生读取失败（reject）→ 静默回退图片通道，不抛错也不丢粘贴', async () => {
+  it('复制 .png 文件（剪贴板既有 CF_HDROP 又有 image/png）→ 走图片通道，不塞 chip', async () => {
+    // 本次修正的核心用例：原生明明能给出 C:\pics\a.png，但用户的期望是“看到这张图”，
+    // 而位图 MIME 已明确 → 必须先走图片通道（chip 只会让模型 read_file 读二进制失败）。
+    tauri.readClipboardFiles.mockResolvedValue(['C:\\pics\\a.png']);
+    renderChatInput();
+
+    pasteWithFile(makeImageFile('a.png'), 'image/png');
+
+    await waitFor(() => expect(screen.getByAltText('待发送图片 1')).toBeInTheDocument());
+    expect(screen.queryByTestId('file-chip')).not.toBeInTheDocument();
+    // 证明省了一次 IPC：图片分支压根不查剪贴板文件
+    expect(tauri.readClipboardFiles).not.toHaveBeenCalled();
+  });
+
+  it('复制 .pdf 文件 → 走路径 chip 通道，无图片预览', async () => {
+    tauri.readClipboardFiles.mockResolvedValue(['C:\\work\\b.pdf']);
+    renderChatInput();
+
+    pasteWithFile(makeTypedFile('b.pdf', 'application/pdf'));
+
+    const chip = await screen.findByTestId('file-chip');
+    expect(chip).toHaveTextContent('b.pdf');
+    expect(chip).toHaveAttribute('title', 'C:\\work\\b.pdf');
+    expect(screen.queryByAltText(/待发送图片/)).not.toBeInTheDocument();
+    expect(tauri.readClipboardFiles).toHaveBeenCalledTimes(1);
+  });
+
+  it('混合（png + pdf 一起复制）→ 整批走 chip，不出现图片预览', async () => {
+    // 取舍：宁可图片也走路径，也不要在一条消息里同时出现
+    // 「同一张图的 base64 预览」+「指向它的 chip」（模型侧重复入上下文）。
+    tauri.readClipboardFiles.mockResolvedValue(['C:\\pics\\a.png', 'C:\\work\\b.pdf']);
+    renderChatInput();
+
+    pasteWithItems([
+      { file: makeImageFile('a.png'), type: 'image/png' },
+      { file: makeTypedFile('b.pdf', 'application/pdf'), type: 'application/pdf' },
+    ]);
+
+    const chips = await screen.findAllByTestId('file-chip');
+    expect(chips).toHaveLength(2);
+    expect(chips[0]).toHaveTextContent('a.png');
+    expect(chips[1]).toHaveTextContent('b.pdf');
+    expect(screen.queryByAltText(/待发送图片/)).not.toBeInTheDocument();
+  });
+
+  it('复制的 png 读不出字节（CF_HDROP 空壳）→ 回退路径 chip，不停在“图片过大”', async () => {
+    // 图片优先带来的新风险：File 只有 name/size、读不出内容。
+    // 此时必须回退原生路径通道，否则用户会撞上误导性提示且无路可走。
+    vi.stubGlobal('FileReader', FailingFileReader);
+    tauri.readClipboardFiles.mockResolvedValue(['C:\\pics\\blank.png']);
+    renderChatInput();
+
+    pasteWithFile(makeImageFile('blank.png'), 'image/png');
+
+    const chip = await screen.findByTestId('file-chip');
+    expect(chip).toHaveAttribute('title', 'C:\\pics\\blank.png');
+    expect(screen.queryByAltText(/待发送图片/)).not.toBeInTheDocument();
+    // 回退成功后不应残留「图片读取失败 / 图片过大」这类提示
+    await waitFor(() => expect(screen.queryByRole('alert')).not.toBeInTheDocument());
+  });
+
+  it('复制的 png 是 0 字节空壳 → 同样回退路径 chip，不弄出一张破图', async () => {
+    // 空壳的另一种形状：FileReader 不报错，但 data URL 载荷为空。
+    tauri.readClipboardFiles.mockResolvedValue(['C:\\pics\\empty.png']);
+    renderChatInput();
+
+    pasteWithFile(makeImageFile('empty.png', 0), 'image/png');
+
+    const chip = await screen.findByTestId('file-chip');
+    expect(chip).toHaveAttribute('title', 'C:\\pics\\empty.png');
+    expect(screen.queryByAltText(/待发送图片/)).not.toBeInTheDocument();
+  });
+
+  it('复制的 png 超过 4MB → 保留“图片过大”提示，不回退成 chip（确定原因不靠路径通道救）', async () => {
+    tauri.readClipboardFiles.mockResolvedValue(['C:\\pics\\big.png']);
+    renderChatInput();
+
+    pasteWithFile(makeImageFile('big.png', 5 * 1024 * 1024), 'image/png');
+
+    await waitFor(() =>
+      expect(screen.getByRole('alert')).toHaveTextContent('图片过大（超过 4MB）'),
+    );
+    // 过大是确定原因（压缩后再传），不应被兜底成“模型读不出二进制”的 chip
+    expect(screen.queryByTestId('file-chip')).not.toBeInTheDocument();
+  });
+
+  it('图片读不出且原生也没有路径（真·截图）→ 保留提示，不静默', async () => {
+    vi.stubGlobal('FileReader', FailingFileReader);
+    tauri.readClipboardFiles.mockResolvedValue([]);
+    renderChatInput();
+
+    pasteWithFile(makeImageFile('image.png'), 'image/png');
+
+    await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent('图片读取失败'));
+    expect(screen.queryByTestId('file-chip')).not.toBeInTheDocument();
+    expect(screen.queryByAltText(/待发送图片/)).not.toBeInTheDocument();
+    // 读失败时才会为了兜底去问原生
+    expect(tauri.readClipboardFiles).toHaveBeenCalledTimes(1);
+  });
+
+  it('原生读取失败（reject）+ 非位图文件 → 不抛错，回退图片通道并给出可操作提示', async () => {
+    tauri.readClipboardFiles.mockRejectedValue(new Error('ACL denied'));
+    renderChatInput();
+
+    pasteWithFile(makeTypedFile('b.pdf', 'application/pdf'));
+
+    // 原生通道异常不能变成“粘贴没反应”：回退图片通道，pdf 由白名单拦下并指路
+    await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent('不支持的文件类型'));
+    expect(screen.queryByTestId('file-chip')).not.toBeInTheDocument();
+  });
+
+  it('原生读取失败（reject）→ 纯位图粘贴不丢图，也不抛错', async () => {
+    // 注：全图片分支根本不问原生（reject 不会发生），此用例保证「原生通道再怎么
+    // 坏，粘贴的图也不能丢」——读剪贴板异常在 readClipboardPaths 里已降级成 []。
     tauri.readClipboardFiles.mockRejectedValue(new Error('ACL denied'));
     renderChatInput();
 

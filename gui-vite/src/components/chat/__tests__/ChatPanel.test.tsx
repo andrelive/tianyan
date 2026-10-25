@@ -18,19 +18,12 @@ import { messageText } from '@/lib/types';
  */
 const tauri = vi.hoisted(() => ({
   desktop: false,
-  dropCallbacks: [] as Array<(paths: string[]) => void>,
-  pickFiles: vi.fn<() => Promise<string[]>>(async () => []),
+  // 剪贴板文件通道（粘贴 = 资源管理器 Ctrl+C 的文件）：默认「原生没看到文件」
+  readClipboardFiles: vi.fn<() => Promise<string[]>>(async () => [] as string[]),
 }));
 vi.mock('@/lib/tauri', () => ({
   isTauri: () => tauri.desktop,
-  onFileDrop: async (cb: (paths: string[]) => void) => {
-    tauri.dropCallbacks.push(cb);
-    return () => {
-      const i = tauri.dropCallbacks.indexOf(cb);
-      if (i >= 0) tauri.dropCallbacks.splice(i, 1);
-    };
-  },
-  pickFiles: () => tauri.pickFiles(),
+  readClipboardFiles: () => tauri.readClipboardFiles(),
   pickDirectory: async () => null,
   openExternal: async () => false,
 }));
@@ -62,9 +55,8 @@ beforeEach(() => {
   useAppStore.setState(useAppStore.getInitialState());
   resetTaskMocks();
   tauri.desktop = false;
-  tauri.dropCallbacks.length = 0;
-  tauri.pickFiles.mockReset();
-  tauri.pickFiles.mockResolvedValue([]);
+  tauri.readClipboardFiles.mockReset();
+  tauri.readClipboardFiles.mockResolvedValue([]);
 });
 
 describe('ChatPanel', () => {
@@ -1046,10 +1038,9 @@ describe('ChatPanel', () => {
   // ── 文件引用通道（批次 1）──
 
   it('sends file references as @file lines in content (images untouched)', async () => {
-    // 桌面版：拖放/多选得到绝对路径 → chip；发送时路径并入正文，
+    // 粘贴非位图文件 → chip（绝对路径）；发送时路径并入正文，
     // 图片仍走 images 数组（data URL），两条通道互不影响。
-    tauri.desktop = true;
-    tauri.pickFiles.mockResolvedValue(['C:\\work\\repo\\src\\main.ts']);
+    tauri.readClipboardFiles.mockResolvedValue(['C:\\work\\repo\\src\\main.ts']);
     const sentBodies: Array<{ message?: { content?: string; images?: string[] } }> = [];
     server.use(
       http.post('/api/v1/chat/stream', async ({ request }) => {
@@ -1063,8 +1054,18 @@ describe('ChatPanel', () => {
     const user = userEvent.setup();
     renderChatPanel();
 
-    // 通过「添加文件」（原生对话框替身）加入一个文件引用
-    await user.click(screen.getByRole('button', { name: '添加文件' }));
+    // 粘贴一个 .ts 文件（jsdom 无真实剪贴板，只能手工构造 file 项）加入引用
+    fireEvent.paste(screen.getByPlaceholderText(/输入消息/), {
+      clipboardData: {
+        items: [
+          {
+            kind: 'file',
+            type: 'text/plain',
+            getAsFile: () => new File([new Uint8Array(8)], 'main.ts', { type: 'text/plain' }),
+          },
+        ],
+      },
+    });
     expect(await screen.findByTestId('file-chip')).toHaveTextContent('main.ts');
 
     await user.type(screen.getByPlaceholderText(/输入消息/), '看这个源码');

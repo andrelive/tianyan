@@ -43,45 +43,6 @@ export async function openExternal(url: string): Promise<boolean> {
 }
 
 /**
- * 原生**多选文件**对话框（Tauri 桌面壳；依赖 tauri-plugin-dialog）。
- *
- * 返回用户选中的**绝对路径**列表（取消 / 空选 → `[]`）。浏览器环境没有
- * 绝对路径可言（HTML `File` 对象只有 name/size，`path` 是 Electron 扩展），
- * 直接返回 `[]`——调用方回退到「把路径贴进输入框」。
- */
-export async function pickFiles(title = '选择文件'): Promise<string[]> {
-  if (!isTauri()) return [];
-  // 动态 import：浏览器构建不打包插件代码，桌面壳内才加载
-  const mod = await import('@tauri-apps/plugin-dialog');
-  const selected = await mod.open({ multiple: true, directory: false, title });
-  if (typeof selected === 'string') return [selected];
-  return Array.isArray(selected) ? selected : [];
-}
-
-/**
- * 订阅**原生文件拖放**（Tauri 桌面壳；`@tauri-apps/api/webview`）。
- *
- * 桌面版必须走这条通道：`tauri.conf.json` 的 `drag_drop_enabled` 默认 true，
- * Tauri 在 WebView 层**拦截**了系统拖放，前端的 HTML5 `drop` 事件收不到文件
- * （Windows 尤其如此）；而 HTML5 的 `File` 对象也拿不到绝对路径。原生事件
- * 回调里的 `paths` 才是真路径。
- *
- * 只回调 `drop`（`enter` / `over` / `leave` 是悬停态，调用方不需要）；
- * 返回取消订阅函数（组件卸载时调用）。浏览器环境返回空操作——调用方无需
- * 分支判断。
- */
-export async function onFileDrop(cb: (paths: string[]) => void): Promise<() => void> {
-  if (!isTauri()) return () => {};
-  // 动态 import：浏览器构建不打包桌面代码，E2E（浏览器）不受影响
-  const mod = await import('@tauri-apps/api/webview');
-  const unlisten = await mod.getCurrentWebview().onDragDropEvent((event) => {
-    const payload = event.payload;
-    if (payload.type === 'drop') cb(payload.paths);
-  });
-  return unlisten;
-}
-
-/**
  * 读取系统剪贴板里的**文件路径**（Tauri 桌面壳；自定义 command
  * `read_clipboard_files`，Rust 侧直接读 Windows `CF_HDROP` 文件列表）。
  *
