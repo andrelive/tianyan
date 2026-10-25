@@ -20,6 +20,11 @@ function makeImageFile(name: string, size = 1024): File {
   return new File([new Uint8Array(size)], name, { type: 'image/png' });
 }
 
+/** 任意类型文件（用于验证类型白名单；内容不重要）。 */
+function makeTypedFile(name: string, type: string, size = 128): File {
+  return new File([new Uint8Array(size)], name, { type });
+}
+
 function renderChatInput(overrides: Partial<Parameters<typeof ChatInput>[0]> = {}) {
   const props = {
     onSend: vi.fn(),
@@ -210,6 +215,61 @@ describe('ChatInput', () => {
       expect(screen.getAllByAltText(/待发送图片/)).toHaveLength(4);
     });
     expect(screen.getByRole('alert')).toHaveTextContent('最多上传 4 张图片');
+  });
+
+  it('rejects SVG with an actionable hint instead of sending it as an image', async () => {
+    // 前车之鉴：SVG 的 MIME 是 `image/svg+xml`，此前 `image/*` 过滤会放过它，
+    // 读成 data URL 发给模型 → 三家 provider 全部 400。必须在入口拦下并指路。
+    renderChatInput();
+
+    fireEvent.change(fileInput(), {
+      target: { files: [makeTypedFile('架构图.svg', 'image/svg+xml')] },
+    });
+
+    await waitFor(() => {
+      const alert = screen.getByRole('alert');
+      expect(alert).toHaveTextContent('不支持的文件类型');
+      expect(alert).toHaveTextContent('架构图.svg');
+      expect(alert).toHaveTextContent('read_file'); // 给出可操作出路
+    });
+    expect(screen.queryByAltText('待发送图片 1')).not.toBeInTheDocument();
+  });
+
+  it('keeps accepted images while reporting a rejected sibling (mixed batch)', async () => {
+    // 混选（PNG + SVG）时不能整批丢掉：合法图片照常进预览，非法项单独提示。
+    renderChatInput();
+
+    fireEvent.change(fileInput(), {
+      target: {
+        files: [makeImageFile('ok.png'), makeTypedFile('note.html', 'text/html')],
+      },
+    });
+
+    await waitFor(() => {
+      expect(screen.getByAltText('待发送图片 1')).toBeInTheDocument();
+    });
+    expect(screen.getByRole('alert')).toHaveTextContent('note.html');
+  });
+
+  it('reports pasted non-image files instead of silently ignoring them', async () => {
+    renderChatInput();
+
+    const textarea = screen.getByLabelText('输入消息');
+    fireEvent.paste(textarea, {
+      clipboardData: {
+        items: [
+          {
+            kind: 'file',
+            type: 'image/svg+xml',
+            getAsFile: () => makeTypedFile('logo.svg', 'image/svg+xml'),
+          },
+        ],
+      },
+    });
+
+    await waitFor(() => {
+      expect(screen.getByRole('alert')).toHaveTextContent('logo.svg');
+    });
   });
 
   it('renders session token summary with cache hit rate', () => {

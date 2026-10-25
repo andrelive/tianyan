@@ -38,6 +38,27 @@ const MAX_IMAGE_BYTES = 4 * 1024 * 1024;
 /** 单次最多图片数 */
 const MAX_IMAGES = 4;
 
+/**
+ * 图片通道的**类型白名单**（ADR-050 输入准入）。
+ *
+ * 只有 provider 真正接受的位图能进图片通道：SVG（`image/svg+xml`）、BMP 等
+ * "看起来是图片"的类型会被上游直接拒（2026-10-24 实测：ollama / deepseek /
+ * opencode 对 SVG 全部 400 `invalid image input` / `unsupported image`）。
+ * 后端 `ChatRequest::validate` 与 core 的 `sniff_image_mime` 用同一份口径，
+ * 前端这一层是**最早的用户可见提示**（比等上游 400 好）。
+ */
+const ACCEPTED_IMAGE_TYPES: readonly string[] = [
+  'image/png',
+  'image/jpeg',
+  'image/webp',
+  'image/gif',
+];
+
+/** 是否为图片通道接受的位图（大小写不敏感；空 type 不接受）。 */
+function isAcceptedImage(file: File): boolean {
+  return ACCEPTED_IMAGE_TYPES.includes(file.type.toLowerCase());
+}
+
 /** 空图片数组常量（草稿缺省值；引用稳定，避免每次渲染新建数组）。 */
 const EMPTY_IMAGES: string[] = [];
 
@@ -121,14 +142,28 @@ export default function ChatInput({
 
   const addImages = useCallback(
     async (files: FileList | File[]) => {
-      const list = Array.from(files).filter((f) => f.type.startsWith('image/'));
-      if (list.length === 0) return;
-      setRejected(null);
+      const all = Array.from(files);
+      if (all.length === 0) return;
+
+      // 类型白名单：非位图（SVG / HTML / 其他二进制）在入口拦下并给可操作提示。
+      // 不能只按 `image/*` 过滤——SVG 的 MIME 就是 `image/svg+xml`，会被上游 400。
+      const accepted = all.filter(isAcceptedImage);
+      const rejectedTypes = all.filter((f) => !isAcceptedImage(f));
+      if (rejectedTypes.length > 0) {
+        const names = rejectedTypes.map((f) => f.name || f.type || '未知文件').join('、');
+        setRejected(
+          `不支持的文件类型：${names}（图片通道仅支持 PNG/JPEG/WebP/GIF；` +
+            `SVG / HTML 等可以：① 截图或导出成 PNG；② 把文件路径发给我，我用 read_file 读源码）`,
+        );
+      }
+      if (accepted.length === 0) return;
+      // 全部通过时才清旧提示（否则刚设的类型提示会被立刻覆盖）
+      if (rejectedTypes.length === 0) setRejected(null);
 
       // 读图（IO）在草稿更新之外完成；写入合成见下方函数式更新
       const urls: string[] = [];
       const tooLarge: string[] = [];
-      for (const file of list) {
+      for (const file of accepted) {
         const url = await fileToDataUrl(file);
         if (url) {
           urls.push(url);
@@ -177,13 +212,17 @@ export default function ChatInput({
 
   const handlePaste = useCallback(
     (e: React.ClipboardEvent<HTMLTextAreaElement>) => {
-      const items = Array.from(e.clipboardData?.items ?? []).filter((it) =>
-        it.type.startsWith('image/'),
-      );
-      if (items.length > 0) {
+      // 剪贴板里的**文件项**一律交给 addImages（内部按白名单过滤并给提示）：
+      // 过滤条件用 `kind === 'file'` 而不是 `type.startsWith('image/')`——
+      // 后者会放过 SVG（MIME `image/svg+xml`），前者能接住 HTML 等非图片文件，
+      // 让"粘贴了不支持的文件"给出明确提示而不是静默无反应。
+      const files = Array.from(e.clipboardData?.items ?? [])
+        .filter((it) => it.kind === 'file')
+        .map((it) => it.getAsFile())
+        .filter((f): f is File => f !== null);
+      if (files.length > 0) {
         e.preventDefault();
-        const files = items.map((it) => it.getAsFile()).filter((f): f is File => f !== null);
-        if (files.length > 0) void addImages(files);
+        void addImages(files);
       }
     },
     [addImages],
@@ -302,7 +341,7 @@ export default function ChatInput({
                 <input
                   ref={fileInputRef}
                   type="file"
-                  accept="image/*"
+                  accept={ACCEPTED_IMAGE_TYPES.join(',')}
                   multiple
                   className="hidden"
                   onChange={(e) => {

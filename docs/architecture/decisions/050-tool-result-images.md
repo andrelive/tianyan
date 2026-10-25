@@ -211,6 +211,36 @@ undefined = 路由解析不到模型，属异常）；天演的 `capabilities` �
 前缀分叉），形态是对的；但需要 provider 侧错误码识别 + 请求错误瀑布 seam，
 而天演目前没有任何"上游要求卸载"的实测证据——按「不为假设的需求加机制」搁置。
 
+### 4. 输入准入白名单：图片通道只收 4 种位图（2026-10-25）
+
+**事故**：输入框的粘贴/拖拽判定用的是 `file.type.startsWith('image/')`——
+`image/svg+xml` 也满足该条件，于是 SVG 被读成 data URL、当作图片发给模型，
+而三家上游**全部 400**（实测：ollama `invalid image input`、deepseek
+`You have uploaded an unsupported image`、opencode `Upstream request failed`）。
+整轮对话失败，且用户从"输入框里出现了缩略图"看不出任何异常。
+
+**决策：同一份白名单在三个层级生效**（错误越早越明确，越不浪费一次往返）：
+
+| 层 | 位置 | 行为 |
+|---|---|---|
+| 前端 | `ACCEPTED_IMAGE_TYPES`（`ChatInput.tsx`） | 非位图**不读成 data URL**，给可操作提示（截图/导出 PNG，或发路径让模型 `read_file` 读源码） |
+| 后端 | `ACCEPTED_IMAGE_DATA_URL_PREFIXES`（`ChatRequest::validate`） | API 直连的纵深防御；错误文案点名"仅支持 PNG/JPEG/WebP/GIF" |
+| 工具 | `sniff_image_mime` + `prepare_session_image` | `view_image` 侧同理；**BMP 落盘前转 PNG**（模型不认 BMP，虽然 magic bytes 能识别） |
+
+白名单 = `png / jpeg / jpg / webp / gif`。**SVG / BMP / 其他 `image/*` 一律不进图片通道。**
+
+**为什么不做 SVG → PNG 栅格化**（原计划 D，用户否决）：SVG 的语义在**结构**里
+（节点 id、`<g>` 分层、连线、`data-*`），栅格化后模型只能靠"识图"猜形状——
+更贵、更不准，且把一个"可被代码理解"的输入降级成"只能被视觉理解的输入"。
+SVG 的正路是 `read_file` 读源码（模型分析结构），不是转图。
+
+**对账**：DSH 的图片准入白名单就是 4 种位图（`attachment-local/src/index.ts:184`），
+HTML/SVG 只作"引用"（`media-references`，交前端打开预览）；OpenCode 的
+`attachmentMime` 把 `image/svg+xml` 因 `endsWith("+xml")` 归为 `text/plain`
+（`app/src/components/prompt-input/files.ts`）→ 内联成文本 part 给模型
+（`session/message-v2.ts:215` 注释："text/plain … converted into text parts"）。
+**两家都不把 SVG 当图片**——本节的取舍与它们同向。
+
 ## 与既有决策对账
 
 - **ADR-001 / VFS**：图片字节是**运行期产物**（与快照 ADR-006、spill ADR-047、

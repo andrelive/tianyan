@@ -43,6 +43,20 @@ fn default_max_tokens() -> u32 {
     2048
 }
 
+/// 图片通道接受的 data URL 前缀（ADR-050 输入准入）。
+///
+/// 与前端 `ACCEPTED_IMAGE_TYPES`、core `sniff_image_mime` 保持同一口径：
+/// **只含 provider 真正接受的位图**。SVG（`image/svg+xml`）、BMP 等会被上游直接
+/// 拒绝（2026-10-24 实测：ollama / deepseek / opencode 对 SVG 全部 400），
+/// 所以不进图片通道。`image/jpg` 是历史别名，一并宽容。
+const ACCEPTED_IMAGE_DATA_URL_PREFIXES: [&str; 5] = [
+    "data:image/png;base64,",
+    "data:image/jpeg;base64,",
+    "data:image/jpg;base64,",
+    "data:image/webp;base64,",
+    "data:image/gif;base64,",
+];
+
 impl ChatRequest {
     /// 验证请求参数
     pub fn validate(&self) -> Result<(), String> {
@@ -68,14 +82,24 @@ impl ChatRequest {
         {
             return Err("消息内容不能为空".to_string());
         }
-        if self
-            .message
-            .images
-            .as_deref()
-            .map(|imgs| imgs.iter().any(|u| !u.starts_with("data:")))
-            .unwrap_or(false)
-        {
-            return Err("图片必须为 data URL（data:image/...;base64,...）".to_string());
+        if let Some(images) = self.message.images.as_deref() {
+            for url in images {
+                if !url.starts_with("data:") {
+                    return Err("图片必须为 data URL（data:image/...;base64,...）".to_string());
+                }
+                // 类型白名单（纵深防御）：前端已在入口拦 SVG，这里拦 API 直连——
+                // 让错误在本地就明确，而不是把上游的 `invalid image input` 抛给用户。
+                let lowered = url.to_ascii_lowercase();
+                if !ACCEPTED_IMAGE_DATA_URL_PREFIXES
+                    .iter()
+                    .any(|prefix| lowered.starts_with(prefix))
+                {
+                    let shown: String = url.chars().take(40).collect();
+                    return Err(format!(
+                        "不支持的图片格式（仅支持 PNG/JPEG/WebP/GIF）：{shown}"
+                    ));
+                }
+            }
         }
         if !(0.0..=2.0).contains(&self.temperature) {
             return Err("temperature 必须在 0.0 到 2.0 之间".to_string());
@@ -362,6 +386,35 @@ mod tests {
         msg.images = Some(vec!["https://example.com/x.png".to_string()]);
         let req = request_with_message(msg);
         assert!(req.validate().is_err(), "非 data URL 图片应被拒绝");
+    }
+
+    #[test]
+    fn test_validate_svg_image_rejected() {
+        // SVG 的 MIME 是 `image/svg+xml`——"看起来是图片"但 provider 一律 400。
+        // 必须在入口拒绝并给明确原因（前端同样白名单，这里是 API 直连的兜底）。
+        let mut msg = ChatMessage::user("看这个架构图");
+        msg.images = Some(vec!["data:image/svg+xml;base64,PHN2Zy8+".to_string()]);
+        let req = request_with_message(msg);
+        let err = req.validate().expect_err("SVG 必须被拒绝");
+        assert!(err.contains("不支持的图片格式"), "{err}");
+        assert!(err.contains("svg"), "错误应点明类型：{err}");
+    }
+
+    #[test]
+    fn test_validate_accepted_bitmap_mimes_ok() {
+        // 四种位图（含 jpg 别名）都必须放行——避免白名单误伤正常粘贴。
+        for prefix in [
+            "data:image/png;base64,AAAA",
+            "data:image/jpeg;base64,AAAA",
+            "data:image/jpg;base64,AAAA",
+            "data:image/webp;base64,AAAA",
+            "data:image/gif;base64,AAAA",
+        ] {
+            let mut msg = ChatMessage::user("图");
+            msg.images = Some(vec![prefix.to_string()]);
+            let req = request_with_message(msg);
+            assert!(req.validate().is_ok(), "{prefix} 应被接受");
+        }
     }
 
     #[test]

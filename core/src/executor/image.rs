@@ -186,7 +186,10 @@ pub async fn prepare_session_image(path: &str, data_dir: &Path) -> Result<Prepar
 
     let needs_scale =
         src_w > MAX_IMAGE_DIMENSION || src_h > MAX_IMAGE_DIMENSION || src_pixels > MAX_IMAGE_PIXELS;
-    let needs_normalize = png_bit_depth(&raw) == 16;
+    // 需要规范化（重编码）的两种情形：
+    // - 16-bit PNG（少数 provider 直接 400）
+    // - BMP：**不在模型接受的格式列表内**（只认 png/jpeg/webp/gif），落盘前转 PNG
+    let needs_normalize = png_bit_depth(&raw) == 16 || mime == "image/bmp";
 
     let (bytes, final_mime, width, height, original_dimensions) = if needs_scale || needs_normalize
     {
@@ -401,6 +404,35 @@ mod tests {
             (16, 16),
             "降位深不应改变尺寸"
         );
+    }
+
+    #[tokio::test]
+    async fn test_prepare_session_image_converts_bmp_to_png() {
+        // BMP 能被 magic bytes 识别、也能被 image crate 解码，但**模型不认这个格式**
+        // （provider 只接受 png/jpeg/webp/gif）。落盘前必须转成 PNG，否则上游 400。
+        let data_dir = tempfile::tempdir().unwrap();
+        let work = tempfile::tempdir().unwrap();
+        let src = work.path().join("shot.bmp");
+        let img = image::RgbImage::from_pixel(24, 16, image::Rgb([200, 100, 50]));
+        let mut buf = Vec::new();
+        image::DynamicImage::ImageRgb8(img)
+            .write_to(&mut Cursor::new(&mut buf), ImageFormat::Bmp)
+            .unwrap();
+        assert_eq!(sniff_image_mime(&buf), Some("image/bmp"), "测试前提");
+        std::fs::write(&src, &buf).unwrap();
+
+        let prepared = prepare_session_image(src.to_string_lossy().as_ref(), data_dir.path())
+            .await
+            .unwrap();
+        assert_eq!(prepared.mime, "image/png", "BMP 必须转成 PNG");
+        assert!(
+            prepared.reference.ends_with(".png"),
+            "{}",
+            prepared.reference
+        );
+        let stored = std::fs::read(data_dir.path().join(&prepared.reference)).unwrap();
+        assert_eq!(sniff_image_mime(&stored), Some("image/png"));
+        assert_eq!((prepared.width, prepared.height), (24, 16));
     }
 
     #[tokio::test]

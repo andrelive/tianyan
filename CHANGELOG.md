@@ -15,6 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - 代价（诚实记账）：带图的工具结果在历史里**每轮重传**（图片 token 本来就贵）。**不做**「事后剥离旧图」——改历史会让前缀缓存从该处起全部分叉（ADR-048 的教训），要优化只能落在压缩点旁边。
 
 ### Fixed
+- **粘贴 SVG 会把整轮对话打挂**：输入框的粘贴/拖拽判定用 `file.type.startsWith('image/')`，`image/svg+xml` 也满足 → SVG 被读成 data URL 当图片发出去，而三家上游**全部 400**（ollama `invalid image input` / deepseek `You have uploaded an unsupported image` / opencode `Upstream request failed`）。修复：图片通道改为**类型白名单**（PNG/JPEG/JPG/WebP/GIF），前端在入口拦下并给可操作提示（截图或导出 PNG；或把文件路径发进来由 `read_file` 读源码），后端 `ChatRequest::validate` 同口径兜底（API 直连也拦得住），`view_image` 侧把 BMP 落盘前转 PNG（模型不认 BMP）。**刻意不做 SVG→PNG 栅格化**：SVG 的语义在结构（节点/分层/连线）里，栅格化后模型只能"识图"猜，更贵更不准——正路是读源码（依据见 ADR-050 §4）。
 - **会话待办面板切换会话时旧数据滞留 2-3 秒**（用户实测）：切到别的会话，上一个会话的待办要 2-3 秒才消失；切回来同样要等。**与后端无关**（`/todos?session_id=` + `/goals` 串行实测 2-12ms，首次 158ms 是建连），延迟是三处前端逻辑叠加：
   - `usePolling` 的 effect 依赖里**没有「拉取目标」**——`fn` 走 ref 更新（调用方无需稳定身份，组件重渲染不重启轮询），effect 因此看不见 `sessionId` 变化：切会话既不重启轮询也不立即拉，只能等下一个 `setInterval` tick（`POLL_INTERVAL_MS = 3000`）；
   - 面板的 `todos`/`goals` 是**组件本地 state**，切会话不清空 → 旧数据滞留到下一次 tick 被覆盖；
