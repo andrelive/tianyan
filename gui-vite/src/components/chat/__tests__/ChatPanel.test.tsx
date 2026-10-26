@@ -383,6 +383,36 @@ describe('ChatPanel', () => {
     expect(await screen.findByAltText('待发送图片 1')).toBeInTheDocument();
   });
 
+  it('rollback of a legacy @file line restores it as an inline chip', async () => {
+    // 历史消息（批次 1 的格式：正文 + 空行 + 整行 `@file:"…"`）回退时，编辑器
+    // 必须把整行路径还原成 chip——否则用户看到一行看不懂的裸路径，还得手删。
+    const user = userEvent.setup();
+    const legacyText = '看这个\n\n@file:"C:\\work\\a.ts"';
+    useAppStore.setState({
+      currentSessionId: 'session-1',
+      messages: [
+        {
+          id: 'msg_legacy',
+          role: 'user',
+          segments: [{ type: 'text', text: legacyText }],
+          timestamp: new Date().toISOString(),
+        },
+      ],
+    });
+
+    renderChatPanel();
+
+    // 消息区：旧格式仍按「顶部 chip 行」渲染（兼容路径不变）
+    expect(screen.getAllByTestId('file-chip').length).toBeGreaterThan(0);
+
+    await user.click(screen.getByRole('button', { name: /回退到此/ }));
+
+    // 草稿里直接是消息原文；编辑器把整行引用解析成 chip，文本升级为行内格式
+    // （空行照旧保留——它属于正文的段落结构）
+    await waitFor(() => expect(draftText('session-1')).toBe('看这个\n\n`@file:"C:\\work\\a.ts"`'));
+    expect(composerText()).not.toContain('@file:');
+  });
+
   it('undoes a rollback via backend (redo)', async () => {
     const user = userEvent.setup();
     useAppStore.setState({
@@ -1041,11 +1071,11 @@ describe('ChatPanel', () => {
     });
   });
 
-  // ── 文件引用通道（批次 1）──
+  // ── 文件引用通道（chip 内联在文字流里）──
 
-  it('sends file references as @file lines in content (images untouched)', async () => {
-    // 粘贴非位图文件 → chip（绝对路径）；发送时路径并入正文，
-    // 图片仍走 images 数组（data URL），两条通道互不影响。
+  it('sends inline file chip in content at the caret position (images untouched)', async () => {
+    // 粘贴非位图文件 → chip 落在**光标处**（句子中间），发送时它已经是 content
+    // 的一部分（行内 Markdown），图片仍走 images 数组，两条通道互不影响。
     tauri.readClipboardFiles.mockResolvedValue(['C:\\work\\repo\\src\\main.ts']);
     const sentBodies: Array<{ message?: { content?: string; images?: string[] } }> = [];
     server.use(
@@ -1060,6 +1090,8 @@ describe('ChatPanel', () => {
     const user = userEvent.setup();
     renderChatPanel();
 
+    // 先打半句话（光标在末尾），粘贴文件，再接着打完——这就是用户真实动作
+    await typeIntoComposer('看这个 ');
     // 粘贴一个 .ts 文件（jsdom 无真实剪贴板，只能手工构造 file 项）加入引用
     await pasteFilesOntoComposer([
       {
@@ -1069,21 +1101,21 @@ describe('ChatPanel', () => {
     ]);
     expect(await screen.findByTestId('file-chip')).toHaveTextContent('main.ts');
 
-    await typeIntoComposer('看这个源码');
+    await typeIntoComposer('文件');
     await user.click(screen.getByRole('button', { name: /发送/i }));
 
     await waitFor(() => expect(sentBodies).toHaveLength(1));
-    // 正文 = 用户文本 + 空行 + 引用行（引号包裹，Windows 路径可含空格）
+    // ★ 正文 = 「文字 + 行内 code + 文字」：chip 原位，不是末尾的路径行
     expect(sentBodies[0].message?.content).toBe(
-      '看这个源码\n\n@file:"C:\\work\\repo\\src\\main.ts"',
+      '看这个 `@file:"C:\\work\\repo\\src\\main.ts"` 文件',
     );
     // 图片通道不受影响（本例无图片）
     expect(sentBodies[0].message?.images).toBeUndefined();
 
-    // 乐观渲染与 payload 用同一份文本：消息区把路径行还原成只读 chip
+    // 乐观渲染与 payload 用同一份文本：消息区把行内 code 原位还原成只读 chip
     const userMsg = useAppStore.getState().messages.find((m) => m.role === 'user');
     expect(userMsg ? messageText(userMsg) : undefined).toBe(
-      '看这个源码\n\n@file:"C:\\work\\repo\\src\\main.ts"',
+      '看这个 `@file:"C:\\work\\repo\\src\\main.ts"` 文件',
     );
     expect(await screen.findByTitle('C:\\work\\repo\\src\\main.ts')).toBeInTheDocument();
   });

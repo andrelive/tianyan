@@ -135,3 +135,118 @@ describe('ComposerEditor', () => {
     expect(composerText()).toBe('只读内容');
   });
 });
+
+/**
+ * 行内文件 chip（`FileChipNode`）在编辑器里的行为。
+ *
+ * ChatInput.test.tsx 覆盖「粘贴 → chip」的整卡链路；这里钉编辑器自己的契约：
+ * 命令式插入的落点/去重/上限、插入后 `onChange` 回吐的文本、外部 value 回填时
+ * 的 chip 重建。
+ */
+describe('ComposerEditor / 行内文件 chip', () => {
+  /** 造一个文件 chip 的序列化文本（与 FileChipNode.getTextContent 同一口径）。 */
+  function chipText(path: string) {
+    return '`@file:"' + path + '"`';
+  }
+
+  it('insertFileChips 在光标处插入 chip，onChange 回吐「文字 + 行内 code」', async () => {
+    const handleRef = createRef<ComposerEditorHandle>();
+    const onChangeSpy = vi.fn();
+    render(<Harness handleRef={handleRef} onChangeSpy={onChangeSpy} />);
+
+    // 先打字（光标停在末尾），再插入 chip —— 与粘贴的真实动作一致
+    await typeIntoComposer('帮我看下');
+    await act(async () => {
+      handleRef.current?.insertFileChips(['C:\\a b\\架构.docx'], 20);
+    });
+
+    // 视觉上 chip 在文字流里（编辑器内部），并且有删除按钮
+    const chips = screen.getAllByTestId('file-chip');
+    expect(chips).toHaveLength(1);
+    expect(composerEl().contains(chips[0])).toBe(true);
+    expect(chips[0]).toHaveTextContent('架构.docx');
+    expect(screen.getByRole('button', { name: '移除文件 架构.docx' })).toBeInTheDocument();
+
+    // 序列化：文字 + chip + 末尾补的那个空格
+    expect(onChangeSpy).toHaveBeenLastCalledWith(
+      '帮我看下 ' + chipText('C:\\a b\\架构.docx') + ' ',
+    );
+
+    // 继续打字：接在 chip 后的空格之后（不会与 chip 贴死，也不会跑到文本最前面）
+    await typeIntoComposer('的架构');
+    expect(onChangeSpy).toHaveBeenLastCalledWith(
+      '帮我看下 ' + chipText('C:\\a b\\架构.docx') + ' 的架构',
+    );
+  });
+
+  it('重复插入同一路径只留一个 chip；超过上限时只插放得下的部分', async () => {
+    const handleRef = createRef<ComposerEditorHandle>();
+    render(<Harness handleRef={handleRef} />);
+
+    let first: { inserted: number; limited: boolean } | undefined;
+    await act(async () => {
+      first = handleRef.current?.insertFileChips(['/a.ts', '/a.ts', '/b.ts'], 20);
+    });
+    // 批内去重：3 个路径里只有 2 个不同
+    expect(first).toEqual({ inserted: 2, limited: false });
+    expect(screen.getAllByTestId('file-chip')).toHaveLength(2);
+
+    // 再插一次同一批：全部命中跨批去重，什么都不加
+    let second: { inserted: number; limited: boolean } | undefined;
+    await act(async () => {
+      second = handleRef.current?.insertFileChips(['/a.ts', '/b.ts'], 20);
+    });
+    expect(second).toEqual({ inserted: 0, limited: false });
+    expect(screen.getAllByTestId('file-chip')).toHaveLength(2);
+
+    // 上限按「已有 chip 总数」算：上限 3、已有 2 → 只放得下 1 个
+    let third: { inserted: number; limited: boolean } | undefined;
+    await act(async () => {
+      third = handleRef.current?.insertFileChips(['/c.ts', '/d.ts'], 3);
+    });
+    expect(third).toEqual({ inserted: 1, limited: true });
+    expect(screen.getAllByTestId('file-chip')).toHaveLength(3);
+  });
+
+  it('外部 value 里的行内 chip 会被重建为真 chip（草稿恢复/回退）', async () => {
+    render(<Harness initial={'看这个 ' + chipText('/home/u/a.ts') + ' 文件'} />);
+    await act(async () => {});
+
+    const chips = screen.getAllByTestId('file-chip');
+    expect(chips).toHaveLength(1);
+    expect(chips[0]).toHaveAttribute('title', '/home/u/a.ts');
+    // DOM 里看不到反引号包裹的原文（它已变成组件）
+    expect(composerText()).not.toContain('@file:');
+    expect(composerText()).toContain('看这个');
+    expect(composerText()).toContain('文件');
+  });
+
+  it('历史格式（整行 @file:）回填同样还原成 chip，文本升级为行内格式', async () => {
+    const onChangeSpy = vi.fn();
+    render(<Harness initial={'看这个\n@file:"C:\\a.ts"'} onChangeSpy={onChangeSpy} />);
+    await act(async () => {});
+
+    expect(screen.getAllByTestId('file-chip')).toHaveLength(1);
+    expect(screen.queryByText(/@file:/)).not.toBeInTheDocument();
+    // 重新序列化后统一成当前格式（旧格式只在历史消息里保留）
+    expect(onChangeSpy).toHaveBeenLastCalledWith('看这个\n' + chipText('C:\\a.ts'));
+  });
+
+  it('点击 chip 上的 × 删除该 chip，文本同步去掉引用标记', async () => {
+    const handleRef = createRef<ComposerEditorHandle>();
+    const onChangeSpy = vi.fn();
+    render(<Harness handleRef={handleRef} onChangeSpy={onChangeSpy} />);
+
+    await act(async () => {
+      handleRef.current?.insertFileChips(['/a.ts'], 20);
+    });
+    expect(screen.getAllByTestId('file-chip')).toHaveLength(1);
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: '移除文件 a.ts' }));
+    });
+
+    expect(screen.queryAllByTestId('file-chip')).toHaveLength(0);
+    expect(onChangeSpy).toHaveBeenLastCalledWith(' ');
+  });
+});

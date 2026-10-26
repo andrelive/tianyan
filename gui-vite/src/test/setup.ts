@@ -64,6 +64,34 @@ if (typeof (globalThis as { ClipboardEvent?: unknown }).ClipboardEvent === 'unde
   });
 }
 
+/**
+ * jsdom 同样没有 `DragEvent`：`@lexical/utils` 的 `eventFiles()`（RichText 的
+ * PASTE_COMMAND / DROP_COMMAND 处理器都会先调它）用**裸标识符** `DragEvent` 做
+ * `objectKlassEquals` 判定，全局缺失时直接抛 `ReferenceError: DragEvent is not
+ * defined `，异常被编辑器的 onError 吞掉——表现为「粘贴文本/文件完全没反应」。
+ *
+ * 只补一个能承载 `dataTransfer` / 坐标的最小实现（真实浏览器由平台提供）。
+ */
+if (typeof (globalThis as { DragEvent?: unknown }).DragEvent === 'undefined') {
+  class DragEventPolyfill extends Event {
+    readonly dataTransfer: DataTransfer | null;
+    readonly clientX: number;
+    readonly clientY: number;
+
+    constructor(type: string, init: DragEventInit = {}) {
+      super(type, init);
+      this.dataTransfer = init.dataTransfer ?? null;
+      this.clientX = init.clientX ?? 0;
+      this.clientY = init.clientY ?? 0;
+    }
+  }
+  Object.defineProperty(globalThis, 'DragEvent', {
+    value: DragEventPolyfill,
+    writable: true,
+    configurable: true,
+  });
+}
+
 // msw 保持 2.x：3.0 移除了 `onUnhandledRequest` 选项，且其异步管道与
 // `vi.useFakeTimers()` 组合后不再完成（fake timers 下挂载请求悬挂 → 列表空）。
 // 它只是测试工具，升级收益低而调试成本高，故与 lancedb 同型处理：暂缓升级

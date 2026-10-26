@@ -10,6 +10,17 @@
  * 本模块只做纯函数变换（可单测），不触碰 Tauri / 网络 / 组件状态。
  */
 
+/**
+ * 两种序列化格式（**读**都支持，写只有行内格式）：
+ *
+ * 1. **行内格式（当前唯一写入口径）**：`` `@file:"<绝对路径>"` `` —— 用 Markdown
+ *    行内代码包裹，嵌在用户文字中间（`帮我看下 `@file:"…docx"` 的架构`）。文本
+ *    里天然就是行内 code，消息区渲染时不会破坏段落/列表/表格的块结构，模型侧
+ *    看到的也是一条连贯的句子而不是「正文 + 一堆路径行」。
+ * 2. **整行格式（历史消息兼容，只读）**：`@file:"<绝对路径>"` 独占一行（批次 1
+ *    的写法，消息末尾追加）。历史会话里存量消息是这个形状，消息区/回退仍要认。
+ */
+
 import {
   File,
   FileArchive,
@@ -61,17 +72,15 @@ export function toFileRefs(paths: string[]): FileRef[] {
   return refs;
 }
 
-/** 引用列表 → 引用行文本（一行一个；空列表 → 空串）。 */
-export function formatAttachmentLines(refs: FileRef[]): string {
-  return refs.map((ref) => `@file:"${ref.path}"`).join('\n');
-}
-
 /**
  * 文本 → （正文, 引用列表）：把 `@file:"..."` 行提取成 refs，正文保留其余内容。
  *
  * 正文收尾规则：去掉因提取产生的尾部空行，最多保留一个尾换行（避免消息气泡
  * 底部多出一段空白）；提取后正文全为空则返回空串。**不含引用行时原文原样
  * 返回**（包括 `\r\n` 行尾）——普通聊天文本不走任何改写。
+ *
+ * 只认**整行**旧格式（历史消息的兼容读路径）；新消息走行内格式，由消息区的
+ * code 渲染器原位还原（见 `inlineChipPathOf`），不再进这里。
  */
 export function parseAttachmentLines(text: string): { body: string; refs: FileRef[] } {
   if (!text.includes(ATTACHMENT_MARKER)) return { body: text, refs: [] };
@@ -96,17 +105,88 @@ export function parseAttachmentLines(text: string): { body: string; refs: FileRe
 }
 
 /**
- * 正文 + 引用列表 → 最终消息文本：`正文` + 空行 + 引用行。
+ * 一个文件引用 → 行内格式文本（**序列化唯一口径**，编辑器 chip 节点的
+ * `getTextContent()` 就返回它）。
  *
- * 空行分隔是必须的：紧贴正文的 `@file:` 行会被 markdown 当成段内文本（或与
- * 上一行同段），模型侧按行解析时不易定位。**正文为空（纯附件消息）时不加
- * 前导空行**——消息气泡里不该出现一段无内容的空白。
+ * 为什么是 Markdown 行内代码：模型看到的是 `` `@file:"C:\a b\c.ts"` ``，既直白
+ * 可读、又不会被当成正文结构（路径里的 `*`/`_`/`[` 等 Markdown 元字符在 code
+ * span 内全是字面量）。路径两侧的双引号用来界定边界——Windows 路径可含空格。
  */
-export function appendAttachments(content: string, refs: FileRef[]): string {
-  if (refs.length === 0) return content;
-  const body = content.replace(/\s+$/, '');
-  const lines = formatAttachmentLines(refs);
-  return body === '' ? lines : `${body}\n\n${lines}`;
+export function serializeInlineChip(path: string): string {
+  return '`@file:"' + path + '"`';
+}
+
+/** 行内 chip 的匹配口径：反引号包裹的 `@file:"<路径>"`（路径不含反引号与引号）。 */
+const INLINE_CHIP_RE = /`@file:"([^`"]+)"`/g;
+
+/** 行内 chip 的**单段**匹配口径：整段文本恰好是一个 chip 的序列化结果。 */
+const INLINE_CHIP_ONLY_RE = /^@file:"([^`"]+)"$/;
+
+/**
+ * 单个行内代码的**文本内容**（已去掉反引号）→ 文件路径；不是 chip 则 `null`。
+ *
+ * 消息区的 code 渲染器每渲染一个 `<code>` 都要判一次（流式期间每帧都跑），
+ * 所以这里只做一次锚定正则匹配，不做任何切分。
+ */
+export function inlineChipPathOf(code: string): string | null {
+  const matched = INLINE_CHIP_ONLY_RE.exec(code);
+  return matched === null ? null : matched[1];
+}
+
+/** 行内解析结果的一段：普通文字 / 一个文件引用。 */
+export type InlineChipSegment = { type: 'text'; text: string } | { type: 'chip'; path: string };
+
+/**
+ * 文本 → 行内 segment 序列（编辑器的「外部 value 回填」用它重建 chip 节点）。
+ *
+ * 与 `parseAttachmentLines` 的口径不同：这里处理的是**行内**出现（chip 夹在
+ * 文字中间），不能只匹配整行。两种格式都认：
+ * - 行内格式 `` `@file:"…"` ``：任意位置，一行里可以有多个；
+ * - 整行旧格式 `@file:"…"`：**独占一行**时也还原成 chip（回退旧消息时把历史
+ *   文本塞回草稿，编辑器不该让用户看到一行裸路径）。
+ *
+ * 无 chip 时返回**单个文本段且内容原样**（含行尾差异）——普通文本不经过任何
+ * 改写，这也让调用方可以安全地「先判有无再重建」。
+ */
+export function parseInlineChips(text: string): InlineChipSegment[] {
+  if (!text.includes(ATTACHMENT_MARKER)) return [{ type: 'text', text }];
+
+  // 提取时统一行尾为 `\n`（与编辑器内部的换行语义一致）
+  const lines = text.replace(/\r\n/g, '\n').replace(/\r/g, '\n').split('\n');
+  const segments: InlineChipSegment[] = [];
+  let buffer = '';
+  const flush = () => {
+    if (buffer !== '') {
+      segments.push({ type: 'text', text: buffer });
+      buffer = '';
+    }
+  };
+
+  for (let i = 0; i < lines.length; i += 1) {
+    // 换行属于文字：先并入缓冲，chip 段之间的空行才不会被吞掉
+    if (i > 0) buffer += '\n';
+    const line = lines[i];
+    const legacy = ATTACHMENT_LINE_RE.exec(line);
+    if (legacy) {
+      flush();
+      segments.push({ type: 'chip', path: legacy[1] });
+      continue;
+    }
+    let cursor = 0;
+    INLINE_CHIP_RE.lastIndex = 0;
+    for (let m = INLINE_CHIP_RE.exec(line); m !== null; m = INLINE_CHIP_RE.exec(line)) {
+      buffer += line.slice(cursor, m.index);
+      flush();
+      segments.push({ type: 'chip', path: m[1] });
+      cursor = m.index + m[0].length;
+    }
+    buffer += line.slice(cursor);
+  }
+
+  // 一个 chip 都没认出来（例如用户只打了半截 `@file:"`）→ 原文原样返回
+  if (!segments.some((seg) => seg.type === 'chip')) return [{ type: 'text', text }];
+  flush();
+  return segments;
 }
 
 /** 图标 + 颜色（chip 的视觉标识；图标来自 lucide，颜色用 Tailwind 语义色）。 */

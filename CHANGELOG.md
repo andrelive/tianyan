@@ -13,15 +13,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - 冻结副本而非直接引用原文件：原图被移动/改名/覆盖后历史回放照常（同一内容永远对应同一份字节），也避免「同一段对话两次请求看到不同的图」。
   - 明确不支持的形态：URL 图片；provider/模型视觉能力探测（模型无视觉能力时的表现是上游 400，错误可见——不引入静默降级）。
   - 代价（诚实记账）：带图的工具结果在历史里**每轮重传**（图片 token 本来就贵）。**不做**「事后剥离旧图」——改历史会让前缀缓存从该处起全部分叉（ADR-048 的教训），要优化只能落在压缩点旁边。
-- **粘贴文件给模型：Ctrl+C 一个文件 → 输入框 Ctrl+V → 文件名 chip + 绝对路径引用**。此前非图片文件只能手工把路径敲进输入框（非位图被图片通道拒绝后，提示语就是「把文件路径发给我」）。现在：输入框只显示带图标的文件名 chip，实际发给模型的是 `@file:"<绝对路径>"` 文本行，**由模型自行 `read_file` 读取**——后端 core/server **零改动**（路径就是普通文本）。
+- **粘贴文件给模型：Ctrl+C 一个文件 → 输入框 Ctrl+V → chip 内联在文字中间 + 绝对路径引用**。此前非图片文件只能手工把路径敲进输入框（非位图被图片通道拒绝后，提示语就是「把文件路径发给我」）。现在：chip 是**文字流里的一个节点**（`帮我看下 [📄 架构.docx] 的架构`），可光标定位、Backspace 删除；序列化成行内 `` `@file:"<绝对路径>"` `` 后**由模型自行 `read_file` 读取**——后端 core/server **零改动**（路径就是普通文本）。
+  - 输入框为此从 `<textarea>` 换成 **Lexical**（`DecoratorNode` 才能把 React 组件放进文本流）。这是本次最大的工程改动，也是唯一能同时满足「chip 内联」与「中文输入法可靠」的路径：`PlainTextPlugin` → `RichTextPlugin` 时 **Enter / Shift+Enter / IME 三条契约零回归**——`SubmitOnEnterPlugin` 拦在 `COMMAND_PRIORITY_HIGH`，RichText 的默认处理器在 `COMMAND_PRIORITY_EDITOR`（更低），`return true` 即等于已处理，所以**一行没改**。
+  - 序列化口径是**行内代码**而不是「末尾追加独立行」：行内 code 是 Markdown 的行内元素，嵌在段落/列表/表格里都不会破坏块结构；路径里的 `*` `_` `[` `\` 在 code span 内全是字面量。**旧格式（独立 `@file:"…"` 行）保留只读兼容**——历史消息的位置信息在数据里就不存在，强行原位反而错位；回退编辑时整行路径会被还原成真 chip，并在下次序列化时升级成行内格式。
   - 通道分工由 **MIME 白名单**决定，**不是**「先问原生有没有路径」：截图（`Win+Shift+S`）和「复制一个 `.png` 文件」在 Web 层同形（都是 `kind:'file'`、MIME 都是 `image/png`），且**两者本来就都该走图片通道**（用户期望是「看到这张图」）。原生路径通道只在**存在非位图文件**时出场（顺带省一次 IPC）。反过来做会把复制的 `.png` 送进路径通道——模型 `read_file` 读二进制，图进不了上下文（这是实现期被用户指出并修正的真实缺陷）。
   - 混合场景（一次复制 png+pdf）统一走路径通道：否则同一条消息里同一张图既有一份 base64 预览、又有一个指向它的 chip，模型侧重复入上下文。
   - 兜底：`CF_HDROP` 来的 `File` 可能是「有 name/size 但读不出字节」的空壳（含 0 字节、`data:...,` 空载荷），此时回退路径通道，而不是弹「图片过大」这种误导提示。**超 4MB 不回退**——太大有明确出路（压缩后再传），转 chip 只会让模型去读一份读不出的二进制。
   - 入口**只有粘贴**（用户裁决）：拖拽与文件选择对话框刻意不做——原生 drop / dialog 只给路径、拿不到字节，做出来必然与粘贴的通道语义分叉（拖 `.png` 出 chip、粘 `.png` 出图）。
   - 片段形如 `@file:"C:\dir\报告.pdf"`（引号界定空格），消息区渲染为只读 chip（`title` 显示完整路径）；`parseAttachmentLines` 整行锚定解析 + 前置 `includes` 快速判定（消息每个文本段、流式每帧都会调用，不能做全量正则扫描）。
   - 代价（诚实记账）：绝对路径**永久落库**，换机器 / 搬目录后历史里的路径失效（模型读时 `not found`，可接受）；会话历史外传会暴露目录结构。
+- **`read_file` 明确使用边界**（模型会拿它读 docx 然后对着乱码猜内容）：描述重写为「只支持 UTF-8 文本」+ 列举不支持的二进制类型 + 如实标注编码边界（UTF-16 会被判为二进制、GBK 中文出替换字符）；命中二进制时返回值新增 `format`（magic bytes 识别 `zip`/`pdf`/`ole2`/`image`/`gzip`/`rar`/`7z`/`sqlite`/`pe`/`elf`）与 `hint`（按格式分岔的**可执行**下一步：`image` 直接指向 `view_image`、`zip` 提示解包后读 `word/document.xml`），并明确「不要依据 preview 猜测文件内容」。`preview` 字段与前端 `FileViewer` 的消费方式不变。
+- **模型终于知道自己的当前工作目录**：`InjectableContext` 新增 `working_directory`，渲染成系统前缀里的「## 当前环境」段，位置 **soul → 环境 → AGENTS.md → 规则/记忆**（AGENTS.md 里的相对路径需要它先立锚点）。此前模型能读 AGENTS.md 里的 `docs/architecture/decisions/` 却不知道相对谁，只能硬编码绝对路径——而绝对路径随会话永久落库、换机器即失效。措辞引导模型**优先写相对路径**。
 
 ### Fixed
+- **工作目录失效时静默降级到进程 cwd（安全）**：会话绑定的工作目录被删除 / 移走 / 未挂载后（`Session::working_directory` 因 `is_dir()` 为假返回 `None`），Agent 侧回退全局默认、工具侧却回退**服务安装目录**——`apply_patch` / `write_file` / `execute_command` 会落到那里。四层收口：① `ToolContext` 新增 `default_working_directory` 与 Agent 同源（经 `Deref` 对 `ToolRegistry` 可见）；② 连全局默认都没有时，相对路径解析与基准目录**显式返回 `invalid_input`**（不再用进程 cwd）；③ `WorkingDirectory{Bound, BoundInvalid, Default, Unavailable}` 让环境段如实告知（「绑定的目录已不存在，已回退」/「没有可用工作目录」）；④ `execute_command` 无可用工作目录时**拒绝执行**（显式指定 `cwd` 参数不在此限）。`load_injectable` 参数改为 `&WorkingDirectory`，探测根与环境段路径取同一个 `path()`——编译期保证同源，不靠约定。
 - **粘贴 SVG 会把整轮对话打挂**：输入框的粘贴/拖拽判定用 `file.type.startsWith('image/')`，`image/svg+xml` 也满足 → SVG 被读成 data URL 当图片发出去，而三家上游**全部 400**（ollama `invalid image input` / deepseek `You have uploaded an unsupported image` / opencode `Upstream request failed`）。修复：图片通道改为**类型白名单**（PNG/JPEG/JPG/WebP/GIF），前端在入口拦下并给可操作提示（截图或导出 PNG；或把文件路径发进来由 `read_file` 读源码），后端 `ChatRequest::validate` 同口径兜底（API 直连也拦得住），`view_image` 侧把 BMP 落盘前转 PNG（模型不认 BMP）。**刻意不做 SVG→PNG 栅格化**：SVG 的语义在结构（节点/分层/连线）里，栅格化后模型只能"识图"猜，更贵更不准——正路是读源码（依据见 ADR-050 §4）。
 - **会话待办面板切换会话时旧数据滞留 2-3 秒**（用户实测）：切到别的会话，上一个会话的待办要 2-3 秒才消失；切回来同样要等。**与后端无关**（`/todos?session_id=` + `/goals` 串行实测 2-12ms，首次 158ms 是建连），延迟是三处前端逻辑叠加：
   - `usePolling` 的 effect 依赖里**没有「拉取目标」**——`fn` 走 ref 更新（调用方无需稳定身份，组件重渲染不重启轮询），effect 因此看不见 `sessionId` 变化：切会话既不重启轮询也不立即拉，只能等下一个 `setInterval` tick（`POLL_INTERVAL_MS = 3000`）；

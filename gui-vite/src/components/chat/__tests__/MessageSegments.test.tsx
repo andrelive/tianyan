@@ -234,3 +234,74 @@ describe('文件引用回显', () => {
     expect(container.querySelector('p')?.textContent).toContain('第一行');
   });
 });
+
+/**
+ * 行内格式（新消息）：`` `@file:"<路径>"` `` 是 chip 的序列化形态，消息区必须
+ * **原位**渲染成 chip（用户当初粘在句子里，就显示在句子里）。
+ *
+ * 判别力：没接 code 渲染器的实现会把反引号内容渲染成 `<code>@file:"…"</code>`
+ * ——用户看到一条裸路径，并且找不到 chip。
+ */
+describe('文件引用回显（行内格式，原位）', () => {
+  it('行内 code 渲染为原位 chip：前后文字仍在同一段落里', () => {
+    const { container } = render(
+      <SegmentBlocks
+        segments={[
+          { type: 'text', text: '帮我看下 `@file:"C:\\a b\\张磊--系统架构.docx"` 的架构' },
+        ]}
+        isUser={true}
+      />,
+    );
+
+    const chip = screen.getByTestId('file-chip');
+    expect(chip).toHaveTextContent('张磊--系统架构.docx');
+    expect(chip).toHaveAttribute('title', 'C:\\a b\\张磊--系统架构.docx');
+    // 原位：chip 在段落内部（不是被提到正文之前的独立 chip 行）
+    const paragraph = container.querySelector('p');
+    expect(paragraph?.contains(chip)).toBe(true);
+    // 前后文字都还在这个段落里，且不再有裸路径
+    expect(paragraph?.textContent).toContain('帮我看下');
+    expect(paragraph?.textContent).toContain('的架构');
+    expect(container.querySelector('code')).toBeNull();
+    // 只读：消息区不给删除按钮
+    expect(screen.queryByRole('button', { name: /移除文件/ })).not.toBeInTheDocument();
+  });
+
+  it('一行多个 chip + 跨行：各自原位，顺序不乱', () => {
+    const { container } = render(
+      <SegmentBlocks
+        segments={[
+          {
+            type: 'text',
+            text: '先看 `@file:"/a.ts"` 再看 `@file:"/b.md"`\n\n完毕',
+          },
+        ]}
+        isUser={false}
+      />,
+    );
+
+    const chips = screen.getAllByTestId('file-chip');
+    expect(chips.map((c) => c.getAttribute('title'))).toEqual(['/a.ts', '/b.md']);
+    expect(chips[0].compareDocumentPosition(chips[1])).toBe(Node.DOCUMENT_POSITION_FOLLOWING);
+    expect(container.textContent).toContain('先看');
+    expect(container.textContent).toContain('完毕');
+  });
+
+  it('围栏代码块里的 @file: 字样不被误判成 chip（含无语言标记的块）', () => {
+    // 直接测 MarkdownContent：SegmentBlocks 还会跑旧格式（整行）提取，
+    // 这里只想锁定「code 渲染器不把代码块当 chip」这一条。
+    const fenced = '```\n@file:"C:\\a.ts"\n```';
+    const { container } = render(<MarkdownContent text={fenced} isUser={false} />);
+    expect(screen.queryByTestId('file-chip')).not.toBeInTheDocument();
+    // 仍是代码块（pre + code），内容原样
+    expect(container.querySelector('pre')?.textContent).toContain('@file:"C:\\a.ts"');
+  });
+
+  it('带语言标记的围栏块：语法高亮优先，不当 chip', () => {
+    const { container } = render(
+      <MarkdownContent text={'```text\n@file:"C:\\a.ts"\n```'} isUser={false} />,
+    );
+    expect(screen.queryByTestId('file-chip')).not.toBeInTheDocument();
+    expect(container.textContent).toContain('@file:');
+  });
+});

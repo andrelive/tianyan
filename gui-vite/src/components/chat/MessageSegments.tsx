@@ -8,7 +8,7 @@ import type { MessageSegment, ToolCallWithResult } from '@/lib/types';
 import { cn, lastNonEmptyLine } from '@/lib/utils';
 import remarkAutolinkFix from '@/lib/remark-autolink-fix';
 import { isTauri, openExternal } from '@/lib/tauri';
-import { parseAttachmentLines } from '@/lib/attachments';
+import { basenameOf, inlineChipPathOf, parseAttachmentLines } from '@/lib/attachments';
 import ToolCallCard from './ToolCallCard';
 import FileChip from './FileChip';
 
@@ -160,6 +160,23 @@ export const MarkdownContent = memo(function MarkdownContent({
                 </pre>
               );
             }
+            // 行内文件引用：`` `@file:"<绝对路径>"` `` → **原位**渲染只读 chip
+            // （消息区不可改，故不给删除按钮）。这是输入框 chip 的序列化形态，
+            // 「原位」正是要的效果：chip 出现在用户当初粘贴它的位置，而不是被
+            // 摘到正文之前。
+            //
+            // 只在这里判内联 code：上面两条分支（带语言的围栏块、以 \n 结尾的
+            // 无语言围栏块）已经先返回，所以「代码块里恰好写着 @file:"…"」不会被
+            // 误判成 chip。
+            const chipPath = inlineChipPathOf(raw);
+            if (chipPath !== null) {
+              return (
+                <FileChip
+                  file={{ path: chipPath, name: basenameOf(chipPath) }}
+                  className="align-middle"
+                />
+              );
+            }
             return (
               <code
                 className={cn(
@@ -187,10 +204,12 @@ export const MarkdownContent = memo(function MarkdownContent({
 /**
  * 文本段渲染：文件引用行还原成只读 chip，其余正文走 Markdown。
  *
- * 发送时附件路径以 `@file:"..."` 行并入正文（后端零改动），回显时必须还原
- * 成 chip——否则用户看到的是自己的消息里冒出几行看不懂的路径。chip 置于
- * Markdown **之前**（文件是这条消息的"输入附件"，先看附件再看正文），且
- * 与正文块级并列（不嵌进 Markdown 容器）——避免影响段落/列表的块结构。
+ * 两种格式都在这里兼容（**历史消息不能变形**）：
+ * 1. 行内格式 `` `@file:"…"` ``（新消息）：由 `MarkdownContent` 的 code 渲染器
+ *    **原位**渲染成 chip（用户粘在句子里，就显示在句子里）；
+ * 2. 整行格式 `@file:"…"`（批次 1 的历史消息）：仍按老规则提取成顶部 chip 行，
+ *    正文走 Markdown（这些消息当时的语义就是「附件 + 正文」，位置信息已丢失，
+ *    强行原位反而会错位）。
  */
 function TextSegment({ text, isUser }: { text: string; isUser: boolean }) {
   const { body, refs } = parseAttachmentLines(text);

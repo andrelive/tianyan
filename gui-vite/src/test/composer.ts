@@ -126,17 +126,40 @@ export async function pressEnter(options: { shiftKey?: boolean; isComposing?: bo
   });
 }
 
-/** 在输入框上粘贴一个文件项（jsdom 无真实剪贴板，只能手工构造 payload）。 */
+/**
+ * 在输入框上粘贴一个文件项（jsdom 无真实剪贴板，只能手工构造 payload）。
+ *
+ * `types` / `files` 必须给：RichTextPlugin 的 PASTE_COMMAND 处理器会先调
+ * `eventFiles(event)` 读 `dataTransfer.types`（判断「是文件还是文本」），
+ * 真实浏览器的 DataTransfer 一定带这两项，jsdom 里得自己补。
+ */
 export function pasteFilesOntoComposer(files: Array<{ file: File | null; type?: string }>) {
+  const realFiles = files.map(({ file }) => file).filter((file): file is File => file !== null);
   return act(async () => {
     fireEvent.paste(composerEl(), {
       clipboardData: {
+        types: ['Files'],
+        files: realFiles,
         items: files.map(({ file, type }) => ({
           kind: 'file',
           // 显式 type 优先（剪贴板项的 MIME 不一定等于 File 上的 type）
           type: type ?? file?.type ?? 'application/octet-stream',
           getAsFile: () => file,
         })),
+      },
+    });
+  });
+}
+
+/** 在输入框上粘贴纯文本（同上：`types` 声明为 text/plain，不带文件）。 */
+export function pasteTextOntoComposer(text: string) {
+  return act(async () => {
+    fireEvent.paste(composerEl(), {
+      clipboardData: {
+        types: ['text/plain'],
+        files: [],
+        items: [{ kind: 'string', type: 'text/plain', getAsFile: () => null }],
+        getData: (type: string) => (type === 'text/plain' ? text : ''),
       },
     });
   });

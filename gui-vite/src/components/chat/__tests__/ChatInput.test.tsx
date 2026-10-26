@@ -13,6 +13,7 @@ import {
   draftText,
   expectComposerEditable,
   expectComposerReadOnly,
+  pasteTextOntoComposer,
   pressEnter,
   typeIntoComposer,
 } from '@/test/composer';
@@ -118,8 +119,8 @@ describe('ChatInput', () => {
     expect(screen.getByRole('button', { name: '发送消息' })).toBeEnabled();
 
     await user.click(screen.getByRole('button', { name: '发送消息' }));
-    // 第三个参数 = 文件引用通道（本用例无附件 → 空数组）
-    expect(props.onSend).toHaveBeenCalledWith('你好', [], []);
+    // 两个参数：content（文件 chip 已在里面）+ images（本用例无图片 → 空数组）
+    expect(props.onSend).toHaveBeenCalledWith('你好', []);
     // 发送后编辑器清空（value 同步进 Lexical，文本从 DOM 消失）
     await waitFor(() => expect(composerText()).toBe(''));
     expect(draftText()).toBe('');
@@ -139,7 +140,7 @@ describe('ChatInput', () => {
 
     // Enter：发送，内容含 Shift+Enter 留下的换行（与 textarea 的 value 语义一致）
     await pressEnter();
-    expect(props.onSend).toHaveBeenCalledWith('第一行\n', [], []);
+    expect(props.onSend).toHaveBeenCalledWith('第一行\n', []);
   });
 
   it('输入法组合期间（isComposing）的 Enter 不发送、也不插换行', async () => {
@@ -157,7 +158,7 @@ describe('ChatInput', () => {
 
     // 组合结束后 Enter 恢复发送（同一段文本）
     await pressEnter();
-    expect(props.onSend).toHaveBeenCalledWith('nihao', [], []);
+    expect(props.onSend).toHaveBeenCalledWith('nihao', []);
   });
 
   it('Lexical 自身的组合态（compositionstart）期间 Enter 同样不发送', async () => {
@@ -276,7 +277,7 @@ describe('ChatInput', () => {
 
     await typeIntoComposer('看图');
     await user.click(screen.getByRole('button', { name: '发送消息' }));
-    expect(props.onSend).toHaveBeenCalledWith('看图', ['data:image/png;base64,dGVzdA=='], []);
+    expect(props.onSend).toHaveBeenCalledWith('看图', ['data:image/png;base64,dGVzdA==']);
   });
 
   it('rejects oversized images (>4MB) with an alert and no preview', async () => {
@@ -404,23 +405,29 @@ describe('ChatInput', () => {
 });
 
 /**
- * 文件引用通道（批次 1）：非图片文件 → 带图标的文件名 chip，发给后端的是
- * 绝对路径；图片通道（位图 data URL）行为不变，两条通道互不干扰。
+ * 文件引用通道：非图片文件 → **内联在文字流里**的 chip（`FileChipNode`），
+ * 发给后端的是它序列化后的文本 `` `@file:"<绝对路径>"` ``；图片通道（位图
+ * data URL）行为不变，两条通道互不干扰。
  *
  * 入口只有粘贴（资源管理器 Ctrl+C → 输入框 Ctrl+V）：拖拽与文件选择对话框
  * 两个入口已按需求删除，chip 只能经 `readClipboardFiles` 通道产生。
  */
 describe('ChatInput / 文件引用通道', () => {
-  /** 粘贴一个文件项（jsdom 无真实剪贴板，只能手工构造 payload）。 */
+  /**
+   * 粘贴一个文件项（jsdom 无真实剪贴板，只能手工构造 payload）。
+   * `types`/`files` 是 RichTextPlugin 的 `eventFiles()` 必读项（见 @/test/composer）。
+   */
   function pasteFile(file: File) {
     fireEvent.paste(composerEl(), {
       clipboardData: {
+        types: ['Files'],
+        files: [file],
         items: [{ kind: 'file', type: file.type, getAsFile: () => file }],
       },
     });
   }
 
-  it('粘贴得到绝对路径 → chip 只显示文件名，重复粘贴不堆 chip', async () => {
+  it('粘贴得到绝对路径 → chip 出现在输入框内（不是顶部独立行），重复粘贴不堆 chip', async () => {
     tauri.readClipboardFiles.mockResolvedValue(['/home/u/b.ts']);
     const { props } = renderChatInput();
 
@@ -431,6 +438,9 @@ describe('ChatInput / 文件引用通道', () => {
     expect(chips[0]).toHaveTextContent('b.ts');
     expect(chips[0]).not.toHaveTextContent('/home/u');
     expect(chips[0]).toHaveAttribute('title', '/home/u/b.ts');
+    // ★ 核心诉求：chip 在**编辑器的文字流里**（contenteditable 内部），
+    // 而不是草稿区顶部那一行独立 chip 行
+    expect(composerEl().contains(chips[0])).toBe(true);
 
     // 再粘一次同一文件：跨批次按 path 去重，不会堆成两个 chip
     await act(async () => {
@@ -438,12 +448,29 @@ describe('ChatInput / 文件引用通道', () => {
     });
     expect(screen.getAllByTestId('file-chip')).toHaveLength(1);
 
-    // 只有附件、没有文字也能发（附件并入正文由 ChatPanel 负责）
+    // 纯附件（没有文字）也能发：chip 的序列化文本就是 content
     await userEvent.setup().click(screen.getByRole('button', { name: '发送消息' }));
-    expect(props.onSend).toHaveBeenCalledWith('', [], [{ path: '/home/u/b.ts', name: 'b.ts' }]);
+    // 末尾那个空格是插入 chip 时补的分隔空格（ChatPanel 发送前会 trim）
+    expect(props.onSend).toHaveBeenCalledWith('`@file:"/home/u/b.ts"` ', []);
   });
 
-  it('× 删除 chip：chip 消失且空草稿不残留键（与文本/图片同一条删除规则）', async () => {
+  it('粘贴发生在**光标处**：文字夹着 chip，序列化后是行内 Markdown', async () => {
+    tauri.readClipboardFiles.mockResolvedValue(['C:\\a.ts']);
+    renderChatInput();
+
+    // 先把光标打到句子里（末尾），再粘贴，然后继续打字
+    await typeIntoComposer('看这个 ');
+    await act(async () => {
+      pasteFile(makeTypedFile('a.ts', 'text/plain'));
+    });
+    await waitFor(() => expect(screen.getAllByTestId('file-chip')).toHaveLength(1));
+    await typeIntoComposer('文件');
+
+    // 文本形态：`看这个 ` + `` `@file:"C:\a.ts"` `` + ` ` + `文件`
+    expect(draftText()).toBe('看这个 `@file:"C:\\a.ts"` 文件');
+  });
+
+  it('× 删除 chip：chip 消失，文本里也不再残留引用标记', async () => {
     tauri.readClipboardFiles.mockResolvedValue(['/home/u/b.ts']);
     renderChatInput();
 
@@ -451,7 +478,10 @@ describe('ChatInput / 文件引用通道', () => {
     await waitFor(() => expect(screen.getAllByTestId('file-chip')).toHaveLength(1));
     fireEvent.click(screen.getByRole('button', { name: '移除文件 b.ts' }));
     await waitFor(() => expect(screen.queryAllByTestId('file-chip')).toHaveLength(0));
-    expect(useAppStore.getState().inputDrafts).toEqual({});
+    // 只剩插入时补的那个分隔空格（草稿键因此不会被删——`' '` 不是空串）；
+    // 关键契约是「引用标记彻底消失」，否则用户会发出一条指向已删文件的路径。
+    expect(draftText()).not.toContain('@file:');
+    expect(draftText().trim()).toBe('');
   });
 
   it('浏览器环境：非图片文件提示指向「贴路径」而非静默忽略', async () => {
@@ -482,11 +512,10 @@ describe('ChatInput / 文件引用通道', () => {
     await typeIntoComposer('看这两个');
     await user.click(screen.getByRole('button', { name: '发送消息' }));
 
-    expect(props.onSend).toHaveBeenCalledWith(
-      '看这两个',
-      ['data:image/png;base64,dGVzdA=='],
-      [{ path: '/home/u/b.ts', name: 'b.ts' }],
-    );
+    // chip 先在（粘贴时编辑器还是空的），随后打的字接在它后面的空格之后
+    expect(props.onSend).toHaveBeenCalledWith('`@file:"/home/u/b.ts"` 看这两个', [
+      'data:image/png;base64,dGVzdA==',
+    ]);
   });
 });
 
@@ -500,10 +529,17 @@ describe('ChatInput / 文件引用通道', () => {
  * 模型只能拿到路径去 read_file 读二进制，用户看不到图。
  */
 describe('ChatInput / 粘贴分流（图片优先，原生路径兜底）', () => {
-  /** 构造「粘贴事件里有 N 个文件项」的 payload（jsdom 无真实剪贴板）。 */
+  /**
+   * 构造「粘贴事件里有 N 个文件项」的 payload（jsdom 无真实剪贴板）。
+   * `types`/`files` 必给：RichTextPlugin 的 `eventFiles()` 先读它们判断
+   * 「这批粘贴是文件还是文本」（真实浏览器的 DataTransfer 一定有）。
+   */
   function pasteWithItems(items: Array<{ file: File | null; type?: string }>) {
+    const realFiles = items.map(({ file }) => file).filter((file): file is File => file !== null);
     return fireEvent.paste(composerEl(), {
       clipboardData: {
+        types: ['Files'],
+        files: realFiles,
         items: items.map(({ file, type }) => ({
           kind: 'file',
           // 显式 type 优先（剪贴板项的 MIME 不一定等于 File 上的 type）
@@ -531,9 +567,9 @@ describe('ChatInput / 粘贴分流（图片优先，原生路径兜底）', () =
     // 没走图片通道（addImages 未被调用 → 无图片预览）
     expect(screen.queryByAltText(/待发送图片/)).not.toBeInTheDocument();
 
-    // 真正发给模型的是绝对路径（不是二进制）
+    // 真正发给模型的是绝对路径（不是二进制），且形态是行内 code
     await userEvent.setup().click(screen.getByRole('button', { name: '发送消息' }));
-    expect(props.onSend).toHaveBeenCalledWith('', [], [{ path: 'C:\\work\\a.pdf', name: 'a.pdf' }]);
+    expect(props.onSend).toHaveBeenCalledWith('`@file:"C:\\work\\a.pdf"` ', []);
   });
 
   it('原生返回空数组（截图场景）→ 图片通道，且整个过程不问原生', async () => {
@@ -683,14 +719,8 @@ describe('ChatInput / 粘贴分流（图片优先，原生路径兜底）', () =
       caretToEnd(composerEl());
     });
 
-    await act(async () => {
-      fireEvent.paste(composerEl(), {
-        clipboardData: {
-          items: [{ kind: 'string', type: 'text/plain', getAsFile: () => null }],
-          getData: () => '普通文本',
-        },
-      });
-    });
+    // 剪贴板只带 text/plain（不带文件项）：RichText 的默认导入路径插文本
+    await pasteTextOntoComposer('普通文本');
 
     // 文件通道完全没被碰：既不问原生要路径，也不产生 chip
     expect(tauri.readClipboardFiles).not.toHaveBeenCalled();

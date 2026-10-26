@@ -1,10 +1,11 @@
 import { describe, it, expect } from 'vitest';
 import {
-  appendAttachments,
   basenameOf,
   fileIconFor,
-  formatAttachmentLines,
+  inlineChipPathOf,
   parseAttachmentLines,
+  parseInlineChips,
+  serializeInlineChip,
   toFileRefs,
   type FileRef,
 } from '../attachments';
@@ -42,28 +43,16 @@ describe('attachments / toFileRefs', () => {
   });
 });
 
-describe('attachments / formatAttachmentLines', () => {
-  it('一行一个文件，路径用双引号包裹（含空格路径可解析）', () => {
-    expect(formatAttachmentLines([WIN_REF, POSIX_REF])).toBe(
-      '@file:"C:\\Program Files\\demo\\main.ts"\n@file:"/home/u/repo/src/lib.rs"',
-    );
-  });
-
-  it('空列表 → 空串', () => {
-    expect(formatAttachmentLines([])).toBe('');
-  });
-});
-
 describe('attachments / parseAttachmentLines', () => {
-  it('提取引用行并保留正文；format/parse 往返一致', () => {
-    const text = formatAttachmentLines([WIN_REF, POSIX_REF]);
+  it('提取引用行并保留正文（整行旧格式）', () => {
+    const text = `@file:"${WIN_REF.path}"\n@file:"${POSIX_REF.path}"`;
     const parsed = parseAttachmentLines(text);
     expect(parsed.body).toBe('');
     expect(parsed.refs).toEqual([WIN_REF, POSIX_REF]);
   });
 
   it('含空格路径 + 正文往返一致', () => {
-    const content = appendAttachments('看这个文件', [WIN_REF]);
+    const content = `看这个文件\n\n@file:"${WIN_REF.path}"`;
     expect(content).toBe('看这个文件\n\n@file:"C:\\Program Files\\demo\\main.ts"');
     const parsed = parseAttachmentLines(content);
     expect(parsed.refs).toEqual([WIN_REF]);
@@ -112,19 +101,100 @@ describe('attachments / parseAttachmentLines', () => {
   });
 });
 
-describe('attachments / appendAttachments', () => {
-  it('无引用时原样返回（不做 trim）', () => {
-    expect(appendAttachments('原样 文本\n', [])).toBe('原样 文本\n');
+/**
+ * 行内格式（新消息的唯一序列化口径）：chip 就是一段 Markdown 行内代码。
+ *
+ * 判别力：序列化与解析若不同步（谁改了格式而另一头没跟上），下面每组往返都会
+ * 立刻炸——这是「输入框 chip ↔ 模型/消息区文本」之间唯一的契约。
+ */
+describe('attachments / serializeInlineChip', () => {
+  it('输出反引号包裹的 @file:"路径"（行内 code）', () => {
+    expect(serializeInlineChip('C:\\a b\\c.ts')).toBe('`@file:"C:\\a b\\c.ts"`');
+    expect(serializeInlineChip(POSIX_REF.path)).toBe('`@file:"/home/u/repo/src/lib.rs"`');
+  });
+});
+
+describe('attachments / inlineChipPathOf', () => {
+  it('单个行内 code 文本 → 路径（消息区 code 渲染器用它判 chip）', () => {
+    expect(inlineChipPathOf('@file:"C:\\a b\\c.ts"')).toBe('C:\\a b\\c.ts');
+    expect(inlineChipPathOf(POSIX_REF.path)).toBe(null);
+    // 带反引号的原文不是 code 渲染器看到的形态（children 已去掉反引号）
+    expect(inlineChipPathOf(serializeInlineChip('/a/b.ts'))).toBe(null);
+    // 多行/夹带其他文字都不算 chip
+    expect(inlineChipPathOf('@file:"a.ts"\n')).toBe(null);
+    expect(inlineChipPathOf('见 @file:"a.ts"')).toBe(null);
+  });
+});
+
+describe('attachments / parseInlineChips', () => {
+  it('纯文本（无标记）→ 单段且原文原样（含 CRLF 与尾部空白）', () => {
+    const text = '普通文本\r\n第二行  \n\n';
+    expect(parseInlineChips(text)).toEqual([{ type: 'text', text }]);
   });
 
-  it('去掉正文尾部空白后以空行分隔引用行', () => {
-    expect(appendAttachments('正文   \n\n', [POSIX_REF])).toBe(
-      '正文\n\n@file:"/home/u/repo/src/lib.rs"',
-    );
+  it('空串 → 单个空文本段', () => {
+    expect(parseInlineChips('')).toEqual([{ type: 'text', text: '' }]);
   });
 
-  it('正文为空（纯附件）时不加前导空行', () => {
-    expect(appendAttachments('   ', [POSIX_REF])).toBe('@file:"/home/u/repo/src/lib.rs"');
+  it('chip 在句子中间：切成「文字 + chip + 文字」', () => {
+    const text = '看这个 `@file:"C:\\a b\\c.ts"` 文件';
+    expect(parseInlineChips(text)).toEqual([
+      { type: 'text', text: '看这个 ' },
+      { type: 'chip', path: 'C:\\a b\\c.ts' },
+      { type: 'text', text: ' 文件' },
+    ]);
+  });
+
+  it('chip 在开头 / 结尾（不要产出空文本段）', () => {
+    expect(parseInlineChips('`@file:"/a.ts"` 后面有字')).toEqual([
+      { type: 'chip', path: '/a.ts' },
+      { type: 'text', text: ' 后面有字' },
+    ]);
+    expect(parseInlineChips('前面有字 `@file:"/a.ts"`')).toEqual([
+      { type: 'text', text: '前面有字 ' },
+      { type: 'chip', path: '/a.ts' },
+    ]);
+    expect(parseInlineChips('`@file:"/a.ts"`')).toEqual([{ type: 'chip', path: '/a.ts' }]);
+  });
+
+  it('一行里多个 chip + 多行混排：顺序与换行都不丢', () => {
+    const text = 'A `@file:"/a.ts"` B `@file:"/b.ts"`\n第二行 `@file:"/c.ts"` 尾巴';
+    expect(parseInlineChips(text)).toEqual([
+      { type: 'text', text: 'A ' },
+      { type: 'chip', path: '/a.ts' },
+      { type: 'text', text: ' B ' },
+      { type: 'chip', path: '/b.ts' },
+      { type: 'text', text: '\n第二行 ' },
+      { type: 'chip', path: '/c.ts' },
+      { type: 'text', text: ' 尾巴' },
+    ]);
+  });
+
+  it('整行旧格式（历史消息）也还原成 chip，空行保留在文字里', () => {
+    expect(parseInlineChips('看这个\n\n@file:"C:\\a.ts"')).toEqual([
+      { type: 'text', text: '看这个\n\n' },
+      { type: 'chip', path: 'C:\\a.ts' },
+    ]);
+  });
+
+  it('序列化 → 解析往返：文本与路径都不变（编辑器回填的正确性依据）', () => {
+    const chip = serializeInlineChip('C:\\Program Files\\demo\\main.ts');
+    const text = `帮我看下 ${chip} 的架构`;
+    expect(parseInlineChips(text)).toEqual([
+      { type: 'text', text: '帮我看下 ' },
+      { type: 'chip', path: 'C:\\Program Files\\demo\\main.ts' },
+      { type: 'text', text: ' 的架构' },
+    ]);
+    // 反向：把段序列拼回去必须得到原文（受控 value ↔ 编辑器文本的一致性）
+    const rebuilt = parseInlineChips(text)
+      .map((seg) => (seg.type === 'text' ? seg.text : serializeInlineChip(seg.path)))
+      .join('');
+    expect(rebuilt).toBe(text);
+  });
+
+  it('半截标记（用户手打未完成）不产生 chip，原文原样', () => {
+    const text = '把 `@file:"x.ts 放到这里';
+    expect(parseInlineChips(text)).toEqual([{ type: 'text', text }]);
   });
 });
 

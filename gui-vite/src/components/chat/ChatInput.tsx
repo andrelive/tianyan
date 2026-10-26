@@ -3,19 +3,17 @@ import { Send, Square, ImagePlus, X } from 'lucide-react';
 import { cn, formatNumber } from '@/lib/utils';
 import type { RequestPerf, StreamUsage } from '@/lib/types';
 import { useAppStore, PENDING_SESSION_KEY } from '@/lib/store';
-import { toFileRefs, type FileRef } from '@/lib/attachments';
 import { isTauri, readClipboardFiles } from '@/lib/tauri';
 import ModelSelector from './ModelSelector';
 import ThinkingSelect from './ThinkingSelect';
 import ContextRing from './ContextRing';
-import FileChip from './FileChip';
 import ComposerEditor, { type ComposerEditorHandle } from './ComposerEditor';
 import ZoomableImage from '@/components/ui/ImageLightbox';
 
 interface Props {
-  /** 发送：`content` 为输入框原文，`images` 为图片通道（data URL），
-   * `files` 为文件引用通道（绝对路径）——两者由调用方各自并入请求。 */
-  onSend: (content: string, images: string[], files: FileRef[]) => void;
+  /** 发送：`content` 为输入框原文（文件 chip 已经在里面，序列化成
+   * `` `@file:"<路径>"` `` 的行内 code），`images` 为图片通道（data URL）。 */
+  onSend: (content: string, images: string[]) => void;
   onStop: () => void;
   isStreaming: boolean;
   /** 当前会话上下文占用（近一轮完成的 token 用量；切会话随之更新） */
@@ -47,9 +45,9 @@ const MAX_IMAGES = 4;
 /**
  * 单次最多文件引用数（软上限）。
  *
- * chip 行会随文件数换行把输入卡片撑高，且每个引用都会变成模型侧一次
- * `read_file`——20 个已是「一次对话里说得清」的量级。超出只丢弃多余项并
- * 提示，不阻断已有项（与图片的 `MAX_IMAGES` 同一套手感）。
+ * 每个引用都会变成模型侧一次 `read_file`——20 个已是「一次对话里说得清」的
+ * 量级。上限按**文本里已有的 chip 总数**算，超出只丢弃多余项并提示，不阻断
+ * 已有项（与图片的 `MAX_IMAGES` 同一套手感）。
  */
 const MAX_FILES = 20;
 
@@ -97,9 +95,6 @@ interface AddImagesResult {
 
 /** 空图片数组常量（草稿缺省值；引用稳定，避免每次渲染新建数组）。 */
 const EMPTY_IMAGES: string[] = [];
-
-/** 空文件引用数组常量（同上：草稿缺省值，保持渲染期引用稳定）。 */
-const EMPTY_FILES: FileRef[] = [];
 
 /** 读取 File → data URL；超过大小限制返回 null 并提示 */
 function fileToDataUrl(file: File): Promise<string | null> {
@@ -165,7 +160,6 @@ export default function ChatInput({
   const setInputDraft = useAppStore((s) => s.setInputDraft);
   const input = draft?.text ?? '';
   const images = draft?.images ?? EMPTY_IMAGES;
-  const attachments = draft?.attachments ?? EMPTY_FILES;
   const [rejected, setRejected] = useState<string | null>(null);
   // 富文本编辑器句柄（发送后清空 / 需要重新聚焦）：自动高度与按键逻辑已搬进
   // ComposerEditor（Lexical 用 CSS 的 max-height 自带「撑高 + 封顶滚动」）
@@ -179,42 +173,25 @@ export default function ChatInput({
   // （编辑器/send 一并禁用，与 streaming 语义一致）
   // 控制面操作（回退/重做）期间同理禁发（ADR-041）。
   const canSend =
-    !isStreaming &&
-    !compressing &&
-    !busy &&
-    (input.trim().length > 0 || images.length > 0 || attachments.length > 0);
+    !isStreaming && !compressing && !busy && (input.trim().length > 0 || images.length > 0);
 
   /**
-   * 追加文件引用（粘贴分流的路径通道）。
+   * 在**光标处**插入文件 chip（粘贴分流的路径通道）。
    *
-   * 函数式更新 + 按 path 去重：读路径是异步回调，不能覆盖等待期间输入的
-   * 文字，也不该把同一个文件重复堆成两个 chip。
+   * chip 是编辑器里的行内节点（不是草稿里的附件数组），所以这里只把路径交给
+   * 编辑器——插入位置、去重、上限都在 `ComposerEditor.insertFileChips` 里做，
+   * 落点就是用户 Ctrl+V 时的光标，不是「草稿顶部的一行」。
    */
-  const addFiles = useCallback(
-    (paths: string[]) => {
-      const refs = toFileRefs(paths);
-      if (refs.length === 0) return;
-      setInputDraft(draftKey, (prev) => {
-        const existing = prev.attachments ?? EMPTY_FILES;
-        const known = new Set(existing.map((f) => f.path));
-        // 去重已在 toFileRefs（本批内）+ 这里（跨批次）各做一次，此处按 path 比对
-        const added = refs.filter((f) => !known.has(f.path));
-        if (added.length === 0) return prev;
-
-        // 软上限：只保留放得下的部分，其余丢弃并提示（文案与图片通道同风格）
-        const room = MAX_FILES - existing.length;
-        if (added.length > room) {
-          setRejected(`最多添加 ${MAX_FILES} 个文件`);
-        } else {
-          // 干净追加成功：清掉上一次的提示（与 addImages 的「全部通过才清」一致）
-          setRejected(null);
-        }
-        if (room <= 0) return prev;
-        return { ...prev, attachments: [...existing, ...added.slice(0, room)] };
-      });
-    },
-    [draftKey, setInputDraft],
-  );
+  const insertFiles = useCallback((paths: string[]) => {
+    const result = composerRef.current?.insertFileChips(paths, MAX_FILES);
+    if (result === undefined) return;
+    if (result.limited) {
+      setRejected(`最多添加 ${MAX_FILES} 个文件`);
+    } else if (result.inserted > 0) {
+      // 干净插入成功：清掉上一次的提示（与 addImages 的「全部通过才清」一致）
+      setRejected(null);
+    }
+  }, []);
 
   const addImages = useCallback(
     async (files: FileList | File[]): Promise<AddImagesResult> => {
@@ -277,14 +254,15 @@ export default function ChatInput({
 
   const handleSend = useCallback(() => {
     if (isStreaming || compressing || busy) return;
-    if (input.trim().length === 0 && images.length === 0 && attachments.length === 0) return;
-    onSend(input, images, attachments);
+    if (input.trim().length === 0 && images.length === 0) return;
+    // chip 已在 content 里（编辑器的序列化文本），不再有独立的 files 参数
+    onSend(input, images);
     // 清空该会话草稿（键删除；已发送内容不再随页面/会话切换恢复）
-    setInputDraft(draftKey, { text: '', images: [], attachments: [] });
+    setInputDraft(draftKey, { text: '', images: [] });
     setRejected(null);
     // 发送后把焦点还给编辑器（旧 textarea 天然保持焦点，Lexical 也要显式要一次）
     composerRef.current?.focus();
-  }, [input, images, attachments, isStreaming, compressing, busy, onSend, draftKey, setInputDraft]);
+  }, [input, images, isStreaming, compressing, busy, onSend, draftKey, setInputDraft]);
 
   /**
    * 读剪贴板里的文件绝对路径（CF_HDROP）。
@@ -315,7 +293,7 @@ export default function ChatInput({
    *    内容进不了上下文，用户看不到图——这是旧实现的真实缺陷。
    *
    * 混合场景（一次复制 png+pdf）统一走路径通道（**明确的取舍**）：只要存在
-   * 非白名单文件就整批 `addFiles`。否则同一条消息里会出现「同一张图既有一份
+   * 非白名单文件就整批 `insertFiles`。否则同一条消息里会出现「同一张图既有一份
    * base64 预览、又有一个指向它的 chip」，模型侧重复入上下文、费用翻倍。
    *
    * 兜底（图片优先带来的新风险）：复制来的文件那个 `File` 来自 CF_HDROP，
@@ -347,7 +325,7 @@ export default function ChatInput({
           // 转成 chip 反而让模型去 read_file 读一份读不出的二进制。
           if (accepted === 0 && unreadable.length > 0) {
             const paths = await readClipboardPaths();
-            if (paths.length > 0) addFiles(paths);
+            if (paths.length > 0) insertFiles(paths);
           }
           return;
         }
@@ -356,7 +334,7 @@ export default function ChatInput({
         //    或极端情况下连 File 都取不到 → 原生路径才是正确通道
         const paths = await readClipboardPaths();
         if (paths.length > 0) {
-          addFiles(paths);
+          insertFiles(paths);
           return;
         }
 
@@ -365,7 +343,7 @@ export default function ChatInput({
         if (files.length > 0) await addImages(files);
       })();
     },
-    [addFiles, addImages, readClipboardPaths],
+    [insertFiles, addImages, readClipboardPaths],
   );
 
   const removeImage = useCallback(
@@ -378,31 +356,11 @@ export default function ChatInput({
     [draftKey, setInputDraft],
   );
 
-  /** 移除一个待发文件引用（按索引删除；路径可能重复出现于不同会话草稿）。 */
-  const removeAttachment = useCallback(
-    (idx: number) => {
-      setInputDraft(draftKey, (prev) => ({
-        ...prev,
-        attachments: (prev.attachments ?? EMPTY_FILES).filter((_, i) => i !== idx),
-      }));
-    },
-    [draftKey, setInputDraft],
-  );
-
   // 一体式输入卡片（DSH 布局）：字段、模型、思考、图片、圆环、发送都在同一个圆角矩形外框内，
   // 各组件不再独立戴框。
   return (
     <div className="border-t border-[var(--color-border)] bg-[var(--color-bg-primary)] px-4 pt-3 pb-3">
       <div className="mx-auto max-w-4xl rounded-2xl border border-[var(--color-border)] bg-[var(--color-bg-secondary)] transition-colors">
-        {/* 文件引用预览（桌面版）：只显示图标+文件名，路径在 title 里 */}
-        {attachments.length > 0 && (
-          <div className="flex flex-wrap gap-2 px-3 pt-3 pb-1">
-            {attachments.map((file, i) => (
-              <FileChip key={file.path} file={file} onRemove={() => removeAttachment(i)} />
-            ))}
-          </div>
-        )}
-
         {/* 图片预览 */}
         {images.length > 0 && (
           <div className="flex flex-wrap gap-2 px-3 pt-3 pb-1">

@@ -8,7 +8,7 @@ import {
   type Ref,
 } from 'react';
 import { LexicalComposer } from '@lexical/react/LexicalComposer';
-import { PlainTextPlugin } from '@lexical/react/LexicalPlainTextPlugin';
+import { RichTextPlugin } from '@lexical/react/LexicalRichTextPlugin';
 import { ContentEditable } from '@lexical/react/LexicalContentEditable';
 import { HistoryPlugin } from '@lexical/react/LexicalHistoryPlugin';
 import { OnChangePlugin } from '@lexical/react/LexicalOnChangePlugin';
@@ -20,27 +20,33 @@ import {
   $createTextNode,
   $getRoot,
   $getSelection,
+  $isElementNode,
   $isRangeSelection,
+  $isTextNode,
   COMMAND_PRIORITY_HIGH,
   KEY_ENTER_COMMAND,
   PASTE_COMMAND,
+  type BaseSelection,
   type EditorState,
   type LexicalEditor,
+  type LexicalNode,
   type PasteCommandType,
 } from 'lexical';
 import { cn } from '@/lib/utils';
+import { parseInlineChips, toFileRefs } from '@/lib/attachments';
+import { $createFileChipNode, $isFileChipNode, FileChipNode } from './FileChipNode';
 
 /**
  * 输入框富文本编辑器（Lexical）。
  *
  * ## 为什么不用 `<textarea>`
- * 下一步要把文件 chip **内联**在输入文字中间（像 Trae/WorkBuddy）：chip 是
- * 文本流里的一个 React 组件，而 `<textarea>` 只认纯文本。所以先换成
- * `contenteditable` 富文本编辑器——选 Lexical 的理由是 `DecoratorNode` 能把
- * React 组件嵌进文本流（下一步的 chip 就用它），且 IME 处理成熟（Meta 生产在用）。
+ * 文件 chip 要**内联**在输入文字中间（像 Trae/WorkBuddy）：chip 是文本流里的
+ * 一个 React 组件，而 `<textarea>` 只认纯文本。Lexical 的 `DecoratorNode` 能把
+ * React 组件嵌进文本流（见 `FileChipNode`），IME 处理也成熟（Meta 生产在用）。
  *
- * **本步只做「功能完全等价」验证**：纯文本 + Enter 发送 + 自动高度 + 粘贴文件分流，
- * 不做 chip 内联（图片行 / 附件 chip 行 / 底部控件行全部不动，仍在 ChatInput）。
+ * 对外契约仍是**纯文本受控组件**：`value` 进来、`onChange` 出去，chip 在文本里
+ * 的形态就是序列化文本 `` `@file:"<路径>"` ``（`FileChipNode.getTextContent()`）。
+ * 于是「草稿恢复 / 回退重发 / 发送」全都不需要知道 chip 的存在。
  *
  * ## 三个必须写对的地方
  * 1. **IME 组合期间的 Enter 不能发送**（见 `SubmitOnEnterPlugin`）：中文/日文输入法
@@ -74,10 +80,27 @@ export interface ComposerEditorProps {
   autoFocus?: boolean;
 }
 
+/** `insertFileChips` 的结果（供调用方决定是否提示「超过上限」）。 */
+export interface InsertFileChipsResult {
+  /** 真正插进文本流的 chip 数（去重后、上限内的） */
+  inserted: number;
+  /** 是否因为 `maxTotal` 上限丢弃了一部分（调用方据此提示） */
+  limited: boolean;
+}
+
 /** 命令式句柄（发送后清空、外部需要重新聚焦时用） */
 export interface ComposerEditorHandle {
   focus: () => void;
   clear: () => void;
+  /**
+   * 在**当前光标处**插入 N 个文件 chip（粘贴分流的落点）。
+   *
+   * 跨批按路径去重（同一个文件贴两次只留一个 chip），并遵守 `maxTotal` 的
+   * 总量上限（chip 总数，不是本批数量）；插入后末尾补一个空格，用户接着打字
+   * 不会与 chip 贴死。没有可用文本选区（未聚焦 / 选中了 chip 的节点选区）时
+   * 退到内容末尾，绝不丢文件。
+   */
+  insertFileChips: (paths: string[], maxTotal: number) => InsertFileChipsResult;
 }
 
 /** 自动高度上限（与旧 textarea 的 200px 一致；超出后编辑器内部滚动） */
@@ -143,7 +166,24 @@ function focusComposer(editor: LexicalEditor) {
   editor.focus();
 }
 
-/** Enter 发送（无 Shift）+ Shift+Enter 换行 + IME 组合期一律不发送。 */
+/**
+ * Enter 发送（无 Shift）+ Shift+Enter 换行 + IME 组合期一律不发送。
+ *
+ * 换插件（PlainText → RichText）后这里**一行没改**，因为它拦在
+ * `COMMAND_PRIORITY_HIGH`：命令按优先级从高到低派发，本处理器先跑，跑完
+ * `return true` 就等于「已处理」，`registerRichText`（`COMMAND_PRIORITY_EDITOR`，
+ * 更低）注册的默认处理器根本不会被调用。
+ *
+ * 于是三条契约的落点：
+ * - **Enter 发送**：本处理器 `preventDefault()` + 提交 + `return true`
+ *   （RichText 的默认处理器不会去插 `<p>` / `<br>`）。
+ * - **Shift+Enter 换行**：`return false` → 交回 RichText 的默认处理器 → 它看到
+ *   `event.shiftKey` 会 `dispatchCommand(INSERT_LINE_BREAK_COMMAND)`，即插入
+ *   `LineBreakNode`（渲染成 `<br>`，文本内容仍是 `'\n'`，与 textarea 语义一致）。
+ * - **IME 组合期间**：`return true`（既不发送也不插换行）——注意这一条**不能**
+ *   改成 `return false`：RichText 的默认处理器在组合态下会把 Enter 当成换行，
+ *   而组合态的 Enter 只该由输入法负责确认候选词。
+ */
 function SubmitOnEnterPlugin({ onSubmit }: { onSubmit: () => void }) {
   const [editor] = useLexicalComposerContext();
   // 用 ref 存最新回调：命令注册只做一次（不随父组件重渲染反复注册/注销）
@@ -158,12 +198,12 @@ function SubmitOnEnterPlugin({ onSubmit }: { onSubmit: () => void }) {
         KEY_ENTER_COMMAND,
         (event) => {
           // ① IME 组合期间：既不发送、也不插换行——Enter 在这里只负责「确认候选词」，
-          //    由输入法自己处理。返回 true 表示「已处理」以阻止 PlainTextPlugin 的
+          //    由输入法自己处理。返回 true 表示「已处理」以阻止 RichTextPlugin 的
           //    默认换行逻辑，但**不** preventDefault（否则可能吞掉组合确认）。
           if (isComposingKeyEvent(event, editor)) return true;
           // ② 程序化派发（无事件对象）不当作发送：交回默认换行逻辑
           if (event === null) return false;
-          // ③ Shift+Enter：换行（交回 PlainTextPlugin 插 LineBreakNode）
+          // ③ Shift+Enter：换行（交回 RichTextPlugin 插 LineBreakNode）
           if (event.shiftKey) return false;
           // ④ Enter：发送
           event.preventDefault();
@@ -178,7 +218,45 @@ function SubmitOnEnterPlugin({ onSubmit }: { onSubmit: () => void }) {
   return null;
 }
 
-/** 粘贴分流：剪贴板里有文件项才拦截，纯文本粘贴交给 PlainTextPlugin。 */
+/**
+ * 插入 chip 时要不要在前面补一个空格。
+ *
+ * 只在「光标处于某段文字中间/末尾、且前一个字符不是空白」时补：用户打了
+ * 「帮我看下」就直接粘贴，得到的是「帮我看下 ␣[chip]」——而不是把 chip 直接
+ * 糊在汉字上（chip 有内边距，看着还行；但序列化文本会粘成一坨，模型读起来也
+ * 别扭）。
+ * 行首（前一字符是空白 / 没有任何前置文本）不需要补——粘贴进空输入框时
+ * 文本就是干净的 `` `@file:"…"` ``。
+ */
+function $needsLeadingSpace(selection: BaseSelection | null): boolean {
+  if (!$isRangeSelection(selection) || !selection.isCollapsed()) return false;
+  const { anchor } = selection;
+  const node = anchor.getNode();
+  if (!$isTextNode(node)) return false;
+  const before = node.getTextContent().slice(0, anchor.offset);
+  return before !== '' && !/\s$/.test(before);
+}
+
+/**
+ * 当前文本里已有的 chip 路径（插入时的跨批去重与总量上限都基于它）。
+ *
+ * 深度遍历而不是只看 `getChildren()`：chip 可能落在段落里，也可能被将来加入的
+ * 嵌套结构（引用块/列表项）包住。
+ */
+function $collectFileChipPaths(): string[] {
+  const paths: string[] = [];
+  const visit = (node: LexicalNode) => {
+    if ($isFileChipNode(node)) {
+      paths.push(node.getPath());
+      return;
+    }
+    if ($isElementNode(node)) node.getChildren().forEach(visit);
+  };
+  visit($getRoot());
+  return paths;
+}
+
+/** 粘贴分流：剪贴板里有文件项才拦截，纯文本粘贴交给 RichTextPlugin。 */
 function PasteFilesPlugin({ onPasteFiles }: { onPasteFiles: (files: File[]) => void }) {
   const [editor] = useLexicalComposerContext();
   const pasteRef = useRef(onPasteFiles);
@@ -191,7 +269,7 @@ function PasteFilesPlugin({ onPasteFiles }: { onPasteFiles: (files: File[]) => v
       editor.registerCommand<PasteCommandType>(
         PASTE_COMMAND,
         (event) => {
-          // 没有文件项 = 普通文本粘贴：不拦（走 PlainTextPlugin 的纯文本插入）
+          // 没有文件项 = 普通文本粘贴：不拦（走 RichTextPlugin 的默认文本插入）
           if (!clipboardHasFileItem(event)) return false;
           // 【同步阶段】取文件 + 阻止默认插入：异步之后 clipboardData 已回收，
           // 而默认粘贴一旦发生就会把文件名/图片占位插进正文。
@@ -214,6 +292,11 @@ function PasteFilesPlugin({ onPasteFiles }: { onPasteFiles: (files: File[]) => v
  * 防「update 循环 / 打断输入」的关键：**编辑器当前文本已等于 value 就什么都不做**。
  * 否则每次按键都会 `onChange` → store → value → 重建全部节点，中文输入法的
  * 组合串会被清空（表现为「拼音打一半消失」）。
+ *
+ * 重建时 `parseInlineChips` 会把文本里的引用标记认回来变成真 chip：
+ * - 行内 `` `@file:"…"` ``（当前格式）：草稿恢复/回退后 chip 不会退化成裸文本；
+ * - 整行 `@file:"…"`（历史格式）：回退旧消息时同样还原成 chip（顺便把格式升级）。
+ * 两种格式的序列化文本都是纯文本，所以「文本已等于 value」这个早退仍然成立。
  */
 function ExternalValuePlugin({ value }: { value: string }) {
   const [editor] = useLexicalComposerContext();
@@ -221,21 +304,29 @@ function ExternalValuePlugin({ value }: { value: string }) {
   useEffect(() => {
     editor.update(
       () => {
-        // 值相同 → skip（这一条是 IME 安全的全部秘密）
-        if ($getRoot().getTextContent() === value) return;
-
         const root = $getRoot();
-        const selection = $getSelection();
-        root.clear();
+        // 值相同 → skip（这一条是 IME 安全的全部秘密）
+        // 额外条件 `getChildrenSize() > 0`：首次挂载时 root 是空的（文本也是 ''），
+        // 必须补一个空段落——RichText 的块状结构（Enter 插 `<p>`、块光标）依赖
+        // 它有至少一个块级子节点。
+        if (root.getTextContent() === value && root.getChildrenSize() > 0) return;
 
-        // 纯文本重建：'\n' → LineBreakNode，其余按行切 TextNode
+        const selection = $getSelection();
+        // 纯文本重建：引用标记 → chip 节点，'\n' → LineBreakNode，其余按行切 TextNode
         // （与 textarea 的 value 语义一一对应，`getTextContent()` 读回来一模一样）
         const paragraph = $createParagraphNode();
-        const lines = value.split('\n');
-        for (let i = 0; i < lines.length; i += 1) {
-          if (i > 0) paragraph.append($createLineBreakNode());
-          if (lines[i].length > 0) paragraph.append($createTextNode(lines[i]));
+        for (const segment of parseInlineChips(value)) {
+          if (segment.type === 'chip') {
+            paragraph.append($createFileChipNode(segment.path));
+            continue;
+          }
+          const lines = segment.text.split('\n');
+          for (let i = 0; i < lines.length; i += 1) {
+            if (i > 0) paragraph.append($createLineBreakNode());
+            if (lines[i].length > 0) paragraph.append($createTextNode(lines[i]));
+          }
         }
+        root.clear();
         root.append(paragraph);
 
         // 只有编辑器当前持有焦点时才挪光标（否则别抢焦点，也别留一个假选区）
@@ -289,6 +380,47 @@ function HandlePlugin({
           root.clear();
           root.append($createParagraphNode());
         }),
+      insertFileChips: (paths: string[], maxTotal: number) => {
+        // 返回值在 `editor.update` 的回调里被填（update 回调是同步执行的）
+        const result: InsertFileChipsResult = { inserted: 0, limited: false };
+        // 批内去重（同一次粘贴里的重复路径）在这里做，跨批去重在上面的 update 里做
+        const refs = toFileRefs(paths);
+        if (refs.length === 0) return result;
+
+        editor.update(
+          () => {
+            const existing = new Set($collectFileChipPaths());
+            const fresh = refs.filter((ref) => !existing.has(ref.path));
+            if (fresh.length === 0) return;
+            // 上限按「文本里已有的 chip 总数」算，而不是本批数量
+            const room = Math.max(0, maxTotal - existing.size);
+            if (fresh.length > room) result.limited = true;
+            const accepted = fresh.slice(0, room);
+            if (accepted.length === 0) return;
+
+            const nodes: LexicalNode[] = [];
+            // 前面紧挨着文字 → 先补一个空格（见 $needsLeadingSpace）
+            if ($needsLeadingSpace($getSelection())) nodes.push($createTextNode(' '));
+            accepted.forEach((ref, index) => {
+              // chip 之间留一个空格：连续粘贴多个文件时不会挤成一串
+              if (index > 0) nodes.push($createTextNode(' '));
+              nodes.push($createFileChipNode(ref.path));
+            });
+            // 末尾补一个空格：chip 之后接着打字不会与 chip 贴死
+            nodes.push($createTextNode(' '));
+
+            // 光标在哪儿就插哪儿；没有可用的文本选区（未聚焦 / 选中了 chip 的节点
+            // 选区）时退到内容末尾——宁可插在末尾，也不能把文件丢掉
+            if (!$isRangeSelection($getSelection())) $getRoot().selectEnd();
+            const selection = $getSelection();
+            if (!$isRangeSelection(selection)) return;
+            selection.insertNodes(nodes);
+            result.inserted = accepted.length;
+          },
+          { tag: 'file-chip-insert' },
+        );
+        return result;
+      },
     }),
     [editor],
   );
@@ -306,7 +438,7 @@ function HandlePlugin({
 }
 
 /**
- * 聊天输入框的富文本编辑器（Lexical + 纯文本插件）。
+ * 聊天输入框的富文本编辑器（Lexical + RichText 插件 + 行内文件 chip）。
  *
  * 对外仍是「受控 + 命令式句柄」：`value` 进来、`onChange` 出去，Enter 提交、
  * 粘贴文件交回调用方。视觉与旧 `<textarea>` 等价（同样 2 行起步、200px 封顶）。
@@ -323,6 +455,8 @@ const ComposerEditor = forwardRef<ComposerEditorHandle, ComposerEditorProps>(
         namespace: 'tianyan-composer',
         // 初始可编辑态；后续变化由 EditablePlugin 动态 setEditable
         editable: !disabled,
+        // 自定义节点必须登记：chip 的 decorate/importJSON 与文本序列化都靠它
+        nodes: [FileChipNode],
         theme: {},
         onError: (error: Error) => {
           // 不抛：输入框崩掉不该拖垮整个会话页（Lexical 的 onError 是「最后一道网」）
@@ -347,7 +481,10 @@ const ComposerEditor = forwardRef<ComposerEditorHandle, ComposerEditorProps>(
       <LexicalComposer initialConfig={initialConfig}>
         {/* 相对定位容器：placeholder 是编辑器的兄弟节点，用绝对定位叠在文字位置上 */}
         <div className="relative">
-          <PlainTextPlugin
+          {/* RichTextPlugin：DecoratorNode（文件 chip）的前置——它负责把 decorate()
+              返回的 React 元素 portal 进 chip 的宿主 span。只有块/行内结构能力，
+              不引入 markdown 快捷输入（`@lexical/markdown` 没装也不用）。 */}
+          <RichTextPlugin
             contentEditable={
               <ContentEditable
                 aria-label="输入消息"
