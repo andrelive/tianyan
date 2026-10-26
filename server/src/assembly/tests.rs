@@ -555,7 +555,7 @@ impl ContextPort for StubContextPort {
     async fn load_injectable(
         &self,
         _query: &str,
-        _working_directory: Option<&std::path::Path>,
+        _working_directory: &tianyan::common::types::WorkingDirectory,
     ) -> tianyan::Result<tianyan::common::types::InjectableContext> {
         Ok(tianyan::common::types::InjectableContext::new())
     }

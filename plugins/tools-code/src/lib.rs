@@ -144,7 +144,7 @@ impl DynamicToolExecutor for RepoMapTool {
     ) -> tianyan::common::error::Result<serde_json::Value> {
         let params: RepoMapParams = parse_params(arguments)?;
         let root = match &params.path {
-            Some(dir) => self.ctx.resolve_tool_path(session_id, dir).await,
+            Some(dir) => self.ctx.resolve_tool_path(session_id, dir).await?,
             None => self
                 .ctx
                 .resolve_base_dir(session_id)
@@ -218,7 +218,7 @@ impl DynamicToolExecutor for GrepTool {
     ) -> tianyan::common::error::Result<serde_json::Value> {
         let params: SearchCodeParams = parse_params(arguments)?;
         let resolved_root = match &params.path {
-            Some(dir) => self.ctx.resolve_tool_path(session_id, dir).await,
+            Some(dir) => self.ctx.resolve_tool_path(session_id, dir).await?,
             None => self
                 .ctx
                 .resolve_base_dir(session_id)

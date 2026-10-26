@@ -199,20 +199,25 @@ impl ToolRegistry {
             }
         }
 
-        // 默认工作目录：模型未指定 cwd 时使用会话绑定的工作目录（工作区），
-        // 缺省回退进程当前目录——确保命令在用户的工作区内执行，而非进程 cwd
-        // （如天演仓库根目录）
+        // 默认工作目录：模型未指定 cwd 时使用**会话生效的工作目录**
+        // （会话绑定优先 → 全局默认），与 `read_file` / `apply_patch` 同一套
+        // 归属规则（`ToolContext::resolve_base_dir`）。
+        //
+        // 两处都没有可用目录时**拒绝执行**（而不是降级到进程 cwd）：进程 cwd 是
+        // 服务安装目录，`echo x > 文件`、`rm -rf build` 这类命令会在那里生效——
+        // 「静默降级 + 写操作」的组合比直接拒绝危险得多（用户裁定：宁可否掉，
+        // 也不要落到安装目录）。模型显式指定 `cwd` 参数时不受此限。
         let cwd = match params.cwd.clone() {
             Some(cwd) => Some(cwd),
-            None => match &self.session_manager {
-                Some(sm) => match sm.get_session(session_id).await {
-                    Ok(Some(session)) => session
-                        .working_directory(None)
-                        .map(|p| p.to_string_lossy().into_owned()),
-                    _ => None,
-                },
-                None => None,
-            },
+            None => {
+                let base = self.resolve_base_dir(session_id).await.map_err(|_| {
+                    TianyanError::invalid_input(
+                        "tool: 没有可用工作目录，无法执行命令（命令需在会话工作区内运行）。\
+                         请为该会话绑定工作区，或显式指定 cwd 参数。",
+                    )
+                })?;
+                Some(base.to_string_lossy().into_owned())
+            }
         };
 
         // Path sandbox for working directory

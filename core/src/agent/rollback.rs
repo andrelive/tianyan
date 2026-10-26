@@ -110,7 +110,13 @@ impl Agent {
                     .cancel_tasks_after_anchor(session_id, index as i64, true)
                     .await?;
 
-                let workdir = self.resolve_working_directory(session_id).await;
+                // `.path()`：绑定目录失效时用兜底目录做快照根（与工具侧同一口径）；
+                // 无可用目录 = 没有可回退的文件基准（workdir 回报 None，前端明示）。
+                let workdir = self
+                    .resolve_working_directory(session_id)
+                    .await
+                    .path()
+                    .map(std::path::Path::to_path_buf);
                 let mut restored_files = 0usize;
                 let mut redo_available = false;
 
@@ -185,7 +191,17 @@ impl Agent {
                 let workdir = self
                     .resolve_working_directory(session_id)
                     .await
-                    .ok_or_else(|| TianyanError::invalid_input("未启用工作区快照，无法重做"))?;
+                    .path()
+                    .map(std::path::Path::to_path_buf)
+                    .ok_or_else(|| {
+                        // 快照管理器已装配，这里只可能是「没有可用工作目录」
+                        // （会话未绑定/绑定失效 且 无全局默认）——文案要指对原因，
+                        // 否则用户会去查快照配置而不是绑定工作区。
+                        TianyanError::invalid_input(
+                            "没有可用工作目录，无法重做（重做需按工作区快照回放文件）。\
+                             请为该会话绑定工作区。",
+                        )
+                    })?;
                 let Some((messages, restored_files)) = sm
                     .with_workdir(workdir)
                     .load_redo(session_id, message_id)

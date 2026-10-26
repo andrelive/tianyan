@@ -58,14 +58,27 @@ impl ContextAssembler {
             messages.push(Message::system(&injectable.soul));
         }
 
-        // 注入当前环境（工作目录 + 相对路径口径）——soul 之后、AGENTS.md 之前：
-        // AGENTS.md 正文里的相对路径（如 `docs/architecture/decisions/`）需要先立
-        // 基准，模型才知道该从哪儿起算。未绑定工作目录（`None`，少见）时整段不注入，
-        // 不占 token；空串同理（渲染出来是个空 code span，不如不给）。
-        if let Some(working_directory) = injectable.working_directory.as_deref() {
-            if !working_directory.is_empty() {
-                messages.push(Message::system(render_environment(working_directory)));
-            }
+        // 注入当前环境（工作目录 + 相对路径口径 [+ 异常警示]）——soul 之后、
+        // AGENTS.md 之前：AGENTS.md 正文里的相对路径（如
+        // `docs/architecture/decisions/`）需要先立基准，模型才知道该从哪儿起算。
+        //
+        // 两类内容任一存在就注入本段：
+        // - 工作目录本身（未绑定 / 空串时不给，避免渲染出空 code span）；
+        // - 异常警示（绑定目录失效 / 无可用目录）——**这段即便没有可用目录也必须
+        //   出现**：它正是「模型别瞎试、去提醒用户绑定工作区」的唯一信息源。
+        let working_directory = injectable
+            .working_directory
+            .as_deref()
+            .filter(|d| !d.is_empty());
+        let warning = injectable
+            .working_directory_warning
+            .as_deref()
+            .filter(|w| !w.is_empty());
+        if working_directory.is_some() || warning.is_some() {
+            messages.push(Message::system(render_environment(
+                working_directory,
+                warning,
+            )));
         }
 
         // 注入项目指令（AGENTS.md）——环境段之后、rules/memories 之前
@@ -359,23 +372,36 @@ impl ContextAssembler {
     }
 }
 
-/// 渲染「当前环境」系统段：工作目录 + 相对路径解析口径。
+/// 渲染「当前环境」系统段：工作目录 + 相对路径解析口径（+ 异常警示）。
 ///
 /// 措辞克制（这段进每次请求）：只讲模型会用到的两件事——基准在哪、
 /// 相对路径优于绝对路径的理由。不重复工具描述里已说明的平台信息。
 ///
+/// `warning` 来自 `WorkingDirectory::warning()`（绑定目录失效 / 无可用目录）：
+/// 非 `None` 时**前置**在段首，让模型先看到「这不是你该反复试错的事，而该提醒
+/// 用户」。它与 `working_directory` 来自**同一个** `WorkingDirectory` 值，
+/// 因此「探测 AGENTS.md 的根」与「告诉模型的目录」不会分叉。
+///
+/// 无可用目录（`working_directory = None` + `warning = Some`）时只渲染警示——
+/// 没有可给的路径，就不给「工作目录：\`\`」这种空 code span。
+///
 /// 纯函数（无 I/O、无状态），内容只依赖入参——工作目录在会话生命周期内不变，
 /// 故同一会话每次请求渲染逐字节一致，不引起 prompt 缓存抖动。
-fn render_environment(working_directory: &str) -> String {
-    format!(
-        "## 当前环境\n\
-         \n\
-         工作目录：`{working_directory}`\n\
-         \n\
-         所有相对路径（如 `src/main.rs`、`./docs`）都基于此目录解析——`read_file` / `glob` / \
-         `grep` / `list_dir` / `execute_command`（未显式指定 cwd 时）同一口径。\
-         **结论里优先写相对路径**：绝对路径会随会话永久落库，换机器或搬目录后即失效。\n"
-    )
+fn render_environment(working_directory: Option<&str>, warning: Option<&str>) -> String {
+    let mut text = String::from("## 当前环境\n");
+    if let Some(warning) = warning {
+        text.push_str(&format!("\n{warning}\n"));
+    }
+    if let Some(working_directory) = working_directory {
+        text.push_str(&format!(
+            "\n工作目录：`{working_directory}`\n\
+             \n\
+             所有相对路径（如 `src/main.rs`、`./docs`）都基于此目录解析——`read_file` / `glob` / \
+             `grep` / `list_dir` / `execute_command`（未显式指定 cwd 时）同一口径。\
+             **结论里优先写相对路径**：绝对路径会随会话永久落库，换机器或搬目录后即失效。\n"
+        ));
+    }
+    text
 }
 
 /// 该消息是否承载指定调用的工具结果。
@@ -671,7 +697,7 @@ mod tests {
     /// 判别力：少任何一条，模型就回到「不知道基准」或「继续硬编码绝对路径」。
     #[test]
     fn test_render_environment_contains_path_and_relative_guidance() {
-        let text = render_environment("F:\\work\\git\\tianyan");
+        let text = render_environment(Some("F:\\work\\git\\tianyan"), None);
 
         assert!(
             text.starts_with("## 当前环境"),
@@ -700,11 +726,72 @@ mod tests {
                 "环境段不应重复平台信息（出现 {noise}）：{text}"
             );
         }
+        // 正常态（无警示）不得出现 ⚠️：这段每轮都在前缀里，噪声会稀释真警示
+        assert!(!text.contains("⚠️"), "正常态不应有警示：{text}");
         // 逐字节确定：同入参同输出（前缀缓存依赖这一点）
         assert_eq!(
-            render_environment("F:\\work\\git\\tianyan"),
+            render_environment(Some("F:\\work\\git\\tianyan"), None),
             text,
             "渲染必须是纯函数（前缀稳定性）"
+        );
+        // 与「引入警示前」逐字节一致：这段进每次请求，任何空白改动都会让存量
+        // 会话的 prompt 前缀缓存整体失效（成本是每次请求全量重算）。
+        assert_eq!(
+            text,
+            "## 当前环境\n\n工作目录：`F:\\work\\git\\tianyan`\n\n所有相对路径（如 `src/main.rs`、\
+             `./docs`）都基于此目录解析——`read_file` / `glob` / `grep` / `list_dir` / \
+             `execute_command`（未显式指定 cwd 时）同一口径。**结论里优先写相对路径**：\
+             绝对路径会随会话永久落库，换机器或搬目录后即失效。\n",
+            "正常态环境段必须与引入警示前的渲染逐字节一致（存量会话前缀缓存）"
+        );
+    }
+
+    // ── 工作目录异常警示（L3：环境段如实反映状态）───────────────────
+
+    /// 绑定目录失效 + 已回退到默认：警示在前、两个路径都在（失效的 + 兜底的）。
+    ///
+    /// 判别力：把警示塞在段尾或只给一个路径时，模型很可能只读到「工作目录：X」
+    /// 就继续在 X 里写（X 已被删），或只看到警示却不知道现在该在哪儿干活。
+    #[test]
+    fn test_render_environment_with_bound_invalid_warning() {
+        let warning = "⚠️ 本会话绑定的工作目录 `D:\\gone` 已不存在（可能被删除、移动或未挂载），\
+                       已回退到全局默认工作目录。";
+        let text = render_environment(Some("F:\\workspace"), Some(warning));
+
+        assert!(text.starts_with("## 当前环境"), "{text}");
+        let warn_pos = text.find("⚠️").expect("警示必须在环境段里");
+        let wd_pos = text
+            .find("工作目录：`F:\\workspace`")
+            .expect("仍要给出兜底目录");
+        assert!(
+            warn_pos < wd_pos,
+            "警示必须前置（先看到事实，再看到现在在哪儿）：{text}"
+        );
+        assert!(text.contains("D:\\gone"), "必须指名失效的绑定目录：{text}");
+        assert!(
+            text.contains("F:\\workspace"),
+            "必须给出实际生效的兜底目录：{text}"
+        );
+        // 兜底目录仍然带着相对路径口径（模型要在这里继续干活）
+        assert!(text.contains("都基于此目录解析"), "{text}");
+    }
+
+    /// 无任何可用目录：只渲染警示，不渲染空的工作目录行。
+    #[test]
+    fn test_render_environment_unavailable_has_no_path_line() {
+        let warning = "⚠️ 没有可用工作目录，相对路径操作将失败。请让用户为该会话绑定工作区。";
+        let text = render_environment(None, Some(warning));
+
+        assert!(text.starts_with("## 当前环境"), "{text}");
+        assert!(text.contains("⚠️"), "{text}");
+        assert!(text.contains("请让用户为该会话绑定工作区"), "{text}");
+        assert!(
+            !text.contains("工作目录：`"),
+            "无可用目录时不得渲染空的工作目录行（空 code span 只会误导）：{text}"
+        );
+        assert!(
+            !text.contains("都基于此目录解析"),
+            "没有基准就别说「基于此目录」：{text}"
         );
     }
 
@@ -798,6 +885,35 @@ mod tests {
         let messages = ContextAssembler::assemble(&[], &injectable);
         assert_eq!(messages.len(), 1, "只有 soul：{messages:?}");
         assert!(!messages[0].content.contains("## 当前环境"));
+    }
+
+    /// 无可用工作目录但有警示 → 环境段**仍要注入**（且只有警示）。
+    ///
+    /// 判别力：注入条件若只看 `working_directory`，警示永远发不出去——模型在
+    /// 「没有基准」的会话里既不知道基准，也不知道该提醒用户，只能瞎试。
+    #[test]
+    fn test_assemble_injects_warning_without_working_directory() {
+        let warning = "⚠️ 没有可用工作目录，相对路径操作将失败。请让用户为该会话绑定工作区。";
+        let injectable = InjectableContext {
+            soul: "SOUL-人格".to_string(),
+            working_directory: None,
+            working_directory_warning: Some(warning.to_string()),
+            project_instructions: "AGENTS-MD-项目规范".to_string(),
+            ..Default::default()
+        };
+        let messages = ContextAssembler::assemble(&[], &injectable);
+
+        assert_eq!(
+            messages.len(),
+            3,
+            "soul + 环境(仅警示) + AGENTS.md：{messages:?}"
+        );
+        assert!(
+            messages[1].content.starts_with("## 当前环境") && messages[1].content.contains("⚠️"),
+            "第 2 段必须是环境警示：{}",
+            messages[1].content
+        );
+        assert_eq!(messages[2].content, "AGENTS-MD-项目规范");
     }
 
     #[test]

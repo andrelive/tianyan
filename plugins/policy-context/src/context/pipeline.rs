@@ -14,7 +14,7 @@ use tianyan::common::error::Result;
 use tianyan::common::types::InjectableContext;
 use tianyan::common::types::{
     AgentPath, CacheUsage, ContentLevel, ContextNamespace, DetailedTokenUsage, Message,
-    MessageRole, MessageTime, Part, PartTime, StructuredMessage, TokenUsage,
+    MessageRole, MessageTime, Part, PartTime, StructuredMessage, TokenUsage, WorkingDirectory,
 };
 use tianyan::vfs::VirtualFileSystem;
 
@@ -84,7 +84,7 @@ impl ContextPipeline {
     pub async fn load_injectable(
         &self,
         query: &str,
-        working_directory: Option<&std::path::Path>,
+        working_directory: &WorkingDirectory,
     ) -> Result<InjectableContext> {
         let mut injectable = InjectableContext::new();
 
@@ -108,15 +108,18 @@ impl ContextPipeline {
             }
         }
 
-        // Load project instructions（AGENTS.md）——会话绑定工作目录下探测；
+        // Load project instructions（AGENTS.md）——会话生效工作目录下探测；
         // 会话首次加载时读取一次（会话绑定工作目录后不变，无需刷新机制）。
         //
-        // 同一个 `if let` 里同时记下**目录本身**：环境段的「工作目录」与 AGENTS.md 的
-        // 「探测根」必然同源，不会出现「告诉模型 A、实际按 B 探测」的不一致。
-        if let Some(dir) = working_directory {
+        // 「探测根」「环境段路径」「警示文案」三者都出自**同一个**
+        // `WorkingDirectory` 值：`path()` 既用于探测也用于回报，`warning()`
+        // 说明该值是正常态还是异常态。因此不可能出现「告诉模型 A、实际按 B 探测」，
+        // 也不可能出现「按失效目录探测却告诉模型一切正常」。
+        if let Some(dir) = working_directory.path() {
             injectable.project_instructions = load_agents_md(dir);
             injectable.working_directory = Some(dir.to_string_lossy().into_owned());
         }
+        injectable.working_directory_warning = working_directory.warning();
 
         // Load learned rules and experiences
         let rules = self.load_relevant_rules(query).await;
@@ -144,7 +147,9 @@ impl ContextPipeline {
         conversation: &mut Vec<Message>,
         recent_input_tokens: usize,
     ) -> Result<(InjectableContext, Option<String>)> {
-        let injectable = self.load_injectable(query, None).await?;
+        let injectable = self
+            .load_injectable(query, &WorkingDirectory::Unavailable)
+            .await?;
         let outcome = self
             .compress_if_needed(conversation, recent_input_tokens, false, None, None)
             .await?;
@@ -391,7 +396,7 @@ impl tianyan::context::ContextPort for ContextPipeline {
     async fn load_injectable(
         &self,
         query: &str,
-        working_directory: Option<&std::path::Path>,
+        working_directory: &WorkingDirectory,
     ) -> Result<InjectableContext> {
         ContextPipeline::load_injectable(self, query, working_directory).await
     }
@@ -556,7 +561,7 @@ mod tests {
         std::fs::write(dir.path().join("AGENTS.md"), "项目规范：禁止使用 unsafe。").unwrap();
 
         let ctx = pipeline
-            .load_injectable("test", Some(dir.path()))
+            .load_injectable("test", &WorkingDirectory::Default(dir.path().to_path_buf()))
             .await
             .unwrap();
         assert_eq!(ctx.project_instructions, "项目规范：禁止使用 unsafe。");
@@ -567,6 +572,10 @@ mod tests {
             Some(dir.path().to_string_lossy().as_ref()),
             "回报的工作目录必须就是探测 AGENTS.md 的那个目录"
         );
+        assert_eq!(
+            ctx.working_directory_warning, None,
+            "正常态（绑定有效）不得带警示"
+        );
     }
 
     #[tokio::test]
@@ -576,7 +585,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap(); // 无 AGENTS.md
 
         let ctx = pipeline
-            .load_injectable("test", Some(dir.path()))
+            .load_injectable("test", &WorkingDirectory::Default(dir.path().to_path_buf()))
             .await
             .unwrap();
         assert!(ctx.project_instructions.is_empty());
@@ -593,11 +602,56 @@ mod tests {
         let vfs = Arc::new(MockVfs::new());
         let (pipeline, _) = make_pipeline(vfs);
 
-        let ctx = pipeline.load_injectable("test", None).await.unwrap();
+        let ctx = pipeline
+            .load_injectable("test", &WorkingDirectory::Unavailable)
+            .await
+            .unwrap();
         assert!(ctx.project_instructions.is_empty());
         assert!(
             ctx.working_directory.is_none(),
             "未绑定工作目录 → None（组装层据此不注入环境段）"
+        );
+        assert!(
+            ctx.working_directory_warning.is_some(),
+            "无可用目录必须带警示（否则模型对着空基准瞎试）"
+        );
+    }
+
+    /// 绑定目录失效 → 探测根与警示都按**兜底目录**给出（同源，不可能矛盾）。
+    ///
+    /// 判别力：若实现改成「探测兜底目录、警示却说还在绑定目录」，模型会在兜底
+    /// 目录里读到 AGENTS.md 却以为自己在另一个地方干活。
+    #[tokio::test]
+    async fn test_load_injectable_bound_invalid_reports_fallback_with_warning() {
+        let vfs = Arc::new(MockVfs::new());
+        let (pipeline, _) = make_pipeline(vfs);
+        let fallback = tempfile::tempdir().unwrap();
+        std::fs::write(fallback.path().join("AGENTS.md"), "兜底目录的项目规范").unwrap();
+        let gone = tempfile::tempdir().unwrap();
+        let gone_path = gone.path().to_path_buf();
+        drop(gone); // 绑定的目录被删掉
+
+        let ctx = pipeline
+            .load_injectable(
+                "test",
+                &WorkingDirectory::resolve(Some(&gone_path), Some(fallback.path())),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            ctx.project_instructions, "兜底目录的项目规范",
+            "AGENTS.md 必须从实际生效的兜底目录探测"
+        );
+        assert_eq!(
+            ctx.working_directory.as_deref(),
+            Some(fallback.path().to_string_lossy().as_ref()),
+            "环境段路径 = 探测根 = 兜底目录"
+        );
+        let warn = ctx.working_directory_warning.expect("绑定失效必须带警示");
+        assert!(
+            warn.contains(&gone_path.display().to_string()),
+            "警示须指名失效的绑定目录：{warn}"
         );
     }
 

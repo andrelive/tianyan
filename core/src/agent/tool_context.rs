@@ -68,6 +68,13 @@ pub struct ToolContext {
     /// 数据目录（ADR-050：`view_image` 的冻结副本写到 `{data_dir}/session_images/`；
     /// 组装层按同一目录回读）。未注入 = 该能力不可用（工具报错，不 panic）。
     pub data_dir: Option<std::path::PathBuf>,
+    /// 全局默认工作目录（`[agent] working_directory`）。
+    ///
+    /// 会话 header 未绑定或绑定目录已失效时，相对路径解析的兜底——与
+    /// `Agent::default_working_directory` **同源**。不设此字段会让工具侧
+    /// 静默回退进程 cwd（服务安装目录），`apply_patch` / `execute_command`
+    /// 会落到意外位置（安全风险）。
+    pub default_working_directory: Option<std::path::PathBuf>,
 }
 
 impl ToolContext {
@@ -84,11 +91,48 @@ impl ToolContext {
             approval_gate: None,
             pending_approval_fingerprints: Arc::new(Mutex::new(Vec::new())),
             data_dir: None,
+            default_working_directory: None,
         }
     }
 
-    /// 解析工具文件路径：相对路径（非绝对）基于**会话绑定的工作目录**解析
-    /// （缺省回退进程 cwd 语义，原样返回）；绝对路径原样解析。
+    /// 注入全局默认工作目录（`[agent] working_directory`）。
+    ///
+    /// **与 `Agent::default_working_directory` 同源**：Agent 侧回退到的目录与工具侧
+    /// 相对路径解析的兜底必须是同一个值。两侧不一致时，模型会在 A 里看到文件、
+    /// 写到 B 去（旧实现在「会话目录失效」时正是这样：Agent 退到配置的
+    /// `F:\workspace`，工具退到**服务进程 cwd**）。
+    pub fn with_default_working_directory(mut self, dir: Option<std::path::PathBuf>) -> Self {
+        self.default_working_directory = dir;
+        self
+    }
+
+    /// 会话生效的工作目录（**工具侧唯一取值口**）：会话绑定优先，其次全局默认。
+    ///
+    /// 两个候选都要过 `is_dir()`：绑定目录失效（被删 / 移走 / 未挂载）→ 用全局
+    /// 默认；默认目录同样不存在 → `None`。**没有第三个选项**——进程 cwd 不是
+    /// 兜底，它是服务安装目录，写操作落在那儿是安全事故而不是降级。
+    ///
+    /// 与 `Agent::resolve_working_directory` **同源**（同一份
+    /// `[agent] working_directory` + 同一套「绑定目录必须真实存在」规则）：
+    /// Agent 侧告诉模型「在 X 干活」时，工具侧解析相对路径也必须落到 X。
+    async fn session_working_directory(&self, session_id: &str) -> Option<std::path::PathBuf> {
+        // 全局默认目录也要存在（否则等于给了个假的兜底）
+        let fallback = self
+            .default_working_directory
+            .as_deref()
+            .filter(|p| p.is_dir());
+        if let Some(sm) = &self.session_manager {
+            if let Ok(Some(session)) = sm.get_session(session_id).await {
+                if let Some(wd) = session.working_directory(fallback) {
+                    return Some(wd);
+                }
+            }
+        }
+        fallback.map(std::path::Path::to_path_buf)
+    }
+
+    /// 解析工具文件路径：绝对路径原样（归一化）；相对路径基于**会话生效的工作目录**
+    /// 解析。
     ///
     /// 输出统一做**词法归一化**（折叠 `.`/`..`）——判定（沙箱前缀匹配）
     /// 与执行（OS 解析）使用同一形态的路径，`sub/../..` 与符号链接都无法
@@ -97,42 +141,54 @@ impl ToolContext {
     /// 与 execute_command 默认 cwd 同一套归属规则：模型在会话工作区内工作时，
     /// `read_file ".git/HEAD"`、`glob path="."` 等相对路径落在工作区而非
     /// 进程 cwd（如天演仓库根）。
-    pub async fn resolve_tool_path(&self, session_id: &str, path: &str) -> String {
+    ///
+    /// # Errors
+    /// 会话未绑定 / 绑定目录失效 **且** 没有可用的全局默认目录时，相对路径**无从
+    /// 解析**：返回 `invalid_input`（消息含原路径，便于模型改正）。旧实现在这里是
+    /// 「静默按进程 cwd 解析」——`apply_patch` / `write_file` 因此会写到服务安装
+    /// 目录，而模型以为自己在工作区里干活（安全风险，不只是可用性问题）。
+    pub async fn resolve_tool_path(
+        &self,
+        session_id: &str,
+        path: &str,
+    ) -> Result<String, TianyanError> {
         use crate::executor::security::lexical_normalize;
 
         let p = std::path::Path::new(path);
         if p.is_absolute() {
-            return lexical_normalize(p).to_string_lossy().into_owned();
+            return Ok(lexical_normalize(p).to_string_lossy().into_owned());
         }
-        if let Some(sm) = &self.session_manager {
-            if let Ok(Some(session)) = sm.get_session(session_id).await {
-                if let Some(wd) = session.working_directory(None) {
-                    let joined = wd.join(path);
-                    return lexical_normalize(&joined).to_string_lossy().into_owned();
-                }
-            }
-        }
-        // 无会话绑定：保留相对语义（进程 cwd），同样折叠 `.`/`..`
-        lexical_normalize(p).to_string_lossy().into_owned()
+        let Some(wd) = self.session_working_directory(session_id).await else {
+            return Err(TianyanError::invalid_input(format!(
+                "executor: 没有可用工作目录，无法解析相对路径 `{path}`。\
+                 请为该会话绑定工作区，或改用绝对路径。"
+            )));
+        };
+        let joined = wd.join(path);
+        Ok(lexical_normalize(&joined).to_string_lossy().into_owned())
     }
 
-    /// 解析会话生效的基准目录：会话绑定的工作目录优先，缺省回退进程 cwd。
+    /// 解析会话生效的基准目录：会话绑定优先，其次全局默认。
     ///
     /// 与 [`Self::resolve_tool_path`] 同一套归属规则；供 apply_patch 基准目录、
-    /// glob 搜索根等需要「目录本身」（而非拼接路径）的场景使用。
+    /// glob / grep 搜索根等需要「目录本身」（而非拼接路径）的场景使用。
+    ///
+    /// # Errors
+    /// 没有任何可用工作目录（会话未绑定/失效 且 无全局默认）→ `invalid_input`。
+    /// **不再回退 `std::env::current_dir()`**：进程 cwd 是服务安装目录，把
+    /// `apply_patch` 的基准指到那里意味着「补丁写到了天演自己的源码树里」。
     pub async fn resolve_base_dir(
         &self,
         session_id: &str,
     ) -> Result<std::path::PathBuf, TianyanError> {
-        if let Some(sm) = &self.session_manager {
-            if let Ok(Some(session)) = sm.get_session(session_id).await {
-                if let Some(wd) = session.working_directory(None) {
-                    return Ok(wd);
-                }
-            }
-        }
-        std::env::current_dir()
-            .map_err(|e| TianyanError::Custom(format!("tool: 执行失败：无法获取工作目录: {e}")))
+        self.session_working_directory(session_id)
+            .await
+            .ok_or_else(|| {
+                TianyanError::invalid_input(
+                    "executor: 没有可用工作目录，无法确定基准目录（apply_patch 基准、\
+                     glob / grep 搜索根都依赖它）。请为该会话绑定工作区，或改用绝对路径。",
+                )
+            })
     }
 
     /// 记录被审批拒绝、待用户确认的操作指纹。
@@ -335,5 +391,196 @@ name = "pref-model"
     fn test_lookup_unknown_model_returns_none() {
         let config = config_with_models();
         assert!(lookup_model_capabilities(&config, Some("prov-a"), "nope").is_none());
+    }
+}
+
+/// 相对路径归属解析（L1/L2）：工作目录失效时**明确失败**，绝不静默落到进程 cwd。
+///
+/// 这组用例锁的是安全断言，不是"行为细节"：旧实现在「无任何工作目录」时按
+/// **进程 cwd（服务安装目录）** 解析相对路径，于是 `apply_patch` / `write_file`
+/// 会把改动写进天演的安装目录，而模型以为自己仍在工作区里干活。
+#[cfg(test)]
+mod path_resolution_tests {
+    use super::*;
+    use crate::common::types::Message;
+    use crate::session::Session;
+    use std::path::PathBuf;
+
+    /// 固定返回同一个会话的会话管理器（`None` = 会话未找到）。
+    struct FixedSessionManager {
+        session: Option<Session>,
+    }
+
+    #[async_trait::async_trait]
+    impl SessionManager for FixedSessionManager {
+        async fn create_session(&self, id: &str, _message: Message) -> crate::Result<Session> {
+            Ok(Session::new(id))
+        }
+
+        async fn get_session(&self, _id: &str) -> crate::Result<Option<Session>> {
+            Ok(self.session.clone())
+        }
+
+        async fn list_sessions(&self) -> crate::Result<Vec<Session>> {
+            Ok(Vec::new())
+        }
+    }
+
+    /// 构造**未装配会话管理器**的上下文（`default` = 全局默认目录）。
+    fn ctx(default: Option<&std::path::Path>) -> ToolContext {
+        ToolContext::new(SecurityPolicy::default())
+            .with_default_working_directory(default.map(PathBuf::from))
+    }
+
+    /// 装配会话管理器：`bound` = 会话 header 绑定的目录，`default` = 全局默认目录。
+    fn ctx_with_session(
+        bound: Option<&std::path::Path>,
+        default: Option<&std::path::Path>,
+    ) -> ToolContext {
+        let mut session = Session::new("s1");
+        session.header.working_directory = bound.map(|p| p.to_string_lossy().into_owned());
+        let mut c = ctx(default);
+        c.session_manager = Some(Arc::new(FixedSessionManager {
+            session: Some(session),
+        }));
+        c
+    }
+
+    /// **最关键的断言**：无任何工作目录 + 相对路径 → `Err`，且消息含原路径。
+    ///
+    /// 判别力：若实现仍静默按进程 cwd 解析，本用例会拿到
+    /// `Ok(<安装目录>/src/main.rs)`，随后 `apply_patch` 就会往安装目录里写——
+    /// 正是要修的安全问题。
+    #[tokio::test]
+    async fn test_no_working_directory_relative_path_fails_with_path_in_message() {
+        let c = ctx(None);
+        let err = c
+            .resolve_tool_path("s1", "src/../src/main.rs")
+            .await
+            .expect_err("无工作目录时相对路径必须失败，不得回退进程 cwd");
+        assert!(
+            err.is_invalid_input(),
+            "必须是 invalid_input 语义（调用方可判类）：{err}"
+        );
+        let msg = err.to_string();
+        assert!(
+            msg.contains("src/../src/main.rs"),
+            "错误消息必须含原路径（模型据此改正）：{msg}"
+        );
+        assert!(
+            msg.contains("没有可用工作目录"),
+            "错误消息须点明原因与动作：{msg}"
+        );
+    }
+
+    /// 无工作目录 + **绝对**路径 → `Ok`（绝对路径不依赖任何基准）。
+    #[tokio::test]
+    async fn test_no_working_directory_absolute_path_is_ok() {
+        let c = ctx(None);
+        let abs = if cfg!(windows) {
+            "C:\\data\\a.txt"
+        } else {
+            "/data/a.txt"
+        };
+        let resolved = c
+            .resolve_tool_path("s1", abs)
+            .await
+            .expect("绝对路径不需要工作目录");
+        assert_eq!(resolved, abs);
+    }
+
+    /// 会话绑定失效 + 有默认目录 → 解析到**默认目录**（不是进程 cwd）。
+    ///
+    /// 判别力：这是「两侧一致」的核心断言——Agent 侧（环境段）回退到默认目录，
+    /// 工具侧必须落到同一个目录，否则模型写 A、文件进 B。
+    #[tokio::test]
+    async fn test_bound_invalid_falls_back_to_default_not_process_cwd() {
+        let gone = tempfile::tempdir().unwrap();
+        let gone_path = gone.path().to_path_buf();
+        let default = tempfile::tempdir().unwrap();
+        drop(gone); // 绑定目录被删
+
+        let c = ctx_with_session(Some(&gone_path), Some(default.path()));
+        let resolved = c
+            .resolve_tool_path("s1", "src/main.rs")
+            .await
+            .expect("有默认目录时不应失败");
+        assert_eq!(
+            PathBuf::from(&resolved),
+            default.path().join("src/main.rs"),
+            "必须解析到全局默认目录"
+        );
+        assert_ne!(
+            PathBuf::from(&resolved),
+            std::env::current_dir().unwrap().join("src/main.rs"),
+            "绝不能落到进程 cwd（服务安装目录）"
+        );
+    }
+
+    /// 会话绑定有效 → 用绑定目录（默认目录不抢）。
+    #[tokio::test]
+    async fn test_bound_valid_wins_over_default() {
+        let bound = tempfile::tempdir().unwrap();
+        let default = tempfile::tempdir().unwrap();
+        let c = ctx_with_session(Some(bound.path()), Some(default.path()));
+        let resolved = c.resolve_tool_path("s1", "./a.txt").await.unwrap();
+        assert_eq!(PathBuf::from(resolved), bound.path().join("a.txt"));
+    }
+
+    /// 会话未绑定 + 有默认 → 用默认目录（不报错）。
+    #[tokio::test]
+    async fn test_unbound_with_default_resolves() {
+        let default = tempfile::tempdir().unwrap();
+        let c = ctx_with_session(None, Some(default.path()));
+        let resolved = c.resolve_tool_path("s1", "a.txt").await.unwrap();
+        assert_eq!(PathBuf::from(resolved), default.path().join("a.txt"));
+    }
+
+    /// 绑定失效 + 默认目录**也不存在** → `Err`（默认目录不做假兜底）。
+    #[tokio::test]
+    async fn test_missing_default_is_not_a_fallback() {
+        let gone = tempfile::tempdir().unwrap();
+        let gone_path = gone.path().to_path_buf();
+        let default = tempfile::tempdir().unwrap();
+        let default_path = default.path().to_path_buf();
+        drop(gone);
+        drop(default);
+
+        let c = ctx_with_session(Some(&gone_path), Some(&default_path));
+        let err = c
+            .resolve_tool_path("s1", "a.txt")
+            .await
+            .expect_err("两个候选目录都不存在时必须失败");
+        assert!(err.is_invalid_input(), "{err}");
+    }
+
+    /// `resolve_base_dir`（apply_patch 基准 / glob、grep 搜索根）：无目录 → `Err`，
+    /// 不再回退 `std::env::current_dir()`。
+    #[tokio::test]
+    async fn test_resolve_base_dir_never_falls_back_to_process_cwd() {
+        let c = ctx(None);
+        let err = c
+            .resolve_base_dir("s1")
+            .await
+            .expect_err("无工作目录时基准目录必须失败，不得回退进程 cwd");
+        assert!(err.is_invalid_input(), "{err}");
+        let msg = err.to_string();
+        assert!(msg.contains("没有可用工作目录"), "{msg}");
+        assert!(
+            msg.contains("apply_patch"),
+            "错误消息须点明受影响的操作，便于模型改绝对路径：{msg}"
+        );
+    }
+
+    /// `resolve_base_dir` 绑定有效时返回绑定目录；未绑定时返回默认目录。
+    #[tokio::test]
+    async fn test_resolve_base_dir_prefers_bound_then_default() {
+        let bound = tempfile::tempdir().unwrap();
+        let default = tempfile::tempdir().unwrap();
+        let c = ctx_with_session(Some(bound.path()), Some(default.path()));
+        assert_eq!(c.resolve_base_dir("s1").await.unwrap(), bound.path());
+
+        let c = ctx_with_session(None, Some(default.path()));
+        assert_eq!(c.resolve_base_dir("s1").await.unwrap(), default.path());
     }
 }

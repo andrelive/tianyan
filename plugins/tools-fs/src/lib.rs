@@ -81,7 +81,7 @@ impl DynamicToolExecutor for GlobTool {
         let params: GlobParams = parse_params(arguments)?;
         // 安全校验基于解析后的实际搜索根（path 参数或会话工作目录）
         let base: PathBuf = match params.path {
-            Some(p) => PathBuf::from(self.ctx.resolve_tool_path(session_id, &p).await),
+            Some(p) => PathBuf::from(self.ctx.resolve_tool_path(session_id, &p).await?),
             None => self.ctx.resolve_base_dir(session_id).await?,
         };
         safety_violation(self.ctx.security_policy.check_path(&base))?;
@@ -130,7 +130,7 @@ impl DynamicToolExecutor for ListDirTool {
         arguments: &str,
     ) -> tianyan::common::error::Result<serde_json::Value> {
         let params: ListDirParams = parse_params(arguments)?;
-        let path = self.ctx.resolve_tool_path(session_id, &params.path).await;
+        let path = self.ctx.resolve_tool_path(session_id, &params.path).await?;
         safety_violation(
             self.ctx
                 .security_policy
@@ -210,7 +210,7 @@ impl DynamicToolExecutor for ReadFileTool {
         arguments: &str,
     ) -> tianyan::common::error::Result<serde_json::Value> {
         let params: ReadFileParams = parse_params(arguments)?;
-        let path = self.ctx.resolve_tool_path(session_id, &params.path).await;
+        let path = self.ctx.resolve_tool_path(session_id, &params.path).await?;
         safety_violation(
             self.ctx
                 .security_policy
@@ -262,7 +262,7 @@ impl WriteFileTool {
         subagent: bool,
     ) -> tianyan::common::error::Result<serde_json::Value> {
         let mut params: WriteFileParams = parse_params(arguments)?;
-        params.path = self.ctx.resolve_tool_path(session_id, &params.path).await;
+        params.path = self.ctx.resolve_tool_path(session_id, &params.path).await?;
         safety_violation(self.ctx.security_policy.check_file_write())?;
         safety_violation(
             self.ctx
@@ -352,7 +352,7 @@ impl ApplyEditTool {
         subagent: bool,
     ) -> tianyan::common::error::Result<serde_json::Value> {
         let mut params: ApplyEditParams = parse_params(arguments)?;
-        params.path = self.ctx.resolve_tool_path(session_id, &params.path).await;
+        params.path = self.ctx.resolve_tool_path(session_id, &params.path).await?;
         safety_violation(self.ctx.security_policy.check_file_write())?;
         safety_violation(
             self.ctx
@@ -437,7 +437,9 @@ impl ApplyPatchTool {
     ) -> tianyan::common::error::Result<serde_json::Value> {
         let params: ApplyPatchParams = parse_params(arguments)?;
         safety_violation(self.ctx.security_policy.check_file_write())?;
-        // 补丁基准目录：会话绑定工作目录优先，缺省回退进程 cwd
+        // 补丁基准目录：会话生效工作目录优先（绑定 → 全局默认）。两者都没有时
+        // `resolve_base_dir` 明确报错——**绝不**回退进程 cwd（那是服务安装目录，
+        // 补丁会写进天演自己的源码树）。
         let base_dir = self.ctx.resolve_base_dir(session_id).await?;
         // 补丁的**全部**目标文件逐一参与安全检查（与落盘对象同源：都经 patch_targets）
         let targets = tianyan::executor::patch::patch_targets(&params.patch, &base_dir)

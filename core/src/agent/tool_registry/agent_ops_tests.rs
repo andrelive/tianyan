@@ -257,7 +257,9 @@ fn default_strict_policy() -> SecurityPolicy {
 
 #[tokio::test]
 async fn test_execute_command_success_captures_output() {
-    let registry = ToolRegistry::new(default_strict_policy());
+    // 显式注入工作目录：无可用工作目录时 execute_command 会拒绝执行（不再降级到进程 cwd）
+    let registry = ToolRegistry::new(default_strict_policy())
+        .with_default_working_directory(Some(std::env::temp_dir()));
     let result = registry
         .execute_execute_command(r#"{"command":"echo hello"}"#, "test-session", false)
         .await
@@ -364,7 +366,9 @@ fn test_ready_spec_defaults_pattern_and_timeout() {
 #[tokio::test]
 async fn test_execute_command_rejects_ready_without_background() {
     // 工具层端到端：校验在审批/执行之前完成——命令不得被拉起。
-    let registry = ToolRegistry::new(default_strict_policy());
+    // （需注入工作目录，否则会在解析 cwd 阶段先因「无可用工作目录」被拒）
+    let registry = ToolRegistry::new(default_strict_policy())
+        .with_default_working_directory(Some(std::env::temp_dir()));
     let err = registry
         .execute_execute_command(
             r#"{"command":"echo hi","ready":{"port":3000}}"#,
@@ -386,7 +390,9 @@ async fn test_subagent_command_denied_without_hang() {
         mode: ApprovalMode::Interactive,
         ..Default::default()
     }));
-    let registry = ToolRegistry::new(default_strict_policy()).with_approval_gate(workflow.clone());
+    let registry = ToolRegistry::new(default_strict_policy())
+        .with_approval_gate(workflow.clone())
+        .with_default_working_directory(Some(std::env::temp_dir()));
 
     let fut =
         registry.execute_execute_command(r#"{"command":"cargo --version"}"#, "session-1", true);
@@ -414,15 +420,20 @@ async fn test_subagent_command_approved_via_shared_fingerprint() {
         mode: ApprovalMode::Interactive,
         ..Default::default()
     }));
-    // 主循环先确认过该操作（指纹记录）
+    // 主循环先确认过该操作（指纹记录）。
+    // cwd 必须与执行时解析出的值一致（否则指纹不匹配、走到拒绝分支）——
+    // 无可用工作目录时 execute_command 会拒绝执行，故这里显式注入同一目录。
+    let workdir = std::env::temp_dir();
     let action = Action::ExecuteCommand {
         command: "cargo --version".to_string(),
-        cwd: None,
+        cwd: Some(workdir.to_string_lossy().into_owned()),
         timeout_secs: None,
     };
     workflow.record_user_confirmation(&action).await;
 
-    let registry = ToolRegistry::new(default_strict_policy()).with_approval_gate(workflow);
+    let registry = ToolRegistry::new(default_strict_policy())
+        .with_approval_gate(workflow)
+        .with_default_working_directory(Some(workdir));
 
     let result = registry
         .execute_execute_command(r#"{"command":"cargo --version"}"#, "session-1", true)
@@ -1700,11 +1711,15 @@ async fn test_task_status_workspace_scope_filters_other_directories() {
     // 解析失败）不构成"其他目录"证据，仍可见。
     use crate::agent::background::TaskKind;
 
-    let registry = ToolRegistry::new(default_strict_policy());
     let here = std::env::current_dir()
         .unwrap()
         .to_string_lossy()
         .into_owned();
+    // 「本目录」= 全局默认工作目录（显式注入）：视野键只从「会话绑定 → 全局默认」
+    // 解析，**进程 cwd 不再是隐式兜底**（L2：apply_patch / glob 等路径解析不再
+    // 静默落到安装目录）。这里显式对齐，才能复现「模型在本目录里工作」的语义。
+    let registry = ToolRegistry::new(default_strict_policy())
+        .with_default_working_directory(Some(std::path::PathBuf::from(&here)));
     let elsewhere = "X:\\unrelated-other-dir";
 
     // A：本会话（s1）+ 本目录；B：他会话（s2）+ 其他目录；
@@ -1783,7 +1798,10 @@ async fn test_task_status_single_other_directory_denied_without_leak() {
     // scope="global" 指引；错误信息不泄漏任务实际所在目录）；global 可查。
     use crate::agent::background::TaskKind;
 
-    let registry = ToolRegistry::new(default_strict_policy());
+    // 视野键需要「本会话的工作目录」：显式注入进程 cwd 作全局默认（L2 之后
+    // 不再有进程 cwd 的隐式兜底，见上一个用例的说明）。
+    let registry = ToolRegistry::new(default_strict_policy())
+        .with_default_working_directory(Some(std::env::current_dir().unwrap()));
     let id = registry
         .background_tasks
         .register(

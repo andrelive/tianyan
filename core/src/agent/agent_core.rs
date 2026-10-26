@@ -21,7 +21,7 @@ use crate::agent::types::{AgentResponse, AgentState, StreamChunkType, StreamEven
 use crate::agent::working_set::{SessionWorkingSet, WorkingSetRegistry};
 use crate::common::error::Result;
 use crate::common::types::{
-    InjectableContext, Message, MessageRole, StructuredMessage, TokenUsage,
+    InjectableContext, Message, MessageRole, StructuredMessage, TokenUsage, WorkingDirectory,
 };
 use crate::context::{ContextAssembler, ContextPort};
 use crate::executor::approval::ApprovalGate;
@@ -474,15 +474,22 @@ impl Agent {
         };
 
         if !soul_loaded {
-            // 会话生效工作目录（AGENTS.md 项目指令前缀的探测根）
-            let workdir = self
-                .resolve_working_directory(&state.read().await.session_id)
-                .await;
-            match self
-                .context_pipeline
-                .load_injectable(query, workdir.as_deref())
-                .await
-            {
+            // 会话生效工作目录（AGENTS.md 项目指令前缀的探测根 + 环境段文案来源）。
+            // 三态值**整体**交给端口：探测根与警示必须同源，不能让调用方各判一次。
+            // 会话 id 先取出：`state.read().await` 不能内联进 `tracing` 宏参数
+            // （守卫跨 await 会让整个 future 失去 `Send`）。
+            let session_id = state.read().await.session_id.clone();
+            let workdir = self.resolve_working_directory(&session_id).await;
+            if let Some(warning) = workdir.warning() {
+                // 症状可见（ADR-038）：工作目录异常是用户该知道的装配问题
+                tracing::warn!(
+                    session = %session_id,
+                    workdir = ?workdir.path(),
+                    warning = %warning,
+                    "会话工作目录异常"
+                );
+            }
+            match self.context_pipeline.load_injectable(query, &workdir).await {
                 Ok(ctx) => {
                     let injected_rules = ctx.rules_and_experiences.len();
                     if injected_rules > 0 {
@@ -527,18 +534,38 @@ impl Agent {
     /// 装配顺序因此成立：Agent 先就绪（内部注册表持有 ctx）→ 装配层取 ctx →
     /// 构造插件工具 → `register_dynamic_tools` 注入（追加末尾，前缀稳定性保持）。
     pub async fn tool_context(&self) -> crate::agent::tool_context::ToolContext {
-        self.agent_loop.tool_registry().context().clone()
+        // 全局默认工作目录在这里再注入一次（幂等）：插件工具都从这份 ctx 构造，
+        // 漏注入会让插件侧相对路径解析回退进程 cwd（服务安装目录）——与 Agent
+        // 侧的 `default_working_directory` 分叉。值同源（都是本字段），不会漂移。
+        self.agent_loop
+            .tool_registry()
+            .context()
+            .clone()
+            .with_default_working_directory(self.default_working_directory.clone())
     }
 
-    /// 解析会话生效的工作目录：会话级绑定（header.working_directory，目录必须
-    /// 存在）优先，缺省回退构建时注入的全局默认（[agent] working_directory）。
-    pub(crate) async fn resolve_working_directory(&self, session_id: &str) -> Option<PathBuf> {
-        if let Ok(Some(session)) = self.session_manager.get_session(session_id).await {
-            if let Some(wd) = session.working_directory(None) {
-                return Some(wd);
-            }
-        }
-        self.default_working_directory.clone()
+    /// 解析会话生效的工作目录（三态：绑定有效 / 绑定失效 / 未绑定 / 无可用目录）。
+    ///
+    /// 会话级绑定（`header.working_directory`，目录必须存在）优先，缺省用构建时
+    /// 注入的全局默认（`[agent] working_directory`）。与工具侧
+    /// [`crate::agent::tool_context::ToolContext`] 的相对路径解析**同源**（同一份
+    /// 全局默认 + 同一条「绑定目录必须真实存在」规则）。
+    ///
+    /// 返回三态而不是 `Option<PathBuf>`：旧实现把「绑定目录失效」与「从未绑定」
+    /// 压成同一个 `None`，环境段因此只能闭口不言——模型对着一个不存在的目录
+    /// 反复试错，用户也不知道自己绑的工作区已经没了。
+    ///
+    /// 判定本身是纯函数 [`WorkingDirectory::resolve`]（可单测），这里只负责取数。
+    pub(crate) async fn resolve_working_directory(&self, session_id: &str) -> WorkingDirectory {
+        let bound = match self.session_manager.get_session(session_id).await {
+            Ok(Some(session)) => session
+                .header
+                .working_directory
+                .filter(|d| !d.trim().is_empty())
+                .map(PathBuf::from),
+            _ => None,
+        };
+        WorkingDirectory::resolve(bound.as_deref(), self.default_working_directory.as_deref())
     }
 
     /// 捕获工作区快照（消息处理前调用，键 = 本条用户消息 ID）。
@@ -556,7 +583,14 @@ impl Agent {
         let Some(sm) = &self.snapshot_manager else {
             return;
         };
-        let Some(workdir) = self.resolve_working_directory(session_id).await else {
+        // `.path()`：绑定失效时快照根是兜底目录（与工具侧解析同一口径）；
+        // 「无可用目录」= 没有可快照的根，跳过（与迁移前行为一致）。
+        let Some(workdir) = self
+            .resolve_working_directory(session_id)
+            .await
+            .path()
+            .map(std::path::Path::to_path_buf)
+        else {
             return;
         };
         if let Err(e) = sm

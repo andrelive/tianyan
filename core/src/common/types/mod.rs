@@ -18,8 +18,10 @@ mod structured_message;
 mod token;
 pub(crate) mod tool;
 mod uri;
+mod working_directory;
 
 pub use injectable::InjectableContext;
+pub use working_directory::WorkingDirectory;
 
 pub use content::{ContentLevel, ContentSource, EntryType};
 pub use content_part::{ContentPart, ImageUrl};

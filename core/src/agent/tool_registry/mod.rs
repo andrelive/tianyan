@@ -384,6 +384,16 @@ impl ToolRegistry {
         self
     }
 
+    /// 设置全局默认工作目录（`[agent] working_directory`；与
+    /// `Agent::default_working_directory` 同源）。
+    ///
+    /// 工具侧相对路径解析的兜底：会话未绑定或绑定目录失效时落到这里，
+    /// **不再**落到进程 cwd（服务安装目录）。
+    pub fn with_default_working_directory(mut self, dir: Option<PathBuf>) -> Self {
+        self.ctx = self.ctx.with_default_working_directory(dir);
+        self
+    }
+
     /// 设置会话工作集注册表（ADR-035：轮边界增量注入 + 落库收口）。
     pub fn with_working_sets(
         mut self,

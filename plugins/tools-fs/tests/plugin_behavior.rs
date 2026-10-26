@@ -10,7 +10,7 @@ use std::sync::Arc;
 use tianyan::agent::{DynamicToolExecutor, ToolContext};
 use tianyan::executor::SecurityPolicy;
 
-use tianyan_tools_fs::{tools, GlobTool, ListDirTool, ViewImageTool};
+use tianyan_tools_fs::{tools, ApplyPatchTool, GlobTool, ListDirTool, ViewImageTool};
 
 /// 宽松策略的上下文（测试只用临时目录，不做路径限制断言）。
 fn test_ctx() -> ToolContext {
@@ -143,4 +143,51 @@ async fn test_view_image_without_data_dir_reports_wiring_error() {
     let msg = err.to_string();
     assert!(msg.contains("view_image"), "错误消息带工具前缀：{msg}");
     assert!(msg.contains("data_dir"), "错误消息点明缺件：{msg}");
+}
+
+// ── 工作目录失效 / 缺失：明确失败，不回退进程 cwd（安全断言）────────────
+
+/// 相对路径 + 无任何工作目录 → 工具返回 `invalid_input` 错误。
+///
+/// 判别力：这条用例过的是**插件的 `?` 传播**（`resolve_tool_path` 变 `Result`
+/// 之后，任何一个调用点漏补 `?` 都会在这里变成 `Ok`）；同时证明错误不会在
+/// 插件层被吞掉、也不会静默按进程 cwd（服务安装目录）解析。
+#[tokio::test]
+async fn test_relative_path_without_working_directory_is_an_error() {
+    let tool = GlobTool::new(test_ctx()); // 未注入会话管理器 + 无全局默认
+    let args = serde_json::json!({ "pattern": "*.rs", "path": "src" });
+    let err = tool
+        .execute("session-test", &args.to_string())
+        .await
+        .expect_err("无工作目录时相对路径必须失败");
+    assert!(
+        err.is_invalid_input(),
+        "错误必须是 invalid_input 语义：{err}"
+    );
+    let msg = err.to_string();
+    assert!(msg.contains("src"), "错误消息须含原路径：{msg}");
+    assert!(msg.contains("没有可用工作目录"), "{msg}");
+}
+
+/// `apply_patch`（基准目录 = 相对路径的落点）在无工作目录时**明确失败**。
+///
+/// 这是最危险的一条：旧实现把补丁基准解析到**进程 cwd**（服务安装目录），
+/// 补丁会写进天演自己的源码树。断言错误在审批之前就发生（未装配审批门控时
+/// 也不会执行到落盘）。
+#[tokio::test]
+async fn test_apply_patch_without_working_directory_is_an_error() {
+    let tool = ApplyPatchTool::new(test_ctx());
+    let patch = "*** Update File: src/main.rs\n-old\n+new\n";
+    let args = serde_json::json!({ "patch": patch });
+    let err = tool
+        .execute("session-test", &args.to_string())
+        .await
+        .expect_err("无工作目录时 apply_patch 必须失败，不得以进程 cwd 为基准");
+    assert!(
+        err.is_invalid_input(),
+        "错误必须是 invalid_input 语义：{err}"
+    );
+    let msg = err.to_string();
+    assert!(msg.contains("没有可用工作目录"), "{msg}");
+    assert!(msg.contains("apply_patch"), "错误须点明受影响的操作：{msg}");
 }

@@ -241,7 +241,7 @@ mod pipeline_tests {
             "低于阈值不该压缩"
         );
         let empty = port
-            .load_injectable("q", None)
+            .load_injectable("q", &tianyan::common::types::WorkingDirectory::Unavailable)
             .await
             .expect("空 VFS 不报错");
         assert!(empty.soul.is_empty());

@@ -504,6 +504,11 @@ impl AgentBuilder {
             .with_model(&chat_model)
             .with_metrics(metrics.clone())
             .with_session_manager(session_manager.clone());
+        // 全局默认工作目录：工具侧相对路径解析的兜底，**与 Agent 侧同源**
+        // （`Agent::default_working_directory`）。不注入的话工具侧会静默回退
+        // 进程 cwd——会话绑定目录失效时 `apply_patch` 就写进服务安装目录。
+        tool_registry =
+            tool_registry.with_default_working_directory(self.default_working_directory.clone());
         // 审批门控只在装配了就注入（未装配 → `ToolContext.approval_gate` 保持 None，
         // `ensure_approved` 走「未装配直接放行」分支；见上方告警）
         if let Some(gate) = approval {
@@ -745,7 +750,7 @@ mod tests {
         async fn load_injectable(
             &self,
             _query: &str,
-            _working_directory: Option<&std::path::Path>,
+            _working_directory: &crate::common::types::WorkingDirectory,
         ) -> Result<InjectableContext> {
             Ok(InjectableContext::new())
         }
@@ -877,7 +882,7 @@ mod tests {
         );
         let injectable = agent
             .context_pipeline
-            .load_injectable("q", None)
+            .load_injectable("q", &crate::common::types::WorkingDirectory::Unavailable)
             .await
             .expect("降级实现不报错");
         assert!(

@@ -43,7 +43,7 @@
 use async_trait::async_trait;
 
 use crate::common::error::Result;
-use crate::common::types::{InjectableContext, Message, StructuredMessage};
+use crate::common::types::{InjectableContext, Message, StructuredMessage, WorkingDirectory};
 
 /// 上下文工程端口：可注入上下文的加载 + 会话压缩 + 压缩点摘要提取。
 ///
@@ -66,13 +66,21 @@ pub trait ContextPort: Send + Sync {
     /// `Agent::ensure_injectable` 以「`soul` 非空」为已加载标记。
     ///
     /// - `query` — 用户查询（规则/记忆的语义检索输入；唤醒轮传空串）
-    /// - `working_directory` — 会话绑定工作目录：既是 `AGENTS.md` 的探测根，也原样
-    ///   记入 [`InjectableContext::working_directory`]（模型据此确定相对路径基准）。
-    ///   `None` 时两者皆空（不探测、不注入环境段）
+    /// - `working_directory` — 会话生效工作目录的**判定结果**（三态 + 无可用目录）：
+    ///   `path()` 既是 `AGENTS.md` 的探测根，也原样记入
+    ///   [`InjectableContext::working_directory`]（模型据此确定相对路径基准）；
+    ///   `warning()` 记入 [`InjectableContext::working_directory_warning`]（绑定失效 /
+    ///   无可用目录时让模型知道该提醒用户，而不是对着不存在的目录反复试错）。
+    ///
+    ///   参数是 [`WorkingDirectory`] 而不是 `Option<&Path>`：**探测根与警示必须
+    ///   同源**——若让调用方事后补警示，两处各自判定就会漂移（「按 A 探测、告诉
+    ///   模型 B」）。实现方拿到的就是那个已经判定好的值，无从二次解释。
+    ///
+    ///   `Unavailable` 时既不探测也不注入工作目录，只注入警示。
     async fn load_injectable(
         &self,
         query: &str,
-        working_directory: Option<&std::path::Path>,
+        working_directory: &WorkingDirectory,
     ) -> Result<InjectableContext>;
 
     /// 判定并执行会话压缩，返回带 `compression_marker` 的摘要消息。
@@ -105,7 +113,7 @@ pub trait ContextPort: Send + Sync {
 /// 未装配上下文策略时的内存直通实现（**降级路径，不是功能实现**）。
 ///
 /// 语义：`load_injectable` 返回空可注入上下文（无 soul / 无工作目录（因而不注入
-/// 环境段）/ 无 rules / 无 memories）、
+/// 环境段）/ 无工作目录警示 / 无 rules / 无 memories）、
 /// `compress_for_session` 恒 `None`（不压缩）、`extract_marker_summary` 恒 `None`。
 ///
 /// 为什么是「空直通」而不是 `Err`：`create_app`（构造对象图，47 处 lib 单测 +
@@ -132,7 +140,7 @@ impl ContextPort for NullContextPort {
     async fn load_injectable(
         &self,
         _query: &str,
-        _working_directory: Option<&std::path::Path>,
+        _working_directory: &WorkingDirectory,
     ) -> Result<InjectableContext> {
         Ok(InjectableContext::new())
     }

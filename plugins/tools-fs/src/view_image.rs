@@ -48,7 +48,7 @@ impl DynamicToolExecutor for ViewImageTool {
 
     async fn execute(&self, session_id: &str, arguments: &str) -> Result<serde_json::Value> {
         let params: ViewImageParams = parse_params(arguments)?;
-        let path = self.ctx.resolve_tool_path(session_id, &params.path).await;
+        let path = self.ctx.resolve_tool_path(session_id, &params.path).await?;
         safety_violation(
             self.ctx
                 .security_policy

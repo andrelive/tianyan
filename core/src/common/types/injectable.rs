@@ -31,6 +31,17 @@ pub struct InjectableContext {
     /// 故可安全进前缀、不引起 prompt 缓存抖动。旧快照缺该字段 → `None`。
     #[serde(default)]
     pub working_directory: Option<String>,
+    /// 工作目录异常说明（`Some` = 会话绑定的目录已失效 / 无可用目录）。
+    ///
+    /// 渲染时并入「## 当前环境」段，让模型知道该提醒用户而不是瞎试：
+    /// 旧实现把「绑定目录失效」与「从未绑定」压成同一个 `None`，模型只能看到
+    /// 一个不存在的路径（或什么都没有），于是对着它反复试错。
+    ///
+    /// 与 [`Self::working_directory`] **同源**：两者都由
+    /// `WorkingDirectory`（`common::types::working_directory`）一次性产出——
+    /// 探测根、环境段路径、警示文案不可能互相矛盾。
+    #[serde(default)]
+    pub working_directory_warning: Option<String>,
     /// 经验与方法论。
     pub rules_and_experiences: Vec<String>,
     /// 用户画像与环境事实。
@@ -76,6 +87,10 @@ mod tests {
             ctx.working_directory, None,
             "旧快照缺该字段 → None（不注入环境段）"
         );
+        assert_eq!(
+            ctx.working_directory_warning, None,
+            "旧快照缺警示字段 → None（不注入警示）"
+        );
     }
 
     /// 新快照往返：带工作目录写入后读回一致（字段真的落了库，不是只在内存里）。
@@ -84,6 +99,7 @@ mod tests {
         let ctx = InjectableContext {
             soul: "soul".to_string(),
             working_directory: Some("F:\\work\\git\\tianyan".to_string()),
+            working_directory_warning: Some("⚠️ 绑定目录已失效".to_string()),
             ..Default::default()
         };
         let json = serde_json::to_string(&ctx).unwrap();
@@ -91,6 +107,11 @@ mod tests {
         assert_eq!(
             back.working_directory.as_deref(),
             Some("F:\\work\\git\\tianyan")
+        );
+        assert_eq!(
+            back.working_directory_warning.as_deref(),
+            Some("⚠️ 绑定目录已失效"),
+            "警示文案同样落盘（快照复用，重启后模型仍能看到事实）"
         );
         assert_eq!(back, ctx);
     }
