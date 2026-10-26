@@ -34,10 +34,10 @@ impl ContextAssembler {
         structured_messages: &[StructuredMessage],
         injectable: &InjectableContext,
     ) -> Vec<Message> {
-        Self::assemble_with(structured_messages, injectable, None)
+        Self::assemble_with(structured_messages, injectable, None, None)
     }
 
-    /// 将结构化消息和注入上下文组装为 LLM 传输格式（可携带 tool 结果图片）。
+    /// 将结构化消息和注入上下文组装为 LLM 传输格式（可携带 tool 结果图片 + 待办摘要）。
     ///
     /// 与 [`Self::assemble`] 的唯一差别：`images` 非 `None` 时，Tool 分支会按
     /// [`Part::ToolResult`] 原文里的引用（`session_images/<name>`）加载图片字节，
@@ -46,10 +46,17 @@ impl ContextAssembler {
     /// `images` 为 `None` 或引用解析不出图片时，行为与 [`Self::assemble`] 逐字节一致
     /// （纯文本 tool 结果零变化）。引用解析是 best effort：副本缺失 / 超限 /
     /// magic 不符 → 该结果保持纯文本，不报错。
+    ///
+    /// `todos_summary` 是**当前待办清单**的渲染文本（[`crate::todos::render_todos_summary`]，
+    /// `None` = 没有待办、整段不注入）。它插在**最后一条 user 消息之前**——即历史
+    /// 之后、当前用户输入之前。**绝不能放进 soul / 环境 / AGENTS.md / rules 那段
+    /// 前缀**：待办每轮都可能变，进前缀会让 prompt 缓存每轮整体失效（ADR-004
+    /// 前缀零漂移）。找不到 user 消息时（极端情况）追加到末尾，绝不报错。
     pub fn assemble_with(
         structured_messages: &[StructuredMessage],
         injectable: &InjectableContext,
         images: Option<&SessionImages>,
+        todos_summary: Option<&str>,
     ) -> Vec<Message> {
         let mut messages = Vec::new();
 
@@ -117,6 +124,11 @@ impl ContextAssembler {
         // 此后每次请求都被拒（错误链常驻）。
         for sm in Self::normalize_tool_pairs(&structured_messages[start_idx..]) {
             messages.extend(Self::structured_to_messages(sm.as_ref(), images));
+        }
+
+        // 当前待办清单：插在最后一条 user 消息之前（可变后缀段，不进前缀缓存）
+        if let Some(summary) = todos_summary.filter(|s| !s.is_empty()) {
+            insert_todos_summary(&mut messages, summary);
         }
 
         messages
@@ -370,6 +382,28 @@ impl ContextAssembler {
     ) -> StructuredMessage {
         StructuredMessage::from_message(msg, session_id, parent_id, token_usage)
     }
+}
+
+/// 把「当前待办」段插到**当前轮用户输入之前**（历史之后、当前输入之前）。
+///
+/// 位置由 ADR-004 的前缀缓存红线决定：待办清单每轮都可能变（模型每完成
+/// 一步就重发整表），一旦落进 soul / 环境 / AGENTS.md / rules 那段**恒定前缀**，
+/// 整段 prompt 缓存每轮失效（成本是每次请求全量重算）。
+///
+/// 插入点的判定依据是「**最后一条**是不是 user」，而不是「历史里最后一条 user
+/// 在哪」——两者的差别在**唤醒轮**（后台任务/定时任务触发的自动轮）：那种轮
+/// 次的消息链是「历史 + 无当前输入」，若按 `rposition(User)` 插到历史里最后
+/// 一条 user 之前，会把该位置之后的整段历史**后移一位**，那一段 prompt 缓存
+/// 当场失效（推理链/工具结果动辄数万 token）。
+///
+/// 因此：最后一条是 user（普通用户轮）→ 插在它之前；否则（唤醒轮 / 空会话）
+/// → **追加到末尾**。末尾追加不动任何既有消息，缓存命中不受影响。
+fn insert_todos_summary(messages: &mut Vec<Message>, summary: &str) {
+    let insert_at = match messages.last() {
+        Some(m) if m.role == MessageRole::User => messages.len() - 1,
+        _ => messages.len(),
+    };
+    messages.insert(insert_at, Message::system(summary));
 }
 
 /// 渲染「当前环境」系统段：工作目录 + 相对路径解析口径（+ 异常警示）。
@@ -1370,5 +1404,173 @@ mod tests {
         ];
         let msgs = ContextAssembler::assemble(&chain, &InjectableContext::default());
         assert_messages_wellformed(&msgs);
+    }
+
+    // ── P0：待办清单注入（位置 = 最后一条 user 之前，绝不进系统前缀）─────────
+
+    /// 「soul + 环境 + AGENTS.md + rules/memories」这套完整前缀 + 一轮历史 +
+    /// 当前用户输入（ADR-004 的典型请求形状）。
+    fn full_prefix_injectable() -> InjectableContext {
+        InjectableContext {
+            soul: "SOUL-人格".to_string(),
+            working_directory: Some("F:\\work\\git\\tianyan".to_string()),
+            project_instructions: "AGENTS-MD-项目规范".to_string(),
+            rules_and_experiences: vec!["RULE-先读后写".to_string()],
+            memories: vec!["MEMORY-用户偏好 Rust".to_string()],
+            ..Default::default()
+        }
+    }
+
+    /// **核心契约**：待办段落在最后一条 user 消息**之前**，且**不在前缀段内**。
+    ///
+    /// 判别力（用索引断言，不看措辞）：
+    /// - 前缀段 = 开头的连续 system 消息（soul/环境/AGENTS.md/rules）；
+    ///   待办若落进去，prompt 缓存每轮整体失效（ADR-004 红线）。
+    /// - 待办若排到当前用户消息**之后**，模型读到的就是「上一轮的清单」，
+    ///   等于没注入（「做着做着就忘了」仍在）。
+    #[test]
+    fn test_assemble_injects_todos_before_last_user_message_not_in_prefix() {
+        let injectable = full_prefix_injectable();
+        let chain = vec![
+            StructuredMessage::user("s1", "历史用户消息"),
+            StructuredMessage::assistant("s1", "历史助手回复"),
+            StructuredMessage::user("s1", "当前用户消息"),
+        ];
+        let todos = "## 当前待办（1 项，进行中 0）\n- [ ] 待办甲\n完成一步就重发整表并把它标 completed——不要等最后一起标。\n";
+
+        let msgs = ContextAssembler::assemble_with(&chain, &injectable, None, Some(todos));
+
+        let todos_idx = msgs
+            .iter()
+            .position(|m| m.content == todos)
+            .expect("待办段必须被注入");
+        let last_user_idx = msgs
+            .iter()
+            .rposition(|m| m.role == MessageRole::User)
+            .expect("链上必有 user 消息");
+        assert_eq!(
+            todos_idx,
+            last_user_idx - 1,
+            "待办段必须紧贴最后一条 user 消息之前：{msgs:?}"
+        );
+        assert_eq!(msgs[last_user_idx].content, "当前用户消息");
+
+        // 前缀段 = 从 0 开始的连续 system 消息；待办不在其中
+        let prefix_len = msgs
+            .iter()
+            .position(|m| m.role != MessageRole::System)
+            .unwrap_or(msgs.len());
+        assert!(
+            todos_idx >= prefix_len,
+            "待办段不得进入系统前缀段（prefix_len={prefix_len}, todos_idx={todos_idx}）：{msgs:?}"
+        );
+        // 前缀段的四段内容一字不多：soul / 环境 / AGENTS.md / rules+memories
+        assert_eq!(
+            prefix_len, 4,
+            "前缀段只应有 soul/环境/AGENTS/rules：{msgs:?}"
+        );
+        assert!(msgs[0].content.starts_with("SOUL-人格"));
+        assert!(msgs[1].content.starts_with("## 当前环境"));
+        assert_eq!(msgs[2].content, "AGENTS-MD-项目规范");
+        assert!(msgs[3].content.contains("RULE-先读后写"));
+
+        // 历史顺序不被待办段打乱
+        assert_eq!(msgs[prefix_len].content, "历史用户消息");
+        assert_eq!(msgs[prefix_len + 1].content, "历史助手回复");
+    }
+
+    /// 待办段**不进前缀**的第二个判别：前缀段逐字节与「无待办」时一致
+    /// （缓存命中的前提）。
+    #[test]
+    fn test_assemble_todos_summary_leaves_prefix_byte_identical() {
+        let injectable = full_prefix_injectable();
+        let chain = vec![StructuredMessage::user("s1", "当前用户消息")];
+        let without = ContextAssembler::assemble_with(&chain, &injectable, None, None);
+        let with_todos = ContextAssembler::assemble_with(
+            &chain,
+            &injectable,
+            None,
+            Some("## 当前待办（1 项，进行中 0）\n- [ ] 甲\n尾行\n"),
+        );
+        assert_eq!(
+            with_todos.len(),
+            without.len() + 1,
+            "只多一条待办 system 消息：{with_todos:?}"
+        );
+        // 前缀段的每一条（含索引）逐字节一致
+        for (i, m) in without.iter().enumerate() {
+            let matched = with_todos
+                .iter()
+                .position(|w| w.role == m.role && w.content == m.content);
+            assert_eq!(
+                matched,
+                Some(if i >= 4 { i + 1 } else { i }),
+                "第 {i} 条消息在前缀/历史的相对位置不得漂移"
+            );
+        }
+    }
+
+    /// `todos_summary = None` / 空串 → 不插入任何消息（与改动前逐条一致）。
+    #[test]
+    fn test_assemble_without_todos_inserts_nothing() {
+        let injectable = full_prefix_injectable();
+        let chain = vec![
+            StructuredMessage::user("s1", "问题"),
+            StructuredMessage::assistant("s1", "回答"),
+        ];
+        let baseline = ContextAssembler::assemble(&chain, &injectable);
+        for empty in [None, Some("")] {
+            let msgs = ContextAssembler::assemble_with(&chain, &injectable, None, empty);
+            assert_eq!(msgs.len(), baseline.len(), "无待办不得插入消息：{msgs:?}");
+            for (a, b) in msgs.iter().zip(baseline.iter()) {
+                assert_eq!((&a.role, &a.content), (&b.role, &b.content));
+            }
+        }
+    }
+
+    /// 链上没有 user 消息（唤起轮历史全是 system）→ 追加到末尾，绝不丢弃待办。
+    #[test]
+    fn test_assemble_todos_appended_when_no_user_message() {
+        let chain = vec![StructuredMessage::system("s1", "后台任务完成通知")];
+        let todos = "## 当前待办（1 项，进行中 0）\n- [ ] 甲\n尾行\n";
+        let msgs = ContextAssembler::assemble_with(
+            &chain,
+            &InjectableContext::default(),
+            None,
+            Some(todos),
+        );
+        assert_eq!(msgs.len(), 2);
+        assert_eq!(msgs[1].content, todos);
+    }
+
+    /// 唤醒轮（历史里有 user，但**最后一条**是 assistant/通知）：待办必须追加到
+    /// 末尾，不得插到「历史里最后一条 user」之前——那会把该位置之后的整段历史
+    /// 后移一位，让那一段 prompt 缓存当场失效（推理链/工具结果动辄数万 token）。
+    ///
+    /// 这是区分「插在当前输入之前」与「插在历史最后一条 user 之前」的关键用例。
+    #[test]
+    fn test_assemble_todos_appended_in_wake_turn_not_inserted_into_history() {
+        let chain = vec![
+            StructuredMessage::user("s1", "历史用户消息"),
+            StructuredMessage::assistant("s1", "历史助手回复"),
+            StructuredMessage::system("s1", "后台任务完成通知"),
+        ];
+        let todos = "## 当前待办（1 项，进行中 0）\n- [ ] 甲\n尾行\n";
+        let msgs = ContextAssembler::assemble_with(
+            &chain,
+            &InjectableContext::default(),
+            None,
+            Some(todos),
+        );
+
+        assert_eq!(
+            msgs.last().map(|m| m.content.as_str()),
+            Some(todos),
+            "唤醒轮待办应追加到末尾（历史一条不动）：{msgs:?}"
+        );
+        // 历史段逐条原位（索引不后移）——这是缓存命中的前提
+        assert_eq!(msgs[0].content, "历史用户消息");
+        assert_eq!(msgs[1].content, "历史助手回复");
+        assert_eq!(msgs[2].content, "后台任务完成通知");
     }
 }

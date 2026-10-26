@@ -103,6 +103,12 @@ pub struct AgentBuilder {
     user_questions: Option<Arc<crate::agent::user_questions::UserQuestionService>>,
     /// 子智能体消息流事件通道（ADR-026：面板实时流式；None 时静默）。
     task_event_sink: Option<Arc<dyn crate::agent::background::TaskEventSink>>,
+    /// 会话待办存储（P0：每轮把当前清单注入上下文的数据源；None 时退化为
+    /// 「不注入待办段」，不报错）。
+    ///
+    /// 装配层必须传入与 `todo` 工具 / REST API **同一实例**的 store（工具写的
+    /// 待办要立刻出现在下一轮上下文里）。
+    todo_store: Option<Arc<crate::todos::TodoStore>>,
 }
 
 impl AgentBuilder {
@@ -144,6 +150,7 @@ impl AgentBuilder {
             role_router: None,
             user_questions: None,
             task_event_sink: None,
+            todo_store: None,
         }
     }
 
@@ -449,6 +456,18 @@ impl AgentBuilder {
         self
     }
 
+    /// 设置会话待办存储（P0：把当前清单**每轮注入上下文**的数据源）。
+    ///
+    /// 必须传入与 `todo` 工具 / REST API **同一实例**的 store：工具写进去的
+    /// 待办要立刻出现在下一轮请求里（各自 `TodoStore` 的内存快照互不感知，
+    /// 传副本等于「刚写完就忘」）。
+    ///
+    /// 未调用 → `None` → 不注入待办段（core 内单测等非会话场景），不报错。
+    pub fn with_todo_store(mut self, store: Arc<crate::todos::TodoStore>) -> Self {
+        self.todo_store = Some(store);
+        self
+    }
+
     /// 构建 Agent 实例。
     pub fn build(self) -> Result<Agent> {
         let model_service = self
@@ -689,7 +708,7 @@ impl AgentBuilder {
         // （EvolutionTask + 演化智能体综述）驱动；执行轨迹持久化在
         // ToolObservabilityListener（GEPA 数据层）。
 
-        Ok(Agent::new(
+        let agent = Agent::new(
             chat_model,
             context_port,
             metrics,
@@ -698,7 +717,12 @@ impl AgentBuilder {
             self.snapshot_manager,
             self.default_working_directory,
             working_sets,
-        ))
+        );
+        // 待办上下文注入的数据源（P0）：装配层传入与 `todo` 工具同一实例的 store
+        Ok(match self.todo_store {
+            Some(store) => agent.with_todo_store(store),
+            None => agent,
+        })
     }
 }
 

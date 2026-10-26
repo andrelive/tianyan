@@ -16,11 +16,21 @@ use tokio::sync::RwLock;
 
 use crate::common::error::{Result, TianyanError};
 
+mod summary;
+
+// 待办清单的**上下文注入**渲染（每轮进请求的那一小段）+ 状态计数口径。
+// 放在 store 旁边：渲染只读条目、不碰存储，故抽成可单测的纯函数。
+pub use summary::count_by_status;
+pub use summary::render_todos_summary;
+
 /// 待办状态。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum TodoStatus {
     /// 未开始。
+    #[default]
     Pending,
     /// 进行中。
     InProgress,
@@ -41,12 +51,15 @@ impl TodoStatus {
 }
 
 /// 优先级。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema,
+)]
 #[serde(rename_all = "lowercase")]
 pub enum TodoPriority {
     /// 低。
     Low,
     /// 中（默认）。
+    #[default]
     Medium,
     /// 高。
     High,

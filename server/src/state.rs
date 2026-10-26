@@ -567,6 +567,9 @@ impl AppState {
             .task_reviewer_factory()
             .as_ref()
             .map(|factory| factory(model_services.chat.clone(), &resolve_chat_model(&config)));
+        // 会话待办存储（P0）：**在构建 Agent 之前**创建，因为 Agent 需要它把
+        // 当前清单每轮注入上下文；且必须与 `todo` 工具 / REST API 是同一份实例。
+        let todo_store = Arc::new(TodoStore::new(&config.storage.data_dir));
         let agent = AgentBuilderFactory::build_agent_or_wizard(
             &config,
             model_services.clone(),
@@ -588,6 +591,7 @@ impl AppState {
             task_event_sink,
             task_event_tx.clone(),
             working_sets.clone(),
+            todo_store.clone(),
             approval_gate.clone(),
             context_port,
             task_reviewer,
@@ -617,7 +621,7 @@ impl AppState {
             scheduler: Arc::new(RwLock::new(None)),
             scheduled_agent_tasks: Arc::new(RwLock::new(None)),
             scheduled_task_tx: Arc::new(RwLock::new(None)),
-            todo_store: Arc::new(TodoStore::new(&data_dir)),
+            todo_store,
             goal_store: Arc::new(GoalStore::new(&data_dir)),
             sqlite_db: database,
             event_bus: Arc::new(tianyan::events::EventBus::new()),
@@ -850,6 +854,9 @@ impl AppState {
             // 热重载复用**同一**工作集（状态不能在 reload 时分裂：新 Agent
             // 必须看到旧 Agent 已物化的会话缓存）
             self.working_sets.clone(),
+            // 待办存储跨热重载复用：新 Agent 的上下文注入必须看到同一个 store
+            // （重建副本 = 工具写的待办在下一轮上下文里消失）
+            self.todo_store.clone(),
             approval_gate,
             context_port,
             task_reviewer,

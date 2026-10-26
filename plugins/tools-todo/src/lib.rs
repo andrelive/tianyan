@@ -40,99 +40,71 @@ use tianyan::agent::{DynamicToolExecutor, ToolContext};
 use tianyan::common::error::Result;
 use tianyan::goals::{GoalStatus, GoalStore};
 use tianyan::model::types::{FunctionDefinition, ToolDefinition, ToolPresentation};
-use tianyan::todos::{TodoDraft, TodoItem, TodoPatch, TodoPriority, TodoStatus, TodoStore};
+use tianyan::todos::{count_by_status, TodoDraft, TodoItem, TodoPriority, TodoStatus, TodoStore};
 use tianyan::TianyanError;
 
 // ── todo ─────────────────────────────────────────────────────────────────
 
-/// 批量创建的单条输入。
+/// 清单里的**一条**待办（整表替换语义：一次调用传完整计划）。
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct TodoDraftArgs {
-    /// 标题（必填，非空）。
+    /// 标题（必填，非空）。写成**可独立验证完成**的最小单元。
     pub title: String,
-    /// 详细描述。
+    /// 详细描述（可选；进上下文时压成单行并截断到 60 字符）。
     #[serde(default)]
     pub description: Option<String>,
-    /// 初始状态（缺省 pending）。
+    /// 状态（缺省 pending）：pending | in_progress | completed。
     #[serde(default)]
-    pub status: Option<TodoStatus>,
-    /// 优先级（缺省 medium）。
+    pub status: TodoStatus,
+    /// 优先级（缺省 medium）：low | medium | high。
     #[serde(default)]
-    pub priority: Option<TodoPriority>,
-    /// 关联目标 id。
-    #[serde(default)]
-    pub goal_id: Option<String>,
-    /// 父待办 id（整表替换下不可用——非空会被拒绝；请先创建、再用 update 挂靠）。
-    #[serde(default)]
-    pub parent_id: Option<String>,
-}
-
-/// 批量更新的单条输入。
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
-pub struct TodoUpdateArgs {
-    /// 目标待办 id（必填）。
-    pub id: String,
-    /// 新标题。
-    #[serde(default)]
-    pub title: Option<String>,
-    /// 新描述。
-    #[serde(default)]
-    pub description: Option<String>,
-    /// 新状态（pending | in_progress | completed）。
-    #[serde(default)]
-    pub status: Option<TodoStatus>,
-    /// 新优先级。
-    #[serde(default)]
-    pub priority: Option<TodoPriority>,
-    /// 新关联目标 id（空串清除）。
+    pub priority: TodoPriority,
+    /// 关联目标 id（可选；目标进度按关联待办的完成比例计算）。
     #[serde(default)]
     pub goal_id: Option<String>,
-    /// 新父待办 id（空串清除；父待办须已存在且属于本会话）。
-    #[serde(default)]
-    pub parent_id: Option<String>,
 }
 
-/// todo 工具参数。
+/// todo 工具参数——**只有一个字段**。
 ///
-/// **形态唯一**：每种 operation 只有一种写法——要改/删**单条也放进数组**
-/// （长度 1）。此前 update/delete 另有「单条快捷形态」（顶层 `id` + 各字段），
-/// 与数组形态表达同一意图 → 同一份意图两套 schema，是模型参数生成的抖动源
-/// （与已收敛的 `ask_user` 同型问题）。create 早已收敛（只接受 `todos`）。
+/// 此前的 `operation`（create/update/list/delete/close 分派）+ 5 个可选数组
+/// 字段，是模型参数报错的主因：`operation` 必填且无 `serde(default)`，模型漏传
+/// 就直接 `missing field 'operation'`（实测报错原文）。参考实现（OpenCode
+/// `todowrite` / DSH `dsh-tool-todo`）的共识是**只剩一个 `todos` 数组 + 整表
+/// 替换**——结构上不可能漏必填字段，同一份意图也只有一种写法。
+///
+/// 三态语义（靠「有没有传」区分，而不是靠一个 operation 字符串）：
+/// - `todos: [非空]` → 整表替换（id 重新生成是既有语义）；
+/// - `todos: []` → 清空该会话待办；
+/// - `todos` 缺省 / `null` → 只读取当前清单（**不写**）。
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct TodoArgs {
-    /// 操作：create | update | list | delete | close。
-    pub operation: String,
-    /// 整表替换（create 必填）：当前完整计划——未包含的旧条目即被移除。
+    /// 完整清单（**整表替换**：未包含的旧条目即被移除）。传 `[]` 清空该会话
+    /// 待办；**不传则只读取当前清单**（不写入）。
     #[serde(default)]
     pub todos: Option<Vec<TodoDraftArgs>>,
-    /// 更新列表（update 必填；单条更新也放进数组，长度 1）。
-    #[serde(default)]
-    pub updates: Option<Vec<TodoUpdateArgs>>,
-    /// 删除列表（delete 必填；单条删除也放进数组，长度 1）。
-    #[serde(default)]
-    pub ids: Option<Vec<String>>,
-    /// list 过滤：只返回该状态的条目（可选）。
-    #[serde(default)]
-    pub status: Option<TodoStatus>,
-    /// list 过滤：只返回关联到该目标的条目（可选）。
-    #[serde(default)]
-    pub goal_id: Option<String>,
 }
 
-/// `todo` 工具：让智能体在会话内创建/更新/跟踪待办清单。
+/// `todo` 工具：让智能体在会话内维护待办清单（整表替换）。
 ///
 /// 待办是智能体可调用的工具（非纯 UI 功能）：agent 自主拆分任务、跟踪进度、
 /// 标记完成。会话页输入框上方展示待办，完成条目保留展示（划线样式），
 /// 无任何条目后面板消失（对齐 DSH todo_write 的临时面板语义）。
 ///
-/// 当前批语义（同一会话同一时期只有一批同源待办；create = 整表替换，
-/// 对齐 DSH todo_write 的 last-write-wins）：
-/// - create 传 `todos` 数组 = "当前完整计划"，旧批（含已完成项）整体替换——
-///   未包含的旧条目即被移除（被中止/放弃的任务随重规划自然消失）；
-///   想保留的条目（包括已完成的）必须包含在新列表中。
-/// - 推进/完成用 `update`（id 批量合并，比全量重发省）；`close` 主动清空
-///   当前批（目标变更、整批作废时使用）；`delete` 按 id 删除；完成项批内
-///   划线保留；子任务建后用 update 的 parent_id 挂靠。
+/// **当前清单每轮自动注入上下文**（`Agent::assemble_context` →
+/// [`tianyan::todos::render_todos_summary`]），所以模型不需要为了「想起来」
+/// 而反复调用本工具读清单；本工具的职责是**写**（整表替换）与按需读取。
+///
+/// 批语义（同一会话同一时期只有一批同源待办，last-write-wins）：
+/// - 传非空 `todos` = 「当前完整计划」，旧批（含已完成项）整体替换——未包含的
+///   旧条目即被移除（被中止/放弃的任务随重规划自然消失）；想保留的条目
+///   （包括已完成的）必须包含在新列表中。
+/// - 传 `[]` = 清空当前批（目标变更、整批作废时使用）。
+/// - 不传 = 只读取（不写）。
+///
+/// **已放弃的能力：`parent_id` 子任务挂靠**。整表替换下 id 每次重新生成，
+/// 挂靠只能「先 create 再 update 挂靠」两步走——那正是报错来源之一。子任务
+/// 属低频能力，砍掉换结构简单（前端面板的 `parent_id` 缩进展示对平铺清单
+/// 自然退化为无缩进，不报错）。
 pub struct TodoTool {
     store: Arc<TodoStore>,
 }
@@ -149,11 +121,39 @@ impl TodoTool {
         serde_json::json!({
             "id": i.id,
             "title": i.title,
+            "description": i.description,
             "status": i.status,
             "priority": i.priority,
             "goal_id": i.goal_id,
-            "parent_id": i.parent_id,
         })
+    }
+
+    /// 统一返回形状：`{ action, summary, counts, todos }`。
+    ///
+    /// `summary` 是人/模型都易读的一句话（参照 dsh-tool-todo）：模型读 JSON 时
+    /// 先看到它就能确认「这次调用到底改成了什么」，不必自己数组计数。
+    /// `counts` 与注入摘要的头部共用 [`count_by_status`] 的计数口径。
+    fn build_result(items: &[TodoItem], action: &str, summary: String) -> serde_json::Value {
+        let (pending, in_progress, completed) = count_by_status(items);
+        serde_json::json!({
+            "action": action,
+            "summary": summary,
+            "counts": {
+                "pending": pending,
+                "in_progress": in_progress,
+                "completed": completed,
+            },
+            "todos": items.iter().map(Self::todo_json).collect::<Vec<_>>(),
+        })
+    }
+
+    /// 「N 项待办（a 待办 / b 进行中 / c 完成）」——返回值摘要与清空提示共用。
+    fn counts_phrase(items: &[TodoItem]) -> String {
+        let (pending, in_progress, completed) = count_by_status(items);
+        format!(
+            "{} 项待办（{pending} 待办 / {in_progress} 进行中 / {completed} 完成）",
+            items.len()
+        )
     }
 }
 
@@ -165,11 +165,21 @@ impl DynamicToolExecutor for TodoTool {
 
     fn definition(&self) -> ToolDefinition {
         // schema 由 struct 派生（from_schema）——单一事实源：字段/枚举/必填随
-        // TodoArgs 自动同步。手写 json! 曾与 struct 漂移（schema 把 status/goal_id
-        // 描述为「update 单条形态」而实现里它们是 list 过滤——功能被藏）。
+        // TodoArgs 自动同步。手写 json! 曾与 struct 漂移。
+        //
+        // 描述只讲**怎么用**（何时用/何时不用/颗粒度/完成即更新），不讲 create/
+        // update/delete 的语义——旧描述 90% 篇幅在解释 operation 分派，模型仍
+        // 漏传 operation（参数报错）且规划质量差。整表替换语义已让「分派」消失。
+        //
+        // **必须是单行**：工具目录（`docs/architecture/tool-catalog.md`）把描述
+        // 原样放进 markdown 表格单元格，换行会把一行表格拆成多行（表格结构坏掉）。
         ToolDefinition::function(FunctionDefinition::from_schema::<TodoArgs>(
             "todo",
-            "管理当前会话的待办清单（会话绑定，仅本会话可见；同一时期只保留一批同源待办）。**每种操作只有一种写法**——要改/删单条也放进数组（长度 1）：create 传 `todos` 数组 = 当前完整计划（**整表替换**——未包含的旧条目（含未完成项）即被移除；想保留的条目必须包含在新列表中）；update 传 `updates` 数组（按 id 批量合并状态）；delete 传 `ids` 数组；list 查看当前清单（可用 status / goal_id 过滤）；close 清空当前批全部待办（用户目标变更、现有待办不再反映当前意图时使用，即使有未完成项）。开始多步工作先写入整份清单；推进/完成用 update（比全量重发省）；计划增删改时重发完整列表。子任务挂靠：先创建任务，再用 update 的 parent_id 挂靠（整表替换中 parent_id 不可用）。完成项默认划线保留展示，是否清理由你自行决定。",
+            "维护当前会话的待办清单（整表替换：每次传当前完整计划，未包含的旧条目即被移除；传 [] 清空；不传则只读取当前清单）。当前清单每轮自动注入你的上下文，不必为「想起来」而反复读取。\
+             【何时用】任务 ≥3 步、步骤间有依赖、或用户明确要求先列计划。\
+             【何时不用】单步任务、管理成本高于执行成本的琐碎事、纯问答/闲聊——不要为走流程而建清单。\
+             【颗粒度】每项写成可独立验证完成的最小单元（「跑通 X 的 3 个用例」而不是「做测试」）。\
+             【必须遵守】每完成一步立刻重发整表并把它标 completed——不要等全部做完再一起标；进行中的项同一时刻只留一个。",
         ))
     }
 
@@ -179,173 +189,62 @@ impl DynamicToolExecutor for TodoTool {
     }
 
     async fn execute(&self, session_id: &str, arguments: &str) -> Result<serde_json::Value> {
-        let args: TodoArgs = serde_json::from_str(arguments)
-            .map_err(|e| TianyanError::Custom(format!("tool: todo 参数无效：{e}")))?;
-        match args.operation.as_str() {
-            "create" => self.create(session_id, args).await,
-            "update" => self.update(session_id, args).await,
-            "list" => self.list(session_id, &args).await,
-            "delete" => self.delete(session_id, args).await,
-            "close" => self.close(session_id).await,
-            other => Err(TianyanError::invalid_input(format!(
-                "tool: todo 未知操作：{other}"
-            ))),
-        }
-    }
-}
-
-impl TodoTool {
-    // —— create：整表替换（todos 数组 = 当前完整计划；未包含的旧条目即被移除） ——
-    async fn create(&self, session_id: &str, args: TodoArgs) -> Result<serde_json::Value> {
-        let drafts: Vec<TodoDraftArgs> = match args.todos {
-            Some(list) if !list.is_empty() => list,
-            _ => {
-                return Err(TianyanError::invalid_input(
-                    "tool: todo create 需要非空 todos 数组（整表替换：传入当前完整清单）",
+        // 空参数（模型「只想看看清单」，`arguments` 为 ""）视同缺省 → 只读取。
+        // `serde_json` 对空串报 EOF，不该因此让一次合法读取失败。
+        let args: TodoArgs = if arguments.trim().is_empty() {
+            TodoArgs { todos: None }
+        } else {
+            serde_json::from_str(arguments)
+                .map_err(|e| TianyanError::Custom(format!("tool: todo 参数无效：{e}")))?
+        };
+        match args.todos {
+            // ① 缺省 / null：只读取，不写
+            None => {
+                let items = self.store.list_by_session(session_id).await;
+                Ok(Self::build_result(
+                    &items,
+                    "read",
+                    format!("当前清单：{}", Self::counts_phrase(&items)),
                 ))
             }
-        };
-        let mut drafts_parsed = Vec::with_capacity(drafts.len());
-        for d in drafts {
-            drafts_parsed.push(TodoDraft {
-                title: d.title,
-                description: d.description,
-                status: d.status,
-                priority: d.priority,
-                goal_id: d.goal_id,
-                parent_id: d.parent_id,
-            });
-        }
-        let (created, replaced) = self.store.replace_many(session_id, drafts_parsed).await?;
-        Ok(serde_json::json!({
-            "status": "created",
-            "count": created.len(),
-            "replaced": replaced,
-            "todos": created.iter().map(Self::todo_json).collect::<Vec<_>>(),
-        }))
-    }
-
-    // —— close：清空当前会话全部待办（目标变更时主动关闭当前批）——
-    async fn close(&self, session_id: &str) -> Result<serde_json::Value> {
-        let removed = self.store.delete_by_session(session_id).await;
-        Ok(serde_json::json!({ "status": "closed", "removed": removed }))
-    }
-
-    // —— update：只接受 updates 数组（单条更新也放进数组）；原子归属校验 ——
-    async fn update(&self, session_id: &str, args: TodoArgs) -> Result<serde_json::Value> {
-        let updates: Vec<TodoUpdateArgs> = match args.updates {
-            Some(list) if !list.is_empty() => list,
-            _ => {
-                return Err(TianyanError::invalid_input(
-                    "tool: todo update 需要非空 updates 数组（单条更新也放进数组，长度 1）",
+            // ② 空数组：清空该会话待办（`replace_many` 拒绝空数组，故走 delete_by_session）
+            Some(drafts) if drafts.is_empty() => {
+                let removed = self.store.delete_by_session(session_id).await;
+                Ok(Self::build_result(
+                    &[],
+                    "cleared",
+                    format!("已清空：移除 {removed} 项待办"),
                 ))
             }
-        };
-        // 归属校验（原子）：任一 id 不属于当前会话则整体拒绝
-        let owned: Vec<String> = self
-            .store
-            .list_by_session(session_id)
-            .await
-            .into_iter()
-            .map(|i| i.id)
-            .collect();
-        let unknown: Vec<String> = updates
-            .iter()
-            .map(|u| u.id.clone())
-            .filter(|id| !owned.contains(id))
-            .collect();
-        if !unknown.is_empty() {
-            return Err(TianyanError::not_found(format!(
-                "tool: todo 不存在或不属于当前会话：{}",
-                unknown.join(", ")
-            )));
-        }
-        // parent_id 亦须属于本会话（空串 = 清除挂靠）
-        let parent_unknown: Vec<String> = updates
-            .iter()
-            .filter_map(|u| u.parent_id.clone())
-            .filter(|p| !p.is_empty() && !owned.contains(p))
-            .collect();
-        if !parent_unknown.is_empty() {
-            return Err(TianyanError::not_found(format!(
-                "tool: todo 父待办不存在或不属于当前会话：{}",
-                parent_unknown.join(", ")
-            )));
-        }
-        let mut patches = Vec::with_capacity(updates.len());
-        for u in updates {
-            patches.push(TodoPatch {
-                id: u.id,
-                title: u.title,
-                description: u.description,
-                status: u.status,
-                priority: u.priority,
-                goal_id: u.goal_id,
-                parent_id: u.parent_id,
-                due_at: None,
-            });
-        }
-        let updated = self.store.update_many(patches).await?;
-        Ok(serde_json::json!({
-            "status": "updated",
-            "count": updated.len(),
-            "todos": updated.iter().map(Self::todo_json).collect::<Vec<_>>(),
-        }))
-    }
-
-    // —— list：本会话条目（可选 status/goal_id 过滤）——
-    async fn list(&self, session_id: &str, args: &TodoArgs) -> Result<serde_json::Value> {
-        let items = self.store.list_by_session(session_id).await;
-        let filtered: Vec<_> = items
-            .into_iter()
-            .filter(|i| {
-                let status_ok = match args.status {
-                    Some(s) => s == i.status,
-                    None => true,
-                };
-                let goal_ok = match args.goal_id.as_deref() {
-                    Some(g) => i.goal_id.as_deref() == Some(g),
-                    None => true,
-                };
-                status_ok && goal_ok
-            })
-            .map(|i| Self::todo_json(&i))
-            .collect();
-        let count = filtered.len();
-        Ok(serde_json::json!({ "todos": filtered, "count": count }))
-    }
-
-    // —— delete：只接受 ids 数组（单条删除也放进数组） ——
-    async fn delete(&self, session_id: &str, args: TodoArgs) -> Result<serde_json::Value> {
-        let ids: Vec<String> = match args.ids {
-            Some(list) if !list.is_empty() => list,
-            _ => {
-                return Err(TianyanError::invalid_input(
-                    "tool: todo delete 需要非空 ids 数组（单条删除也放进数组，长度 1）",
-                ))
+            // ③ 非空：整表替换（id 重新生成是既有语义）
+            Some(drafts) => {
+                let mut parsed = Vec::with_capacity(drafts.len());
+                for d in drafts {
+                    // 显式校验：`replace_many` 也会拒，但这里给模型的动作级提示
+                    // （错的是「某一项忘了写标题」，不是整表语义）
+                    if d.title.trim().is_empty() {
+                        return Err(TianyanError::invalid_input(
+                            "tool: todo 每一项待办都需要非空 title",
+                        ));
+                    }
+                    parsed.push(TodoDraft {
+                        title: d.title,
+                        description: d.description,
+                        status: Some(d.status),
+                        priority: Some(d.priority),
+                        goal_id: d.goal_id,
+                        // 整表替换不支持 parent_id（能力已砍——见 TodoTool 文档）
+                        parent_id: None,
+                    });
+                }
+                let (created, replaced) = self.store.replace_many(session_id, parsed).await?;
+                let mut summary = format!("已更新：{}", Self::counts_phrase(&created));
+                if replaced > 0 {
+                    summary.push_str(&format!("，替换旧批 {replaced} 项"));
+                }
+                Ok(Self::build_result(&created, "updated", summary))
             }
-        };
-        // 归属校验（原子）
-        let owned: Vec<String> = self
-            .store
-            .list_by_session(session_id)
-            .await
-            .into_iter()
-            .map(|i| i.id)
-            .collect();
-        let unknown: Vec<String> = ids
-            .iter()
-            .filter(|id| !owned.contains(id))
-            .cloned()
-            .collect();
-        if !unknown.is_empty() {
-            return Err(TianyanError::not_found(format!(
-                "tool: todo 不存在或不属于当前会话：{}",
-                unknown.join(", ")
-            )));
         }
-        let removed = self.store.delete_many(&ids).await?;
-        Ok(serde_json::json!({ "status": "deleted", "count": removed }))
     }
 }
 
@@ -578,350 +477,215 @@ mod tests {
         assert_eq!(from_factory, from_tools);
     }
 
+    /// 新 API ①：`todos` **缺省 / null → 只读取**（不写入，store 内容逐字段不变）。
+    ///
+    /// 判别力：这条锁的是「读」的三态语义——只读路径若顺手写了 store（哪怕写成
+    /// 等价内容），`updated_at`/id 会变，前端面板会闪一下、会话面板的完成时间
+    /// 也会被刷新。
     #[tokio::test]
-    async fn test_batch_create_and_list() {
+    async fn test_todo_read_only_when_todos_absent() {
         let (tool, _dir) = todo_tool();
-        let result = tool
+        let created = tool
             .execute(
                 "s-1",
-                "{ \"operation\": \"create\", \"todos\": [ { \"title\": \"调研\", \"priority\": \"high\" }, { \"title\": \"实现\", \"status\": \"in_progress\" }, { \"title\": \"写文档\" } ] }",
+                r#"{ "todos": [ { "title": "甲" }, { "title": "乙", "status": "completed" } ] }"#,
             )
             .await
             .unwrap();
-        assert_eq!(result["count"], 3);
-        assert_eq!(result["replaced"], 0);
-        assert_eq!(result["todos"][1]["status"], "in_progress");
+        assert_eq!(
+            created["action"], "updated",
+            "写路径：非空 todos = 整表替换"
+        );
+        assert_eq!(
+            created["summary"], "已更新：2 项待办（1 待办 / 0 进行中 / 1 完成）",
+            "summary 要人/模型都易读：{}",
+            created["summary"]
+        );
+        assert_eq!(created["counts"]["pending"], 1);
+        assert_eq!(created["counts"]["in_progress"], 0);
+        assert_eq!(created["counts"]["completed"], 1);
 
-        let list = tool
-            .execute("s-1", "{ \"operation\": \"list\" }")
-            .await
-            .unwrap();
-        assert_eq!(list["count"], 3);
+        let before = tool.store.list_by_session("s-1").await;
+        assert_eq!(before.len(), 2);
 
-        // create 为整表替换：再次 create 单条新批 → 旧批 3 条被整体替换
+        // 缺省 todos（空对象）
+        let read = tool.execute("s-1", "{}").await.unwrap();
+        assert_eq!(read["action"], "read");
+        assert_eq!(read["todos"].as_array().unwrap().len(), 2);
+        assert_eq!(read["counts"]["completed"], 1);
+        // 显式 null 同义
+        let read_null = tool.execute("s-1", r#"{ "todos": null }"#).await.unwrap();
+        assert_eq!(read_null["action"], "read");
+        assert_eq!(read_null["todos"].as_array().unwrap().len(), 2);
+
+        // 只读不写：ID / 时间戳全不变（写路径必然重新生成 id 并刷新 updated_at）
+        let after = tool.store.list_by_session("s-1").await;
+        assert_eq!(after.len(), before.len());
+        for (a, b) in before.iter().zip(after.iter()) {
+            assert_eq!(a.id, b.id, "只读路径不得改写条目");
+            assert_eq!(a.updated_at, b.updated_at, "只读路径不得刷新时间戳");
+        }
+    }
+
+    /// 新 API ②③：非空 → 整表替换；`[]` → 清空该会话（且不影响其他会话）。
+    #[tokio::test]
+    async fn test_todo_replace_and_clear() {
+        let (tool, _dir) = todo_tool();
+        // 整表替换：第二次只传 1 条 → 旧批 2 条整体移除
+        tool.execute(
+            "s-1",
+            r#"{ "todos": [ { "title": "旧1" }, { "title": "旧2" } ] }"#,
+        )
+        .await
+        .unwrap();
         let replaced = tool
-            .execute(
-                "s-1",
-                "{ \"operation\": \"create\", \"todos\": [ { \"title\": \"新批\" } ] }",
-            )
+            .execute("s-1", r#"{ "todos": [ { "title": "新批" } ] }"#)
             .await
             .unwrap();
-        assert_eq!(replaced["count"], 1);
-        assert_eq!(replaced["replaced"], 3);
-        let list = tool
-            .execute("s-1", "{ \"operation\": \"list\" }")
-            .await
-            .unwrap();
-        assert_eq!(list["count"], 1);
+        assert_eq!(replaced["todos"].as_array().unwrap().len(), 1);
+        assert!(
+            replaced["summary"]
+                .as_str()
+                .unwrap()
+                .contains("替换旧批 2 项"),
+            "替换要说明清掉了多少旧条目：{}",
+            replaced["summary"]
+        );
 
-        // create 不再接受单条快捷形态（缺 todos → 明确报错）
-        let err = tool
-            .execute("s-1", "{ \"operation\": \"create\", \"title\": \"单条\" }")
+        // 其他会话不受影响
+        tool.execute("s-2", r#"{ "todos": [ { "title": "他会话" } ] }"#)
             .await
-            .unwrap_err();
-        assert!(err.is_invalid_input());
+            .unwrap();
+
+        // 空数组 = 清空（replace_many 拒绝空数组，此处必须走 delete_by_session）
+        let cleared = tool.execute("s-1", r#"{ "todos": [] }"#).await.unwrap();
+        assert_eq!(cleared["action"], "cleared");
+        assert_eq!(cleared["todos"].as_array().unwrap().len(), 0);
+        assert!(
+            cleared["summary"].as_str().unwrap().contains("移除 1 项"),
+            "{}",
+            cleared["summary"]
+        );
+        assert!(tool.store.list_by_session("s-1").await.is_empty());
+        assert_eq!(
+            tool.store.list_by_session("s-2").await.len(),
+            1,
+            "清空只作用于本会话"
+        );
     }
 
+    /// 报错路径：`title` 为空 → `invalid_input`（语义谓词判定，不做字符串匹配）。
     #[tokio::test]
-    async fn test_batch_update_progress_and_ownership() {
+    async fn test_todo_empty_title_is_invalid_input() {
         let (tool, _dir) = todo_tool();
-        let created = tool
-            .execute(
-                "s-1",
-                "{ \"operation\": \"create\", \"todos\": [ { \"title\": \"a\" }, { \"title\": \"b\" } ] }",
-            )
-            .await
-            .unwrap();
-        let todos = created["todos"].as_array().unwrap();
-        let id_a = todos[0]["id"].as_str().unwrap().to_string();
-        let id_b = todos[1]["id"].as_str().unwrap().to_string();
-
-        // 一次调用推进两条
-        let updated = tool
-            .execute(
-                "s-1",
-                &format!(
-                    "{{ \"operation\": \"update\", \"updates\": [ {{ \"id\": \"{id_a}\", \"status\": \"completed\" }}, {{ \"id\": \"{id_b}\", \"status\": \"in_progress\" }} ] }}"
-                ),
-            )
-            .await
-            .unwrap();
-        assert_eq!(updated["count"], 2);
-        assert_eq!(updated["todos"][0]["status"], "completed");
-        assert_eq!(updated["todos"][1]["status"], "in_progress");
-
-        // 跨会话 id → 整体拒绝（原子归属校验）
-        tool.execute(
-            "s-2",
-            "{ \"operation\": \"create\", \"todos\": [ { \"title\": \"他会的\" } ] }",
-        )
-        .await
-        .unwrap();
         let err = tool
-            .execute(
-                "s-2",
-                &format!(
-                    "{{ \"operation\": \"update\", \"updates\": [ {{ \"id\": \"{id_a}\", \"status\": \"completed\" }} ] }}"
-                ),
-            )
-            .await
-            .unwrap_err();
-        assert!(err.is_not_found());
-        assert!(err.to_string().contains("不属于当前会话"));
-    }
-
-    #[tokio::test]
-    async fn test_parent_id_subtask() {
-        let (tool, _dir) = todo_tool();
-        // 先创建整批（整表替换语义），再用 update 挂靠
-        let created = tool
-            .execute(
-                "s-1",
-                "{ \"operation\": \"create\", \"todos\": [ { \"title\": \"父任务\" }, { \"title\": \"待挂子任务\" } ] }",
-            )
-            .await
-            .unwrap();
-        let parent_id = created["todos"][0]["id"].as_str().unwrap().to_string();
-        let child_id = created["todos"][1]["id"].as_str().unwrap().to_string();
-        // update 挂靠
-        let child = tool
-            .execute(
-                "s-1",
-                &format!(
-                    "{{ \"operation\": \"update\", \"updates\": [ {{ \"id\": \"{child_id}\", \"parent_id\": \"{parent_id}\" }} ] }}"
-                ),
-            )
-            .await
-            .unwrap();
-        assert_eq!(child["todos"][0]["parent_id"], parent_id.as_str());
-
-        // create 带 parent_id → 明确拒绝（整表替换：旧条目将被替换、新 id 未生成）
-        let err = tool
-            .execute(
-                "s-1",
-                &format!(
-                    "{{ \"operation\": \"create\", \"todos\": [ {{ \"title\": \"孤儿\", \"parent_id\": \"{parent_id}\" }} ] }}"
-                ),
-            )
-            .await
-            .unwrap_err();
-        assert!(err.is_invalid_input());
-
-        // update 挂靠不存在的父 → 报错
-        let err = tool
-            .execute(
-                "s-1",
-                &format!(
-                    "{{ \"operation\": \"update\", \"updates\": [ {{ \"id\": \"{child_id}\", \"parent_id\": \"ghost\" }} ] }}"
-                ),
-            )
-            .await
-            .unwrap_err();
-        assert!(err.is_not_found());
-
-        // 批量删除
-        let deleted = tool
-            .execute(
-                "s-1",
-                &format!("{{ \"operation\": \"delete\", \"ids\": [\"{parent_id}\"] }}"),
-            )
-            .await
-            .unwrap();
-        assert_eq!(deleted["count"], 1);
-    }
-
-    #[tokio::test]
-    async fn test_create_replaces_whole_batch() {
-        let (tool, _dir) = todo_tool();
-        // 旧批 2 条：1 完成 + 1 未完成——旧语义下"未完成项"导致只追加不替换（回归点）
-        let created = tool
-            .execute(
-                "s-1",
-                "{ \"operation\": \"create\", \"todos\": [ { \"title\": \"旧完成\", \"status\": \"completed\" }, { \"title\": \"旧未完成\" } ] }",
-            )
-            .await
-            .unwrap();
-        assert_eq!(created["count"], 2);
-        assert_eq!(created["replaced"], 0);
-        // 整表替换：新批完全取代旧批（未包含的旧条目即被移除）
-        let new_batch = tool
-            .execute(
-                "s-1",
-                "{ \"operation\": \"create\", \"todos\": [ { \"title\": \"新1\" } ] }",
-            )
-            .await
-            .unwrap();
-        assert_eq!(new_batch["count"], 1);
-        assert_eq!(new_batch["replaced"], 2);
-        let list = tool
-            .execute("s-1", "{ \"operation\": \"list\" }")
-            .await
-            .unwrap();
-        assert_eq!(list["count"], 1, "旧批（含未完成项）应被整表替换移除");
-        assert_eq!(list["todos"][0]["title"], "新1");
-        // 全完成批同样被替换（原"全完成才轮换"逻辑被整表替换覆盖）
-        tool.execute(
-            "s-1",
-            "{ \"operation\": \"create\", \"todos\": [ { \"title\": \"全完成\", \"status\": \"completed\" } ] }",
-        )
-        .await
-        .unwrap();
-        let third = tool
-            .execute(
-                "s-1",
-                "{ \"operation\": \"create\", \"todos\": [ { \"title\": \"新2\" } ] }",
-            )
-            .await
-            .unwrap();
-        assert_eq!(third["replaced"], 1);
-    }
-
-    #[tokio::test]
-    async fn test_close_clears_current_batch() {
-        let (tool, _dir) = todo_tool();
-        tool.execute(
-            "s-1",
-            "{ \"operation\": \"create\", \"todos\": [ { \"title\": \"a\" }, { \"title\": \"b\" } ] }",
-        )
-        .await
-        .unwrap();
-        // close 清空当前批（含未完成项）
-        let closed = tool
-            .execute("s-1", "{ \"operation\": \"close\" }")
-            .await
-            .unwrap();
-        assert_eq!(closed["removed"], 2);
-        let list = tool
-            .execute("s-1", "{ \"operation\": \"list\" }")
-            .await
-            .unwrap();
-        assert_eq!(list["count"], 0);
-        // 只清本会话：他会话不受影响
-        tool.execute(
-            "s-2",
-            "{ \"operation\": \"create\", \"todos\": [ { \"title\": \"别的\" } ] }",
-        )
-        .await
-        .unwrap();
-        let _ = tool.execute("s-1", "{ \"operation\": \"close\" }").await;
-        let other = tool
-            .execute("s-2", "{ \"operation\": \"list\" }")
-            .await
-            .unwrap();
-        assert_eq!(other["count"], 1, "close 不应影响其他会话");
-    }
-
-    #[tokio::test]
-    async fn test_single_item_shapes_are_rejected() {
-        // 形态唯一（与已收敛的 ask_user 同型）：update/delete 只有数组写法——
-        // 旧「单条快捷形态」（顶层 id + 字段）必须被拒并给出改法提示。
-        let (tool, _dir) = todo_tool();
-        let created = tool
-            .execute(
-                "s-1",
-                "{ \"operation\": \"create\", \"todos\": [ { \"title\": \"A\" } ] }",
-            )
-            .await
-            .unwrap();
-        let id = created["todos"][0]["id"].as_str().unwrap().to_string();
-
-        // update 单条形态 → 拒绝（invalid_input）
-        let err = tool
-            .execute(
-                "s-1",
-                &format!(
-                    "{{ \"operation\": \"update\", \"id\": \"{id}\", \"status\": \"completed\" }}"
-                ),
-            )
+            .execute("s-1", r#"{ "todos": [ { "title": "  " } ] }"#)
             .await
             .unwrap_err();
         assert!(err.is_invalid_input(), "{err}");
-
-        // delete 单条形态 → 拒绝
-        let err = tool
-            .execute(
-                "s-1",
-                &format!("{{ \"operation\": \"delete\", \"id\": \"{id}\" }}"),
-            )
-            .await
-            .unwrap_err();
-        assert!(err.is_invalid_input(), "{err}");
-
-        // 数组写法（长度 1）→ 接受
-        let updated = tool
-            .execute(
-                "s-1",
-                &format!(
-                    "{{ \"operation\": \"update\", \"updates\": [ {{ \"id\": \"{id}\", \"status\": \"completed\" }} ] }}"
-                ),
-            )
-            .await
-            .unwrap();
-        assert_eq!(updated["count"], 1);
-        let deleted = tool
-            .execute(
-                "s-1",
-                &format!("{{ \"operation\": \"delete\", \"ids\": [\"{id}\"] }}"),
-            )
-            .await
-            .unwrap();
-        assert_eq!(deleted["count"], 1);
+        // 失败不写：store 保持为空
+        assert!(tool.store.list_by_session("s-1").await.is_empty());
     }
 
+    /// 前向兼容（治「模型调工具经常报错」）：老参数形状（带 `operation`）不再
+    /// 报 `missing field 'operation'`——未知字段被忽略，语义只由 `todos` 决定。
+    ///
+    /// 判别力：实测报错原文就是 `missing field 'operation'`。模型带着旧习惯
+    /// 多传一个字段时必须仍然可用，否则「报错 → 重试 → 又报错」的恶性循环照旧。
     #[tokio::test]
-    async fn test_list_filters_by_status() {
-        // list 的 status 过滤此前只存在于实现里（schema 描述写的是"update 单条形态"，
-        // 功能被藏且无覆盖）——语义单一化后补上覆盖。
+    async fn test_todo_ignores_legacy_operation_field() {
         let (tool, _dir) = todo_tool();
-        tool.execute(
-            "s-1",
-            "{ \"operation\": \"create\", \"todos\": [ { \"title\": \"待办1\", \"status\": \"completed\" }, { \"title\": \"待办2\" } ] }",
-        )
-        .await
-        .unwrap();
-        let done = tool
+        // 带 operation=create + 非空 todos → 仍按整表替换
+        let created = tool
             .execute(
                 "s-1",
-                "{ \"operation\": \"list\", \"status\": \"completed\" }",
+                r#"{ "operation": "create", "todos": [ { "title": "x" } ] }"#,
             )
             .await
             .unwrap();
-        assert_eq!(done["count"], 1);
-        assert_eq!(done["todos"][0]["title"], "待办1");
-        let all = tool
-            .execute("s-1", "{ \"operation\": \"list\" }")
+        assert_eq!(created["action"], "updated");
+        // 带 operation=list 但不传 todos → 只读（不报 "未知操作"）
+        let read = tool
+            .execute("s-1", r#"{ "operation": "list" }"#)
             .await
             .unwrap();
-        assert_eq!(all["count"], 2, "无过滤应返回全部");
+        assert_eq!(read["action"], "read");
+        assert_eq!(read["todos"].as_array().unwrap().len(), 1);
+        // 完全没传任何参数（模型漏参）→ 也只读，不报错
+        let empty = tool.execute("s-1", "").await.unwrap();
+        assert_eq!(empty["action"], "read");
     }
 
+    /// schema：**只有一个字段 `todos`**，且非必填（结构上不可能漏必填字段）。
+    ///
+    /// 判别力：`operation` / `updates` / `ids` / `status` / `goal_id` 任何一个
+    /// 回到顶层，都意味着「同一份意图又有了两套写法」。
     #[test]
-    fn test_todo_definition_schema_derives_from_struct() {
-        // schema 由 struct 派生（from_schema → schemars::schema_for!）：顶层
-        // required 只有 operation；嵌套类型（TodoDraftArgs/TodoUpdateArgs、
-        // TodoStatus/TodoPriority）经 definitions + $ref 表达——不再手写 json!
+    fn test_todo_schema_has_single_optional_field() {
         let (tool, _dir) = todo_tool();
-        let def = tool.definition();
-        let params = &def.function.parameters;
-        assert_eq!(params["required"], serde_json::json!(["operation"]));
+        let params = tool.definition().function.parameters;
+        let props = params["properties"]
+            .as_object()
+            .expect("顶层必须有 properties");
+        let keys: Vec<&String> = props.keys().collect();
+        assert_eq!(keys, vec!["todos"], "顶层只能有一个字段：{params}");
+        // 非必填：required 为空或缺席（模型不传 = 只读，不该被判参数无效）
+        let required_empty = match params.get("required") {
+            None => true,
+            Some(v) => v.as_array().map(|a| a.is_empty()).unwrap_or(false),
+        };
+        assert!(
+            required_empty,
+            "todos 必须非必填（缺省 = 只读取）：{params}"
+        );
+        for gone in ["operation", "updates", "ids", "goal_id", "parent_id"] {
+            assert!(
+                props.get(gone).is_none(),
+                "旧字段 {gone} 不得出现在顶层：{params}"
+            );
+        }
+        // 条目内的 status/priority 缺省值来自 core 的 Default 派生
         let all = params.to_string();
-        for needle in [
-            "TodoDraftArgs",
-            "TodoUpdateArgs",
-            "TodoStatus",
-            "TodoPriority",
-        ] {
+        for needle in ["TodoDraftArgs", "TodoStatus", "TodoPriority"] {
             assert!(all.contains(needle), "schema 缺少 {needle}：{all}");
         }
-        // 已删的单条快捷字段不得再出现在 schema 里（形态唯一）
+    }
+
+    /// 描述：≤300 字，且四件必须讲的事都在（何时用 / 何时不用 / 颗粒度 /
+    /// 完成即更新 + 清空与读取的写法）。
+    ///
+    /// 判别力：旧描述 90% 篇幅在解释 create/update/delete 语义，模型仍不会规划；
+    /// 这条锁住「描述讲用法、不讲分派」。
+    #[test]
+    fn test_todo_description_covers_planning_guidance() {
+        let (tool, _dir) = todo_tool();
+        let desc = tool.definition().function.description;
         assert!(
-            params["properties"].get("id").is_none(),
-            "旧单条字段 id 不应存在：{all}"
+            desc.chars().count() <= 300,
+            "描述须 ≤300 字（每轮进提示词）：{} 字",
+            desc.chars().count()
         );
+        // 工具目录把描述原样放进 markdown 表格单元格：换行会把一行拆成多行
         assert!(
-            params["properties"].get("priority").is_none(),
-            "旧单条字段 priority 不应存在：{all}"
+            !desc.contains('\n'),
+            "描述必须单行（多行会破坏 docs/architecture/tool-catalog.md 的表格）：{desc}"
         );
+        for needle in [
+            "整表替换",
+            "何时用",
+            "何时不用",
+            "颗粒度",
+            "可独立验证",
+            "completed",
+            "[]",
+            "不传",
+        ] {
+            assert!(desc.contains(needle), "描述缺少「{needle}」：{desc}");
+        }
+        // 不再解释 operation 分派（治「规划质量差」的根因之一）
+        for gone in ["operation", "updates", "ids", "close"] {
+            assert!(!desc.contains(gone), "描述不该再讲分派语义 {gone}：{desc}");
+        }
     }
 
     #[tokio::test]

@@ -127,6 +127,12 @@ pub struct Agent {
     /// 待用户确认的操作指纹队列（与 ToolRegistry 共享同一 Arc；
     /// 状态展示直读，不经穿透）。
     pub(crate) pending_approval_fingerprints: Arc<TokioMutex<Vec<String>>>,
+    /// 会话待办存储（P0：每轮把当前清单注入上下文的数据源）。
+    ///
+    /// `None` = 未装配（core 内单测、非会话场景）→ 退化为「不注入待办段」，
+    /// 不报错。装配后**必须**与 `todo` 工具、REST API 是**同一实例**（工具写的
+    /// 待办要立刻出现在下一轮上下文里）——各自 `TodoStore` 的内存快照互不感知。
+    pub(crate) todo_store: Option<Arc<crate::todos::TodoStore>>,
 }
 
 impl Agent {
@@ -165,7 +171,17 @@ impl Agent {
             command_tasks,
             approval_gate,
             pending_approval_fingerprints,
+            todo_store: None,
         }
+    }
+
+    /// 装配会话待办存储（P0：上下文注入的数据源）。
+    ///
+    /// 由 [`crate::agent::builder::AgentBuilder::with_todo_store`] 在 build 时
+    /// 调用；未装配时 [`Agent::assemble_context`] 不注入待办段。
+    pub(crate) fn with_todo_store(mut self, store: Arc<crate::todos::TodoStore>) -> Self {
+        self.todo_store = Some(store);
+        self
     }
 
     /// 获取会话级轮次锁（ADR-013 串行化；锁表由工作集注册表承载，ADR-035 §6）。
@@ -680,6 +696,11 @@ impl Agent {
     ///
     /// 图片（`message.content_parts`）随用户消息写入会话状态，经
     /// `ContextAssembler` 组装为多模态传输消息，对 LLM 可见。
+    ///
+    /// **当前待办清单每轮都注入**（P0，治「做着做着就忘了」）：从
+    /// [`Self::todo_store`] 读本会话条目渲染成摘要，交给组装器插在最后一条
+    /// user 消息之前（不进系统前缀——待办每轮可变，进前缀会让 prompt 缓存每轮
+    /// 失效）。未装配 store 或清单为空 → 不注入（不报错、不占 token）。
     pub(crate) async fn assemble_context(
         &self,
         state: &Arc<RwLock<SessionState>>,
@@ -687,6 +708,16 @@ impl Agent {
     ) -> Vec<Message> {
         // 加载（或复用）可注入上下文：soul/rules/memories 前缀
         let injectable = self.ensure_injectable(state, query).await;
+
+        // 当前待办摘要（读取在拿 state 读锁之前：`list_by_session` 有 I/O，
+        // 守卫跨 await 会让整个 future 失去 `Send`）
+        let session_id = state.read().await.session_id.clone();
+        let todos_summary = match self.todo_store.as_ref() {
+            Some(store) => {
+                crate::todos::render_todos_summary(&store.list_by_session(&session_id).await)
+            }
+            None => None,
+        };
 
         let s = state.read().await;
         let sid = s.session_id.clone();
@@ -698,9 +729,19 @@ impl Agent {
                 let images = crate::context::SessionImages::new(
                     dir.join(crate::executor::image::SESSION_IMAGES_DIR),
                 );
-                ContextAssembler::assemble_with(&s.structured_messages, &injectable, Some(&images))
+                ContextAssembler::assemble_with(
+                    &s.structured_messages,
+                    &injectable,
+                    Some(&images),
+                    todos_summary.as_deref(),
+                )
             }
-            None => ContextAssembler::assemble(&s.structured_messages, &injectable),
+            None => ContextAssembler::assemble_with(
+                &s.structured_messages,
+                &injectable,
+                None,
+                todos_summary.as_deref(),
+            ),
         };
 
         // 注入会话定位信息：早期对话被压缩后，摘要字段可能不足以恢复细节，
@@ -1691,6 +1732,136 @@ mod tests {
                 .all(|m| m.role == MessageRole::System),
             "会话定位提示之前只应有 system 前缀（soul/rules）"
         );
+    }
+
+    /// P0：待办清单**每轮注入上下文**（治「做着做着就忘了」）。
+    ///
+    /// 判别力：注入位置若进了系统前缀段，prompt 缓存每轮失效；若排到当前用户
+    /// 消息之后，模型读到的是上一轮的旧清单（等于没注入）。两条都用索引断言。
+    #[tokio::test]
+    async fn test_assemble_context_injects_todos_before_current_user_message() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(crate::todos::TodoStore::new(dir.path()));
+        // 与本会话绑定的一批待办：1 完成 / 1 进行中 / 1 待开始
+        store
+            .replace_many(
+                "session-todo",
+                vec![
+                    crate::todos::TodoDraft {
+                        title: "已完成的事".to_string(),
+                        description: None,
+                        status: Some(crate::todos::TodoStatus::Completed),
+                        priority: None,
+                        goal_id: None,
+                        parent_id: None,
+                    },
+                    crate::todos::TodoDraft {
+                        title: "正在做的事".to_string(),
+                        description: Some("描述会附在标题后".to_string()),
+                        status: Some(crate::todos::TodoStatus::InProgress),
+                        priority: None,
+                        goal_id: None,
+                        parent_id: None,
+                    },
+                    crate::todos::TodoDraft {
+                        title: "还没做的事".to_string(),
+                        description: None,
+                        status: None,
+                        priority: None,
+                        goal_id: None,
+                        parent_id: None,
+                    },
+                ],
+            )
+            .await
+            .unwrap();
+
+        let agent = make_agent(MockChatService::new()).with_todo_store(store);
+        let state = agent
+            .load_and_build_state("session-todo")
+            .await
+            .expect("会话状态加载成功");
+        // 一轮历史 + 当前用户输入（persist_user_message 是用户消息单一创建点）
+        state.write().await.add_user_message("上一轮问题");
+        agent
+            .persist_user_message("session-todo", &state, &Message::user("当前轮问题"))
+            .await;
+
+        let messages = agent.assemble_context(&state, "当前轮问题").await;
+        let todos_idx = messages
+            .iter()
+            .position(|m| m.content.starts_with("## 当前待办"))
+            .expect("待办段必须注入上下文");
+        let todos = messages[todos_idx].content.clone();
+        assert!(todos.contains("- [ ] 还没做的事"), "{todos}");
+        assert!(
+            todos.contains("- [•] 正在做的事 —— 描述会附在标题后"),
+            "{todos}"
+        );
+        assert!(todos.contains("- [x] 已完成的事"), "{todos}");
+        assert!(
+            todos.contains("（3 项，进行中 1）"),
+            "头部须给出总数与进行中数：{todos}"
+        );
+
+        // ① 位置：最后一条 user 消息之前
+        let last_user_idx = messages
+            .iter()
+            .rposition(|m| m.role == MessageRole::User)
+            .expect("链上必有 user 消息");
+        assert_eq!(
+            todos_idx,
+            last_user_idx - 1,
+            "待办段必须紧贴当前用户消息之前：{messages:?}"
+        );
+        // ② 不在系统前缀段内（前缀 = 开头的连续 system 消息）
+        let prefix_len = messages
+            .iter()
+            .position(|m| m.role != MessageRole::System)
+            .unwrap_or(messages.len());
+        assert!(
+            todos_idx >= prefix_len,
+            "待办段不得进入系统前缀段（prefix_len={prefix_len}, todos_idx={todos_idx}）"
+        );
+    }
+
+    /// P0 反向断言：`todo_store = None` 与「store 里没有本会话待办」都**不插入
+    /// 任何消息**（消息条数与未装配时一致，不占 token）。
+    #[tokio::test]
+    async fn test_assemble_context_without_todos_inserts_nothing() {
+        let mock = MockChatService::new();
+        let agent = make_agent(mock);
+        let state = agent
+            .load_and_build_state("session-empty")
+            .await
+            .expect("会话状态加载成功");
+        agent
+            .persist_user_message("session-empty", &state, &Message::user("你好"))
+            .await;
+        let baseline = agent.assemble_context(&state, "你好").await;
+        assert!(
+            !baseline.iter().any(|m| m.content.contains("当前待办")),
+            "未装配 store 时不得注入待办段"
+        );
+
+        // store 装配了但清单为空 → 与未装配逐条一致
+        let dir = tempfile::tempdir().unwrap();
+        let empty_store = Arc::new(crate::todos::TodoStore::new(dir.path()));
+        let agent_with_store = make_agent(MockChatService::new()).with_todo_store(empty_store);
+        let state2 = agent_with_store
+            .load_and_build_state("session-empty")
+            .await
+            .expect("会话状态加载成功");
+        agent_with_store
+            .persist_user_message("session-empty", &state2, &Message::user("你好"))
+            .await;
+        let with_store = agent_with_store.assemble_context(&state2, "你好").await;
+        assert_eq!(
+            with_store.len(),
+            baseline.len(),
+            "空清单不得插入消息：{with_store:?} vs {baseline:?}"
+        );
+        assert!(!with_store.iter().any(|m| m.content.contains("当前待办")));
     }
 
     #[tokio::test]
