@@ -24,6 +24,13 @@ pub struct InjectableContext {
     /// 随快照持久化（旧快照缺省空，向后兼容）。
     #[serde(default)]
     pub project_instructions: String,
+    /// 会话绑定工作目录（`None` = 未绑定）。
+    ///
+    /// 渲染成系统前缀里的「## 当前环境」段，让模型知道相对路径的基准。
+    /// 工作目录在会话生命周期内**不变**（用户确认「只要确定就不会更换」），
+    /// 故可安全进前缀、不引起 prompt 缓存抖动。旧快照缺该字段 → `None`。
+    #[serde(default)]
+    pub working_directory: Option<String>,
     /// 经验与方法论。
     pub rules_and_experiences: Vec<String>,
     /// 用户画像与环境事实。
@@ -39,5 +46,52 @@ impl InjectableContext {
             last_updated: Utc::now(),
             ..Default::default()
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// serde 向后兼容：旧快照 JSON（无 `working_directory` 字段）必须能反序列化，
+    /// 且该字段取 `None`（不注入环境段、不报错）。
+    ///
+    /// 判别力：去掉字段上的 `#[serde(default)]` 后本用例直接反序列化失败
+    /// （`missing field 'working_directory'`）——升级后读旧会话即崩。
+    #[test]
+    fn test_deserialize_legacy_snapshot_without_working_directory() {
+        let legacy = r#"{
+            "soul": "you are tianyan",
+            "project_instructions": "项目规范",
+            "rules_and_experiences": ["先读后写"],
+            "memories": ["用户偏好 Rust"],
+            "last_updated": "2026-01-02T03:04:05Z"
+        }"#;
+        let ctx: InjectableContext = serde_json::from_str(legacy).unwrap();
+        assert_eq!(ctx.soul, "you are tianyan");
+        assert_eq!(ctx.project_instructions, "项目规范");
+        assert_eq!(ctx.rules_and_experiences, vec!["先读后写".to_string()]);
+        assert_eq!(ctx.memories, vec!["用户偏好 Rust".to_string()]);
+        assert_eq!(
+            ctx.working_directory, None,
+            "旧快照缺该字段 → None（不注入环境段）"
+        );
+    }
+
+    /// 新快照往返：带工作目录写入后读回一致（字段真的落了库，不是只在内存里）。
+    #[test]
+    fn test_roundtrip_with_working_directory() {
+        let ctx = InjectableContext {
+            soul: "soul".to_string(),
+            working_directory: Some("F:\\work\\git\\tianyan".to_string()),
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&ctx).unwrap();
+        let back: InjectableContext = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            back.working_directory.as_deref(),
+            Some("F:\\work\\git\\tianyan")
+        );
+        assert_eq!(back, ctx);
     }
 }

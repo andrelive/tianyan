@@ -225,7 +225,7 @@ pub fn prompt_side_tokens(&self) -> usize {
 
 ### 4.5 前缀稳定性（命中的前提）
 
-命中依赖前缀**逐字节稳定**：组装顺序固定（soul → project_instructions → rules+memories → history）**不可变更**（ADR-004；`docs/architecture/context-pipeline.md` §1）。会话内**不刷新**注入内容（ADR-012），刷新点 = 启动全量 / 新会话增量 / **压缩点**（会话内唯一免费刷新点）——会话内任何前缀抖动都会使缓存失效。
+命中依赖前缀**逐字节稳定**：组装顺序固定（soul → 当前环境 → project_instructions → rules+memories → history）**不可变更**（ADR-004；`docs/architecture/context-pipeline.md` §1）。会话内**不刷新**注入内容（ADR-012），刷新点 = 启动全量 / 新会话增量 / **压缩点**（会话内唯一免费刷新点）——会话内任何前缀抖动都会使缓存失效。其中「当前环境」段的内容是会话绑定的工作目录（会话内不变），故同样逐字节稳定。
 
 ---
 

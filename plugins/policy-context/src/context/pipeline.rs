@@ -75,10 +75,11 @@ impl ContextPipeline {
         &self.compressor
     }
 
-    /// 加载可注入上下文（soul + project_instructions + rules + memories）。
+    /// 加载可注入上下文（soul + project_instructions + working_directory + rules + memories）。
     ///
     /// soul 通过 VFS 读取（有内部缓存），project_instructions 读取会话绑定
-    /// 工作目录下的 AGENTS.md（无则空），rules 和 memories 通过向量检索。
+    /// 工作目录下的 AGENTS.md（无则空）、同时把该目录记入 `working_directory`
+    /// （渲染成「## 当前环境」段），rules 和 memories 通过向量检索。
     /// 此方法有 I/O 开销，调用方应在会话级缓存结果。
     pub async fn load_injectable(
         &self,
@@ -109,8 +110,12 @@ impl ContextPipeline {
 
         // Load project instructions（AGENTS.md）——会话绑定工作目录下探测；
         // 会话首次加载时读取一次（会话绑定工作目录后不变，无需刷新机制）。
+        //
+        // 同一个 `if let` 里同时记下**目录本身**：环境段的「工作目录」与 AGENTS.md 的
+        // 「探测根」必然同源，不会出现「告诉模型 A、实际按 B 探测」的不一致。
         if let Some(dir) = working_directory {
             injectable.project_instructions = load_agents_md(dir);
+            injectable.working_directory = Some(dir.to_string_lossy().into_owned());
         }
 
         // Load learned rules and experiences
@@ -555,6 +560,13 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(ctx.project_instructions, "项目规范：禁止使用 unsafe。");
+        // 「探测根」与「回报给模型的工作目录」**同源**：同一个 `if let` 里赋值，
+        // 环境段说的目录就是 AGENTS.md 实际读取的位置（两者不可能不一致）。
+        assert_eq!(
+            ctx.working_directory.as_deref(),
+            Some(dir.path().to_string_lossy().as_ref()),
+            "回报的工作目录必须就是探测 AGENTS.md 的那个目录"
+        );
     }
 
     #[tokio::test]
@@ -568,6 +580,12 @@ mod tests {
             .await
             .unwrap();
         assert!(ctx.project_instructions.is_empty());
+        // 目录仍然要回报：没有 AGENTS.md 不代表模型不该知道自己在哪个目录。
+        assert_eq!(
+            ctx.working_directory.as_deref(),
+            Some(dir.path().to_string_lossy().as_ref()),
+            "有无 AGENTS.md 都须回报工作目录"
+        );
     }
 
     #[tokio::test]
@@ -577,6 +595,10 @@ mod tests {
 
         let ctx = pipeline.load_injectable("test", None).await.unwrap();
         assert!(ctx.project_instructions.is_empty());
+        assert!(
+            ctx.working_directory.is_none(),
+            "未绑定工作目录 → None（组装层据此不注入环境段）"
+        );
     }
 
     // ── Soul loading ────────────────────────────────────────────────

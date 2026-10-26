@@ -9,7 +9,7 @@
 //!
 //! | 方法 | 内核侧调用点 | 语义 |
 //! |---|---|---|
-//! | [`ContextPort::load_injectable`] | `:478` `Agent::ensure_injectable` | 加载可注入前缀（soul + AGENTS.md + learned rules + memories）。调用方按会话缓存，`soul` 非空即视为已加载 |
+//! | [`ContextPort::load_injectable`] | `:478` `Agent::ensure_injectable` | 加载可注入前缀（soul + 当前环境/工作目录 + AGENTS.md + learned rules + memories）。调用方按会话缓存，`soul` 非空即视为已加载 |
 //! | [`ContextPort::compress_for_session`] | `:783` `Agent::maybe_compress_and_persist` | 判定+执行压缩，产出带 `compression_marker` 的摘要消息；`None` = 不需要压缩 / 空摘要丢弃 |
 //! | [`ContextPort::extract_marker_summary`] | `:751` `Agent::maybe_compress_and_persist`（取「本会话已有摘要」） | 从链上最后一个压缩点剥出纯摘要文本，作为下一次增量摘要的输入 |
 //!
@@ -49,8 +49,10 @@ use crate::common::types::{InjectableContext, Message, StructuredMessage};
 ///
 /// 实现方必须保持的策略语义（这些是**行为契约**，迁移前后逐字一致）：
 ///
-/// - 注入顺序：`soul` → `project_instructions`（AGENTS.md）→ `rules_and_experiences`
-///   → `memories`（组装顺序由 `ContextAssembler` 决定，本端口只填充内容）；
+/// - 注入顺序：`soul` → 当前环境（`working_directory`，渲染成「## 当前环境」段）
+///   → `project_instructions`（AGENTS.md）→ `rules_and_experiences` → `memories`
+///   （组装顺序由 `ContextAssembler` 决定，本端口只填充内容）。环境段必须排在
+///   AGENTS.md **之前**：后者正文里写的是相对路径，先立基准模型才用得上；
 /// - 压缩触发：真实 usage（最近一次请求的 prompt 侧 token）> `context_window ×
 ///   compression_threshold`；`force = true`（用户手动压缩）跳过阈值判定，只受消息数
 ///   下限保护；
@@ -58,13 +60,15 @@ use crate::common::types::{InjectableContext, Message, StructuredMessage};
 ///   链上保持原压缩点，下一轮自然重试。
 #[async_trait]
 pub trait ContextPort: Send + Sync {
-    /// 加载可注入上下文（soul + 项目指令 + learned rules + memories）。
+    /// 加载可注入上下文（soul + 工作目录 + 项目指令 + learned rules + memories）。
     ///
     /// 有 I/O 开销（VFS 读 + 向量检索），调用方应在会话级缓存结果——
     /// `Agent::ensure_injectable` 以「`soul` 非空」为已加载标记。
     ///
     /// - `query` — 用户查询（规则/记忆的语义检索输入；唤醒轮传空串）
-    /// - `working_directory` — 会话绑定工作目录（探测其中的 `AGENTS.md`；`None` 跳过）
+    /// - `working_directory` — 会话绑定工作目录：既是 `AGENTS.md` 的探测根，也原样
+    ///   记入 [`InjectableContext::working_directory`]（模型据此确定相对路径基准）。
+    ///   `None` 时两者皆空（不探测、不注入环境段）
     async fn load_injectable(
         &self,
         query: &str,
@@ -100,7 +104,8 @@ pub trait ContextPort: Send + Sync {
 
 /// 未装配上下文策略时的内存直通实现（**降级路径，不是功能实现**）。
 ///
-/// 语义：`load_injectable` 返回空可注入上下文（无 soul / 无 rules / 无 memories）、
+/// 语义：`load_injectable` 返回空可注入上下文（无 soul / 无工作目录（因而不注入
+/// 环境段）/ 无 rules / 无 memories）、
 /// `compress_for_session` 恒 `None`（不压缩）、`extract_marker_summary` 恒 `None`。
 ///
 /// 为什么是「空直通」而不是 `Err`：`create_app`（构造对象图，47 处 lib 单测 +

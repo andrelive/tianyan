@@ -50,29 +50,48 @@
 
 | # | 位置 | 内容 | 来源 | 代码 |
 |---|---|---|---|---|
-| 1 | `messages[0]` | soul（system） | VFS `AgentPath::Soul`（首次加载后缓存） | `assembler.rs:30-33` |
-| 2 | 次条 system | **project_instructions**（会话工作区 `AGENTS.md`） | `injectable.project_instructions` | `assembler.rs:35-37` |
-| 3 | 合并 system | rules + memories | 向量检索（learned rules / memories） | `assembler.rs:39-59` |
-| 4 | system | 会话定位提示（`insert_session_hint`） | 由 `assemble_context` 追加 | `agent_core.rs:918-930` |
-| 5 | 结尾 | history（从最后一个 `compression_marker` 起） | `structured_messages[..]` | `assembler.rs:60-68` |
+| 1 | `messages[0]` | soul（system） | VFS `AgentPath::Soul`（首次加载后缓存） | `assembler.rs:56-59` |
+| 2 | 次条 system | **当前环境**（工作目录 + 相对路径口径） | `injectable.working_directory`（`None` 时整段缺席） | `assembler.rs:61-69` |
+| 3 | system | **project_instructions**（会话工作区 `AGENTS.md`） | `injectable.project_instructions` | `assembler.rs:71-74` |
+| 4 | 合并 system | rules + memories | 向量检索（learned rules / memories） | `assembler.rs:76-95` |
+| 5 | system | 会话定位提示（`insert_session_hint`） | 由 `assemble_context` 追加 | `agent_core.rs:918-930` |
+| 6 | 结尾 | history（从最后一个 `compression_marker` 起） | `structured_messages[..]` | `assembler.rs:97-107` |
 
 ### 2.1 project_instructions 层（最易被文档漏掉）
 
 > ⚠️ **多份既有文档把组装顺序写成 `soul → rules+memories → history`，漏掉了
 > `project_instructions` 这一层**（见 [ADR-004](decisions/004-prefix-match-context-assembly.md)
 > 与 `.scratch/audit-report-2026-09-12.md` C1）。以代码为准：
-> **顺序为 soul → project_instructions → rules+memories → history**，
-> 由 `assembler.rs:35-37` 与回归测试 `test_assemble_injects_project_instructions_after_soul`
-> （`assembler.rs:449-465`）双重确认——project_instructions 插在 **soul 之后、rules/memories 之前**。
+> **顺序为 soul → 当前环境 → project_instructions → rules+memories → history**，
+> 由 `assembler.rs:71-74` 与回归测试 `test_assemble_injects_project_instructions_after_soul`
+> 与 `test_assemble_order_soul_environment_agents_then_rules` 三重确认——
+> project_instructions 插在 **soul/环境之后、rules/memories 之前**。
 
-- 读取逻辑：`ContextPipeline::load_injectable`（`core/src/context/pipeline.rs:81-118`）
+- 读取逻辑：`ContextPipeline::load_injectable`（`plugins/policy-context/src/context/pipeline.rs:84-130`）
   在**会话绑定工作目录**下探测 `AGENTS.md` / `agents.md`（大小写兼容），无则空
-  （`load_agents_md`，`pipeline.rs:324-346`）。
+  （`load_agents_md`，`pipeline.rs:428-445`）。
 - 与 soul/rules/memories 一样属"会话内前缀"，不随轮次变化；刷新语义见 §4.5 压缩点刷新。
+
+### 2.1.1 当前环境段（工作目录锚点）
+
+> **为什么需要它**：模型能读到 AGENTS.md（里面有 `docs/architecture/decisions/` 这类
+> **相对路径**），但不知道工作目录是哪个——相对路径失去锚点，于是倾向硬编码绝对路径；
+> 而绝对路径随会话永久落库，换机器即失效。
+
+- 数据来源：`ContextPipeline::load_injectable` 在**同一个 `if let`** 里既探测
+  `AGENTS.md`、又把会话绑定目录记入 `injectable.working_directory`——「探测根」与
+  「告诉模型的目录」必然同源（`pipeline.rs:116-119`）。
+- 渲染：`render_environment`（`assembler.rs:369`，纯函数）产出一段
+  `## 当前环境`，含工作目录、相对路径解析口径（`read_file`/`glob`/`grep`/`list_dir`/
+  `execute_command` 未指定 cwd 时同一基准）、以及「结论里优先写相对路径」的指引。
+- 位置：**soul 之后、AGENTS.md 之前**（后者正文用相对路径，需先立基准），
+  回归测试 `test_assemble_order_soul_environment_agents_then_rules`。
+- 稳定性：工作目录在会话生命周期内不变，故该段逐字节稳定，不影响前缀缓存；
+  未绑定工作目录（`None` / 空串）时**整段不注入**。
 
 ### 2.2 组装作用域 = 最后一个压缩点
 
-- 组装从**最后一个 `compression_marker`** 开始（`rposition`，`assembler.rs:60-68`）；
+- 组装从**最后一个 `compression_marker`** 开始（`rposition`，`assembler.rs:97-107`）；
   压缩点**之前**的原始消息不发给 LLM（但**完整保留在存储层**，见 [ADR-027](decisions/027-session-timeline-chain.md)）。
 - 压缩点本身（摘要消息）**包含**在组装范围内。
 - 无压缩点时从头组装（完整链全部发给 LLM）。

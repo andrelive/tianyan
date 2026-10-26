@@ -21,10 +21,15 @@ impl ContextAssembler {
     /// 不知道 `data_dir` 的调用点（core 内单测等）用它，行为与引入图片能力前一致。
     ///
     /// 输出顺序（缓存最优）：
-    /// - messages[0]: injectable.soul（system）
-    /// - messages[1]: rules + memories（system）
-    /// - messages[2..N]: 历史对话（含当前用户输入——调用方已把用户消息
-    ///   写入 structured_messages，组装器不再单独接收 current_input）
+    /// 1. injectable.soul（system）
+    /// 2. 当前环境——工作目录 + 相对路径口径（system；工作目录未绑定/为空时整段缺席）
+    /// 3. injectable.project_instructions（AGENTS.md，system）
+    /// 4. rules + memories（合并为一条 system）
+    /// 5. 历史对话（含当前用户输入——调用方已把用户消息写入 structured_messages，
+    ///    组装器不再单独接收 current_input）
+    ///
+    /// 2 必须排在 3 之前：AGENTS.md 里写的是相对路径，环境段先立锚点模型才用得上。
+    /// 各段缺席时后续段整体前移（每段各自判空，不占位）。
     pub fn assemble(
         structured_messages: &[StructuredMessage],
         injectable: &InjectableContext,
@@ -53,7 +58,17 @@ impl ContextAssembler {
             messages.push(Message::system(&injectable.soul));
         }
 
-        // 注入项目指令（AGENTS.md）——soul 之后、rules/memories 之前
+        // 注入当前环境（工作目录 + 相对路径口径）——soul 之后、AGENTS.md 之前：
+        // AGENTS.md 正文里的相对路径（如 `docs/architecture/decisions/`）需要先立
+        // 基准，模型才知道该从哪儿起算。未绑定工作目录（`None`，少见）时整段不注入，
+        // 不占 token；空串同理（渲染出来是个空 code span，不如不给）。
+        if let Some(working_directory) = injectable.working_directory.as_deref() {
+            if !working_directory.is_empty() {
+                messages.push(Message::system(render_environment(working_directory)));
+            }
+        }
+
+        // 注入项目指令（AGENTS.md）——环境段之后、rules/memories 之前
         if !injectable.project_instructions.is_empty() {
             messages.push(Message::system(&injectable.project_instructions));
         }
@@ -344,6 +359,25 @@ impl ContextAssembler {
     }
 }
 
+/// 渲染「当前环境」系统段：工作目录 + 相对路径解析口径。
+///
+/// 措辞克制（这段进每次请求）：只讲模型会用到的两件事——基准在哪、
+/// 相对路径优于绝对路径的理由。不重复工具描述里已说明的平台信息。
+///
+/// 纯函数（无 I/O、无状态），内容只依赖入参——工作目录在会话生命周期内不变，
+/// 故同一会话每次请求渲染逐字节一致，不引起 prompt 缓存抖动。
+fn render_environment(working_directory: &str) -> String {
+    format!(
+        "## 当前环境\n\
+         \n\
+         工作目录：`{working_directory}`\n\
+         \n\
+         所有相对路径（如 `src/main.rs`、`./docs`）都基于此目录解析——`read_file` / `glob` / \
+         `grep` / `list_dir` / `execute_command`（未显式指定 cwd 时）同一口径。\
+         **结论里优先写相对路径**：绝对路径会随会话永久落库，换机器或搬目录后即失效。\n"
+    )
+}
+
 /// 该消息是否承载指定调用的工具结果。
 fn is_tool_result_of(sm: &StructuredMessage, call_id: &str) -> bool {
     sm.parts
@@ -627,6 +661,143 @@ mod tests {
         assert_eq!(messages[1].content, "项目规范：禁止使用 unsafe。");
         assert!(messages[2].content.contains("Always read"));
         assert_eq!(messages[3].role, MessageRole::User);
+    }
+
+    // ── 当前环境段（工作目录注入）─────────────────────────────────
+
+    /// `render_environment` 的三个信息点必须都在：工作目录路径本身、
+    /// 「相对路径基于此目录」的口径、「结论里优先写相对路径」的指引。
+    ///
+    /// 判别力：少任何一条，模型就回到「不知道基准」或「继续硬编码绝对路径」。
+    #[test]
+    fn test_render_environment_contains_path_and_relative_guidance() {
+        let text = render_environment("F:\\work\\git\\tianyan");
+
+        assert!(
+            text.starts_with("## 当前环境"),
+            "环境段标题固定（便于模型识别与人工排查）：{text}"
+        );
+        assert!(
+            text.contains("F:\\work\\git\\tianyan"),
+            "必须给出工作目录本身：{text}"
+        );
+        assert!(
+            text.contains("相对路径") && text.contains("都基于此目录解析"),
+            "必须说明相对路径以该目录为基准：{text}"
+        );
+        assert!(
+            text.contains("优先写相对路径"),
+            "必须给出「结论写相对路径」的指引（绝对路径落库后换机即失效）：{text}"
+        );
+        // 相对路径口径覆盖模型实际会用到的读取/搜索/命令类工具
+        for tool in ["read_file", "glob", "grep", "list_dir", "execute_command"] {
+            assert!(text.contains(tool), "口径须点名 {tool}：{text}");
+        }
+        // 克制：平台/shell 细节由工具描述承担，不在这里重复（每轮都在前缀里）
+        for noise in ["PowerShell", "pwsh", "bash", "cmd.exe", "Windows", "Linux"] {
+            assert!(
+                !text.contains(noise),
+                "环境段不应重复平台信息（出现 {noise}）：{text}"
+            );
+        }
+        // 逐字节确定：同入参同输出（前缀缓存依赖这一点）
+        assert_eq!(
+            render_environment("F:\\work\\git\\tianyan"),
+            text,
+            "渲染必须是纯函数（前缀稳定性）"
+        );
+    }
+
+    /// **核心契约**：注入顺序 = soul → 当前环境 → AGENTS.md → rules+memories。
+    ///
+    /// 环境段必须排在 AGENTS.md 之前：AGENTS.md 里的相对路径（如
+    /// `docs/architecture/decisions/`）要先有基准才可解析。
+    #[test]
+    fn test_assemble_order_soul_environment_agents_then_rules() {
+        let workdir = "F:\\work\\git\\tianyan";
+        let injectable = InjectableContext {
+            soul: "SOUL-人格".to_string(),
+            working_directory: Some(workdir.to_string()),
+            project_instructions: "AGENTS-MD-项目规范".to_string(),
+            rules_and_experiences: vec!["RULE-先读后写".to_string()],
+            memories: vec!["MEMORY-用户偏好 Rust".to_string()],
+            ..Default::default()
+        };
+        let sm = make_text_msg("msg_1", MessageRole::User, "用户输入", "ses_1");
+        let messages = ContextAssembler::assemble(&[sm], &injectable);
+
+        assert_eq!(
+            messages.len(),
+            5,
+            "soul + 环境 + AGENTS.md + rules/memories + 用户消息：{messages:?}"
+        );
+        assert_eq!(messages[0].content, "SOUL-人格");
+        assert!(
+            messages[1].content.starts_with("## 当前环境") && messages[1].content.contains(workdir),
+            "第 2 段必须是当前环境（soul 之后、AGENTS.md 之前）：{}",
+            messages[1].content
+        );
+        assert_eq!(
+            messages[2].content, "AGENTS-MD-项目规范",
+            "AGENTS.md 紧跟环境段"
+        );
+        assert!(
+            messages[3].content.contains("RULE-先读后写")
+                && messages[3].content.contains("MEMORY-用户偏好 Rust"),
+            "rules+memories 合并为最后一条 system 段：{}",
+            messages[3].content
+        );
+        assert_eq!(messages[4].role, MessageRole::User);
+        assert_eq!(messages[4].content, "用户输入");
+        for (i, m) in messages[..4].iter().enumerate() {
+            assert_eq!(m.role, MessageRole::System, "第 {i} 段应为 system");
+        }
+    }
+
+    /// 未绑定工作目录（`None`）→ 不出现环境段，其余段顺序不变。
+    ///
+    /// 环境段缺席是「整段不注入」而不是「留一条空 system」——不占 token，
+    /// 也不改变后面各段的相对次序。
+    #[test]
+    fn test_assemble_without_working_directory_skips_environment() {
+        let injectable = InjectableContext {
+            soul: "SOUL-人格".to_string(),
+            working_directory: None,
+            project_instructions: "AGENTS-MD-项目规范".to_string(),
+            rules_and_experiences: vec!["RULE-先读后写".to_string()],
+            memories: vec!["MEMORY-用户偏好 Rust".to_string()],
+            ..Default::default()
+        };
+        let sm = make_text_msg("msg_1", MessageRole::User, "用户输入", "ses_1");
+        let messages = ContextAssembler::assemble(&[sm], &injectable);
+
+        assert_eq!(
+            messages.len(),
+            4,
+            "soul + AGENTS.md + rules/memories + 用户消息（无环境段）：{messages:?}"
+        );
+        assert!(
+            !messages.iter().any(|m| m.content.contains("## 当前环境")),
+            "未绑定工作目录时不得注入环境段"
+        );
+        assert_eq!(messages[0].content, "SOUL-人格");
+        assert_eq!(messages[1].content, "AGENTS-MD-项目规范");
+        assert!(messages[2].content.contains("RULE-先读后写"));
+        assert_eq!(messages[3].role, MessageRole::User);
+    }
+
+    /// 空串工作目录（历史数据 / 绑定异常）同样不注入——渲染出来会是个空 code span，
+    /// 不如不给；行为与 `None` 一致。
+    #[test]
+    fn test_assemble_empty_working_directory_skips_environment() {
+        let injectable = InjectableContext {
+            soul: "SOUL-人格".to_string(),
+            working_directory: Some(String::new()),
+            ..Default::default()
+        };
+        let messages = ContextAssembler::assemble(&[], &injectable);
+        assert_eq!(messages.len(), 1, "只有 soul：{messages:?}");
+        assert!(!messages[0].content.contains("## 当前环境"));
     }
 
     #[test]
