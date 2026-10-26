@@ -192,7 +192,11 @@ impl DynamicToolExecutor for ReadFileTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition::function(FunctionDefinition::from_schema::<ReadFileParams>(
             "read_file",
-            "读取文本文件内容（纯内容，无行号/哈希前缀）。默认返回前 2000 行（单次输出上限约 50KB，超出部分截断并附「使用 offset 继续」提示）。大文件请**按需读取**：用 offset/limit 指定行范围（1 起始行号），建议先用 grep/symbol_outline 定位目标区域再按范围精读；结果含 total_lines/total_bytes 与实际窗口（showing）。内容匹配编辑（apply_edit）直接按内容定位，无需行号。",
+            // 描述每轮请求都会进上下文：**只写模型必须知道的事**（能读什么 / 编码边界 /
+            // 读不了什么 / 碰到二进制怎么收场），控制在 280 字以内。编码限制如实写——
+            // UTF-16 与 GBK 是 sniff_binary 判定口径的已知技术债，本次不修，但必须
+            // 让模型提前知道，否则它会以为"读不出来 = 文件坏了"并反复重试。
+            "读取 UTF-8 文本（源码/配置/日志/Markdown/CSV/JSON/XML/YAML/TOML），默认 2000 行/50KB，超出用 offset 续读，apply_edit 无需行号。编码：UTF-16（记事本“Unicode”）判为二进制，GBK 中文出现 �；目录自动转 list_dir。**不支持二进制**（docx/xlsx/pptx/pdf/zip/图片/音视频/可执行/数据库）：返回 binary/format/hint 无文本，别重试别猜 preview，按 hint 行事（图片→view_image），或告知用户无法直读。",
         ))
     }
 

@@ -1,6 +1,6 @@
 use serde_json::{json, Value};
 
-use crate::common::binary::sniff_binary;
+use crate::common::binary::{sniff_binary, sniff_binary_format};
 use crate::common::error::TianyanError;
 
 pub use crate::executor::command::{
@@ -21,8 +21,8 @@ use crate::executor::truncate;
 /// 无需同步修改；全仓库无其它旧签名调用方（已 grep 验证），故不保留 1 参数兼容包装。
 ///
 /// 返回结构化 JSON：`content`（纯文本）、`truncated`、`total_lines`、`total_bytes`、
-/// `showing`（实际窗口）、`message`（仅截断时）；二进制文件返回 `binary`/`size`/`preview`，
-/// 目录返回 `directory`/`entries`。
+/// `showing`（实际窗口）、`message`（仅截断时）；二进制文件返回
+/// `binary`/`size`/`format`/`hint`/`preview`（无 `content`），目录返回 `directory`/`entries`。
 pub async fn execute_read_file(
     path: &str,
     offset: Option<usize>,
@@ -85,16 +85,60 @@ fn suggest_similar_paths(path: &Path) -> String {
     }
 }
 
-/// 二进制文件结果：仅返回大小与前 200 字节的 lossy 预览。
+/// 二进制文件结果：大小 + 格式标识 + 可执行 hint + 前 200 字节 lossy 预览。
+///
+/// **字段契约**：`binary` / `path` / `size` / `preview` 的名称与语义保持历史不变
+/// （`gui-vite` 的 `FileViewer.tsx` 按它们渲染「二进制文件」提示与预览），`format`
+/// / `hint` 只是**新增**字段。刻意不返回 `content`：命中二进制时没有文本内容可给，
+/// 给一段 lossy 文本只会诱导模型从乱码里"读出"内容。
 fn binary_result(path: &str, bytes: &[u8]) -> Value {
     let preview_len = bytes.len().min(200);
     let preview = String::from_utf8_lossy(&bytes[..preview_len]).into_owned();
+    let format = sniff_binary_format(bytes);
     json!({
         "binary": true,
         "path": path,
         "size": bytes.len(),
+        "format": format,
         "preview": preview,
+        "hint": binary_hint(format),
     })
+}
+
+/// 按识别出的格式生成**可执行的下一步**（不是一句通用客套话）。
+///
+/// 每条 hint 都包含同一条纪律：「不要依据 preview 猜测文件内容」——`preview` 是
+/// lossy 的 200 字节碎片，从里面"读出"文档内容是模型最典型的臆想来源。
+fn binary_hint(format: &str) -> String {
+    let head = match format {
+        "zip" => "ZIP 容器。docx/xlsx/pptx 都是 ZIP：用 execute_command 解压后读 \
+                  word/document.xml（docx）、xl/worksheets/*.xml（xlsx）、\
+                  ppt/slides/*.xml（pptx）可提取文本；纯 zip 则列出条目即可。"
+            .to_string(),
+        "pdf" => "PDF 二进制，read_file 读不了；可试 execute_command 跑 pdftotext（若环境有），\
+                  否则告知用户该格式无法直接读取。"
+            .to_string(),
+        "image" => {
+            "这是图片，改用 view_image 工具（模型可直接看到像素），不要用 read_file。".to_string()
+        }
+        "ole2" => "旧版 Office 复合文档（doc/xls/ppt），无法直接提取文本；\
+                   建议告知用户另存为 docx/xlsx 后再读。"
+            .to_string(),
+        "sqlite" => {
+            "SQLite 数据库文件，不是文本；需要数据请用 execute_command 调用 sqlite3（若环境有），\
+                     否则告知用户。"
+                .to_string()
+        }
+        "pe" => "Windows 可执行文件（exe/dll），不是文本，读不出任何有意义内容。".to_string(),
+        "elf" => "ELF 可执行文件 / 共享库，不是文本，读不出任何有意义内容。".to_string(),
+        "gzip" => "gzip 压缩流；可用 execute_command 以 gzip/tar 解压后再读解压产物。".to_string(),
+        "rar" => "RAR 压缩包；解压需 unrar（若环境无该命令则告知用户无法读取）。".to_string(),
+        "7z" => "7z 压缩包；解压需 7z（若环境无该命令则告知用户无法读取）。".to_string(),
+        _ => "无法识别格式的二进制文件，本工具只能读文本；请改用 execute_command 探查，\
+              或告知用户。"
+            .to_string(),
+    };
+    format!("{head}**不要依据 preview 猜测文件内容**；应向用户说明该格式无法直接读取。")
 }
 
 /// 文本行模式：应用 offset/limit 窗口，逐行生成 `N#ID|content` 锚点，追加截断提示行，
@@ -214,5 +258,52 @@ mod tests {
         let result = execute_write_file(&temp_path, "测试内容", false).await;
         assert!(result.is_ok());
         let _ = std::fs::remove_file(temp_path);
+    }
+
+    /// 写一个临时二进制文件并跑 execute_read_file（返回结果 + 清理）。
+    async fn read_scratch_binary(tag: &str, bytes: &[u8]) -> Value {
+        let path = format!(
+            "{}/test_executor_binary_{}_{}.bin",
+            std::env::temp_dir().display(),
+            std::process::id(),
+            tag
+        );
+        std::fs::write(&path, bytes).expect("写临时文件");
+        let result = execute_read_file(&path, None, None).await;
+        let _ = std::fs::remove_file(&path);
+        result.expect("读取二进制文件不应报错")
+    }
+
+    #[tokio::test]
+    async fn test_read_file_binary_returns_format_and_hint() {
+        // DOCX 就是 ZIP：format 认 zip，hint 指向解压读 word/document.xml
+        let value = read_scratch_binary("docx", b"PK\x03\x04\x14\x00\x06\x00\x00\x00").await;
+        assert_eq!(value["binary"], json!(true));
+        assert_eq!(value["format"], json!("zip"));
+        assert_eq!(value["size"], json!(10));
+        // 现有字段契约不变：preview 依然存在，且没有 content
+        assert!(value["preview"].is_string());
+        assert!(value.get("content").is_none(), "二进制不应返回 content");
+        let hint = value["hint"].as_str().unwrap();
+        assert!(
+            hint.contains("word/document.xml"),
+            "zip hint 应给出 docx 解法"
+        );
+        assert!(hint.contains("不要依据 preview 猜测文件内容"));
+    }
+
+    #[tokio::test]
+    async fn test_read_file_image_points_to_view_image() {
+        let value = read_scratch_binary("png", b"\x89PNG\r\n\x1A\n\x00\x00\x00\rIHDR").await;
+        assert_eq!(value["format"], json!("image"));
+        assert!(value["hint"].as_str().unwrap().contains("view_image"));
+    }
+
+    #[tokio::test]
+    async fn test_read_file_unknown_binary_still_warns() {
+        // 无 magic 但含 NUL → binary:true + format unknown，hint 仍禁止猜测
+        let value = read_scratch_binary("raw", b"\x00\x01\x02\x03random").await;
+        assert_eq!(value["format"], json!("unknown"));
+        assert!(value["hint"].as_str().unwrap().contains("preview"));
     }
 }

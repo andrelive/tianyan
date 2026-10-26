@@ -48,6 +48,58 @@ pub fn sniff_image_mime(bytes: &[u8]) -> Option<&'static str> {
     None
 }
 
+/// 按 magic bytes 识别二进制容器格式（`read_file` 命中二进制时回传给模型，
+/// 让它知道该换什么工具 / 该不该尝试解包）。
+///
+/// 返回**短标识字符串**（`&'static str`，零分配）：`zip` / `pdf` / `ole2` /
+/// `image` / `gzip` / `rar` / `7z` / `sqlite` / `pe` / `elf`；认不出来返回
+/// `"unknown"`——**刻意不猜**：格式名会被模型拿去选解包命令（`unzip` / `pdftotext`
+/// / `sqlite3`），猜错比"不知道"更坏。空切片与不足 magic 长度的前缀都归 `unknown`。
+///
+/// 注意 `zip` 是**容器**语义：docx/xlsx/pptx/jar 共用 `PK\x03\x04`，此处无法
+/// （也不该）按扩展名二次区分——那是调用方（hint 文案）的事。
+pub fn sniff_binary_format(bytes: &[u8]) -> &'static str {
+    // 图片优先：png/jpeg/gif/bmp/webp 复用严格 MIME 嗅探，不重复实现魔数。
+    if sniff_image_mime(bytes).is_some() {
+        return "image";
+    }
+    // ZIP：本地文件头 PK\x03\x04；空归档 PK\x05\x06；分卷/跨界 PK\x07\x08。
+    if bytes.starts_with(b"PK\x03\x04")
+        || bytes.starts_with(b"PK\x05\x06")
+        || bytes.starts_with(b"PK\x07\x08")
+    {
+        return "zip";
+    }
+    if bytes.starts_with(b"%PDF-") {
+        return "pdf";
+    }
+    // OLE2 复合文档（旧版 doc/xls/ppt）：固定 8 字节签名。
+    if bytes.starts_with(&[0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1]) {
+        return "ole2";
+    }
+    if bytes.starts_with(&[0x1F, 0x8B]) {
+        return "gzip";
+    }
+    if bytes.starts_with(b"Rar!") {
+        return "rar";
+    }
+    if bytes.starts_with(&[0x37, 0x7A, 0xBC, 0xAF, 0x27, 0x1C]) {
+        return "7z";
+    }
+    // SQLite 数据库文件头（含结尾 NUL）。
+    if bytes.starts_with(b"SQLite format 3\0") {
+        return "sqlite";
+    }
+    // PE（exe/dll）：DOS 头 "MZ"。仅前缀，不做 PE 头偏移校验（够用即可）。
+    if bytes.starts_with(b"MZ") {
+        return "pe";
+    }
+    if bytes.starts_with(&[0x7F, 0x45, 0x4C, 0x46]) {
+        return "elf";
+    }
+    "unknown"
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -137,5 +189,84 @@ mod tests {
         // webp 需要长度 ≥ 12：截断的 RIFF 头不算
         assert_eq!(sniff_image_mime(b"RIFF\x00\x00WEB"), None);
         assert_eq!(sniff_image_mime(b"RIFF\x00\x00\x00\x00PNG "), None);
+    }
+
+    // ── 二进制容器格式识别（read_file 的 format/hint 回传）──────────────
+
+    #[test]
+    fn test_sniff_binary_format_zip_family() {
+        // docx/xlsx/pptx/jar 共用本地文件头
+        assert_eq!(sniff_binary_format(b"PK\x03\x04\x14\x00\x06\x00"), "zip");
+        // 空归档 / 分卷签名也归 zip
+        assert_eq!(sniff_binary_format(b"PK\x05\x06\x00\x00"), "zip");
+        assert_eq!(sniff_binary_format(b"PK\x07\x08\x01\x02"), "zip");
+        // 只有两个字节 "PK" 不足以判定
+        assert_eq!(sniff_binary_format(b"PK"), "unknown");
+    }
+
+    #[test]
+    fn test_sniff_binary_format_pdf() {
+        assert_eq!(sniff_binary_format(b"%PDF-1.7\n%\xe2\xe3\xcf\xd3"), "pdf");
+        assert_eq!(sniff_binary_format(b"%PDF-"), "pdf");
+        // 少了连字符就不认（避免把普通文本前缀误判）
+        assert_eq!(sniff_binary_format(b"%PDF"), "unknown");
+    }
+
+    #[test]
+    fn test_sniff_binary_format_ole2() {
+        assert_eq!(
+            sniff_binary_format(&[0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1, 0x00]),
+            "ole2"
+        );
+        // 截断的签名（7 字节）不认
+        assert_eq!(
+            sniff_binary_format(&[0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A]),
+            "unknown"
+        );
+    }
+
+    #[test]
+    fn test_sniff_binary_format_image() {
+        // 复用 sniff_image_mime：五种图片统一报 "image"
+        assert_eq!(sniff_binary_format(b"\x89PNG\r\n\x1A\n\x00"), "image");
+        assert_eq!(sniff_binary_format(&[0xFF, 0xD8, 0xFF, 0xE0]), "image");
+        assert_eq!(sniff_binary_format(b"GIF89a...."), "image");
+        assert_eq!(sniff_binary_format(b"BM\x00\x00\x00\x00"), "image");
+        assert_eq!(
+            sniff_binary_format(b"RIFF\x24\x00\x00\x00WEBPVP8 "),
+            "image"
+        );
+    }
+
+    #[test]
+    fn test_sniff_binary_format_archives() {
+        assert_eq!(sniff_binary_format(&[0x1F, 0x8B, 0x08, 0x00]), "gzip");
+        assert_eq!(sniff_binary_format(b"Rar!\x1A\x07\x00"), "rar");
+        assert_eq!(
+            sniff_binary_format(&[0x37, 0x7A, 0xBC, 0xAF, 0x27, 0x1C, 0x00]),
+            "7z"
+        );
+    }
+
+    #[test]
+    fn test_sniff_binary_format_database_and_executables() {
+        assert_eq!(sniff_binary_format(b"SQLite format 3\0\x10\x00"), "sqlite");
+        assert_eq!(sniff_binary_format(b"MZ\x90\x00\x03\x00"), "pe");
+        assert_eq!(
+            sniff_binary_format(&[0x7F, 0x45, 0x4C, 0x46, 0x02, 0x01]),
+            "elf"
+        );
+    }
+
+    #[test]
+    fn test_sniff_binary_format_unknown() {
+        assert_eq!(sniff_binary_format(b""), "unknown", "空切片");
+        assert_eq!(sniff_binary_format(b"hello world\n"), "unknown", "纯文本");
+        // GBK/GB18030 中文：判定口径不认为是二进制，格式也认不出
+        assert_eq!(sniff_binary_format(&[0xD6, 0xD0, 0xCE, 0xC4]), "unknown");
+        // UTF-16 BOM（记事本"Unicode"）同样只是 unknown——说明里如实提示了这一限制
+        assert_eq!(sniff_binary_format(&[0xFF, 0xFE, 0x61, 0x00]), "unknown");
+        // 随机控制字节
+        assert_eq!(sniff_binary_format(&[0x01, 0x02, 0x03, 0x04]), "unknown");
     }
 }
