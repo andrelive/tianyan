@@ -57,6 +57,9 @@ export default defineConfig({
           if (!id.includes('node_modules')) return undefined;
           // 顺序有意义：先匹配更具体的域
           if (/node_modules[\\/]@codemirror[\\/]/.test(id)) return 'vendor-editor';
+          // 聊天输入框（Lexical）：只在会话页需要，独立成块便于观察体积
+          // （编辑器内核 + react 绑定；`@lexical/*` 子包与 `lexical` 本体同域）
+          if (/node_modules[\\/](?:@lexical|lexical)[\\/]/.test(id)) return 'vendor-lexical';
           if (
             /node_modules[\\/](react-markdown|remark-gfm|react-syntax-highlighter|refractor|hastscript|hast-util-|unist-util-|mdast-util-|micromark|remark-|rehype-)/.test(
               id,

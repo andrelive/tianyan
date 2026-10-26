@@ -69,19 +69,22 @@ test.describe('chat', () => {
   });
 
   test('chat input is focused on page load', async ({ page }) => {
-    const textarea = page.locator('textarea');
-    await expect(textarea).toBeFocused();
+    // 输入框已从 `<textarea>` 换成 Lexical 的 contenteditable div：
+    // 用 aria-label 定位（与其它 spec 一致），Playwright 的 fill/press 同样支持
+    // contenteditable。
+    const composer = page.getByRole('textbox', { name: '输入消息' });
+    await expect(composer).toBeFocused();
   });
 
   test('typing message and sending with Enter', async ({ page }) => {
-    const textarea = page.locator('textarea');
-    await expect(textarea).toBeVisible();
+    const composer = page.getByRole('textbox', { name: '输入消息' });
+    await expect(composer).toBeVisible();
 
     // Type a message
-    await textarea.fill('你好');
+    await composer.fill('你好');
 
     // Press Enter to send
-    await textarea.press('Enter');
+    await composer.press('Enter');
 
     // 乐观渲染（ADR-031）：用户消息本地立即插入，不依赖任何流式事件。
     // scope 消息区 + exact:true——同一文本会出现在侧栏标题 /「最近会话」条上
@@ -231,14 +234,14 @@ test.describe('chat', () => {
   });
 
   test('send button is enabled when input has text', async ({ page }) => {
-    const textarea = page.locator('textarea');
+    const composer = page.getByRole('textbox', { name: '输入消息' });
     const sendButton = page.locator('button', { hasText: '发送' });
 
     // Send button should be disabled initially (no text)
     await expect(sendButton).toBeDisabled();
 
     // Type some text
-    await textarea.fill('测试消息');
+    await composer.fill('测试消息');
 
     // Send button should now be enabled
     await expect(sendButton).toBeEnabled();

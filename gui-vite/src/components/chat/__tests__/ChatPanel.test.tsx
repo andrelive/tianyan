@@ -11,6 +11,15 @@ import { handleChatStreamEvent } from '@/lib/chat-stream';
 import { applySnapshot } from '@/hooks/use-unified-events';
 import type { ChatMessage, ChatStreamEvent } from '@/lib/types';
 import { messageText } from '@/lib/types';
+// 输入框交互工具（contenteditable 的「打字 / 只读态 / 文本断言」口径集中在
+// `@/test/composer`，与 ChatInput.test.tsx 共用）
+import {
+  composerText,
+  draftText,
+  expectComposerReadOnly,
+  pasteFilesOntoComposer,
+  typeIntoComposer,
+} from '@/test/composer';
 
 /**
  * 桌面壳桥接的可控替身（文件引用通道需要"绝对路径"这一桌面专属能力）：
@@ -62,9 +71,11 @@ beforeEach(() => {
 describe('ChatPanel', () => {
   it('renders input area', () => {
     renderChatPanel();
-    // ChatInput renders a textarea with a specific placeholder
-    const textarea = screen.getByPlaceholderText(/输入消息/);
-    expect(textarea).toBeInTheDocument();
+    // ChatInput 的输入框已换成 Lexical 的 contenteditable：不再有 `placeholder`
+    // 属性（占位符是叠在上面的 div），但 `aria-label="输入消息"` 原样保留
+    const composer = screen.getByLabelText('输入消息');
+    expect(composer).toBeInTheDocument();
+    expect(composer).toHaveAttribute('role', 'textbox');
     // Send button should be present
     expect(screen.getByRole('button', { name: /发送/i })).toBeInTheDocument();
   });
@@ -154,8 +165,7 @@ describe('ChatPanel', () => {
     const user = userEvent.setup();
     renderChatPanel();
 
-    const textarea = screen.getByPlaceholderText(/输入消息/);
-    await user.type(textarea, '测试发送');
+    await typeIntoComposer('测试发送');
 
     // Click send button
     const sendButton = screen.getByRole('button', { name: /发送/i });
@@ -244,9 +254,8 @@ describe('ChatPanel', () => {
     const user = userEvent.setup();
     renderChatPanel();
 
-    const textarea = screen.getByPlaceholderText(/输入消息/);
-    // user.type 会把 [..] 当作键盘修饰符语法，改用 fireEvent.change
-    fireEvent.change(textarea, { target: { value: '这是一个 [error-test] 请求' } });
+    // 方括号在 user-event 里是修饰符语法，所以这里走自己的逐字符打字 helper
+    await typeIntoComposer('这是一个 [error-test] 请求');
     await user.click(screen.getByRole('button', { name: /发送/i }));
 
     // 模拟统一事件通道到达 error 事件（服务端校验/处理失败）
@@ -287,9 +296,8 @@ describe('ChatPanel', () => {
 
     renderChatPanel();
 
-    const textarea = screen.getByPlaceholderText(/输入消息/);
-    // Textarea should be disabled while streaming
-    expect(textarea).toBeDisabled();
+    // 输入框在流式期间应为只读（contenteditable 无 disabled 属性 → 断 contenteditable/aria）
+    expectComposerReadOnly();
   });
 
   it('renders ModelSelector in header', () => {
@@ -338,7 +346,9 @@ describe('ChatPanel', () => {
         images: [],
       });
     });
-    expect(screen.getByLabelText('输入消息')).toHaveValue('你好');
+    // 外部 value（草稿）同步进编辑器：用户真的能看到回填的内容
+    await waitFor(() => expect(composerText()).toBe('你好'));
+    expect(draftText('session-1')).toBe('你好');
 
     // 回退后可撤销回退
     expect(screen.getByRole('button', { name: /撤销回退/ })).toBeInTheDocument();
@@ -446,7 +456,7 @@ describe('ChatPanel', () => {
 
     // 请求挂起期间：进行中反馈可见 + 输入框禁用 + 横幅按钮禁用
     expect(await screen.findByText('回退处理中…')).toBeInTheDocument();
-    expect(screen.getByLabelText('输入消息')).toBeDisabled();
+    expectComposerReadOnly();
 
     releaseDelete();
     await waitFor(() => {
@@ -878,9 +888,7 @@ describe('ChatPanel', () => {
     const user = userEvent.setup();
     renderChatPanel();
 
-    const textarea = screen.getByPlaceholderText(/输入消息/);
-    // user.type 会把 [..] 当作键盘修饰符语法，改用 fireEvent.change
-    fireEvent.change(textarea, { target: { value: '这是一个 [length-test] 请求' } });
+    await typeIntoComposer('这是一个 [length-test] 请求');
     await user.click(screen.getByRole('button', { name: /发送/i }));
 
     // 模拟统一事件通道到达：增量 + length 完成
@@ -906,8 +914,7 @@ describe('ChatPanel', () => {
     const user = userEvent.setup();
     renderChatPanel();
 
-    const textarea = screen.getByPlaceholderText(/输入消息/);
-    await user.type(textarea, '普通请求');
+    await typeIntoComposer('普通请求');
     await user.click(screen.getByRole('button', { name: /发送/i }));
 
     // 模拟统一事件通道到达：增量 + stop 完成
@@ -928,8 +935,7 @@ describe('ChatPanel', () => {
     const user = userEvent.setup();
     renderChatPanel();
 
-    const textarea = screen.getByPlaceholderText(/输入消息/);
-    fireEvent.change(textarea, { target: { value: '带思考的问题' } });
+    await typeIntoComposer('带思考的问题');
     await user.click(screen.getByRole('button', { name: /发送/i }));
 
     // 模拟统一事件通道到达：思考增量 + 正文 + 完成
@@ -1055,20 +1061,15 @@ describe('ChatPanel', () => {
     renderChatPanel();
 
     // 粘贴一个 .ts 文件（jsdom 无真实剪贴板，只能手工构造 file 项）加入引用
-    fireEvent.paste(screen.getByPlaceholderText(/输入消息/), {
-      clipboardData: {
-        items: [
-          {
-            kind: 'file',
-            type: 'text/plain',
-            getAsFile: () => new File([new Uint8Array(8)], 'main.ts', { type: 'text/plain' }),
-          },
-        ],
+    await pasteFilesOntoComposer([
+      {
+        file: new File([new Uint8Array(8)], 'main.ts', { type: 'text/plain' }),
+        type: 'text/plain',
       },
-    });
+    ]);
     expect(await screen.findByTestId('file-chip')).toHaveTextContent('main.ts');
 
-    await user.type(screen.getByPlaceholderText(/输入消息/), '看这个源码');
+    await typeIntoComposer('看这个源码');
     await user.click(screen.getByRole('button', { name: /发送/i }));
 
     await waitFor(() => expect(sentBodies).toHaveLength(1));

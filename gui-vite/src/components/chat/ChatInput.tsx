@@ -1,4 +1,4 @@
-import { useState, useRef, useCallback, useEffect } from 'react';
+import { useState, useRef, useCallback } from 'react';
 import { Send, Square, ImagePlus, X } from 'lucide-react';
 import { cn, formatNumber } from '@/lib/utils';
 import type { RequestPerf, StreamUsage } from '@/lib/types';
@@ -9,6 +9,7 @@ import ModelSelector from './ModelSelector';
 import ThinkingSelect from './ThinkingSelect';
 import ContextRing from './ContextRing';
 import FileChip from './FileChip';
+import ComposerEditor, { type ComposerEditorHandle } from './ComposerEditor';
 import ZoomableImage from '@/components/ui/ImageLightbox';
 
 interface Props {
@@ -166,28 +167,16 @@ export default function ChatInput({
   const images = draft?.images ?? EMPTY_IMAGES;
   const attachments = draft?.attachments ?? EMPTY_FILES;
   const [rejected, setRejected] = useState<string | null>(null);
-  const textareaRef = useRef<HTMLTextAreaElement>(null);
+  // 富文本编辑器句柄（发送后清空 / 需要重新聚焦）：自动高度与按键逻辑已搬进
+  // ComposerEditor（Lexical 用 CSS 的 max-height 自带「撑高 + 封顶滚动」）
+  const composerRef = useRef<ComposerEditorHandle>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   // 桌面壳判定（渲染期常量：运行环境不会中途切换）；浏览器里拿不到文件
   // 绝对路径，非位图文件的提示文案随之分岔
   const desktop = isTauri();
 
-  // Auto-resize textarea as content grows
-  useEffect(() => {
-    const el = textareaRef.current;
-    if (el) {
-      el.style.height = 'auto';
-      el.style.height = Math.min(el.scrollHeight, 200) + 'px';
-    }
-  }, [input]);
-
-  // Focus on mount
-  useEffect(() => {
-    textareaRef.current?.focus();
-  }, []);
-
   // 压缩期间禁发：压缩请求与发送并发会基于分叉状态组装上下文
-  // （textarea/send 一并禁用，与 streaming 语义一致）
+  // （编辑器/send 一并禁用，与 streaming 语义一致）
   // 控制面操作（回退/重做）期间同理禁发（ADR-041）。
   const canSend =
     !isStreaming &&
@@ -293,20 +282,9 @@ export default function ChatInput({
     // 清空该会话草稿（键删除；已发送内容不再随页面/会话切换恢复）
     setInputDraft(draftKey, { text: '', images: [], attachments: [] });
     setRejected(null);
-    if (textareaRef.current) {
-      textareaRef.current.style.height = 'auto';
-    }
+    // 发送后把焦点还给编辑器（旧 textarea 天然保持焦点，Lexical 也要显式要一次）
+    composerRef.current?.focus();
   }, [input, images, attachments, isStreaming, compressing, busy, onSend, draftKey, setInputDraft]);
-
-  const handleKeyDown = useCallback(
-    (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
-      if (e.key === 'Enter' && !e.shiftKey) {
-        e.preventDefault();
-        handleSend();
-      }
-    },
-    [handleSend],
-  );
 
   /**
    * 读剪贴板里的文件绝对路径（CF_HDROP）。
@@ -351,21 +329,12 @@ export default function ChatInput({
    * 一进 `await` 就被回收（`items` 清空、`getAsFile()` 返回 null）。所以
    * `File[]` 必须在**同步阶段**构造好并让异步闭包捕获，`preventDefault()`
    * 也必须同步调用（否则默认粘贴已经发生了）。
+   * 换 Lexical 后这两件事搬到了 `ComposerEditor.tsx` 的 `PasteFilesPlugin`
+   * （在 `PASTE_COMMAND` 的同步阶段取文件 + 拦默认插入），**分流逻辑本身
+   * 仍在这里逐字保留**——它是本功能的核心不变量，与编辑器实现无关。
    */
-  const handlePaste = useCallback(
-    (e: React.ClipboardEvent<HTMLTextAreaElement>) => {
-      // 【同步阶段】取出 items 与 File[]：异步之后 clipboardData 已回收
-      const items = Array.from(e.clipboardData?.items ?? []);
-      // 没有文件项 = 普通文本粘贴：一律不拦截，保持浏览器/WebView 默认行为
-      if (!items.some((it) => it.kind === 'file')) return;
-      const files = items
-        .filter((it) => it.kind === 'file')
-        .map((it) => it.getAsFile())
-        .filter((f): f is File => f !== null);
-
-      // 文件项不走默认粘贴：WebView 默认行为会插入文件名文本或图片占位
-      e.preventDefault();
-
+  const handlePasteFiles = useCallback(
+    (files: File[]) => {
       const images = files.filter(isAcceptedImage);
       const others = files.filter((f) => !isAcceptedImage(f));
 
@@ -463,24 +432,17 @@ export default function ChatInput({
           </p>
         )}
 
-        <textarea
-          ref={textareaRef}
+        {/* 富文本编辑器（Lexical）：Enter 发送 / Shift+Enter 换行 / 自动高度 /
+            粘贴文件分流都在它内部，对外仍是「受控 value + onChange + onSubmit」。 */}
+        <ComposerEditor
+          ref={composerRef}
           value={input}
-          onChange={(e) => setInputDraft(draftKey, (prev) => ({ ...prev, text: e.target.value }))}
-          onKeyDown={handleKeyDown}
-          onPaste={handlePaste}
-          placeholder="输入消息... (Shift+Enter 换行，可粘贴图片或文件)"
-          rows={2}
+          onChange={(text) => setInputDraft(draftKey, (prev) => ({ ...prev, text }))}
+          onSubmit={handleSend}
+          onPasteFiles={handlePasteFiles}
           disabled={isStreaming || compressing || turnRunning || busy}
-          aria-label="输入消息"
-          className={cn(
-            'w-full resize-none bg-transparent px-3.5 pt-3 pb-1',
-            'text-sm text-[var(--color-text-primary)]',
-            'placeholder:text-[var(--color-text-tertiary)]',
-            'focus:outline-none',
-            'disabled:opacity-50 disabled:cursor-not-allowed',
-            'transition-colors',
-          )}
+          placeholder="输入消息... (Shift+Enter 换行，可粘贴图片或文件)"
+          autoFocus
         />
 
         {/* 底部控件行：左 = 图片；右 = 模型 / 思考 / 上下文圆环 / 发送 */}

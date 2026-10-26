@@ -4,6 +4,18 @@ import userEvent from '@testing-library/user-event';
 import { MemoryRouter } from 'react-router-dom';
 import { useAppStore } from '@/lib/store';
 import ChatInput from '../ChatInput';
+// 输入框交互工具（contenteditable 的「打字 / 只读态 / 文本断言」口径集中在这里，
+// 与 ChatPanel.test.tsx 共用；理由见文件内注释）
+import {
+  caretToEnd,
+  composerEl,
+  composerText,
+  draftText,
+  expectComposerEditable,
+  expectComposerReadOnly,
+  pressEnter,
+  typeIntoComposer,
+} from '@/test/composer';
 
 /**
  * 桌面壳桥接的可控替身：默认浏览器语义（拿不到绝对路径）；
@@ -102,52 +114,97 @@ describe('ChatInput', () => {
 
     expect(screen.getByRole('button', { name: '发送消息' })).toBeDisabled();
 
-    await user.type(screen.getByLabelText('输入消息'), '你好');
+    await typeIntoComposer('你好');
     expect(screen.getByRole('button', { name: '发送消息' })).toBeEnabled();
 
     await user.click(screen.getByRole('button', { name: '发送消息' }));
     // 第三个参数 = 文件引用通道（本用例无附件 → 空数组）
     expect(props.onSend).toHaveBeenCalledWith('你好', [], []);
-    expect(screen.getByLabelText('输入消息')).toHaveValue('');
+    // 发送后编辑器清空（value 同步进 Lexical，文本从 DOM 消失）
+    await waitFor(() => expect(composerText()).toBe(''));
+    expect(draftText()).toBe('');
   });
 
   it('sends on Enter and keeps newline on Shift+Enter', async () => {
     const { props } = renderChatInput();
-    const textarea = screen.getByLabelText('输入消息');
 
-    fireEvent.change(textarea, { target: { value: '第一行' } });
-    fireEvent.keyDown(textarea, { key: 'Enter', shiftKey: true });
+    await typeIntoComposer('第一行');
+    expect(composerText()).toBe('第一行');
+
+    // Shift+Enter：不发送，而是插入换行（旧 textarea 里 fireEvent.keyDown 走不到默认
+    // 换行，所以旧断言只能验「没发送」；Lexical 下换行是真发生了，断言可以更严）
+    await pressEnter({ shiftKey: true });
     expect(props.onSend).not.toHaveBeenCalled();
+    expect(draftText()).toBe('第一行\n');
 
-    fireEvent.keyDown(textarea, { key: 'Enter' });
-    expect(props.onSend).toHaveBeenCalledWith('第一行', [], []);
+    // Enter：发送，内容含 Shift+Enter 留下的换行（与 textarea 的 value 语义一致）
+    await pressEnter();
+    expect(props.onSend).toHaveBeenCalledWith('第一行\n', [], []);
   });
 
-  it('keeps the unsent draft after unmount and restores it on remount (page switch)', () => {
-    const { unmount } = renderChatInput();
-    fireEvent.change(screen.getByLabelText('输入消息'), { target: { value: '未发送的草稿' } });
-    expect(screen.getByLabelText('输入消息')).toHaveValue('未发送的草稿');
+  it('输入法组合期间（isComposing）的 Enter 不发送、也不插换行', async () => {
+    // 本步最关键的验证点：contenteditable + 中文输入法的硬门槛。拼音打一半时
+    // 按 Enter 是「确认候选词」——若当成发送，就是半句话被发出去 + 拼音被截断。
+    const { props } = renderChatInput();
+    await typeIntoComposer('nihao');
 
-    // 模拟切走页面（组件卸载）再切回：草稿从 store 恢复
+    // Chromium / WebView2 在确认候选词时派发的 keydown 自报 isComposing
+    await pressEnter({ isComposing: true });
+    expect(props.onSend).not.toHaveBeenCalled();
+    // 也不该插换行（组合中的 Enter 只负责确认候选词）
+    expect(draftText()).toBe('nihao');
+    expect(draftText()).not.toContain('\n');
+
+    // 组合结束后 Enter 恢复发送（同一段文本）
+    await pressEnter();
+    expect(props.onSend).toHaveBeenCalledWith('nihao', [], []);
+  });
+
+  it('Lexical 自身的组合态（compositionstart）期间 Enter 同样不发送', async () => {
+    // 覆盖「Enter 到达时 DOM 事件没带 isComposing，但编辑器知道自己正在组合」
+    // （旧 WebKit / 部分 IME 的形态）——靠 editor.isComposing() 兜住。
+    const { props } = renderChatInput();
+    await typeIntoComposer('nihao');
+
+    await act(async () => {
+      composerEl().dispatchEvent(new CompositionEvent('compositionstart', { bubbles: true }));
+    });
+    await pressEnter();
+
+    expect(props.onSend).not.toHaveBeenCalled();
+    // 只断言「没有插换行」：组合开始时 Lexical 会往文本里放一个占位零宽空格
+    // （COMPOSITION_START_CHAR，真实浏览器在 compositionend 时清掉；jsdom 无法
+    // 复现完整 IME 生命周期，所以这里不对文本做逐字断言）
+    expect(draftText()).not.toContain('\n');
+  });
+
+  it('keeps the unsent draft after unmount and restores it on remount (page switch)', async () => {
+    const { unmount } = renderChatInput();
+    await typeIntoComposer('未发送的草稿');
+    expect(composerText()).toBe('未发送的草稿');
+
+    // 模拟切走页面（组件卸载）再切回：草稿从 store 恢复（外部 value 同步进编辑器）
     unmount();
     renderChatInput();
-    expect(screen.getByLabelText('输入消息')).toHaveValue('未发送的草稿');
+    await waitFor(() => expect(composerText()).toBe('未发送的草稿'));
+    expect(draftText()).toBe('未发送的草稿');
   });
 
-  it('isolates drafts per session and restores each on session switch', () => {
+  it('isolates drafts per session and restores each on session switch', async () => {
     useAppStore.setState({ currentSessionId: 'session-a' });
     renderChatInput();
-    fireEvent.change(screen.getByLabelText('输入消息'), { target: { value: 'A 的草稿' } });
+    await typeIntoComposer('A 的草稿');
+    expect(draftText('session-a')).toBe('A 的草稿');
 
     // 切到会话 B：显示 B 自己的草稿（空）——A 的草稿不串台
     act(() => useAppStore.setState({ currentSessionId: 'session-b' }));
-    expect(screen.getByLabelText('输入消息')).toHaveValue('');
+    await waitFor(() => expect(composerText()).toBe(''));
 
-    fireEvent.change(screen.getByLabelText('输入消息'), { target: { value: 'B 的草稿' } });
+    await typeIntoComposer('B 的草稿');
 
     // 切回会话 A：恢复 A 的草稿
     act(() => useAppStore.setState({ currentSessionId: 'session-a' }));
-    expect(screen.getByLabelText('输入消息')).toHaveValue('A 的草稿');
+    await waitFor(() => expect(composerText()).toBe('A 的草稿'));
   });
 
   it('switches to stop button while streaming', async () => {
@@ -155,22 +212,21 @@ describe('ChatInput', () => {
     const { props } = renderChatInput({ isStreaming: true });
 
     expect(screen.getByRole('button', { name: '停止生成' })).toBeInTheDocument();
-    expect(screen.getByLabelText('输入消息')).toBeDisabled();
+    expectComposerReadOnly();
     expect(screen.queryByRole('button', { name: '发送消息' })).not.toBeInTheDocument();
 
     await user.click(screen.getByRole('button', { name: '停止生成' }));
     expect(props.onStop).toHaveBeenCalled();
   });
 
-  it('disables send and textarea while compressing', async () => {
-    const user = userEvent.setup();
+  it('disables send and composer while compressing', async () => {
     const { props, rerender } = renderChatInput();
 
     // 先输入内容（compressing=false 时可输可发）
-    await user.type(screen.getByLabelText('输入消息'), '压缩期间的消息');
+    await typeIntoComposer('压缩期间的消息');
     expect(screen.getByRole('button', { name: '发送消息' })).toBeEnabled();
 
-    // 压缩开始：rerender 同一输入内容下，发送按钮与 textarea 禁用
+    // 压缩开始：rerender 同一输入内容下，发送按钮与编辑器禁用
     rerender(
       <MemoryRouter>
         <ChatInput
@@ -185,10 +241,10 @@ describe('ChatInput', () => {
       </MemoryRouter>,
     );
     expect(screen.getByRole('button', { name: '发送消息' })).toBeDisabled();
-    expect(screen.getByLabelText('输入消息')).toBeDisabled();
+    expectComposerReadOnly();
 
     // Enter 也不触发发送
-    fireEvent.keyDown(screen.getByLabelText('输入消息'), { key: 'Enter' });
+    await pressEnter();
     expect(props.onSend).not.toHaveBeenCalled();
 
     // 压缩结束：恢复可发
@@ -206,7 +262,7 @@ describe('ChatInput', () => {
       </MemoryRouter>,
     );
     expect(screen.getByRole('button', { name: '发送消息' })).toBeEnabled();
-    expect(screen.getByLabelText('输入消息')).toBeEnabled();
+    expectComposerEditable();
   });
 
   it('adds image via file input and sends it with content', async () => {
@@ -218,7 +274,7 @@ describe('ChatInput', () => {
       expect(screen.getByAltText('待发送图片 1')).toBeInTheDocument();
     });
 
-    await user.type(screen.getByLabelText('输入消息'), '看图');
+    await typeIntoComposer('看图');
     await user.click(screen.getByRole('button', { name: '发送消息' }));
     expect(props.onSend).toHaveBeenCalledWith('看图', ['data:image/png;base64,dGVzdA=='], []);
   });
@@ -292,8 +348,7 @@ describe('ChatInput', () => {
   it('reports pasted non-image files instead of silently ignoring them', async () => {
     renderChatInput();
 
-    const textarea = screen.getByLabelText('输入消息');
-    fireEvent.paste(textarea, {
+    fireEvent.paste(composerEl(), {
       clipboardData: {
         items: [
           {
@@ -358,7 +413,7 @@ describe('ChatInput', () => {
 describe('ChatInput / 文件引用通道', () => {
   /** 粘贴一个文件项（jsdom 无真实剪贴板，只能手工构造 payload）。 */
   function pasteFile(file: File) {
-    fireEvent.paste(screen.getByLabelText('输入消息'), {
+    fireEvent.paste(composerEl(), {
       clipboardData: {
         items: [{ kind: 'file', type: file.type, getAsFile: () => file }],
       },
@@ -424,7 +479,7 @@ describe('ChatInput / 文件引用通道', () => {
     pasteFile(makeTypedFile('b.ts', 'text/plain'));
     await waitFor(() => expect(screen.getAllByTestId('file-chip')).toHaveLength(1));
 
-    await user.type(screen.getByLabelText('输入消息'), '看这两个');
+    await typeIntoComposer('看这两个');
     await user.click(screen.getByRole('button', { name: '发送消息' }));
 
     expect(props.onSend).toHaveBeenCalledWith(
@@ -447,8 +502,7 @@ describe('ChatInput / 文件引用通道', () => {
 describe('ChatInput / 粘贴分流（图片优先，原生路径兜底）', () => {
   /** 构造「粘贴事件里有 N 个文件项」的 payload（jsdom 无真实剪贴板）。 */
   function pasteWithItems(items: Array<{ file: File | null; type?: string }>) {
-    const textarea = screen.getByLabelText('输入消息');
-    return fireEvent.paste(textarea, {
+    return fireEvent.paste(composerEl(), {
       clipboardData: {
         items: items.map(({ file, type }) => ({
           kind: 'file',
@@ -620,19 +674,33 @@ describe('ChatInput / 粘贴分流（图片优先，原生路径兜底）', () =
     expect(screen.queryByRole('alert')).not.toBeInTheDocument();
   });
 
-  it('纯文本粘贴：不查剪贴板文件、不拦截默认行为', () => {
+  it('纯文本粘贴：不查剪贴板文件，文本照常进编辑器', async () => {
     renderChatInput();
 
-    const notCancelled = fireEvent.paste(screen.getByLabelText('输入消息'), {
-      clipboardData: {
-        items: [{ kind: 'string', type: 'text/plain', getAsFile: () => null }],
-        getData: () => '普通文本',
-      },
+    // 真实用户是「先把光标放进输入框，再 Ctrl+V」：编辑器要持有选区，粘贴才有落点
+    await act(async () => {
+      composerEl().focus();
+      caretToEnd(composerEl());
     });
 
-    // fireEvent 返回 !defaultPrevented：true = 没拦截（走默认粘贴）
-    expect(notCancelled).toBe(true);
+    await act(async () => {
+      fireEvent.paste(composerEl(), {
+        clipboardData: {
+          items: [{ kind: 'string', type: 'text/plain', getAsFile: () => null }],
+          getData: () => '普通文本',
+        },
+      });
+    });
+
+    // 文件通道完全没被碰：既不问原生要路径，也不产生 chip
     expect(tauri.readClipboardFiles).not.toHaveBeenCalled();
+    expect(screen.queryByTestId('file-chip')).not.toBeInTheDocument();
+    // 粘贴的文本进了编辑器。旧断言看的是 fireEvent 的 `!defaultPrevented`
+    // （“没被拦截”）；富文本编辑器必须自己接管 paste 才能维护内部模型，事件层面
+    // 调用 preventDefault 是**预期行为**，所以改为验证「粘贴结果本身」——
+    // 语义（纯文本照常粘进来、文件通道不介入）不变，且比看事件标志更强。
+    expect(composerText()).toBe('普通文本');
+    expect(draftText()).toBe('普通文本');
   });
 
   it('超过软上限：只保留 20 个文件并提示「最多添加 20 个文件」', async () => {
