@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  天演原生客户端 MSI 打包定义（WiX v7 验证用）
+
+  目的：验证「不依赖 Tauri bundler 也能出 MSI」这条链路。
+  产品化时要补：
+    - 多语言（zh-CN / en-US），对齐现有 Tianyan_<ver>_x64_{zh-CN,en-US}.msi
+    - 图标、开始菜单、桌面快捷方式
+    - per-machine vs per-user 安装范围决策（影响 updater 是否需要提权）
+    - 升级策略（MajorUpgrade + 版本比较规则）
+-->
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+  <Package
+      Name="天演原生客户端（验证）"
+      Manufacturer="Tianyan"
+      Version="0.1.0.0"
+      UpgradeCode="8E4B2A1C-7F3D-4E5B-9A6C-1D2E3F4A5B6C"
+      Scope="perMachine"
+      Language="2052"
+      Codepage="65001">
+
+    <MajorUpgrade DowngradeErrorMessage="已安装更新版本的天演，无需降级安装。" />
+
+    <MediaTemplate EmbedCab="yes" CompressionLevel="high" />
+
+    <StandardDirectory Id="ProgramFiles64Folder">
+      <Directory Id="INSTALLFOLDER" Name="TianyanGuiNative" />
+    </StandardDirectory>
+
+    <Feature Id="Main" Title="天演原生客户端" Level="1">
+      <Component Id="MainExe" Directory="INSTALLFOLDER" Guid="*">
+        <File Id="MainExeFile"
+              Source="..\target\debug\tianyan-gui-native.exe"
+              KeyPath="yes" />
+      </Component>
+    </Feature>
+  </Package>
+</Wix>

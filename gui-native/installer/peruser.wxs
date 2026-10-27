@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  天演原生客户端 MSI —— perUser 版本（验证无 UAC 静默更新可行性）
+
+  与 perMachine 的区别：
+    - 安装到 %LOCALAPPDATA%\Programs\<App>，不需要管理员权限
+    - 自动更新时可以 msiexec /i /qn 静默完成，不弹 UAC
+    - 代价：只对当前用户生效（多用户机器上需各自安装）
+
+  对比现状：tauri.conf.json 产出的 MSI 是 ALLUSERS=1（perMachine），
+  更新时必须提权，用户会看到 UAC 弹窗。
+-->
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+  <Package
+      Name="天演原生客户端（验证 perUser）"
+      Manufacturer="Tianyan"
+      Version="0.1.3.0"
+      UpgradeCode="8E4B2A1C-7F3D-4E5B-9A6C-1D2E3F4A5B6C"
+      Scope="perUser"
+      Language="2052"
+      Codepage="65001">
+
+    <MajorUpgrade DowngradeErrorMessage="已安装更新版本的天演，无需降级安装。" />
+
+    <MediaTemplate EmbedCab="yes" CompressionLevel="high" />
+
+    <StandardDirectory Id="LocalAppDataFolder">
+      <Directory Id="ProgramsFolder" Name="Programs">
+        <Directory Id="INSTALLFOLDER" Name="TianyanGuiNative" />
+      </Directory>
+    </StandardDirectory>
+
+    <Feature Id="Main" Title="天演原生客户端" Level="1">
+      <Component Id="MainExe" Directory="INSTALLFOLDER" Guid="*">
+        <File Id="MainExeFile"
+              Source="..\target\debug\tianyan-gui-native.exe"
+              KeyPath="yes" />
+      </Component>
+    </Feature>
+  </Package>
+</Wix>

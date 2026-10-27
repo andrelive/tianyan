@@ -1,0 +1,25 @@
+[workspace]
+
+[package]
+name = "tianyan-gui-native"
+version = "0.1.0"
+edition = "2021"
+description = "天演原生桌面客户端（GPUI 试验性并存物）"
+publish = false
+
+[dependencies]
+# 门面 crate：把 GPUI 及其组件库固定到一组匹配版本（应用不直接依赖 gpui）
+gpui-kit = "0.6"
+
+# 开发构建下让 GPUI / 组件库 / 文本栈走 release 级优化，否则 cargo run 渲染明显偏慢
+# （gpui-kit 安装文档的建议；仅影响这些重 crate，应用自身仍是快速 debug 构建）
+[profile.dev.package]
+gpui-pre = { opt-level = 3 }
+gpui-component = { opt-level = 3 }
+gpui-kit = { opt-level = 3 }
+gpui-kit-assets = { opt-level = 3 }
+gpui-pre-macros = { opt-level = 3 }
+gpui-pre-platform = { opt-level = 3 }
+rustybuzz = { opt-level = 3 }
+taffy = { opt-level = 3 }
+ttf-parser = { opt-level = 3 }

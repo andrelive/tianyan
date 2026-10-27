@@ -1,5 +1,8 @@
 # Rust build output
 /target
+# gui-native 是独立 workspace（自带 [workspace]），有自己的 target，根规则不覆盖它
+gui-native/target/
+*.wixpdb
 
 # Node.js
 node_modules/
