@@ -1,136 +1,151 @@
-use gpui_kit::component::input::{Textarea, TextareaState};
-use gpui_kit::component::text::{TextView, TextViewMotion, TextViewState};
+//! UI 侧验证（阶段 A）：
+//! 1. 虚拟列表扛 5000 条消息时的渲染行为（关键指标：render_item 被调用多少次）
+//! 2. 代码编辑器开大文件（tree-sitter 高亮 + 滚动）
+
+use gpui_kit::component::input::{Editor, EditorState};
+use gpui_kit::component::list::{List, ListDelegate, ListItem, ListState};
 use gpui_kit::component::theme::{Theme, ThemeMode};
-use gpui_kit::component::Root;
+use gpui_kit::component::{IndexPath, Root};
 use gpui_kit::*;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
-/// 模拟一次 LLM 回复的完整内容（含中文、代码块、列表、行内样式）
-const STREAM_SOURCE: &str = r#"## 流式渲染验证
+const LIST_COUNT: usize = 1000;
+const CODE_LINES: usize = 100_000;
 
-这是模拟 LLM 逐字输出的内容。它以约 40 字符/秒的速度追加进来，请观察：
-
-1. 文字是否**平滑出现**（`stream_fade` 渐显），而不是整块跳变
-2. 追加过程中**滚动条是否跟随到底部**，而不是停在原位或被拉回顶部
-3. 代码块在**围栏尚未闭合**的中间态是什么表现
-4. 中文与 English 123 混排时**换行位置**是否稳定，有没有半个字被切
-
-```rust
-fn stream_token(delta: &str, cx: &mut Context<Self>) {
-    self.state.update(cx, |state, cx| state.push_str(delta, cx));
-}
-```
-
-| 检查项 | 期望 |
-|---|---|
-| 渐显 | 新字有短暂淡入 |
-| 滚动 | 自动跟随底部 |
-
-> 最后一行：流到这里说明整段追加完毕，且没有出现撕裂或重复。
-"#;
-
-struct App {
-    md: Entity<TextViewState>,
-    input: Entity<TextareaState>,
+/// 模拟聊天列表：变长文本，验证虚拟化 + 高度测量
+struct ChatDelegate {
+    count: usize,
+    calls: Arc<AtomicUsize>,
 }
 
-impl App {
+impl ListDelegate for ChatDelegate {
+    type Item = ListItem;
+
+    fn items_count(&self, _section: usize, _cx: &gpui_kit::App) -> usize {
+        self.count
+    }
+
+    fn set_selected_index(
+        &mut self,
+        _ix: Option<IndexPath>,
+        _window: &mut Window,
+        _cx: &mut Context<ListState<Self>>,
+    ) {
+    }
+
+    fn render_item(
+        &mut self,
+        ix: IndexPath,
+        _window: &mut Window,
+        _cx: &mut Context<ListState<Self>>,
+    ) -> Option<ListItem> {
+        self.calls.fetch_add(1, Ordering::Relaxed);
+        let row = ix.row;
+        let text = if row % 7 == 0 {
+            format!(
+                "第 {} 条 · 这条是长消息，用于检验变高测量：包含中文与 English 123，以及一些标点。",
+                row + 1
+            )
+        } else {
+            format!("第 {} 条消息", row + 1)
+        };
+        Some(ListItem::new(row).h(px(52.)).child(div().px_3().child(text)))
+    }
+}
+
+/// 生成一份用于编辑器压测的 Rust 代码
+fn gen_code(lines: usize) -> String {
+    let mut s = String::with_capacity(lines * 48);
+    s.push_str("// 自动生成的压测代码\n");
+    for i in 0..lines {
+        match i % 5 {
+            0 => s.push_str(&format!("fn handler_{i}(input: &str) -> usize {{\n")),
+            1 => s.push_str(&format!("    let n = input.len() + {i};\n")),
+            2 => s.push_str("    // 中英混排注释 comment\n"),
+            3 => s.push_str(&format!("    println!(\"value = {{}}\", {i});\n")),
+            _ => s.push_str("    n\n}\n"),
+        }
+    }
+    s
+}
+
+struct DemoApp {
+    chat: Entity<ListState<ChatDelegate>>,
+    editor: Entity<EditorState>,
+}
+
+impl DemoApp {
     fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
-        // 流式文档：初始为空，靠 push_str 逐字追加。
-        // 注意：TextViewMotion 默认全部为 ZERO（= 立即整块出现），必须显式开启渐显
-        let md = cx.new(|cx| {
-            let mut state = TextViewState::markdown("", cx);
-            state.set_motion(
-                TextViewMotion::default()
-                    .with_stream_fade(Duration::from_millis(320))
-                    .with_stream_fade_stagger(Duration::from_millis(35)),
-            );
-            state
+        let calls = Arc::new(AtomicUsize::new(0));
+        let chat = cx.new(|cx| {
+            ListState::new(
+                ChatDelegate {
+                    count: LIST_COUNT,
+                    calls: calls.clone(),
+                },
+                window,
+                cx,
+            )
         });
-        let input = cx.new(|cx| TextareaState::new(window, cx));
 
-        cx.observe(&input, |_this, input, cx| {
-            let text = input.read(cx).value().to_string();
-            println!("[输入] {}", text.replace('\n', "\\n"));
-        })
-        .detach();
+        let code = gen_code(CODE_LINES);
+        println!(
+            "[编辑器] 待加载代码 {} 行 / {:.1} MB",
+            CODE_LINES,
+            code.len() as f64 / 1024.0 / 1024.0
+        );
+        let t0 = std::time::Instant::now();
+        let editor = cx
+            .new(|cx| EditorState::new(window, cx).language("rust").default_value(&code));
+        println!("[编辑器] EditorState 创建耗时 {:?}", t0.elapsed());
 
-        // 模拟 SSE：循环重播，便于观察流式过程。每轮内容 = STREAM_SOURCE x3（约 1290 字符），
-        // 每 25ms 追加 4 个字符（接近真实 LLM 流式节奏）
-        let chunks: Vec<char> = STREAM_SOURCE.repeat(3).chars().collect();
-        let total = chunks.len();
-        let md_task = md.clone();
+        // 每 2 秒报告一次 render_item 累计调用数：
+        // 远小于总条数 = 虚拟化生效；与总条数同量级 = 虚拟化失效
         cx.spawn(async move |_this, cx| {
-            let mut round: u32 = 0;
+            let mut last = 0usize;
             loop {
-                round += 1;
                 cx.background_executor()
-                    .timer(Duration::from_millis(1200))
+                    .timer(Duration::from_secs(2))
                     .await;
-                let started = std::time::Instant::now();
-                let mut slow = 0u32;
-                let mut worst = Duration::ZERO;
-                let mut i = 0usize;
-                while i < total {
-                    cx.background_executor()
-                        .timer(Duration::from_millis(25))
-                        .await;
-                    let end = (i + 4).min(total);
-                    let burst: String = chunks[i..end].iter().collect();
-                    i = end;
-                    cx.update(|app| {
-                        let t0 = std::time::Instant::now();
-                        md_task.update(app, |state, cx| {
-                            state.push_str(&burst, cx);
-                            // 流式跟随：追加后把视图滚到底（聊天场景必需）
-                            state.list_state().scroll_to_end();
-                        });
-                        let dt = t0.elapsed();
-                        if dt > worst {
-                            worst = dt;
-                        }
-                        // 5ms 阈值：单次追加超过它说明重解析开始拖后腿
-                        if dt.as_millis() >= 5 {
-                            slow += 1;
-                        }
-                    });
-                }
+                let now = calls.load(Ordering::Relaxed);
                 println!(
-                    "[stream] 第 {round} 轮完成：{total} 字符，兡时 {:?}，单次最大 {worst:?}，慢帧 {slow} 次",
-                    started.elapsed()
+                    "[列表] render_item 累计 {} 次（本轮新增 {}）/ 总条数 {}",
+                    now,
+                    now - last,
+                    LIST_COUNT
                 );
-                cx.background_executor()
-                    .timer(Duration::from_millis(2500))
-                    .await;
-                cx.update(|app| {
-                    md_task.update(app, |state, cx| state.set_text("", cx));
-                });
+                last = now;
             }
         })
         .detach();
 
-        Self { md, input }
+        Self { chat, editor }
     }
 }
 
-impl Render for App {
+impl Render for DemoApp {
     fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
         div()
             .size_full()
             .flex()
-            .flex_col()
-            .p_4()
+            .flex_row()
             .child(
+                // 左：虚拟列表
                 div()
-                    .flex_1()
-                    .min_h_0()
-                    .child(TextView::new(&self.md).scrollable(true)),
+                    .w(px(420.))
+                    .h_full()
+                    .border_r_1()
+                    .child(List::new(&self.chat)),
             )
             .child(
+                // 右：代码编辑器
                 div()
-                    .flex_shrink_0()
-                    .pt_2()
-                    .child(Textarea::new(&self.input).h(px(80.)).w_full()),
+                    .flex_1()
+                    .min_w_0()
+                    .h_full()
+                    .child(Editor::new(&self.editor).h_full()),
             )
     }
 }
@@ -139,19 +154,19 @@ fn main() {
     gpui_kit::application().run(|cx| {
         gpui_kit::init(cx);
         Theme::change(ThemeMode::Dark, None, cx);
-        let bounds = Bounds::centered(None, size(px(1180.), px(820.)), cx);
+        let bounds = Bounds::centered(None, size(px(1360.), px(860.)), cx);
         cx.spawn(async move |cx| {
             cx.open_window(
                 WindowOptions {
                     window_bounds: Some(WindowBounds::Windowed(bounds)),
                     titlebar: Some(TitlebarOptions {
-                        title: Some("天演 · 流式渲染验证".into()),
+                        title: Some("天演 · UI 侧验证（虚拟列表 + 代码编辑器）".into()),
                         ..Default::default()
                     }),
                     ..Default::default()
                 },
                 |window, cx| {
-                    let view = cx.new(|cx| App::new(window, cx));
+                    let view = cx.new(|cx| DemoApp::new(window, cx));
                     cx.new(|cx| Root::new(view, window, cx))
                 },
             )

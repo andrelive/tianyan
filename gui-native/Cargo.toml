@@ -9,7 +9,9 @@ publish = false
 
 [dependencies]
 # 门面 crate：把 GPUI 及其组件库固定到一组匹配版本（应用不直接依赖 gpui）
-gpui-kit = "0.6"
+# tree-sitter / tree-sitter-rust 必须显式开启：否则 Editor 只做纯文本渲染，
+# 源码里是 `#[cfg(not(feature = "tree-sitter"))] pub struct Tree;`，无高亮也不报错
+gpui-kit = { version = "0.6", features = ["tree-sitter", "tree-sitter-rust"] }
 
 # 开发构建下让 GPUI / 组件库 / 文本栈走 release 级优化，否则 cargo run 渲染明显偏慢
 # （gpui-kit 安装文档的建议；仅影响这些重 crate，应用自身仍是快速 debug 构建）
