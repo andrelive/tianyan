@@ -8,7 +8,7 @@
 
 use futures::StreamExt as _;
 use gpui_kit::assets::IconName;
-use gpui_kit::component::input::{InputEvent, Textarea, TextareaState};
+use gpui_kit::component::input::{Input, InputEvent, InputState, Textarea, TextareaState};
 use gpui_kit::component::progress::ProgressCircle;
 use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::text::TextView;
@@ -204,6 +204,26 @@ async fn post_json(url: String, body: serde_json::Value) -> Result<serde_json::V
                 return Err(format!("HTTP {status}: {text}"));
             }
             serde_json::from_str::<serde_json::Value>(&text).map_err(|e| e.to_string())
+        })
+        .await
+        .unwrap_or_else(|e| Err(format!("join: {e}")))
+}
+
+/// DELETE 一个资源（只看状态码，不解析响应体）：删会话用。
+async fn delete_json(url: String) -> Result<(), String> {
+    runtime()
+        .spawn(async move {
+            let resp = reqwest::Client::new()
+                .delete(&url)
+                .send()
+                .await
+                .map_err(|e| e.to_string())?;
+            let status = resp.status();
+            if !status.is_success() {
+                let text = resp.text().await.unwrap_or_default();
+                return Err(format!("HTTP {status}: {text}"));
+            }
+            Ok(())
         })
         .await
         .unwrap_or_else(|e| Err(format!("join: {e}")))
@@ -461,6 +481,16 @@ enum SessionListRow {
     /// 组内折叠的「查看更多 (n)」行
     More { key: String, hidden: usize },
 }
+#[derive(Clone)]
+/// 需要用户确认的模态对话框（自绘覆盖层，不依赖组件库 Dialog）。
+enum Dialog {
+    /// 删除会话确认
+    DeleteSession { id: String, title: String },
+    /// 重命名会话（输入框实体在 `ClientApp::dialog_input`）
+    RenameSession { id: String },
+    /// 新建会话并绑定工作目录（「＋新目录」；输入框实体同上）
+    NewWorkspace,
+}
 
 // 左栏行由 `ClientApp::rebuild_session_rows` 直接产生（行类型混排 + 行高不一，
 // 虚拟列表的等高测量在这里只会帮倒忙：实测「查看更多」行会与上一会话行重叠）。
@@ -708,6 +738,14 @@ struct ClientApp {
     expanded_groups: std::collections::HashMap<String, usize>,
     /// 全量后台任务（会话角标聚合用；面板展示的是按当前会话过滤后的 `tasks`）
     all_tasks: Vec<TaskRow>,
+    /// 当前打开的模态对话框（删除确认 / 重命名）
+    dialog: Option<Dialog>,
+    /// 新会话待绑定的工作目录（「＋新目录」设置）：随首条消息以
+    /// `working_directory` 下发，服务端建会话时固化（目录不存在则不绑定）
+    new_session_workspace: Option<String>,
+    /// 重命名输入框：打开对话框时**新建**一个实体（`InputState` 没有公开的
+    /// `set_value`，复用旧实体无法回填原标题，只能每次新建）
+    dialog_input: Option<Entity<InputState>>,
     /// 消息用 Rc 包一层：闭包驱动的虚拟列表需要把数据带进 'static 闭包，
     /// Rc::clone 是 O(1)，比每帧 clone Vec<MsgRow> 便宜得多
     messages: Rc<Vec<MsgRow>>,
@@ -805,6 +843,9 @@ impl ClientApp {
             collapsed_groups: std::collections::HashSet::new(),
             expanded_groups: std::collections::HashMap::new(),
             all_tasks: Vec::new(),
+            dialog: None,
+            new_session_workspace: None,
+            dialog_input: None,
             messages,
             msg_list_state: GpuiListState::new(0, ListAlignment::Bottom, px(120.)),
             message_total: total,
@@ -937,6 +978,266 @@ impl ClientApp {
         .detach();
     }
 
+    /// 打开「重命名会话」对话框：新建输入框实体并回填原标题。
+    ///
+    /// `InputState` 没有公开的 `set_value`，所以每次开弹窗新建一个实体，
+    /// 而不是复用一个再回填（复用的写法编译不过）。
+    fn open_rename(&mut self, id: String, window: &mut Window, cx: &mut Context<Self>) {
+        let title = self
+            .sessions_data
+            .iter()
+            .find(|s| s.id == id)
+            .map(|s| s.title.clone())
+            .unwrap_or_default();
+        self.dialog_input = Some(cx.new(|cx| InputState::new(window, cx).default_value(title)));
+        self.dialog = Some(Dialog::RenameSession { id });
+        cx.notify();
+    }
+
+    /// 打开「新建会话并绑定目录」对话框。
+    ///
+    /// 预填当前会话的工作目录——多数场景是「在同一个项目下再开一条会话」。
+    fn open_new_workspace(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let current = self
+            .current_session
+            .as_ref()
+            .and_then(|id| self.sessions_data.iter().find(|s| &s.id == id))
+            .map(|s| s.working_directory.clone())
+            .unwrap_or_default();
+        self.dialog_input = Some(cx.new(|cx| InputState::new(window, cx).default_value(current)));
+        self.dialog = Some(Dialog::NewWorkspace);
+        cx.notify();
+    }
+
+    /// 提交「新目录」：记下待绑定目录并进入新会话空态，目录在首条消息时生效。
+    fn submit_new_workspace(&mut self, cx: &mut Context<Self>) {
+        let path = self
+            .dialog_input
+            .as_ref()
+            .map(|input| input.read(cx).value().trim().to_string())
+            .unwrap_or_default();
+        self.dialog = None;
+        self.dialog_input = None;
+        if path.is_empty() {
+            cx.notify();
+            return;
+        }
+        self.new_session_workspace = Some(path.clone());
+        self.start_new_session(cx);
+        self.status = format!("新会话将绑定目录：{path}");
+        cx.notify();
+    }
+
+    /// 提交重命名（`POST /sessions/{id}/title`），成功后就地更新左栏标题。
+    fn submit_rename(&mut self, cx: &mut Context<Self>) {
+        let Some(Dialog::RenameSession { id }) = self.dialog.clone() else {
+            return;
+        };
+        let title = self
+            .dialog_input
+            .as_ref()
+            .map(|input| input.read(cx).value().trim().to_string())
+            .unwrap_or_default();
+        self.dialog = None;
+        self.dialog_input = None;
+        if title.is_empty() {
+            cx.notify();
+            return;
+        }
+        let port = self.port;
+        cx.spawn(async move |this, cx| {
+            let url = format!("http://{SERVER_HOST}:{port}/api/v1/sessions/{id}/title");
+            match post_json(url, serde_json::json!({ "title": title })).await {
+                Ok(_) => {
+                    let _ = this.update(cx, |this, cx| {
+                        if let Some(s) = this.sessions_data.iter_mut().find(|s| s.id == id) {
+                            s.title = title.clone();
+                        }
+                        this.rebuild_session_rows(cx);
+                    });
+                }
+                Err(e) => {
+                    let _ = this.update(cx, |this, cx| {
+                        this.status = format!("重命名失败：{e}");
+                        cx.notify();
+                    });
+                }
+            }
+        })
+        .detach();
+    }
+
+    /// 确认删除会话（`DELETE /sessions/{id}`）。
+    ///
+    /// 删除的是当前会话时清空主区（消息 / 统计 / 待办 / 目标），回到「选一个会话」空态。
+    fn confirm_delete(&mut self, cx: &mut Context<Self>) {
+        let Some(Dialog::DeleteSession { id, .. }) = self.dialog.clone() else {
+            return;
+        };
+        self.dialog = None;
+        let port = self.port;
+        cx.spawn(async move |this, cx| {
+            let url = format!("http://{SERVER_HOST}:{port}/api/v1/sessions/{id}");
+            match delete_json(url).await {
+                Ok(()) => {
+                    let _ = this.update(cx, |this, cx| {
+                        this.sessions_data.retain(|s| s.id != id);
+                        if this.current_session.as_deref() == Some(id.as_str()) {
+                            this.current_session = None;
+                            this.messages = Rc::new(Vec::new());
+                            this.msg_list_state =
+                                GpuiListState::new(0, ListAlignment::Bottom, px(120.));
+                            this.message_total = 0;
+                            this.current_title = "选择左侧会话查看消息".to_string();
+                            this.session_usage = None;
+                            this.request_perf = None;
+                            this.todos.clear();
+                            this.goals.clear();
+                        }
+                        this.rebuild_session_rows(cx);
+                    });
+                }
+                Err(e) => {
+                    let _ = this.update(cx, |this, cx| {
+                        this.status = format!("删除失败：{e}");
+                        cx.notify();
+                    });
+                }
+            }
+        })
+        .detach();
+    }
+
+    /// 模态对话框覆盖层（删除确认 / 重命名）：整窗半透明遮罩 + 居中卡片。
+    ///
+    /// 自绘而不接组件库 `Dialog`：只有两种形态，自绘更可控（遮罩色、按钮危险色
+    /// 都能直接对齐深色主题），也避免为弹窗引入一套焦点/Popover 语义。
+    fn render_dialog(&self, cx: &mut Context<Self>) -> AnyElement {
+        let Some(dialog) = self.dialog.clone() else {
+            return div().into_any_element();
+        };
+        let (heading, message, confirm_label, danger) = match &dialog {
+            Dialog::DeleteSession { title, .. } => (
+                "删除会话".to_string(),
+                Some(format!("确定删除会话「{title}」吗？此操作不可恢复。")),
+                "删除".to_string(),
+                true,
+            ),
+            Dialog::RenameSession { .. } => {
+                ("重命名会话".to_string(), None, "保存".to_string(), false)
+            }
+            Dialog::NewWorkspace => (
+                "新建会话并绑定目录".to_string(),
+                Some(
+                    "填工作目录的绝对路径（如 F:\\work\\my-project）。\
+                     该目录会成为新会话的工作区归属，并出现在左栏分组里。"
+                        .to_string(),
+                ),
+                "新建".to_string(),
+                false,
+            ),
+        };
+        let mut card = div()
+            .w(px(420.))
+            .rounded_xl()
+            .border_1()
+            .border_color(rgb(colors::BORDER))
+            .bg(rgb(colors::BG_SECONDARY))
+            .p_4()
+            .flex()
+            .flex_col()
+            .gap_3()
+            .child(
+                div()
+                    .text_size(px(15.))
+                    .text_color(rgb(colors::TEXT_PRIMARY))
+                    .child(heading),
+            );
+        if let Some(msg) = message {
+            card = card.child(
+                div()
+                    .text_sm()
+                    .text_color(rgb(colors::TEXT_SECONDARY))
+                    .child(msg),
+            );
+        }
+        // 重命名与新目录共用一个输入框实体（两个弹窗互斥，不会同时打开）
+        if let (Dialog::RenameSession { .. } | Dialog::NewWorkspace, Some(input)) =
+            (&dialog, self.dialog_input.as_ref())
+        {
+            card = card.child(
+                div()
+                    .w_full()
+                    .rounded_lg()
+                    .border_1()
+                    .border_color(rgb(colors::BORDER))
+                    .bg(rgb(colors::BG_PRIMARY))
+                    .px_2()
+                    .py_1()
+                    .child(Input::new(input).appearance(false)),
+            );
+        }
+        card = card.child(
+            div()
+                .w_full()
+                .flex()
+                .flex_row()
+                .justify_end()
+                .gap_2()
+                .child(
+                    div()
+                        .id("dlg-cancel")
+                        .px_3()
+                        .py_1()
+                        .rounded_lg()
+                        .cursor_pointer()
+                        .text_sm()
+                        .text_color(rgb(colors::TEXT_SECONDARY))
+                        .child("取消")
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.dialog = None;
+                            this.dialog_input = None;
+                            cx.notify();
+                        })),
+                )
+                .child(
+                    div()
+                        .id("dlg-confirm")
+                        .px_3()
+                        .py_1()
+                        .rounded_lg()
+                        .cursor_pointer()
+                        .text_sm()
+                        .bg(rgb(if danger {
+                            colors::ERROR
+                        } else {
+                            colors::ACCENT
+                        }))
+                        .text_color(rgb(0xffffff))
+                        .child(confirm_label)
+                        .on_click(
+                            cx.listener(move |this, _, _, cx| match this.dialog.clone() {
+                                Some(Dialog::DeleteSession { .. }) => this.confirm_delete(cx),
+                                Some(Dialog::RenameSession { .. }) => this.submit_rename(cx),
+                                Some(Dialog::NewWorkspace) => this.submit_new_workspace(cx),
+                                None => {}
+                            }),
+                        ),
+                ),
+        );
+        div()
+            .absolute()
+            .top(px(0.))
+            .left(px(0.))
+            .size_full()
+            .flex()
+            .items_center()
+            .justify_center()
+            .bg(rgba(0x000000a0))
+            .child(card)
+            .into_any_element()
+    }
+
     /// 左栏的一行（分组 / 会话 / 查看更多）。
     ///
     /// 行高由内容决定，不再用等高虚拟列表：三类行的高度本来就不一样，而
@@ -1008,6 +1309,10 @@ impl ClientApp {
                 tasks,
                 selected,
             } => {
+                // 行内操作按钮要带走 id / 标题（`title` 随后会被 move 进标题节点）
+                let rename_id = id.clone();
+                let delete_id = id.clone();
+                let delete_title = title.clone();
                 let mut head = div().flex().flex_row().items_center().gap_2().child(
                     div()
                         .flex_1()
@@ -1042,6 +1347,60 @@ impl ClientApp {
                             }),
                     );
                 }
+                // 行内操作：重命名 / 删除。两个回调都 `stop_propagation()`——
+                // 整行的 on_click 是「打开会话」，不拦住会把弹窗和切会话一起触发。
+                head = head.child(
+                    div()
+                        .flex_shrink_0()
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap_1()
+                        .child(
+                            div()
+                                .id(("rename", ix))
+                                .size(px(22.))
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .rounded_md()
+                                .cursor_pointer()
+                                .child(
+                                    svg()
+                                        .path(IconName::Pencil.path())
+                                        .size(px(12.))
+                                        .text_color(rgb(colors::TEXT_TERTIARY)),
+                                )
+                                .on_click(cx.listener(move |this, _, window, cx| {
+                                    cx.stop_propagation();
+                                    this.open_rename(rename_id.clone(), window, cx);
+                                })),
+                        )
+                        .child(
+                            div()
+                                .id(("delete", ix))
+                                .size(px(22.))
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .rounded_md()
+                                .cursor_pointer()
+                                .child(
+                                    svg()
+                                        .path(IconName::Trash.path())
+                                        .size(px(12.))
+                                        .text_color(rgb(colors::TEXT_TERTIARY)),
+                                )
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    cx.stop_propagation();
+                                    this.dialog = Some(Dialog::DeleteSession {
+                                        id: delete_id.clone(),
+                                        title: delete_title.clone(),
+                                    });
+                                    cx.notify();
+                                })),
+                        ),
+                );
                 div()
                     .id(("ws-session", ix))
                     .w_full()
@@ -2936,6 +3295,11 @@ impl ClientApp {
             body["model"] = serde_json::Value::String(model.clone());
             body["provider"] = serde_json::Value::String(provider.clone());
         }
+        // 「＋新目录」设置的工作目录：只作用于这一条消息——服务端建会话时固化，
+        // 之后的消息再带就没意义了（所以 `take()` 掉）。
+        if let Some(dir) = self.new_session_workspace.take() {
+            body["working_directory"] = serde_json::Value::String(dir);
+        }
         cx.spawn(async move |this, cx| {
             let url = format!("http://{SERVER_HOST}:{port}/api/v1/chat/stream");
             match post_json(url, body).await {
@@ -3147,6 +3511,27 @@ impl ClientApp {
                                     )
                                     .on_click(cx.listener(|this, _, _, cx| {
                                         this.start_new_session(cx);
+                                    })),
+                            )
+                            // 「＋新目录」：新建一个绑定指定工作目录的会话（目录在
+                            // 首条消息时随 `working_directory` 下发并固化）
+                            .child(
+                                div()
+                                    .id("new-workspace")
+                                    .size(px(22.))
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .rounded_md()
+                                    .cursor_pointer()
+                                    .child(
+                                        svg()
+                                            .path(IconName::FolderPlus.path())
+                                            .size(px(14.))
+                                            .text_color(rgb(colors::TEXT_SECONDARY)),
+                                    )
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.open_new_workspace(window, cx);
                                     })),
                             ),
                     )
@@ -3669,6 +4054,8 @@ impl Render for ClientApp {
             .size_full()
             .flex()
             .flex_row()
+            // 相对定位：模态对话框覆盖层用 `absolute` 相对这里铺满整窗
+            .relative()
             .bg(rgb(colors::BG_PRIMARY))
             .text_color(rgb(colors::TEXT_PRIMARY))
             .child(self.render_rail(cx))
@@ -3677,6 +4064,11 @@ impl Render for ClientApp {
                 View::Settings => self.render_settings(cx).into_any_element(),
                 other => self.render_placeholder(other, cx).into_any_element(),
             }))
+            .child(if self.dialog.is_some() {
+                self.render_dialog(cx)
+            } else {
+                div().into_any_element()
+            })
     }
 }
 
