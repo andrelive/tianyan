@@ -546,6 +546,18 @@ struct RolesStats {
     by_role: Vec<(String, u32)>,
 }
 
+/// 工作区目录树的一条（`GET /workspace/tree` 的 `entries[]`）。
+#[derive(Clone, Debug)]
+struct WsEntry {
+    name: String,
+    /// true = 目录（点进去），false = 文件（点开读）
+    is_dir: bool,
+    /// 相对工作区根的路径（如 `src/main.rs`）
+    path: String,
+    /// 文件大小（目录为 0）
+    size: u64,
+}
+
 /// 角色详情（`GET /roles/{name}`）：完整系统提示 + 工具白名单。
 #[derive(Clone, Debug, Default)]
 struct RoleDetail {
@@ -826,6 +838,51 @@ fn parse_segments(msg: &serde_json::Value) -> (Vec<Seg>, Vec<ToolCall>) {
         }
     }
     (segs, tools)
+}
+
+/// 百分号编码（查询参数值用；路径里常有空格、中文、反斜杠）。
+fn url_encode(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(b as char)
+            }
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
+}
+
+/// 剥掉 hashline 行前缀（`12#AB|内容` → `内容`）。
+///
+/// 那是给模型做行定位用的标识（读文件工具返回的原样格式），界面展示不需要；
+/// 非该格式的行原样保留，避免误伤正文里本来就有的 `|`。
+fn strip_hashline(content: &str) -> String {
+    content
+        .lines()
+        .map(|line| match line.split_once('|') {
+            Some((head, rest)) => match head.split_once('#') {
+                Some((num, _id)) if !num.is_empty() && num.chars().all(|c| c.is_ascii_digit()) => {
+                    rest.to_string()
+                }
+                _ => line.to_string(),
+            },
+            None => line.to_string(),
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// 文件大小 → 人类可读（`1.2 KB`），树里做次要信息。
+fn format_size(bytes: u64) -> String {
+    if bytes >= 1024 * 1024 {
+        format!("{:.1} MB", bytes as f64 / (1024.0 * 1024.0))
+    } else if bytes >= 1024 {
+        format!("{:.1} KB", bytes as f64 / 1024.0)
+    } else {
+        format!("{bytes} B")
+    }
 }
 
 /// 角色来源 → `(展示名, 颜色)`（对齐 Web 版 `SOURCE_LABEL` / `SOURCE_STYLE`：
@@ -1421,6 +1478,16 @@ struct ClientApp {
     roles_status: String,
     /// 角色操作结果提示（回退/退役后的一行反馈）
     roles_action_msg: Option<String>,
+    /// 文件页：工作区根（绝对路径，来自 tree 响应）
+    ws_root: String,
+    /// 文件页：当前目录（相对根；`""` = 根）
+    ws_path: String,
+    /// 文件页：当前目录的条目
+    ws_entries: Vec<WsEntry>,
+    /// 文件页：打开的文件（`(相对路径, 内容)`）
+    ws_file: Option<(String, String)>,
+    /// 文件页状态行（加载中 / 截断提示 / 错误）
+    ws_status: String,
     /// 反向弱引用：`gpui_list` 的渲染闭包只能拿 `&mut App`，点击折叠块时要
     /// 回写 view 状态 → 与旧 `SessionsDelegate` 同一手法
     app_ref: AppRef,
@@ -1556,6 +1623,11 @@ impl ClientApp {
             role_detail: None,
             roles_status: "正在加载子智能体…".to_string(),
             roles_action_msg: None,
+            ws_root: String::new(),
+            ws_path: String::new(),
+            ws_entries: Vec::new(),
+            ws_file: None,
+            ws_status: String::new(),
             dialog: None,
             new_session_workspace: None,
             dialog_input: None,
@@ -2447,6 +2519,133 @@ impl ClientApp {
         .detach();
     }
 
+    /// 加载工作区目录树（`GET /workspace/tree?depth=1&session_id=`）。
+    ///
+    /// 单层浏览（点目录进、点「上级」出）：树的可展开形态要维护每个节点的
+    /// 独立状态与嵌套请求，先按单层落，够用且不易错。
+    fn load_workspace_tree(&self, path: String, cx: &mut Context<Self>) {
+        let port = self.port;
+        let session = self.current_session.clone();
+        cx.spawn(async move |this, cx| {
+            let mut url = format!("http://{SERVER_HOST}:{port}/api/v1/workspace/tree?depth=1");
+            if !path.is_empty() {
+                url.push_str(&format!("&path={}", url_encode(&path)));
+            }
+            if let Some(sid) = &session {
+                url.push_str(&format!("&session_id={sid}"));
+            }
+            match fetch_json(url).await {
+                Ok(body) => {
+                    let root = body
+                        .get("root")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or_default()
+                        .to_string();
+                    let mut entries: Vec<WsEntry> = body
+                        .get("entries")
+                        .and_then(|v| v.as_array())
+                        .map(|arr| {
+                            arr.iter()
+                                .filter_map(|e| {
+                                    Some(WsEntry {
+                                        name: e.get("name")?.as_str()?.to_string(),
+                                        is_dir: e.get("type").and_then(|v| v.as_str())
+                                            == Some("dir"),
+                                        path: e
+                                            .get("path")
+                                            .and_then(|v| v.as_str())
+                                            .unwrap_or_default()
+                                            .to_string(),
+                                        size: e.get("size").and_then(|v| v.as_u64()).unwrap_or(0),
+                                    })
+                                })
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    // 目录在前、文件在后，各自按名字排序（与常见文件浏览器一致）
+                    entries.sort_by(|a, b| {
+                        b.is_dir
+                            .cmp(&a.is_dir)
+                            .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+                    });
+                    let n = entries.len();
+                    let _ = this.update(cx, |this, cx| {
+                        this.ws_root = root;
+                        this.ws_path = path;
+                        this.ws_entries = entries;
+                        this.ws_status = format!("{n} 项");
+                        cx.notify();
+                    });
+                }
+                Err(e) => {
+                    let _ = this.update(cx, |this, cx| {
+                        this.ws_status = format!("读取目录失败：{e}");
+                        cx.notify();
+                    });
+                }
+            }
+        })
+        .detach();
+    }
+
+    /// 读取工作区文件（`GET /workspace/read?limit=2000&session_id=`）。
+    fn load_workspace_file(&self, path: String, cx: &mut Context<Self>) {
+        let port = self.port;
+        let session = self.current_session.clone();
+        cx.spawn(async move |this, cx| {
+            let mut url = format!(
+                "http://{SERVER_HOST}:{port}/api/v1/workspace/read?limit=2000&path={}",
+                url_encode(&path)
+            );
+            if let Some(sid) = &session {
+                url.push_str(&format!("&session_id={sid}"));
+            }
+            match fetch_json(url).await {
+                Ok(body) => {
+                    let truncated = body
+                        .get("truncated")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false);
+                    let total = body.get("total_lines").and_then(|v| v.as_u64());
+                    let raw = body
+                        .get("content")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or_default();
+                    let text = strip_hashline(raw);
+                    let status = if raw.is_empty() {
+                        "（空文件或二进制，无法以文本显示）".to_string()
+                    } else if truncated {
+                        format!(
+                            "已截断：仅显示前 2000 行（共 {} 行）",
+                            total
+                                .map(|n| n.to_string())
+                                .unwrap_or_else(|| "?".to_string())
+                        )
+                    } else {
+                        format!(
+                            "{} 行",
+                            total
+                                .map(|n| n.to_string())
+                                .unwrap_or_else(|| text.lines().count().to_string())
+                        )
+                    };
+                    let _ = this.update(cx, |this, cx| {
+                        this.ws_file = Some((path, text));
+                        this.ws_status = status;
+                        cx.notify();
+                    });
+                }
+                Err(e) => {
+                    let _ = this.update(cx, |this, cx| {
+                        this.ws_status = format!("读取文件失败：{e}");
+                        cx.notify();
+                    });
+                }
+            }
+        })
+        .detach();
+    }
+
     /// 加载角色详情（`GET /roles/{name}`）。
     fn load_role_detail(&self, name: String, cx: &mut Context<Self>) {
         let port = self.port;
@@ -2828,6 +3027,10 @@ impl ClientApp {
                         if view == View::Roles && this.roles.is_empty() {
                             this.load_roles(cx);
                             this.load_roles_stats(cx);
+                        }
+                        // 文件页首次进入才拉目录树（工作区根 = 会话绑定目录）
+                        if view == View::Workspace && this.ws_root.is_empty() {
+                            this.load_workspace_tree(String::new(), cx);
                         }
                         cx.notify();
                     })),
@@ -4027,6 +4230,270 @@ impl ClientApp {
     /// `server/src/api/config/routes.rs`）。
     /// 子智能体页（对齐 `gui-vite/src/components/roles/RolesPanel.tsx`）：
     /// 左列表（搜索 + 角色项）+ 右详情（统计条 + 系统提示 / 工具 / 模型）。
+    /// 文件页（对齐 Web 版 `WorkspacePanel` 的**只读部分**）：左侧单层目录树 +
+    /// 右侧文件内容。
+    ///
+    /// 编辑保存（apply-patch）、diff 面板、目录绑定留阶段 2 —— 那三块各自要一套
+    /// 状态机（草稿 / 冲突 / 快照索引），先把"能看"落地。
+    fn render_workspace(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let crumb = if self.ws_path.is_empty() {
+            if self.ws_root.is_empty() {
+                "未选择会话（无可浏览目录）".to_string()
+            } else {
+                self.ws_root.clone()
+            }
+        } else {
+            format!(
+                "{}/{}",
+                self.ws_root.trim_end_matches(['\\', '/']),
+                self.ws_path
+            )
+        };
+
+        let mut list = div().flex_1().min_h_0().w_full().flex().flex_col().gap_1();
+        if !self.ws_path.is_empty() {
+            let parent = {
+                let p = self.ws_path.replace('\\', "/");
+                match p.rfind('/') {
+                    Some(pos) => p[..pos].to_string(),
+                    None => String::new(),
+                }
+            };
+            list = list.child(
+                div()
+                    .id("ws-up")
+                    .w_full()
+                    .px_2()
+                    .py_1()
+                    .rounded_md()
+                    .cursor_pointer()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_2()
+                    .text_size(px(12.))
+                    .text_color(rgb(colors::TEXT_SECONDARY))
+                    .child(
+                        svg()
+                            .path(IconName::CornerLeftUp.path())
+                            .size(px(12.))
+                            .text_color(rgb(colors::TEXT_TERTIARY)),
+                    )
+                    .child("上级目录")
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.load_workspace_tree(parent.clone(), cx);
+                    })),
+            );
+        }
+        for (ix, entry) in self.ws_entries.iter().enumerate() {
+            let is_dir = entry.is_dir;
+            let path = entry.path.clone();
+            let name = entry.name.clone();
+            let size = entry.size;
+            list = list.child(
+                div()
+                    .id(("ws-entry", ix))
+                    .w_full()
+                    .px_2()
+                    .py_1()
+                    .rounded_md()
+                    .cursor_pointer()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_2()
+                    .text_size(px(12.))
+                    .child(
+                        svg()
+                            .path(if is_dir {
+                                IconName::Folder.path()
+                            } else {
+                                IconName::FileText.path()
+                            })
+                            .size(px(12.))
+                            .text_color(rgb(colors::TEXT_TERTIARY)),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .whitespace_nowrap()
+                            .overflow_hidden()
+                            .text_color(rgb(if is_dir {
+                                colors::TEXT_PRIMARY
+                            } else {
+                                colors::TEXT_SECONDARY
+                            }))
+                            .child(name),
+                    )
+                    .children(if is_dir {
+                        None
+                    } else {
+                        Some(
+                            div()
+                                .flex_shrink_0()
+                                .text_size(px(10.))
+                                .text_color(rgb(colors::TEXT_TERTIARY))
+                                .child(format_size(size)),
+                        )
+                    })
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        if is_dir {
+                            this.load_workspace_tree(path.clone(), cx);
+                        } else {
+                            this.load_workspace_file(path.clone(), cx);
+                        }
+                    })),
+            );
+        }
+
+        let content = match &self.ws_file {
+            None => div()
+                .flex_1()
+                .flex()
+                .flex_col()
+                .items_center()
+                .justify_center()
+                .gap_3()
+                .child(
+                    svg()
+                        .path(IconName::FileText.path())
+                        .size(px(36.))
+                        .text_color(rgb(colors::TEXT_TERTIARY)),
+                )
+                .child(
+                    div()
+                        .text_size(px(13.))
+                        .text_color(rgb(colors::TEXT_TERTIARY))
+                        .child("从左侧选择一个文件查看内容"),
+                )
+                .into_any_element(),
+            Some((path, text)) => div()
+                .flex_1()
+                .min_h_0()
+                .w_full()
+                .flex()
+                .flex_col()
+                .child(
+                    div()
+                        .px_4()
+                        .py_2()
+                        .border_b_1()
+                        .border_color(rgb(colors::BORDER))
+                        .text_size(px(11.))
+                        .text_color(rgb(colors::TEXT_TERTIARY))
+                        .whitespace_nowrap()
+                        .overflow_hidden()
+                        .child(path.clone()),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .min_h_0()
+                        .p_4()
+                        .text_size(px(12.))
+                        .text_color(rgb(colors::TEXT_SECONDARY))
+                        .child(text.clone())
+                        .overflow_y_scrollbar(),
+                )
+                .into_any_element(),
+        };
+
+        div()
+            .size_full()
+            .flex()
+            .flex_col()
+            .child(
+                div()
+                    .px_6()
+                    .py_4()
+                    .border_b_1()
+                    .border_color(rgb(colors::BORDER))
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_3()
+                    .child(
+                        svg()
+                            .path(IconName::FolderTree.path())
+                            .size(px(16.))
+                            .text_color(rgb(colors::TEXT_SECONDARY)),
+                    )
+                    .child(
+                        div()
+                            .flex_shrink_0()
+                            .text_size(px(15.))
+                            .text_color(rgb(colors::TEXT_PRIMARY))
+                            .child("文件"),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .whitespace_nowrap()
+                            .overflow_hidden()
+                            .text_size(px(11.))
+                            .text_color(rgb(colors::TEXT_TERTIARY))
+                            .child(crumb),
+                    )
+                    .child(
+                        div()
+                            .flex_shrink_0()
+                            .text_size(px(11.))
+                            .text_color(rgb(colors::TEXT_TERTIARY))
+                            .child(self.ws_status.clone()),
+                    ),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    .flex()
+                    .flex_row()
+                    .child(
+                        div()
+                            .w(px(280.))
+                            .h_full()
+                            .flex()
+                            .flex_col()
+                            .border_r_1()
+                            .border_color(rgb(colors::BORDER))
+                            .bg(rgb(colors::BG_SECONDARY))
+                            .child(
+                                div()
+                                    .px_3()
+                                    .py_2()
+                                    .border_b_1()
+                                    .border_color(rgb(colors::BORDER))
+                                    .text_size(px(11.))
+                                    .text_color(rgb(colors::TEXT_SECONDARY))
+                                    .child(if self.ws_path.is_empty() {
+                                        "工作区根目录".to_string()
+                                    } else {
+                                        self.ws_path.clone()
+                                    }),
+                            )
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_h_0()
+                                    .p_2()
+                                    .child(list.overflow_y_scrollbar()),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .h_full()
+                            .flex()
+                            .flex_col()
+                            .bg(rgb(colors::BG_PRIMARY))
+                            .child(content),
+                    ),
+            )
+    }
+
     fn render_roles(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let query = self.roles_query.trim().to_lowercase();
         let visible: Vec<RoleRow> = self
@@ -4893,6 +5360,12 @@ impl ClientApp {
         self.todos.clear();
         self.goals.clear();
         self.pending_approvals.clear();
+        // 文件页目录树按会话绑定目录解析：切会话必须作废，否则会继续显示
+        // 上一条会话（或全局默认）的目录
+        self.ws_root.clear();
+        self.ws_entries.clear();
+        self.ws_file = None;
+        self.ws_path.clear();
         self.load_messages(id, cx);
         self.load_session_usage(cx);
         self.load_todos_goals(cx);
@@ -5722,6 +6195,7 @@ impl Render for ClientApp {
                 View::Chat => self.render_chat(cx).into_any_element(),
                 View::Settings => self.render_settings(cx).into_any_element(),
                 View::Roles => self.render_roles(cx).into_any_element(),
+                View::Workspace => self.render_workspace(cx).into_any_element(),
                 other => self.render_placeholder(other, cx).into_any_element(),
             }))
             .child(if self.dialog.is_some() {
