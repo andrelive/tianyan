@@ -10508,6 +10508,7 @@ name = "tianyan-gui-native"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "axum",
  "futures",
  "gpui-kit",
  "reqwest",

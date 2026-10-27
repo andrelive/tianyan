@@ -21,6 +21,8 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 use tokio::runtime::Runtime;
 
+mod automation;
+
 const SERVER_HOST: &str = "127.0.0.1";
 const PREFERRED_PORT: u16 = 3000;
 /// 单屏渲染的消息条数上限（无虚拟化时控制 Markdown 布局量，否则滚动卡顿）
@@ -420,6 +422,46 @@ enum View {
     Settings,
 }
 
+impl View {
+    /// 全部一级入口（顺序即侧栏顺序）。
+    const ALL: [View; 11] = [
+        View::Chat,
+        View::Workspace,
+        View::Skills,
+        View::Roles,
+        View::Tools,
+        View::Knowledge,
+        View::Memory,
+        View::Approval,
+        View::Scheduled,
+        View::Insights,
+        View::Settings,
+    ];
+
+    /// 稳定标识（自动化 API 的**对外契约值**：`state.view` 与 `switch_tab` 的参数）。
+    /// 改名等于改契约，验证脚本会跟着断。
+    fn key(self) -> &'static str {
+        match self {
+            View::Chat => "chat",
+            View::Workspace => "workspace",
+            View::Skills => "skills",
+            View::Roles => "roles",
+            View::Tools => "tools",
+            View::Knowledge => "knowledge",
+            View::Memory => "memory",
+            View::Approval => "approval",
+            View::Scheduled => "scheduled",
+            View::Insights => "insights",
+            View::Settings => "settings",
+        }
+    }
+
+    /// 由标识反查（未知标识返回 `None`，报错交给调用方）。
+    fn from_key(key: &str) -> Option<Self> {
+        Self::ALL.iter().copied().find(|v| v.key() == key)
+    }
+}
+
 /// 设置页的模型行（只取展示与切换需要的字段）。
 #[derive(Clone, Debug)]
 struct ModelRow {
@@ -490,6 +532,16 @@ enum PickerTarget {
     NewSession,
 }
 
+impl PickerTarget {
+    /// 稳定标识（自动化 API 契约值）。
+    fn key(self) -> &'static str {
+        match self {
+            PickerTarget::Session => "session",
+            PickerTarget::NewSession => "new_session",
+        }
+    }
+}
+
 #[derive(Clone)]
 /// 需要用户确认的模态对话框（自绘覆盖层，不依赖组件库 Dialog）。
 enum Dialog {
@@ -504,6 +556,19 @@ enum Dialog {
     ResetRole { name: String },
     /// 退役删除角色（`DELETE /roles/{name}`）
     DeleteRole { name: String },
+}
+
+impl Dialog {
+    /// 稳定标识（自动化 API 契约值；`state.dialog.kind`）。
+    fn key(&self) -> &'static str {
+        match self {
+            Dialog::DeleteSession { .. } => "delete_session",
+            Dialog::RenameSession { .. } => "rename_session",
+            Dialog::WorkspacePicker { .. } => "workspace_picker",
+            Dialog::ResetRole { .. } => "reset_role",
+            Dialog::DeleteRole { .. } => "delete_role",
+        }
+    }
 }
 
 // 左栏行由 `ClientApp::rebuild_session_rows` 直接产生（行类型混排 + 行高不一，
@@ -3287,6 +3352,29 @@ impl ClientApp {
             );
         }
         rail
+    }
+
+    /// 切页：**侧栏点击与自动化 `switch_tab` 共用这一份**。
+    ///
+    /// 「首次进入才补拉」的逻辑必须住在这里。早先它内联在侧栏的 `on_click` 闭包
+    /// 里，于是点侧栏会拉数据、而自动化 `switch_tab` 只改 `view` 不拉 —— 两条
+    /// 路径分叉，验证结论随即失真（ADR-052 D8 的实例，实测踩过：文件页树一直空）。
+    fn switch_view(&mut self, view: View, cx: &mut Context<Self>) {
+        self.view = view;
+        if view == View::Settings {
+            self.load_models(cx);
+        }
+        // 数据已在启动时预加载：只在空列表（首次失败/未拉到）时补拉，
+        // 避免每次切页都发请求、页面先空一帧再填
+        if view == View::Roles && self.roles.is_empty() {
+            self.load_roles(cx);
+            self.load_roles_stats(cx);
+        }
+        // 文件页首次进入才拉目录树（工作区根 = 会话绑定目录）
+        if view == View::Workspace && self.ws_root.is_empty() {
+            self.load_workspace_tree(String::new(), cx);
+        }
+        cx.notify();
     }
 
     /// 输入卡片底部显示的当前 chat 模型（`模型 · provider`）。
@@ -7248,6 +7336,9 @@ fn main() {
         gpui_kit::init(cx);
         Theme::change(ThemeMode::Dark, None, cx);
         let bounds = Bounds::centered(None, size(px(1280.), px(820.)), cx);
+        // 自动化端口（ADR-052）：服务在 tokio 线程、动作用 UI 线程执行，所以先把
+        // `AsyncApp` 取出来带进窗口构建闭包——窗口建好才有状态可读。
+        let async_cx = cx.to_async();
         cx.spawn(async move |cx| {
             cx.open_window(
                 WindowOptions {
@@ -7260,6 +7351,8 @@ fn main() {
                 },
                 move |window, cx| {
                     let view = cx.new(|cx| ClientApp::new(window, cx, port));
+                    // 未设 `TIANYAN_GUI_AUTOMATION_PORT` 时是空操作
+                    automation::maybe_start(&async_cx, view.downgrade());
                     cx.new(|cx| Root::new(view, window, cx))
                 },
             )

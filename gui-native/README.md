@@ -238,18 +238,47 @@ cd gui-native
 cargo run            # 首次约 3 分钟，之后增量 2-6 秒
 ```
 
-## 自动验证（本机没有 Playwright 的等价物）
+## 自动验证
 
-原生窗口不能用 Playwright/Cypress。本 crate 用「DPI-aware 截图 + 鼠标点击」这套
-外部脚本自证（`scripts/`）：
+### 首选：内建自动化端口（ADR-052）—— 不截图、不点坐标
+
+界面自己提供 `GET /state`（状态快照）与 `POST /act`（语义动作），agent 直接读断言、
+直接触发动作。**锁屏也能跑**（不依赖窗口可见）：
 
 ```powershell
-# 1) 启动
+# 终端 1：带端口启动
+$env:TIANYAN_GUI_AUTOMATION_PORT = "3010"
 .\target\debug\tianyan-gui-native.exe
-# 2) 点一下左侧第一个会话（坐标 = 截图里的像素坐标，原点是窗口左上角）
-pwsh -NoProfile -File .\scripts\ui-click.ps1 -X 260 -Y 120
-# 3) 截图，交给模型/人核对
-pwsh -NoProfile -File .\scripts\ui-shot.ps1 -Out "$env:TEMP\shot.png"
+
+# 终端 2：跑冒烟（要用 pwsh；PowerShell 5.1 会把无 BOM 的 UTF-8 中文读成乱码）
+pwsh -NoProfile -File .\scripts\automation-smoke.ps1
+```
+
+随手用（`curl` 也行）：
+
+```powershell
+# 状态快照
+Invoke-RestMethod http://127.0.0.1:3010/state | ConvertTo-Json -Depth 8
+# 触发动作（返回动作**之后**的状态；settle_ms = 睡一会再读，等异步数据落地）
+Invoke-RestMethod http://127.0.0.1:3010/act -Method Post -ContentType application/json `
+  -Body '{"action":"switch_tab","view":"skills","settle_ms":300}'
+```
+
+能断言的东西（以前只能看图的）：`messages.last.head`（消息正文渲染出来没有）、
+`sessions_rows`（分组折叠 / 查看更多剩几条）、`picker.current`（目录选择器在第几层）、
+`workspace.diff.files` 与单文件 `+N −M`、`tasks.items[].activity`（子代理活动流拉到几条）。
+完整动作清单见 `src/automation.rs` 的 `apply_action`。
+
+> 端口**默认不开**：没设 `TIANYAN_GUI_AUTOMATION_PORT` 就不监听（生产 MSI 不带该变量）。
+> 只绑 `127.0.0.1`，且 `state` 不含 `api_key`。
+
+### 次选：DPI-aware 截图 + 坐标点击（仅用于像素级观感核对）
+
+配色 / 间距 / 字体这类「好看不好看」还得看像素。**状态验证不要再用它**：
+
+```powershell
+.\scripts\ui-click.ps1 -X 260 -Y 120     # 坐标 = 截图里的像素坐标，原点是窗口左上角
+.\scripts\ui-shot.ps1 -Out "$env:TEMP\shot.png"
 ```
 
 > ⛔ **必读坑：PowerShell 默认 DPI-unaware。** 本机 2560×1440 @150%，`GetWindowRect`
@@ -261,8 +290,9 @@ pwsh -NoProfile -File .\scripts\ui-shot.ps1 -Out "$env:TEMP\shot.png"
 > 第二个坑：`CopyFromScreen` 抓的是屏幕像素，窗口被别的窗口挡住会抓到遮挡物，
 > 所以脚本里先 `ShowWindow` + `HWND_TOPMOST` + `SetForegroundWindow`。
 
-更彻底的方案是 GPUI 自带的 `#[gpui_kit::test]`（headless 窗口 + 真实事件 + 断言，
-需开 `test-support` feature）——可对纯视图逻辑做单元级验证；像素级观感仍需上面的截图。
+GPUI 自己的 `#[gpui_kit::test]`（headless 窗口 + 真实事件 + 断言，需开 `test-support`
+feature）适合**纯视图逻辑的单元级验证**（不进真实 app 状态机）；而自动化端口验证的是
+**运行中的整个界面**（有后端数据、有 SSE、有异步加载）。两者互补，都不是观感。
 
 打包 MSI（需先 `dotnet tool install --global wix --version 6.0.2`）：
 

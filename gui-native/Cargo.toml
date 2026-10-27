@@ -28,6 +28,8 @@ tokio = { version = "1.35", features = ["full"] }
 # stream：SSE 常驻订阅要按块读响应体（`Response::bytes_stream`）
 reqwest = { version = "0.12", features = ["json", "stream"] }
 serde_json = "1.0"
+# 自动化端口（ADR-052）：只在 `TIANYAN_GUI_AUTOMATION_PORT` 存在时监听
+axum = "0.8"
 futures = "0.3"
 tracing = "0.1"
 anyhow = "1.0"
