@@ -76,6 +76,12 @@ if (-not $bh) { Write-Error "没有可见顶层窗口"; exit 1 }
 [void][TyClick]::SetForegroundWindow($bh)
 Start-Sleep -Milliseconds 600
 
+# 最小化时 rect 是假值（-32000 附近 / 约 237x39），恢复后必须重新取一次，
+# 否则点击坐标会算到屏幕外（实测：点在 (-32000+300, …) 上，等于没点）。
+$rr = New-Object TyClick+RECT
+[void][TyClick]::GetWindowRect($bh, [ref]$rr)
+$best = $rr
+
 $ax = $best.Left + $X
 $ay = $best.Top + $Y
 [void][TyClick]::SetCursorPos($ax, $ay)

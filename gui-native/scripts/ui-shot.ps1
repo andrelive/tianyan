@@ -87,14 +87,24 @@ for ($i = 0; $i -lt $Tries; $i++) {
     Start-Sleep -Milliseconds 500
 }
 if (-not $bh) { Write-Error "没有可见顶层窗口"; exit 1 }
-if ($bw -lt $MinW -or $bhh -lt $MinH) {
-    Write-Error "窗口尺寸不足：${bw}x${bhh}（进程可能启动失败或窗口未创建）"; exit 1
-}
+# 这里**不**按尺寸判失败：窗口可能处于最小化（rect 是 -32000 附近的假值，
+# 只有约 237x39）。先恢复再重取 rect，真正的尺寸门槛放在 ShowWindow 之后。
 
 [void][TyShot]::ShowWindow($bh, 9)
 [void][TyShot]::SetWindowPos($bh, [IntPtr](-1), 0, 0, 0, 0, 0x0001 -bor 0x0002)
 [void][TyShot]::SetForegroundWindow($bh)
 Start-Sleep -Milliseconds 1200
+
+# 最小化窗口的 rect 是个假值（-32000 附近、约 237x39），恢复后必须**重新取**——
+# 否则后面按旧 rect 裁屏幕区域，抓到的是桌面左上角而不是窗口。
+$rr = New-Object TyShot+RECT
+[void][TyShot]::GetWindowRect($bh, [ref]$rr)
+$best = $rr
+$bw = $rr.Right - $rr.Left
+$bhh = $rr.Bottom - $rr.Top
+if ($bw -lt $MinW -or $bhh -lt $MinH) {
+    Write-Error "恢复后窗口尺寸仍不足：${bw}x${bhh}（句柄 $bh）"; exit 1
+}
 
 # 窗口若越出屏幕，裁到屏幕内（越界部分是黑的）
 $left = [Math]::Max($best.Left, 0)

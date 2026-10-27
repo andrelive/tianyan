@@ -7,17 +7,17 @@
 //! 未完成：SSE 流式发送、设置页/workspace/审批面板、托盘/通知/快捷键/updater、单实例保护。
 
 use futures::StreamExt as _;
-use gpui_kit::assets::{IconName, IconNamed as _};
+use gpui_kit::assets::IconName;
 use gpui_kit::component::input::{InputEvent, Textarea, TextareaState};
-use gpui_kit::component::list::{List, ListDelegate, ListItem, ListState};
 use gpui_kit::component::progress::ProgressCircle;
+use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::text::TextView;
 use gpui_kit::component::theme::{Theme, ThemeMode};
-use gpui_kit::component::{IndexPath, Root};
+use gpui_kit::component::Root;
 use gpui_kit::*;
 use gpui_kit::{list as gpui_list, ListAlignment, ListState as GpuiListState};
 use std::rc::Rc;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::OnceLock;
 use std::time::Duration;
 use tokio::runtime::Runtime;
 
@@ -25,6 +25,13 @@ const SERVER_HOST: &str = "127.0.0.1";
 const PREFERRED_PORT: u16 = 3000;
 /// 单屏渲染的消息条数上限（无虚拟化时控制 Markdown 布局量，否则滚动卡顿）
 const RENDER_LIMIT: usize = 60;
+/// 左栏组内初始可见会话数（对齐 Tauri 版 `SESSIONS_INITIAL_VISIBLE`）
+const SESSIONS_INITIAL_VISIBLE: usize = 3;
+/// 「查看更多」单次要展开的条数（`SESSIONS_LOAD_STEP`）
+const SESSIONS_LOAD_STEP: usize = 10;
+/// 「最近活跃」段的时间窗口（24h）与组数上限
+const ACTIVE_GROUP_WINDOW_SECS: i64 = 24 * 3_600;
+const ACTIVE_GROUP_LIMIT: usize = 3;
 
 /// 本地生成会话 id：服务端 `resolve_or_create_session` 接受前端传入的 id
 /// 并在不存在时按它新建（`server/src/api/chat/services.rs`），因此新会话
@@ -36,6 +43,96 @@ fn new_session_id() -> String {
         .map(|d| d.as_nanos())
         .unwrap_or(0);
     format!("session-{nanos:x}")
+}
+/// 当前 Unix 时间（秒）。
+fn now_unix_secs() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+/// `HH:MM` → `(小时, 分钟)`（时区换算用；解析不出来按 0 处理）。
+fn split_hhmm(s: &str) -> (i64, i64) {
+    let hh = s.get(0..2).and_then(|v| v.parse().ok()).unwrap_or(0);
+    let mm = s.get(3..5).and_then(|v| v.parse().ok()).unwrap_or(0);
+    (hh, mm)
+}
+
+/// 解析 RFC3339 时间戳为 Unix 秒。
+///
+/// 手写而不引 `chrono`：左栏只需要「多久以前」这一档精度，为它加一个依赖不值。
+/// 支持 `...Z`（UTC）、`...+08:00` / `...-05:00`（换算到 UTC）与小数秒
+/// （`2026-10-27T06:45:44.885328Z` —— 小数部分丢弃）。
+fn parse_rfc3339_secs(s: &str) -> Option<i64> {
+    if s.len() < 19 {
+        return None;
+    }
+    let year: i64 = s.get(0..4)?.parse().ok()?;
+    let month: i64 = s.get(5..7)?.parse().ok()?;
+    let day: i64 = s.get(8..10)?.parse().ok()?;
+    let hour: i64 = s.get(11..13)?.parse().ok()?;
+    let minute: i64 = s.get(14..16)?.parse().ok()?;
+    let second: i64 = s.get(17..19)?.parse().ok()?;
+    // 公历 → 距 1970-01-01 的天数（Howard Hinnant 的 days_from_civil）
+    let y = if month <= 2 { year - 1 } else { year };
+    let era = if y >= 0 { y } else { y - 399 } / 400;
+    let yoe = y - era * 400;
+    let mp = (month + 9) % 12;
+    let doy = (153 * mp + 2) / 5 + day - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = era * 146_097 + doe - 719_468;
+    let mut secs = days * 86_400 + hour * 3_600 + minute * 60 + second;
+    // 时区在**小数秒之后**：`...55.122+08:00` / `...44.885328Z`。别只看第 20 个
+    // 字节——后端的时间戳两种形态都有（UTC 带 Z 的与本地带 +08:00 的混用）。
+    let tail = s.get(19..).unwrap_or("");
+    if let Some(pos) = tail.find(['+', '-']) {
+        let tz = &tail[pos..];
+        if let Some(rest) = tz.strip_prefix('+') {
+            let (hh, mm) = split_hhmm(rest);
+            secs -= hh * 3_600 + mm * 60;
+        } else if let Some(rest) = tz.strip_prefix('-') {
+            let (hh, mm) = split_hhmm(rest);
+            secs += hh * 3_600 + mm * 60;
+        }
+    }
+    Some(secs)
+}
+
+/// 相对时间文案（对齐 Tauri 版 `formatRelativeTime` 的口径）。
+///
+/// 超过一周就退化成年月日（`MM/DD`），与 Web 版一致 —— 「37 天前」不如日期可读。
+fn format_relative(ts: &str) -> String {
+    let Some(secs) = parse_rfc3339_secs(ts) else {
+        return String::new();
+    };
+    let delta = now_unix_secs() - secs;
+    if delta < 60 {
+        "刚刚".to_string()
+    } else if delta < 3_600 {
+        format!("{} 分钟前", delta / 60)
+    } else if delta < 86_400 {
+        format!("{} 小时前", delta / 3_600)
+    } else if delta < 86_400 * 7 {
+        format!("{} 天前", delta / 86_400)
+    } else {
+        ts.get(5..10)
+            .map(|m| m.replace('-', "/"))
+            .unwrap_or_default()
+    }
+}
+
+/// 工作目录 → 分组展示名（末级目录名；默认组显示「默认」）。
+fn group_label(workdir: &str) -> String {
+    if workdir.is_empty() {
+        return "默认".to_string();
+    }
+    workdir
+        .split(['\\', '/'])
+        .filter(|s| !s.is_empty())
+        .last()
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| workdir.to_string())
 }
 
 fn runtime() -> &'static Runtime {
@@ -293,68 +390,46 @@ fn ellipsis(s: &str, max_chars: usize) -> String {
 
 // ===== 会话列表 =====
 
+/// 会话（`GET /api/v1/sessions` 的子集，够左栏分组渲染）。
 #[derive(Clone, Debug)]
 struct SessionRow {
     id: String,
     title: String,
+    /// 工作目录绝对路径；`""` = 未绑定（默认组）。后端字段 `working_directory` 可为 null。
+    working_directory: String,
+    /// RFC3339 时间戳（列表展示相对时间）
+    updated_at: String,
 }
 
-type AppRef = Arc<Mutex<Option<WeakEntity<ClientApp>>>>;
-
-struct SessionsDelegate {
-    items: Vec<SessionRow>,
-    app: AppRef,
+/// 左栏的一行 —— **分组行 / 会话行 / 「查看更多」行混排**。
+///
+/// 与 `SessionRow`（原始会话数据）分开：一行的「是什么」由折叠状态、选中态、
+/// 后台任务数共同决定，不能从会话数据直接推出来。
+#[derive(Clone, Debug)]
+enum SessionListRow {
+    /// 工作区分组行（目录名 + 会话数 + 折叠箭头）
+    Group {
+        key: String,
+        label: String,
+        count: usize,
+        collapsed: bool,
+    },
+    /// 会话行
+    Session {
+        id: String,
+        title: String,
+        /// 副标题：相对时间（右对齐信息，空串则不画）
+        meta: String,
+        /// 该会话正在跑的后台任务数（>0 显示红色角标）
+        tasks: usize,
+        selected: bool,
+    },
+    /// 组内折叠的「查看更多 (n)」行
+    More { key: String, hidden: usize },
 }
 
-impl ListDelegate for SessionsDelegate {
-    type Item = ListItem;
-
-    fn items_count(&self, _section: usize, _cx: &gpui_kit::App) -> usize {
-        self.items.len()
-    }
-
-    fn render_item(
-        &mut self,
-        ix: IndexPath,
-        _window: &mut Window,
-        _cx: &mut Context<ListState<Self>>,
-    ) -> Option<ListItem> {
-        let row = self.items.get(ix.row)?.clone();
-        let title = if row.title.is_empty() {
-            "(无标题)".to_string()
-        } else {
-            ellipsis(&row.title, 22)
-        };
-        let app = self.app.clone();
-        let id = row.id.clone();
-        Some(
-            ListItem::new(ix.row)
-                .h(px(40.))
-                .child(
-                    div()
-                        .px_3()
-                        .whitespace_nowrap()
-                        .overflow_hidden()
-                        .child(title),
-                )
-                .on_click(move |_, _window, cx| {
-                    let weak = app.lock().ok().and_then(|g| g.clone());
-                    if let Some(w) = weak {
-                        let _ = w.update(cx, |this, cx| this.open_session(id.clone(), cx));
-                    }
-                }),
-        )
-    }
-
-    fn set_selected_index(
-        &mut self,
-        _ix: Option<IndexPath>,
-        _window: &mut Window,
-        _cx: &mut Context<ListState<Self>>,
-    ) {
-    }
-}
-
+// 左栏行由 `ClientApp::rebuild_session_rows` 直接产生（行类型混排 + 行高不一，
+// 虚拟列表的等高测量在这里只会帮倒忙：实测「查看更多」行会与上一会话行重叠）。
 // ===== 消息（不再用虚拟列表：高度不定，几十到 200 条直接布局更简单可靠）=====
 
 /// 会话目标行。
@@ -450,6 +525,8 @@ struct TaskRow {
     kind: String,
     status: String,
     description: String,
+    /// 归属会话 id（左栏角标按它聚合；子代理/终端任务才有）
+    parent_session_id: String,
 }
 
 /// 消息内的一个展示块（口径对齐 Tauri 版 `MessageSegments` 的分段渲染）。
@@ -586,7 +663,17 @@ fn parse_segments(msg: &serde_json::Value) -> Vec<Seg> {
 }
 
 struct ClientApp {
-    sessions: Entity<ListState<SessionsDelegate>>,
+    /// 左栏派生行（分组 / 会话 / 查看更多）：由 `rebuild_session_rows` 从
+    /// `sessions_data` + 折叠态 + 选中态 + 任务角标重新算出
+    session_rows: Vec<SessionListRow>,
+    /// 会话原始数据（左栏分组的真相源；`sessions` 那份是按折叠/选中态**派生**的行）
+    sessions_data: Vec<SessionRow>,
+    /// 折叠的工作区分组（key = `working_directory`）
+    collapsed_groups: std::collections::HashSet<String>,
+    /// 组内额外展开条数（key = `working_directory`；点「查看更多」累加）
+    expanded_groups: std::collections::HashMap<String, usize>,
+    /// 全量后台任务（会话角标聚合用；面板展示的是按当前会话过滤后的 `tasks`）
+    all_tasks: Vec<TaskRow>,
     /// 消息用 Rc 包一层：闭包驱动的虚拟列表需要把数据带进 'static 闭包，
     /// Rc::clone 是 O(1)，比每帧 clone Vec<MsgRow> 便宜得多
     messages: Rc<Vec<MsgRow>>,
@@ -648,23 +735,8 @@ struct ClientApp {
 
 impl ClientApp {
     fn new(window: &mut Window, cx: &mut Context<Self>, port: u16) -> Self {
-        let app_ref: AppRef = Arc::new(Mutex::new(None));
-        let sessions = cx.new(|cx| {
-            ListState::new(
-                SessionsDelegate {
-                    items: Vec::new(),
-                    app: app_ref.clone(),
-                },
-                window,
-                cx,
-            )
-        });
         let messages: Rc<Vec<MsgRow>> = Rc::new(Vec::new());
         let total: usize = 0;
-        // 回填自身弱引用，供列表项点击回调使用
-        if let Ok(mut g) = app_ref.lock() {
-            *g = Some(cx.entity().downgrade());
-        }
 
         let input = cx.new(|cx| {
             TextareaState::new(window, cx).placeholder("输入消息 · Enter 发送 / Shift+Enter 换行")
@@ -688,7 +760,11 @@ impl ClientApp {
         .detach();
 
         let app = Self {
-            sessions,
+            session_rows: Vec::new(),
+            sessions_data: Vec::new(),
+            collapsed_groups: std::collections::HashSet::new(),
+            expanded_groups: std::collections::HashMap::new(),
+            all_tasks: Vec::new(),
             messages,
             msg_list_state: GpuiListState::new(0, ListAlignment::Bottom, px(120.)),
             message_total: total,
@@ -742,8 +818,10 @@ impl ClientApp {
         cx.spawn(async move |this, cx| loop {
             sleep_secs(3).await;
             let alive = this.update(cx, |this, cx| {
+                // 任务列表**无条件**轮询：左栏会话角标要按 `parent_session_id`
+                // 聚合所有会话，未选中会话时也得更新；面板那三个只在有会话时拉。
+                this.load_tasks(cx);
                 if this.current_session.is_some() {
-                    this.load_tasks(cx);
                     this.load_todos_goals(cx);
                     this.load_approvals(cx);
                 }
@@ -758,7 +836,6 @@ impl ClientApp {
 
     fn load_sessions(&self, cx: &mut Context<Self>) {
         let port = self.port;
-        let sessions = self.sessions.clone();
         cx.spawn(async move |this, cx| {
             match fetch_json(format!("http://{SERVER_HOST}:{port}/api/v1/sessions")).await {
                 Ok(body) => {
@@ -781,19 +858,26 @@ impl ClientApp {
                                 .and_then(|v| v.as_str())
                                 .unwrap_or_default()
                                 .to_string(),
+                            working_directory: s
+                                .get("working_directory")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or_default()
+                                .to_string(),
+                            updated_at: s
+                                .get("updated_at")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or_default()
+                                .to_string(),
                         })
                         .collect();
                     let n = rows.len();
                     println!("[会话] 拉到 {n} 条");
                     cx.update(|app| {
-                        sessions.update(app, |state, cx| {
-                            state.delegate_mut().items = rows;
-                            cx.notify();
-                        });
                         let _ = this.update(app, |this, cx| {
+                            this.sessions_data = rows;
                             this.session_count = n;
                             this.status = format!("127.0.0.1:{port} · 会话 {n} 条");
-                            cx.notify();
+                            this.rebuild_session_rows(cx);
                         });
                     });
                 }
@@ -809,6 +893,302 @@ impl ClientApp {
             }
         })
         .detach();
+    }
+
+    /// 左栏的一行（分组 / 会话 / 查看更多）。
+    ///
+    /// 行高由内容决定，不再用等高虚拟列表：三类行的高度本来就不一样，而
+    /// `List` 的测量缓存会把「查看更多」压到上一行标题上（实测重叠）。
+    fn render_session_row(&self, ix: usize, cx: &mut Context<Self>) -> AnyElement {
+        let Some(row) = self.session_rows.get(ix).cloned() else {
+            return div().into_any_element();
+        };
+        match row {
+            SessionListRow::Group {
+                key,
+                label,
+                count,
+                collapsed,
+            } => {
+                let chevron = if collapsed {
+                    IconName::ChevronRight
+                } else {
+                    IconName::ChevronDown
+                };
+                div()
+                    .id(("ws-group", ix))
+                    .w_full()
+                    .px_1()
+                    .py_1()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_1()
+                    .rounded_md()
+                    .cursor_pointer()
+                    .child(
+                        svg()
+                            .path(chevron.path())
+                            .size(px(11.))
+                            .text_color(rgb(colors::TEXT_TERTIARY)),
+                    )
+                    .child(
+                        svg()
+                            .path(IconName::FolderOpen.path())
+                            .size(px(12.))
+                            .text_color(rgb(colors::TEXT_TERTIARY)),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .whitespace_nowrap()
+                            .overflow_hidden()
+                            .text_size(px(11.))
+                            .text_color(rgb(colors::TEXT_SECONDARY))
+                            .child(label),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(10.))
+                            .text_color(rgb(colors::TEXT_TERTIARY))
+                            .child(format!("{count}")),
+                    )
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.toggle_group(key.clone(), cx);
+                    }))
+                    .into_any_element()
+            }
+            SessionListRow::Session {
+                id,
+                title,
+                meta,
+                tasks,
+                selected,
+            } => {
+                let mut head = div().flex().flex_row().items_center().gap_2().child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .whitespace_nowrap()
+                        .overflow_hidden()
+                        .text_sm()
+                        .text_color(rgb(if selected {
+                            colors::ACCENT
+                        } else {
+                            colors::TEXT_PRIMARY
+                        }))
+                        .child(if title.is_empty() {
+                            "新对话".to_string()
+                        } else {
+                            title
+                        }),
+                );
+                if tasks > 0 {
+                    head = head.child(
+                        div()
+                            .flex_shrink_0()
+                            .px_1()
+                            .rounded_full()
+                            .bg(rgb(colors::ERROR))
+                            .text_size(px(9.))
+                            .text_color(rgb(0xffffff))
+                            .child(if tasks > 99 {
+                                "99+".to_string()
+                            } else {
+                                format!("{tasks}")
+                            }),
+                    );
+                }
+                div()
+                    .id(("ws-session", ix))
+                    .w_full()
+                    .px_2()
+                    .py_1()
+                    .rounded_md()
+                    .bg(rgb(if selected {
+                        colors::BG_TERTIARY
+                    } else {
+                        colors::BG_SECONDARY
+                    }))
+                    .cursor_pointer()
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .child(head)
+                    .child(
+                        div()
+                            .text_size(px(11.))
+                            .text_color(rgb(colors::TEXT_SECONDARY))
+                            .whitespace_nowrap()
+                            .overflow_hidden()
+                            .child(meta),
+                    )
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.open_session(id.clone(), cx);
+                    }))
+                    .into_any_element()
+            }
+            SessionListRow::More { key, hidden } => div()
+                .id(("ws-more", ix))
+                .w_full()
+                .pl_4()
+                .pr_2()
+                .py_1()
+                .rounded_md()
+                .cursor_pointer()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap_1()
+                .text_size(px(11.))
+                .text_color(rgb(colors::TEXT_SECONDARY))
+                .child("查看更多")
+                .child(
+                    div()
+                        .text_color(rgb(colors::TEXT_TERTIARY))
+                        .child(format!("({hidden})")),
+                )
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.expand_group(key.clone(), cx);
+                }))
+                .into_any_element(),
+        }
+    }
+
+    /// 该会话正在跑的后台任务数（`pending` / `running` 计）。
+    fn running_tasks_of(&self, session_id: &str) -> usize {
+        self.all_tasks
+            .iter()
+            .filter(|t| {
+                t.parent_session_id == session_id
+                    && (t.status == "pending" || t.status == "running")
+            })
+            .count()
+    }
+
+    /// 折叠 / 展开一个工作区分组。
+    fn toggle_group(&mut self, key: String, cx: &mut Context<Self>) {
+        if !self.collapsed_groups.remove(&key) {
+            self.collapsed_groups.insert(key);
+        }
+        self.rebuild_session_rows(cx);
+    }
+
+    /// 组内「查看更多」：再展开 `SESSIONS_LOAD_STEP` 条。
+    fn expand_group(&mut self, key: String, cx: &mut Context<Self>) {
+        *self.expanded_groups.entry(key).or_insert(0) += SESSIONS_LOAD_STEP;
+        self.rebuild_session_rows(cx);
+    }
+
+    /// 新建会话：清空选中与消息。真正的会话记录由服务端在首条消息时按本地
+    /// 生成的 id 创建（事件按 `session_id` 路由，id 必须发起前就确定）。
+    fn start_new_session(&mut self, cx: &mut Context<Self>) {
+        self.current_session = None;
+        self.streaming = false;
+        self.session_model = None;
+        self.model_menu_open = false;
+        self.ctx_used = 0;
+        self.ctx_window = 0;
+        self.messages = Rc::new(Vec::new());
+        self.msg_list_state = GpuiListState::new(0, ListAlignment::Bottom, px(120.));
+        self.message_total = 0;
+        self.current_title = "新会话（发送首条消息后创建）".to_string();
+        self.rebuild_session_rows(cx);
+    }
+
+    /// 重建左栏行（分组 / 会话 / 查看更多）。
+    ///
+    /// 排序对齐 `gui-vite/src/components/session/SessionList.tsx` 的 `sortGroups`：
+    /// 1.「最近活跃」段：24h 内有活动的工作区，按组内最近时间倒序，最多 3 个；
+    /// 2.「其余」段：按路径字母序（稳定段，位置不随使用漂移）；
+    /// 3. 默认组（`""`）始终垫底（即使没有未绑定会话，也要能在这儿新建）。
+    ///
+    /// 组内折叠：初始 3 条 + 「查看更多」累加；**当前会话始终可见**（从别处切进
+    /// 深处会话时不会被折叠藏住，同 Tauri 版）。
+    fn rebuild_session_rows(&mut self, cx: &mut Context<Self>) {
+        use std::collections::{BTreeMap, HashSet};
+        let mut groups: BTreeMap<String, Vec<&SessionRow>> = BTreeMap::new();
+        groups.entry(String::new()).or_default();
+        for s in &self.sessions_data {
+            groups
+                .entry(s.working_directory.clone())
+                .or_default()
+                .push(s);
+        }
+        for list in groups.values_mut() {
+            list.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+        }
+        let now = now_unix_secs();
+        let last_activity = |list: &[&SessionRow]| -> i64 {
+            list.iter()
+                .filter_map(|s| parse_rfc3339_secs(&s.updated_at))
+                .max()
+                .unwrap_or(0)
+        };
+        let mut active: Vec<(String, Vec<&SessionRow>)> = groups
+            .iter()
+            .filter(|(k, l)| !k.is_empty() && last_activity(l) >= now - ACTIVE_GROUP_WINDOW_SECS)
+            .map(|(k, l)| (k.clone(), l.clone()))
+            .collect();
+        active.sort_by(|a, b| last_activity(&b.1).cmp(&last_activity(&a.1)));
+        active.truncate(ACTIVE_GROUP_LIMIT);
+        let active_keys: HashSet<&str> = active.iter().map(|(k, _)| k.as_str()).collect();
+        let mut rest: Vec<(String, Vec<&SessionRow>)> = groups
+            .iter()
+            .filter(|(k, _)| !k.is_empty() && !active_keys.contains(k.as_str()))
+            .map(|(k, l)| (k.clone(), l.clone()))
+            .collect();
+        rest.sort_by(|a, b| a.0.cmp(&b.0));
+        let mut ordered = active;
+        ordered.extend(rest);
+        ordered.extend(
+            groups
+                .iter()
+                .filter(|(k, _)| k.is_empty())
+                .map(|(k, l)| (k.clone(), l.clone())),
+        );
+
+        let mut rows: Vec<SessionListRow> = Vec::new();
+        for (key, list) in ordered {
+            let collapsed = self.collapsed_groups.contains(&key);
+            let count = list.len();
+            rows.push(SessionListRow::Group {
+                label: group_label(&key),
+                key: key.clone(),
+                count,
+                collapsed,
+            });
+            if collapsed {
+                continue;
+            }
+            let base =
+                SESSIONS_INITIAL_VISIBLE + self.expanded_groups.get(&key).copied().unwrap_or(0);
+            let visible = match self
+                .current_session
+                .as_deref()
+                .and_then(|id| list.iter().position(|s| s.id == id))
+            {
+                Some(pos) if pos >= base => pos + 1,
+                _ => base,
+            }
+            .min(count);
+            for s in list.iter().take(visible) {
+                rows.push(SessionListRow::Session {
+                    id: s.id.clone(),
+                    title: s.title.clone(),
+                    meta: format_relative(&s.updated_at),
+                    tasks: self.running_tasks_of(&s.id),
+                    selected: self.current_session.as_deref() == Some(s.id.as_str()),
+                });
+            }
+            let hidden = count.saturating_sub(visible);
+            if hidden > 0 {
+                rows.push(SessionListRow::More { key, hidden });
+            }
+        }
+        self.session_rows = rows;
+        cx.notify();
     }
 
     /// 加载模型服务列表（`GET /api/v1/config/models`）。
@@ -1054,15 +1434,11 @@ impl ClientApp {
             let url = format!("http://{SERVER_HOST}:{port}/api/v1/tasks");
             if let Ok(body) = fetch_json(url).await {
                 let arr = body.as_array().cloned().unwrap_or_default();
-                let rows: Vec<TaskRow> = arr
+                // 全量任务一次拉回来：面板只显示当前会话的，左栏会话角标要按
+                // `parent_session_id` 聚合**所有**会话（同一份轮询供两处用，
+                // 与 Tauri 版把 `backgroundTasks` 放进 store 同口径）。
+                let all: Vec<TaskRow> = arr
                     .iter()
-                    .filter(|t| {
-                        let parent = t
-                            .get("parent_session_id")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or_default();
-                        session.as_deref().map(|s| s == parent).unwrap_or(false)
-                    })
                     .map(|t| TaskRow {
                         kind: t
                             .get("kind")
@@ -1079,11 +1455,27 @@ impl ClientApp {
                             .and_then(|v| v.as_str())
                             .unwrap_or_default()
                             .to_string(),
+                        parent_session_id: t
+                            .get("parent_session_id")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or_default()
+                            .to_string(),
                     })
+                    .collect();
+                let rows: Vec<TaskRow> = all
+                    .iter()
+                    .filter(|t| {
+                        session
+                            .as_deref()
+                            .map(|s| s == t.parent_session_id)
+                            .unwrap_or(false)
+                    })
+                    .cloned()
                     .collect();
                 let _ = this.update(cx, |this, cx| {
                     this.tasks = rows;
-                    cx.notify();
+                    this.all_tasks = all;
+                    this.rebuild_session_rows(cx);
                 });
             }
         })
@@ -2237,6 +2629,8 @@ impl ClientApp {
         self.ctx_used = 0;
         self.ctx_window = 0;
         self.load_messages(id, cx);
+        // 选中态与「当前会话始终可见」都体现在左栏行上
+        self.rebuild_session_rows(cx);
     }
 
     /// 处理一条统一事件。
@@ -2599,15 +2993,99 @@ impl ClientApp {
                     .bg(rgb(colors::BG_SECONDARY))
                     .border_r_1()
                     .border_color(rgb(colors::BORDER))
+                    // 头部：状态行 + 新建会话（对齐 Tauri 版 `SessionList` 头部；
+                    // 「＋ 新目录」要目录选择器弹窗，留到 workspace 页一起做）
                     .child(
                         div()
                             .px_3()
                             .py_2()
-                            .text_xs()
-                            .text_color(rgb(colors::TEXT_SECONDARY))
-                            .child(self.status.clone()),
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .gap_2()
+                            .border_b_1()
+                            .border_color(rgb(colors::BORDER))
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .text_xs()
+                                    .text_color(rgb(colors::TEXT_SECONDARY))
+                                    .whitespace_nowrap()
+                                    .overflow_hidden()
+                                    .child(self.status.clone()),
+                            )
+                            .child(
+                                div()
+                                    .id("new-session")
+                                    .size(px(22.))
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .rounded_md()
+                                    .cursor_pointer()
+                                    .child(
+                                        svg()
+                                            .path(IconName::Plus.path())
+                                            .size(px(14.))
+                                            .text_color(rgb(colors::TEXT_SECONDARY)),
+                                    )
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.start_new_session(cx);
+                                    })),
+                            ),
                     )
-                    .child(div().flex_1().min_h_0().child(List::new(&self.sessions))),
+                    // 分组列表（gpui-component `List`：自带虚拟化与滚动）
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_h_0()
+                            .px_2()
+                            .py_2()
+                            .flex()
+                            .flex_col()
+                            .gap_1()
+                            .children(
+                                (0..self.session_rows.len())
+                                    .map(|ix| self.render_session_row(ix, cx))
+                                    .collect::<Vec<_>>(),
+                            )
+                            .overflow_y_scrollbar(),
+                    )
+                    // 底部：文件视图入口（占位页；与 Tauri 版同位置）
+                    .child(
+                        div()
+                            .border_t_1()
+                            .border_color(rgb(colors::BORDER))
+                            .px_2()
+                            .py_2()
+                            .child(
+                                div()
+                                    .id("open-workspace")
+                                    .w_full()
+                                    .px_2()
+                                    .py_1()
+                                    .flex()
+                                    .flex_row()
+                                    .items_center()
+                                    .gap_2()
+                                    .rounded_md()
+                                    .cursor_pointer()
+                                    .text_xs()
+                                    .text_color(rgb(colors::TEXT_SECONDARY))
+                                    .child(
+                                        svg()
+                                            .path(IconName::FileText.path())
+                                            .size(px(14.))
+                                            .text_color(rgb(colors::TEXT_SECONDARY)),
+                                    )
+                                    .child("文件视图")
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.view = View::Workspace;
+                                        cx.notify();
+                                    })),
+                            ),
+                    ),
             )
             // 右：消息列表
             .child(
