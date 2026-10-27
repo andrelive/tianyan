@@ -236,6 +236,32 @@ cd gui-native
 cargo run            # 首次约 3 分钟，之后增量 2-6 秒
 ```
 
+## 自动验证（本机没有 Playwright 的等价物）
+
+原生窗口不能用 Playwright/Cypress。本 crate 用「DPI-aware 截图 + 鼠标点击」这套
+外部脚本自证（`scripts/`）：
+
+```powershell
+# 1) 启动
+.\target\debug\tianyan-gui-native.exe
+# 2) 点一下左侧第一个会话（坐标 = 截图里的像素坐标，原点是窗口左上角）
+pwsh -NoProfile -File .\scripts\ui-click.ps1 -X 260 -Y 120
+# 3) 截图，交给模型/人核对
+pwsh -NoProfile -File .\scripts\ui-shot.ps1 -Out "$env:TEMP\shot.png"
+```
+
+> ⛔ **必读坑：PowerShell 默认 DPI-unaware。** 本机 2560×1440 @150%，`GetWindowRect`
+> 返回的是虚拟化坐标——物理 1920×1230 的窗口只报 1295×857，于是 `CopyFromScreen`
+> **只抓到窗口左上角那块**。症状极像「右下角的元素没渲染」（消息区空白、输入卡片
+> 消失、任务面板不见），曾据此误判 GPUI 的 flex 布局失效、白查数轮。
+> `scripts/ui-shot.ps1` 已用 `SetProcessDpiAwareness(2)` 修掉，**不要再手写截图**。
+>
+> 第二个坑：`CopyFromScreen` 抓的是屏幕像素，窗口被别的窗口挡住会抓到遮挡物，
+> 所以脚本里先 `ShowWindow` + `HWND_TOPMOST` + `SetForegroundWindow`。
+
+更彻底的方案是 GPUI 自带的 `#[gpui_kit::test]`（headless 窗口 + 真实事件 + 断言，
+需开 `test-support` feature）——可对纯视图逻辑做单元级验证；像素级观感仍需上面的截图。
+
 打包 MSI（需先 `dotnet tool install --global wix --version 6.0.2`）：
 
 ```powershell

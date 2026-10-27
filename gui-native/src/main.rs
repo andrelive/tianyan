@@ -683,7 +683,7 @@ impl ClientApp {
         let app = Self {
             sessions,
             messages,
-            msg_list_state: GpuiListState::new(0, ListAlignment::Top, px(120.)),
+            msg_list_state: GpuiListState::new(0, ListAlignment::Bottom, px(120.)),
             message_total: total,
             status: "正在连接后端…".to_string(),
             port,
@@ -2487,7 +2487,7 @@ impl ClientApp {
                             // 条数变了必须重建 list state（item_count 在构造时固定）
                             this.msg_list_state = GpuiListState::new(
                                 this.messages.len(),
-                                ListAlignment::Top,
+                                ListAlignment::Bottom,
                                 px(120.),
                             );
                             this.message_total = total;
@@ -2760,6 +2760,15 @@ impl ClientApp {
                                         div().px_4().py_2().w_full().child(body).into_any_element()
                                     }
                                 })
+                                // GPUI 内置 `list` 的默认 `sizing_behavior = Auto`：它自己
+                                // **不带任何尺寸**（`request_layout` 只把空 style 交给内核），
+                                // 宽度与高度都取「内容尺寸」。实测 `on_children_prepainted`
+                                // 打印出 `w=636px h=0px` —— 高度塌成 0，`prepaint` 拿到的
+                                // bounds 高 0，于是一条消息都画不出来（症状：标题正确显示
+                                // 「会话消息（共 72 条，显示最近 60 条）」，消息区全空）。
+                                // 必须显式给尺寸；`.size_full()` = 100% x 100%，父容器
+                                // （`flex_1` 分配的高度）是确定值，百分比可解析。
+                                .size_full()
                             }))
                             // 会话待办 / 目标窄条（在输入卡片上方；两者都空时整条不渲染）
                             .child(self.render_approval_banner(cx))
