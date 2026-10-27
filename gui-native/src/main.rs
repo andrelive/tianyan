@@ -349,6 +349,21 @@ impl ListDelegate for SessionsDelegate {
 
 // ===== 消息（不再用虚拟列表：高度不定，几十到 200 条直接布局更简单可靠）=====
 
+/// 会话目标行。
+///
+/// 注意 `GET /goals` 的元素是**嵌套结构**：`{ goal: {title, status, ...},
+/// progress, todo_total, todo_done }`（`server/src/api/goals/handlers.rs` 现场组装，
+/// 不是 core 的 `Goal` 平铺）。早先按平铺解析导致标题空白、进度丢失。
+#[derive(Clone, Debug)]
+struct GoalRow {
+    title: String,
+    status: String,
+    /// 0-100（`todo_total == 0` 时为 0，表示「还没有子待办」）
+    progress: u64,
+    todo_total: u64,
+    todo_done: u64,
+}
+
 /// 设置页的 provider 行。
 ///
 /// **含 api_key**：编辑时要把它回填进输入框，而 `set_value` 需要 `&mut Window`
@@ -605,8 +620,8 @@ struct ClientApp {
     tasks_collapsed: bool,
     /// 会话待办（`(status, title)`，来自 `GET /todos?session_id=`）
     todos: Vec<(String, String)>,
-    /// 会话目标（`(status, title)`，来自 `GET /goals?session_id=`）
-    goals: Vec<(String, String)>,
+    /// 会话目标（`GET /goals?session_id=`，元素是 `{goal, progress, todo_total, todo_done}`）
+    goals: Vec<GoalRow>,
     /// 待办/目标窄条是否折叠
     todo_bar_collapsed: bool,
     /// 本会话的待审批操作（`GET /api/v1/approval/status` 按 `session_id` 过滤）
@@ -1568,20 +1583,27 @@ impl ClientApp {
                     }
                 }
             }
-            let mut goals: Vec<(String, String)> = Vec::new();
+            let mut goals: Vec<GoalRow> = Vec::new();
             if let Ok(body) = goals_res {
                 if let Some(arr) = body.get("goals").and_then(|v| v.as_array()) {
                     for g in arr {
-                        goals.push((
-                            g.get("status")
-                                .and_then(|v| v.as_str())
-                                .unwrap_or("active")
-                                .to_string(),
-                            g.get("title")
+                        // 元素是 `{ goal: {...}, progress, todo_total, todo_done }`
+                        let goal = g.get("goal").unwrap_or(g);
+                        goals.push(GoalRow {
+                            title: goal
+                                .get("title")
                                 .and_then(|v| v.as_str())
                                 .unwrap_or_default()
                                 .to_string(),
-                        ));
+                            status: goal
+                                .get("status")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("active")
+                                .to_string(),
+                            progress: g.get("progress").and_then(|v| v.as_u64()).unwrap_or(0),
+                            todo_total: g.get("todo_total").and_then(|v| v.as_u64()).unwrap_or(0),
+                            todo_done: g.get("todo_done").and_then(|v| v.as_u64()).unwrap_or(0),
+                        });
                     }
                 }
             }
@@ -1652,11 +1674,18 @@ impl ClientApp {
         if collapsed {
             return bar.into_any_element();
         }
-        for (status, title) in &self.goals {
-            let (glyph, color) = match status.as_str() {
+        for g in &self.goals {
+            let (glyph, color) = match g.status.as_str() {
                 "completed" => ("✓", colors::SUCCESS),
                 "archived" => ("·", colors::TEXT_TERTIARY),
                 _ => ("🎯", colors::ACCENT),
+            };
+            // 进度文案与 Tauri 版一致：有子待办才显示百分比，否则「进行中」
+            //（`todo_total == 0` 时后端给的 progress 是 0，直接显示 0% 会误导）
+            let progress_text = if g.todo_total > 0 {
+                format!("{}%（{}/{}）", g.progress, g.todo_done, g.todo_total)
+            } else {
+                "进行中".to_string()
             };
             bar = bar.child(
                 div()
@@ -1666,7 +1695,16 @@ impl ClientApp {
                     .gap_2()
                     .text_xs()
                     .child(div().text_color(rgb(color)).child(glyph))
-                    .child(div().text_color(rgb(colors::TEXT_PRIMARY)).child(ellipsis(title, 48))),
+                    .child(
+                        div()
+                            .text_color(rgb(colors::TEXT_PRIMARY))
+                            .child(ellipsis(&g.title, 40)),
+                    )
+                    .child(
+                        div()
+                            .text_color(rgb(colors::TEXT_TERTIARY))
+                            .child(progress_text),
+                    ),
             );
         }
         for (status, title) in &self.todos {
