@@ -130,15 +130,34 @@ pub struct HealthResponse {
     pub status: String,
     /// 服务版本号
     pub version: String,
+    /// 服务标识：固定 `"tianyan"`。
+    ///
+    /// 桌面端启动时要判断「这个端口上跑的确实是天演」，只靠 `status=ok` 不够——
+    /// 任何本地服务都可能返回 200。判据见 `tianyan-desktop::discover_existing`。
+    pub service: String,
+    /// 本次服务使用的数据目录（`common::path::normalize_dir` 口径的规范化路径）。
+    ///
+    /// **一个 server 只服务一个数据目录**，客户端据此回答「已有实例是不是我的实例」：
+    /// 数据目录不同绝不能复用（否则会读写别人的数据）。取不到配置时为空串——
+    /// 客户端把空串判为「不匹配」（宁可多起一个进程，也不猜）。
+    pub data_dir: String,
+    /// 服务进程 pid（排查用：谁占着数据目录、该关哪个进程）。
+    pub pid: u32,
 }
 
 /// Health check handler
 async fn health_check() -> Json<HealthResponse> {
     let version = env!("CARGO_PKG_VERSION").to_string();
+    let data_dir = tianyan::config::try_get_config()
+        .map(|c| tianyan::common::path::normalize_dir(&c.storage.data_dir))
+        .unwrap_or_default();
 
     Json(HealthResponse {
         status: "ok".to_string(),
         version,
+        service: "tianyan".to_string(),
+        data_dir,
+        pid: std::process::id(),
     })
 }
 

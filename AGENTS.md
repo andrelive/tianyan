@@ -66,6 +66,7 @@ cargo test -p tianyan-core vfs::backend::local -- --nocapture  # 指定测试模
 | `service/config/` | `tianyan-service-config` | **服务层**：配置加载 / 持久化（段保全）/ 数据目录迁移 / 校验编排 / 向导 DTO（ADR-049 期 3-T4，753 生产行从 core 搬出）；**不含配置结构**（`TianyanConfig` 留 core——内核与插件的共同构造参数） |
 | `assembly/` | `tianyan-assembly` | **装配清单**：11 个插件工厂 + 两份清单（`full()` = 生产 11 插槽 / `policies()` = 集成测试的 9 插槽前缀）+ 跨插件顺序断言的**单一实现**（ADR-049 期 4）；全仓唯一 `use` 全部插件 crate 之处（改造前同一份清单在 `app` / `tauri` / `server/tests` / `app/tests` / `app/examples` 共 5 处副本） |
 | `tools-ops/` | `tianyan-tools-ops` | **运维工具**（ADR-049 期 4d）：服务停止后直接修数据的终端脚本（`skill_import` / `rebuild_overviews`），**不被任何 crate 依赖**；插件 crate 因此零 dev 边 |
+| `desktop/` | `tianyan-desktop` | **桌面启动编排（单 server 发现与复用）**：`ensure_server` / `discover_existing`（扫 `3000..=3100` + 校验 `/health` 的 `service` **与** `data_dir`）+ `find_available_port` / `start_axum_server`；`tauri/` 与 `gui-native/` 共用这一份。**端口探测只避免端口冲突，不能避免数据目录双写**——实测撞上过「桌面版占 3000、gui-native 顺延 3001，两个 server 同写 `D:\tianyan`」（定时任务各跑一遍 + SQLite 并发写）。只经 `tianyan-assembly::full()` 取插件清单，**不直接认识插件 crate**（不是第二份装配清单） |
 | `plugins/tools-fs/` | `tianyan-tools-fs` | 插件：glob / list_dir / read_file / write_file / apply_edit / apply_patch / **view_image**（定义/门控/审批；实现暂留 core） |
 | `plugins/tools-code/` | `tianyan-tools-code` | 插件：symbol_outline / repo_map / grep（**含实现**，tree-sitter ×6 在此） |
 | `plugins/tools-todo/` | `tianyan-tools-todo` | 插件：todo / goal（含实现） |
@@ -81,10 +82,13 @@ cargo test -p tianyan-core vfs::backend::local -- --nocapture  # 指定测试模
 | `plugins/provider-llm/` | `tianyan-provider-llm` | 插件：**聊天 + 视觉 provider**（`chat` / `vision` / `discovery` / 日志装饰，约 2,450 行 + 39 个迁移测试）+ 连通性探针（配置页「测试连接」）；`async-openai` 随之离开 core（ADR-049 期 2 序 6） |
 | `plugins/provider-embed/` | `tianyan-provider-embed` | 插件：**文本嵌入 provider**（宽容 usage 解析 / 用量上报 / 查询缓存 FIFO 256，约 700 行 + 10 个迁移测试）；用量上报**契约** `EmbeddingUsageSink` 留 core（实现方在通道层）（期 2 序 6） |
 | `plugins/tool-pipeline/` | `tianyan-tool-pipeline` | 插件：**工具管线出口侧**——观测监听器（统计 / Trace / GEPA 执行记录 / 失败规则学习，213 生产行）+ 超预算输出落盘（ADR-047，181 生产行）+ 工具目录渲染（96 生产行），394 生产行搬出 core + 14 个迁移测试 + 2 个新增；契约 `ToolPostExecuteListener` / `ToolPipelineWiring` / `ToolPipelineFactory` 留 core（`agent::tool_registry::pipeline`，期 3-T5） |
+| `gui-native/` | `tianyan-gui-native` | **GPUI 原生客户端（第二个桌面壳，独立 workspace）**：自带 `[workspace]`，**不进主 workspace**（零脚本改动、零 IDE 索引污染、零 CI 风险；代价 = `core`/`server` 编两份）。与 `gui-vite` + `tauri/` 并存，连同一个内嵌 server、走同一套 HTTP/SSE 协议。验证结论与实测数据见 `gui-native/README.md`（含 GPUI 内存对比、IME/Markdown/虚拟列表实测、MSI perUser 静默升级） |
 
 **依赖铁律**（破一条拆包收益全部回吐）：插件只依赖 `core`（kernel-api）；插件之间零互赖；
 `core`/`server` 不认识任何插件 crate。**认识具体插件 crate 的只有三处**：`assembly/`
 （清单与其唯一实现，ADR-049 期 4）+ `app/`、`tauri/`（两个装配器，只写启动编排）；
+`desktop/`（桌面启动编排）**不在此列**——它只调 `tianyan_assembly::full()`，不直接
+`use` 任何插件 crate，因此铁律不因它从三处变四处；
 另有一个**终端消费者** `tools-ops/`（运维脚本，依赖插件但**不被任何 crate 依赖**，
 与两个装配器的区别是它不提供装配清单，且可在服务未启动时直接改数据——期 4d）。
 装配经 `server/src/assembly/` 的类型擦除插槽——**10 个插槽按「变化原因」分 4 组**

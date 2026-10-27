@@ -1,0 +1,29 @@
+[package]
+name = "tianyan-desktop"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "天演桌面端共享启动编排：内嵌 server 的单实例发现与复用（tauri / gui-native 共用）"
+
+[dependencies]
+# 启动编排需要配置结构（构造参数）、server 入口与装配清单。
+# 注意本 crate **不直接认识任何插件 crate**：插件清单只经 `tianyan-assembly::full()`
+# 取得（ADR-049 依赖铁律），因此它是「装配器的启动编排段」，不是第二个装配清单。
+tianyan-core = { path = "../core" }
+tianyan-server = { path = "../server" }
+tianyan-assembly = { path = "../assembly" }
+
+tokio = { workspace = true }
+reqwest = { workspace = true }
+serde = { workspace = true }
+tracing = { workspace = true }
+
+[lints]
+workspace = true
+
+[lib]
+name = "tianyan_desktop"
+path = "src/lib.rs"
+# 禁用 doctest：无示例可跑，避免改动后 doctest 目标重编
+doctest = false

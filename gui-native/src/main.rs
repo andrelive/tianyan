@@ -16,7 +16,6 @@ use gpui_kit::{
 };
 use gpui_kit::*;
 use futures::StreamExt as _;
-use std::net::TcpListener;
 use std::rc::Rc;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
@@ -42,29 +41,6 @@ fn new_session_id() -> String {
 fn runtime() -> &'static Runtime {
     static RT: OnceLock<Runtime> = OnceLock::new();
     RT.get_or_init(|| Runtime::new().expect("创建 tokio runtime 失败"))
-}
-
-fn find_available_port(preferred: u16) -> Option<TcpListener> {
-    for port in preferred..=preferred.saturating_add(100) {
-        if let Ok(listener) = TcpListener::bind((SERVER_HOST, port)) {
-            return Some(listener);
-        }
-    }
-    None
-}
-
-async fn wait_for_server(port: u16) -> bool {
-    let url = format!("http://{SERVER_HOST}:{port}/health");
-    let client = reqwest::Client::new();
-    for _ in 0..60 {
-        if let Ok(resp) = client.get(&url).send().await {
-            if resp.status().is_success() {
-                return true;
-            }
-        }
-        tokio::time::sleep(Duration::from_millis(500)).await;
-    }
-    false
 }
 
 /// 在 tokio runtime 上取一段 JSON（GPUI 的 executor 是 smol 系，跨 runtime await
@@ -837,54 +813,27 @@ fn main() {
     }
     tianyan::common::panic_hook::install(tianyan::common::panic_hook::default_log_dir());
 
-    let listener = match find_available_port(PREFERRED_PORT) {
-        Some(l) => l,
-        None => {
-            eprintln!("{PREFERRED_PORT} 起 100 个端口均被占用，退出");
+    let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+    // 单 server 复用（与桌面版共用同一份启动编排）：本机若已有**服务同一数据目录**的
+    // 天演实例就直接连它，本进程不再起第二个 —— 否则两个 server 会各跑一遍定时任务
+    // 并并发写同一个 SQLite（实测撞上过 3000 + 3001 同时跑）。
+    let endpoint = match runtime().block_on(tianyan_desktop::ensure_server(
+        config.clone(),
+        PREFERRED_PORT,
+        shutdown_rx,
+    )) {
+        Ok(ep) => ep,
+        Err(e) => {
+            eprintln!("[启动] 内嵌 server 不可用：{e}");
             std::process::exit(1);
         }
     };
-    let port = listener
-        .local_addr()
-        .map(|a| a.port())
-        .unwrap_or(PREFERRED_PORT);
-    println!("[启动] 内嵌 server 端口 = {port}");
-
-    let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
-    let server_config = config.clone();
-    // JoinHandle 丢掉不取消任务（tokio 默认 detached），与“窗口关闭后再发关停信号”的收尾顺序无关
-    let _ = runtime().spawn(async move {
-        let listener = match listener.set_nonblocking(true) {
-            Ok(()) => match tokio::net::TcpListener::from_std(listener) {
-                Ok(l) => l,
-                Err(e) => {
-                    eprintln!("转换监听 socket 失败：{e}");
-                    return;
-                }
-            },
-            Err(e) => {
-                eprintln!("设置非阻塞失败：{e}");
-                return;
-            }
-        };
-        if let Err(e) = tianyan_server::start_server_with_shutdown_signal_and_assembly(
-            listener,
-            server_config,
-            shutdown_rx,
-            tianyan_assembly::full(),
-        )
-        .await
-        {
-            eprintln!("server 退出：{e}");
-        }
-    });
-
-    println!("[启动] 等待 server 就绪…");
-    if !runtime().block_on(wait_for_server(port)) {
-        eprintln!("server 30 秒内未就绪，退出");
-        std::process::exit(1);
+    let port = endpoint.port;
+    if endpoint.reused {
+        println!("[启动] 复用本机已有 server（端口 {port}），本进程未启动 server");
+    } else {
+        println!("[启动] 内嵌 server 已就绪（端口 {port}）");
     }
-    println!("[启动] server 就绪");
 
     gpui_kit::application().run(move |cx| {
         gpui_kit::init(cx);

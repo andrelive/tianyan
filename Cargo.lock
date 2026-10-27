@@ -9632,6 +9632,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "tianyan-desktop"
+version = "1.0.1"
+dependencies = [
+ "reqwest 0.12.28",
+ "serde",
+ "tianyan-assembly",
+ "tianyan-core",
+ "tianyan-server",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "tianyan-mcp"
 version = "1.0.1"
 dependencies = [
@@ -9846,6 +9859,7 @@ dependencies = [
  "tauri-plugin-updater",
  "tianyan-assembly",
  "tianyan-core",
+ "tianyan-desktop",
  "tianyan-server",
  "tianyan-service-config",
  "tokio",

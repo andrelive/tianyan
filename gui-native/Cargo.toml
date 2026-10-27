@@ -13,6 +13,9 @@ tianyan-core = { path = "../core" }
 tianyan-server = { path = "../server" }
 tianyan-service-config = { path = "../service/config" }
 tianyan-assembly = { path = "../assembly" }
+# 启动编排（单 server 发现与复用）：与 tauri/ 共用同一份实现 ——
+# 端口探测只避免端口冲突，不能避免「两个 server 同写一个数据目录」。
+tianyan-desktop = { path = "../desktop" }
 
 # GPUI 门面（绑 gpui-pre 快照）。
 # tree-sitter* 必须显式开启，否则 Editor 静默无高亮。

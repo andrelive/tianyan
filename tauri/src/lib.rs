@@ -27,7 +27,7 @@ use tracing_subscriber::{
 
 pub use server::start_axum_server;
 
-use server::{find_available_port, PREFERRED_PORT, SERVER_HOST};
+use server::{find_available_port, PORT_SCAN_SPAN, PREFERRED_PORT, SERVER_HOST};
 
 const HEALTH_CHECK_TIMEOUT: Duration = Duration::from_secs(30);
 const HEALTH_CHECK_INTERVAL: Duration = Duration::from_millis(500);
@@ -58,28 +58,19 @@ fn fatal_startup_error(title: &str, message: &str) -> ! {
     std::process::exit(1);
 }
 
-/// 检测首选端口上是否已有 Tianyan 实例在服务（健康检查可达）。
+/// 检测本机是否已有**服务同一数据目录**的天演实例（扫 `preferred..preferred+100`）。
 ///
-/// 在启动内嵌服务器之前调用：第二实例直接退出，避免短暂打开共享数据文件。
-fn existing_instance_running(rt: &tokio::runtime::Runtime) -> bool {
-    instance_running_on(rt, PREFERRED_PORT)
-}
-
-/// 探测指定端口上的 /health 是否可达。
-fn instance_running_on(rt: &tokio::runtime::Runtime, port: u16) -> bool {
-    let url = format!("http://{}:{}/health", SERVER_HOST, port);
-    rt.block_on(async {
-        tokio::time::timeout(HEALTH_CHECK_INTERVAL * 3, async {
-            reqwest::Client::new()
-                .get(&url)
-                .send()
-                .await
-                .map(|r| r.status().is_success())
-                .unwrap_or(false)
-        })
-        .await
-        .unwrap_or(false)
-    })
+/// 在启动内嵌服务器之前调用：第二实例直接退出，避免第二份定时任务与 SQLite 并发写。
+///
+/// 与旧实现的两点差别（都由实测事故驱动）：
+/// 1. 旧实现只探首选端口 3000 —— 于是「gui-native 先起、顺延到 3001」时判定为
+///    「无实例」，再起一个 server，两个 server 同写 `D:\tianyan`。现在扫整个顺延区间。
+/// 2. 旧实现只看 `/health` 是否 200 —— 任何本地服务都可能 200。现在要求服务标识为
+///    天演**且** `data_dir` 与本进程配置一致（数据目录不同的实例不算「已有实例」，
+///    连过去会读写别人的数据）。
+fn existing_instance_running(rt: &tokio::runtime::Runtime, data_dir: &std::path::Path) -> bool {
+    rt.block_on(tianyan_desktop::discover_existing(data_dir, PREFERRED_PORT))
+        .is_some()
 }
 
 /// 构建系统托盘：左键单击显示主窗口，右键菜单（显示主窗口 / 退出）。
@@ -754,10 +745,11 @@ pub fn run() {
     // 首选端口健康检查可达 = 已有实例在服务 → 直接退出，
     // 避免第二实例短暂启动 server 并打开共享 SQLite/LanceDB 数据文件。
     // 与 single-instance 插件构成双保险（插件兜底此处检查与启动之间的竞态窗口）。
-    if existing_instance_running(&rt) {
+    if existing_instance_running(&rt, &tianyan_config.storage.data_dir) {
         info!(
-            "检测到已有实例运行（端口 {} 服务可达），退出当前进程",
-            PREFERRED_PORT
+            "检测到已有实例运行（端口 {}..={}，同一数据目录），退出当前进程",
+            PREFERRED_PORT,
+            PREFERRED_PORT.saturating_add(PORT_SCAN_SPAN)
         );
         return;
     }
@@ -1016,23 +1008,30 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_instance_running_on_detects_live_server() {
-        // 起一个真实健康检查服务，探测应返回 true
-        let rt = test_runtime();
+    /// 起一个「形状正确的假天演服务」（`/health` 报给定的 `data_dir`），返回其端口。
+    ///
+    /// 判定「已有实例」需要两条都过：服务标识 + 数据目录一致。旧测试只起一个返回
+    /// `{"status":"ok"}` 的服务——那只能证明「端口活着」，证明不了「是我的实例」。
+    fn spawn_fake_tianyan(rt: &tokio::runtime::Runtime, reported_data_dir: String) -> u16 {
         let listener = std::net::TcpListener::bind((SERVER_HOST, 0)).expect("绑定临时端口");
         let port = listener.local_addr().expect("读取端口").port();
         listener.set_nonblocking(true).expect("非阻塞");
 
-        // 启动测试服务并等待就绪（同一 block_on 内：from_std/spawn 需要 runtime 上下文，
-        // 轮询驱动 server 任务；最多 2s）
+        // 同一 block_on 内：from_std/spawn 需要 runtime 上下文，轮询驱动 server 任务（最多 2s）
         let ready = rt.block_on(async {
             let tokio_listener =
                 tokio::net::TcpListener::from_std(listener).expect("转 tokio listener");
             let app = axum::Router::new().route(
                 "/health",
-                axum::routing::get(|| async {
-                    axum::response::Json(serde_json::json!({"status": "ok"}))
+                axum::routing::get(move || {
+                    let reported = reported_data_dir.clone();
+                    async move {
+                        axum::response::Json(serde_json::json!({
+                            "status": "ok",
+                            "service": "tianyan",
+                            "data_dir": reported,
+                        }))
+                    }
                 }),
             );
             rt.spawn(async move {
@@ -1052,18 +1051,54 @@ mod tests {
             }
             false
         });
-        assert!(ready, "测试服务应就绪");
-        assert!(instance_running_on(&rt, port), "服务在线时应探测到实例");
+        assert!(ready, "假天演服务应就绪");
+        port
     }
 
     #[test]
-    fn test_instance_running_on_returns_false_for_idle_port() {
-        // 未启动服务的随机端口，探测应返回 false（无并发占用，结果确定）
+    fn test_discover_existing_detects_same_data_dir() {
+        let rt = test_runtime();
+        let data_dir = std::env::temp_dir();
+        let port = spawn_fake_tianyan(&rt, tianyan::common::path::normalize_dir(&data_dir));
+        assert_eq!(
+            rt.block_on(tianyan_desktop::discover_existing(&data_dir, port)),
+            Some(port),
+            "同数据目录的天演实例应被复用"
+        );
+    }
+
+    #[test]
+    fn test_discover_existing_rejects_other_data_dir() {
+        // 一台机器上可能有多个数据目录各跑一个天演（主数据 / 测试数据）：
+        // 数据目录不同就绝不能复用，连过去会读写别人的数据。
+        let rt = test_runtime();
+        let other = std::env::temp_dir().join("tianyan-other-data-dir");
+        let port = spawn_fake_tianyan(&rt, tianyan::common::path::normalize_dir(&other));
+        assert_eq!(
+            rt.block_on(tianyan_desktop::discover_existing(
+                &std::env::temp_dir(),
+                port
+            )),
+            None,
+            "数据目录不同时不得复用"
+        );
+    }
+
+    #[test]
+    fn test_discover_existing_returns_none_for_idle_port() {
+        // 未启动服务的随机端口，探测应返回 None（无并发占用，结果确定）
         let rt = test_runtime();
         let probe = std::net::TcpListener::bind((SERVER_HOST, 0)).expect("绑定临时端口");
         let port = probe.local_addr().expect("读取端口").port();
         drop(probe);
-        assert!(!instance_running_on(&rt, port), "空闲端口不应探测到实例");
+        assert_eq!(
+            rt.block_on(tianyan_desktop::discover_existing(
+                &std::env::temp_dir(),
+                port
+            )),
+            None,
+            "空闲端口不应探测到可复用实例"
+        );
     }
 
     #[test]

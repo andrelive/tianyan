@@ -9,6 +9,7 @@ pub mod http;
 pub mod llm_judge;
 pub mod logging;
 pub mod panic_hook;
+pub mod path;
 pub mod token_estimator;
 pub mod truncate;
 pub mod types;

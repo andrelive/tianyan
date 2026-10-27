@@ -10491,6 +10491,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "tianyan-desktop"
+version = "1.0.1"
+dependencies = [
+ "reqwest",
+ "serde",
+ "tianyan-assembly",
+ "tianyan-core",
+ "tianyan-server",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "tianyan-gui-native"
 version = "0.1.0"
 dependencies = [
@@ -10501,6 +10514,7 @@ dependencies = [
  "serde_json",
  "tianyan-assembly",
  "tianyan-core",
+ "tianyan-desktop",
  "tianyan-server",
  "tianyan-service-config",
  "tokio",

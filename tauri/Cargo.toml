@@ -17,6 +17,9 @@ tianyan-server = { path = "../server" }
 tianyan-service-config = { path = "../service/config" }
 # 装配清单单一实现（ADR-049 期 4）：11 个工厂与三份清单都在此，桌面端只调用
 tianyan-assembly = { path = "../assembly" }
+# 启动编排（单 server 发现与复用）：与 gui-native 共用同一份实现。
+# 它只经 `tianyan-assembly::full()` 取插件清单，不直接认识插件 crate。
+tianyan-desktop = { path = "../desktop" }
 
 # Tauri framework
 tauri = { version = "2.2", features = ["tray-icon", "devtools"] }
