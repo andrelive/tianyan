@@ -32,6 +32,8 @@
 | `plugins/*` | `tianyan-{tools-fs,tools-code,tools-todo,tools-web,storage-vector,storage-sqlite,task-builtin,task-evolution,policy-approval,policy-context,policy-review,provider-client,provider-llm,provider-embed,tool-pipeline}` | 编译期插件（只依赖 `core`，彼此零互赖） | `plugins/*/src/` |
 | `gui-vite/` | - | React TS 前端 | `gui-vite/src/` |
 | `tauri/` | `tianyan-tauri` | Tauri 桌面包装（第二个装配器：端口探测 + 窗口生命周期 + 关闭信号；清单同样取自 `tianyan-assembly`） | `tauri/src/` |
+| `desktop/` | `tianyan-desktop` | 桌面启动编排：**单 server 发现与复用**（`ensure_server` / `discover_existing`：扫 `3000..=3100` + 校验 `/health` 的 `service` 与 `data_dir`）+ `find_available_port` / `start_axum_server`；`tauri/` 与 `gui-native/` 共用（ADR-051） | `desktop/src/` |
+| `gui-native/` | `tianyan-gui-native` | **GPUI 原生客户端（第二个桌面壳）**：自带 `[workspace]`，**不进主 workspace**（零脚本/IDE/CI 污染，代价 = core+server 编两份）；与 `gui-vite` 并存、走同一套 HTTP/SSE 协议；启动编排同样走 `tianyan-desktop`（ADR-051） | `gui-native/src/` |
 | `mcp/` | `tianyan-mcp` | MCP 协议客户端 | `mcp/src/` |
 
 共享依赖统一在 workspace `[workspace.dependencies]` 中定义。
