@@ -4800,7 +4800,15 @@ impl ClientApp {
                     .text_color(rgb(colors::TEXT_SECONDARY))
                     .child("工作区改动（相对会话起点快照）"),
             )
-            .child(div().max_h(px(220.)).p_2().child(files))
+            // 列表必须自己可滚动：改动文件可能几十个，`max_h` 只限高不裁剪，
+            // 内容会溢出盖到下面的 diff 区（实测二十多个文件时整片文字重叠）
+            .child(
+                div()
+                    .max_h(px(220.))
+                    .min_h_0()
+                    .p_2()
+                    .child(files.overflow_y_scrollbar()),
+            )
             .child(detail)
             .into_any_element()
     }
