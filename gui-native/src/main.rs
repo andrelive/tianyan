@@ -1,30 +1,95 @@
-//! UI 侧验证（阶段 A）：
-//! 1. 虚拟列表扛 5000 条消息时的渲染行为（关键指标：render_item 被调用多少次）
-//! 2. 代码编辑器开大文件（tree-sitter 高亮 + 滚动）
+//! 天演原生桌面客户端（GPUI）。
+//!
+//! 定位：与 `gui-vite`（Tauri + React）**并存**的第二个客户端，连同一个内嵌
+//! axum server，走同一套 HTTP/SSE 协议。gui-vite 退役前 `tauri/` 必须保留。
+//!
+//! 当前阶段：真实骨架——装配内核 → 起内嵌 server → 拉真实会话列表 → 渲染。
+//! 尚未迁移：聊天流、设置页、工作区、托盘/通知/updater（见 README 的未验证清单）。
+//!
+//! 启动编排与 `tauri/src/lib.rs` 同源同形（配置加载 → 日志 → runtime → 端口 →
+//! server → 健康检查）。**这两份将来要抽成共享 crate**，否则第三份副本迟早出现。
 
-use gpui_kit::component::input::{Editor, EditorState};
 use gpui_kit::component::list::{List, ListDelegate, ListItem, ListState};
 use gpui_kit::component::theme::{Theme, ThemeMode};
 use gpui_kit::component::{IndexPath, Root};
 use gpui_kit::*;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::net::TcpListener;
+use std::sync::OnceLock;
 use std::time::Duration;
+use tokio::runtime::Runtime;
 
-const LIST_COUNT: usize = 1000;
-const CODE_LINES: usize = 100_000;
+/// 服务器监听地址（仅本机回环）。
+const SERVER_HOST: &str = "127.0.0.1";
+/// 首选端口（被占用时递增扫描）。
+const PREFERRED_PORT: u16 = 3000;
 
-/// 模拟聊天列表：变长文本，验证虚拟化 + 高度测量
-struct ChatDelegate {
-    count: usize,
-    calls: Arc<AtomicUsize>,
+/// 全局 tokio runtime：server 与 HTTP 客户端共用。GPUI 的 executor 是 smol 系，
+/// 跨 runtime 的 `JoinHandle` 是可以 await 的（只要 tokio 在跑）。
+fn runtime() -> &'static Runtime {
+    static RT: OnceLock<Runtime> = OnceLock::new();
+    RT.get_or_init(|| Runtime::new().expect("创建 tokio runtime 失败"))
 }
 
-impl ListDelegate for ChatDelegate {
+/// 探测并绑定可用端口：探测与监听原子化，消除竞态窗口。
+fn find_available_port(preferred: u16) -> Option<TcpListener> {
+    for port in preferred..=preferred.saturating_add(100) {
+        if let Ok(listener) = TcpListener::bind((SERVER_HOST, port)) {
+            return Some(listener);
+        }
+    }
+    None
+}
+
+/// 等 `/health` 就绪（最多 30 秒）。
+async fn wait_for_server(port: u16) -> bool {
+    let url = format!("http://{SERVER_HOST}:{port}/health");
+    let client = reqwest::Client::new();
+    for _ in 0..60 {
+        if let Ok(resp) = client.get(&url).send().await {
+            if resp.status().is_success() {
+                return true;
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    false
+}
+
+/// 会话列表项（后端 `GET /api/v1/sessions` 的最小子集）
+#[derive(Clone, Debug)]
+struct SessionRow {
+    title: String,
+    id: String,
+}
+
+struct SessionsDelegate {
+    items: Vec<SessionRow>,
+}
+
+impl ListDelegate for SessionsDelegate {
     type Item = ListItem;
 
     fn items_count(&self, _section: usize, _cx: &gpui_kit::App) -> usize {
-        self.count
+        self.items.len()
+    }
+
+    fn render_item(
+        &mut self,
+        ix: IndexPath,
+        _window: &mut Window,
+        _cx: &mut Context<ListState<Self>>,
+    ) -> Option<ListItem> {
+        let row = self.items.get(ix.row)?;
+        let title = if row.title.is_empty() {
+            "(无标题)".to_string()
+        } else {
+            row.title.clone()
+        };
+        Some(
+            ListItem::new(ix.row)
+                .h(px(46.))
+                .child(div().px_3().child(title)),
+        )
     }
 
     fn set_selected_index(
@@ -34,139 +99,221 @@ impl ListDelegate for ChatDelegate {
         _cx: &mut Context<ListState<Self>>,
     ) {
     }
-
-    fn render_item(
-        &mut self,
-        ix: IndexPath,
-        _window: &mut Window,
-        _cx: &mut Context<ListState<Self>>,
-    ) -> Option<ListItem> {
-        self.calls.fetch_add(1, Ordering::Relaxed);
-        let row = ix.row;
-        let text = if row % 7 == 0 {
-            format!(
-                "第 {} 条 · 这条是长消息，用于检验变高测量：包含中文与 English 123，以及一些标点。",
-                row + 1
-            )
-        } else {
-            format!("第 {} 条消息", row + 1)
-        };
-        Some(ListItem::new(row).h(px(52.)).child(div().px_3().child(text)))
-    }
 }
 
-/// 生成一份用于编辑器压测的 Rust 代码
-fn gen_code(lines: usize) -> String {
-    let mut s = String::with_capacity(lines * 48);
-    s.push_str("// 自动生成的压测代码\n");
-    for i in 0..lines {
-        match i % 5 {
-            0 => s.push_str(&format!("fn handler_{i}(input: &str) -> usize {{\n")),
-            1 => s.push_str(&format!("    let n = input.len() + {i};\n")),
-            2 => s.push_str("    // 中英混排注释 comment\n"),
-            3 => s.push_str(&format!("    println!(\"value = {{}}\", {i});\n")),
-            _ => s.push_str("    n\n}\n"),
-        }
-    }
-    s
+struct ClientApp {
+    sessions: Entity<ListState<SessionsDelegate>>,
+    status: String,
+    port: u16,
+    session_count: usize,
 }
 
-struct DemoApp {
-    chat: Entity<ListState<ChatDelegate>>,
-    editor: Entity<EditorState>,
-}
-
-impl DemoApp {
-    fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let calls = Arc::new(AtomicUsize::new(0));
-        let chat = cx.new(|cx| {
+impl ClientApp {
+    fn new(window: &mut Window, cx: &mut Context<Self>, port: u16) -> Self {
+        let sessions = cx.new(|cx| {
             ListState::new(
-                ChatDelegate {
-                    count: LIST_COUNT,
-                    calls: calls.clone(),
+                SessionsDelegate {
+                    items: Vec::new(),
                 },
                 window,
                 cx,
             )
         });
 
-        let code = gen_code(CODE_LINES);
-        println!(
-            "[编辑器] 待加载代码 {} 行 / {:.1} MB",
-            CODE_LINES,
-            code.len() as f64 / 1024.0 / 1024.0
-        );
-        let t0 = std::time::Instant::now();
-        let editor = cx
-            .new(|cx| EditorState::new(window, cx).language("rust").default_value(&code));
-        println!("[编辑器] EditorState 创建耗时 {:?}", t0.elapsed());
+        let app = Self {
+            sessions,
+            status: "正在连接后端…".to_string(),
+            port,
+            session_count: 0,
+        };
+        app.load_sessions(cx);
+        app
+    }
 
-        // 每 2 秒报告一次 render_item 累计调用数：
-        // 远小于总条数 = 虚拟化生效；与总条数同量级 = 虚拟化失效
-        cx.spawn(async move |_this, cx| {
-            let mut last = 0usize;
-            loop {
-                cx.background_executor()
-                    .timer(Duration::from_secs(2))
-                    .await;
-                let now = calls.load(Ordering::Relaxed);
-                println!(
-                    "[列表] render_item 累计 {} 次（本轮新增 {}）/ 总条数 {}",
-                    now,
-                    now - last,
-                    LIST_COUNT
-                );
-                last = now;
+    /// 拉真实会话列表（与 gui-vite 的 `GET /api/v1/sessions` 同一端点）
+    fn load_sessions(&self, cx: &mut Context<Self>) {
+        let port = self.port;
+        let sessions = self.sessions.clone();
+        cx.spawn(async move |this, cx| {
+            let fetched = runtime()
+                .spawn(async move {
+                    let url = format!("http://{SERVER_HOST}:{port}/api/v1/sessions");
+                    let resp = reqwest::get(&url).await.map_err(|e| e.to_string())?;
+                    let body: serde_json::Value =
+                        resp.json().await.map_err(|e| e.to_string())?;
+                    Ok::<serde_json::Value, String>(body)
+                })
+                .await
+                .unwrap_or_else(|e| Err(format!("join: {e}")));
+
+            match fetched {
+                Ok(body) => {
+                    // 后端返回形如 {"sessions": [...]} 或直接数组，两种都容忍
+                    let arr = body
+                        .get("sessions")
+                        .and_then(|v| v.as_array())
+                        .or_else(|| body.as_array())
+                        .cloned()
+                        .unwrap_or_default();
+                    let rows: Vec<SessionRow> = arr
+                        .iter()
+                        .map(|s| SessionRow {
+                            id: s
+                                .get("id")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or_default()
+                                .to_string(),
+                            title: s
+                                .get("title")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or_default()
+                                .to_string(),
+                        })
+                        .collect();
+                    let n = rows.len();
+                    println!("[会话] 从后端拉到 {n} 条");
+                    cx.update(|app| {
+                        sessions.update(app, |state, cx| {
+                            state.delegate_mut().items = rows;
+                            cx.notify();
+                        });
+                        this.update(app, |this, cx| {
+                            this.session_count = n;
+                            this.status = format!("已连接 127.0.0.1:{port} · 会话 {n} 条");
+                            cx.notify();
+                        });
+                    });
+                }
+                Err(e) => {
+                    println!("[会话] 拉取失败: {e}");
+                    cx.update(|app| {
+                        this.update(app, |this, cx| {
+                            this.status = format!("拉取会话失败：{e}");
+                            cx.notify();
+                        });
+                    });
+                }
             }
         })
         .detach();
-
-        Self { chat, editor }
     }
 }
 
-impl Render for DemoApp {
+impl Render for ClientApp {
     fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
         div()
             .size_full()
             .flex()
             .flex_row()
             .child(
-                // 左：虚拟列表
+                // 左：真实会话列表
                 div()
-                    .w(px(420.))
+                    .w(px(320.))
                     .h_full()
                     .border_r_1()
-                    .child(List::new(&self.chat)),
+                    .child(List::new(&self.sessions)),
             )
             .child(
-                // 右：代码编辑器
+                // 右：状态区（后续替换为聊天流）
                 div()
                     .flex_1()
                     .min_w_0()
                     .h_full()
-                    .child(Editor::new(&self.editor).h_full()),
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .justify_center()
+                    .gap_2()
+                    .child(div().text_xl().child("天演 · 原生客户端"))
+                    .child(div().child(self.status.clone()))
+                    .child(
+                        div()
+                            .text_sm()
+                            .child(format!("会话数：{}", self.session_count)),
+                    ),
             )
     }
 }
 
 fn main() {
-    gpui_kit::application().run(|cx| {
+    // ===== 1. 装配：配置加载 + 注入内核槽位 + 日志（与 app/src/main.rs、tauri/src/lib.rs 同源）=====
+    let config = tianyan_service_config::load_and_install();
+    if let Err(e) = tianyan::common::logging::init_logging(&config.logging) {
+        eprintln!("日志初始化失败：{e}");
+    }
+    tianyan::common::panic_hook::install(tianyan::common::panic_hook::default_log_dir());
+
+    // ===== 2. 端口：探测与绑定原子化 =====
+    let listener = match find_available_port(PREFERRED_PORT) {
+        Some(l) => l,
+        None => {
+            eprintln!("{PREFERRED_PORT} 起 100 个端口均被占用，退出");
+            std::process::exit(1);
+        }
+    };
+    let port = listener
+        .local_addr()
+        .map(|a| a.port())
+        .unwrap_or(PREFERRED_PORT);
+    println!("[启动] 内嵌 server 端口 = {port}");
+
+    // ===== 3. 后台起 server（完整装配：11 插槽，清单在 tianyan-assembly）=====
+    let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+    {
+        let config = config.clone();
+        runtime().spawn(async move {
+            let listener = match listener.set_nonblocking(true) {
+                Ok(()) => match tokio::net::TcpListener::from_std(listener) {
+                    Ok(l) => l,
+                    Err(e) => {
+                        eprintln!("转换监听 socket 失败：{e}");
+                        return;
+                    }
+                },
+                Err(e) => {
+                    eprintln!("设置非阻塞失败：{e}");
+                    return;
+                }
+            };
+            if let Err(e) = tianyan_server::start_server_with_shutdown_signal_and_assembly(
+                listener,
+                config,
+                shutdown_rx,
+                tianyan_assembly::full(),
+            )
+            .await
+            {
+                eprintln!("server 退出：{e}");
+            }
+        });
+    }
+
+    // ===== 4. 等健康检查（启动期硬前置：server 起不来就没有 UI 可用）=====
+    println!("[启动] 等待 server 就绪…");
+    let ready = runtime().block_on(wait_for_server(port));
+    if !ready {
+        eprintln!("server 30 秒内未就绪，退出");
+        std::process::exit(1);
+    }
+    println!("[启动] server 就绪");
+
+    // ===== 5. GPUI 主循环 =====
+    gpui_kit::application().run(move |cx| {
         gpui_kit::init(cx);
         Theme::change(ThemeMode::Dark, None, cx);
-        let bounds = Bounds::centered(None, size(px(1360.), px(860.)), cx);
+        let bounds = Bounds::centered(None, size(px(1180.), px(780.)), cx);
         cx.spawn(async move |cx| {
             cx.open_window(
                 WindowOptions {
                     window_bounds: Some(WindowBounds::Windowed(bounds)),
                     titlebar: Some(TitlebarOptions {
-                        title: Some("天演 · UI 侧验证（虚拟列表 + 代码编辑器）".into()),
+                        title: Some("天演".into()),
                         ..Default::default()
                     }),
                     ..Default::default()
                 },
-                |window, cx| {
-                    let view = cx.new(|cx| DemoApp::new(window, cx));
+                move |window, cx| {
+                    let view = cx.new(|cx| ClientApp::new(window, cx, port));
                     cx.new(|cx| Root::new(view, window, cx))
                 },
             )
@@ -174,4 +321,8 @@ fn main() {
         })
         .detach();
     });
+
+    // ===== 6. 窗口关闭 → 关停 server =====
+    let _ = shutdown_tx.send(true);
+    println!("[退出] 已发送关停信号");
 }
