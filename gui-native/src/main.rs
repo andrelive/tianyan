@@ -1377,6 +1377,8 @@ struct ExpandState {
     thinking: std::collections::HashSet<String>,
     tool_args: std::collections::HashSet<String>,
     tool_result: std::collections::HashSet<String>,
+    /// 子代理活动流里展开的那一行（Web 版同口径：同时只展开一个）
+    activity: Option<String>,
 }
 
 type ExpandRef = Rc<std::cell::RefCell<ExpandState>>;
@@ -1398,8 +1400,8 @@ struct ClientApp {
     all_tasks: Vec<TaskRow>,
     /// 任务面板里展开的任务 id（同时只展开一个，与 Tauri 版 `openId` 同口径）
     expanded_task: Option<String>,
-    /// 子代理任务的消息缓存（`task_id` = 子会话 id → `[(role, text)]`）
-    task_messages: std::collections::HashMap<String, Vec<(String, String)>>,
+    /// 子代理任务的消息缓存（`task_id` = 子会话 id → 结构化消息，供活动流渲染）
+    task_messages: std::collections::HashMap<String, Vec<MsgRow>>,
     /// 消息区折叠状态（思考块 / 工具参数 / 工具结果）
     expand: ExpandRef,
     /// 子智能体（角色）列表 / 统计 / 详情
@@ -1604,6 +1606,9 @@ impl ClientApp {
         .detach();
         app.load_sessions(cx);
         app.load_models(cx);
+        // 子智能体页数据预加载：等到切页时才拉会让用户先看到空白再「跳」出内容
+        app.load_roles(cx);
+        app.load_roles_stats(cx);
         // 后台任务面板轮询（3s，对齐 Tauri 版 `AgentTasksPanel.POLL_INTERVAL_MS`）。
         // 面板是观测面：只在有选中会话时拉，失败静默（`load_tasks` 内部处理）。
         cx.spawn(async move |this, cx| loop {
@@ -2730,7 +2735,9 @@ impl ClientApp {
                         if view == View::Settings {
                             this.load_models(cx);
                         }
-                        if view == View::Roles {
+                        // 数据已在启动时预加载：只在空列表（首次失败/未拉到）时补拉，
+                        // 避免每次切页都发请求、页面先空一帧再填
+                        if view == View::Roles && this.roles.is_empty() {
                             this.load_roles(cx);
                             this.load_roles_stats(cx);
                         }
@@ -3076,43 +3083,9 @@ impl ClientApp {
                             .child(text),
                     );
                 } else {
-                    match self.task_messages.get(&t.id) {
-                        Some(list) if !list.is_empty() => {
-                            let start = list.len().saturating_sub(8);
-                            for (role, text) in list.iter().skip(start) {
-                                body = body.child(
-                                    div()
-                                        .flex()
-                                        .flex_col()
-                                        .gap_1()
-                                        .child(
-                                            div()
-                                                .text_size(px(10.))
-                                                .text_color(rgb(if role == "user" {
-                                                    colors::ACCENT
-                                                } else {
-                                                    colors::TEXT_TERTIARY
-                                                }))
-                                                .child(role.clone()),
-                                        )
-                                        .child(
-                                            div()
-                                                .text_size(px(11.))
-                                                .text_color(rgb(colors::TEXT_SECONDARY))
-                                                .child(ellipsis(text, 300)),
-                                        ),
-                                );
-                            }
-                        }
-                        _ => {
-                            body = body.child(
-                                div()
-                                    .text_size(px(11.))
-                                    .text_color(rgb(colors::TEXT_TERTIARY))
-                                    .child("加载子代理消息…"),
-                            );
-                        }
-                    }
+                    // 子代理活动流：紧凑单行投影（思考 / 输出 / 工具），
+                    // 不是消息气泡 —— 与 Web 版 `DelegateActivity` 同构
+                    body = body.child(self.render_delegate_activity(&t.id, !terminal, cx));
                 }
                 card = card.child(body);
             }
@@ -3162,16 +3135,23 @@ impl ClientApp {
                     .and_then(|v| v.as_array())
                     .cloned()
                     .unwrap_or_default();
-                let rows: Vec<(String, String)> = arr
+                // 与主对话流同一套结构化解析：子代理的活动流要靠 segments 区分
+                // 思考 / 输出 / 工具，纯文本摊平后这些结构就没了（此前正是如此）
+                let rows: Vec<MsgRow> = arr
                     .iter()
                     .map(|m| {
-                        (
-                            m.get("role")
+                        let (segs, tool_calls) = parse_segments(m);
+                        MsgRow {
+                            role: m
+                                .get("role")
                                 .and_then(|v| v.as_str())
                                 .unwrap_or("?")
                                 .to_string(),
-                            segments_text(m),
-                        )
+                            text: segments_text(m).into(),
+                            segs,
+                            tool_calls,
+                            compression: false,
+                        }
                     })
                     .collect();
                 let _ = this.update(cx, |this, cx| {
@@ -4726,8 +4706,15 @@ impl ClientApp {
         // 统计行是按会话的：切走即清空，由新会话的两次 GET 重新填
         self.session_usage = None;
         self.request_perf = None;
+        // 会话语义的面板数据先清空（避免看着新会话却显示上一条的待办/审批），
+        // 再**立即**拉一次 —— 否则要等 3s 轮询窗口，体感就是"切过去慢一拍"
+        self.todos.clear();
+        self.goals.clear();
+        self.pending_approvals.clear();
         self.load_messages(id, cx);
         self.load_session_usage(cx);
+        self.load_todos_goals(cx);
+        self.load_approvals(cx);
         // 选中态与「当前会话始终可见」都体现在左栏行上
         self.rebuild_session_rows(cx);
     }
@@ -5560,6 +5547,347 @@ impl Render for ClientApp {
             } else {
                 div().into_any_element()
             })
+    }
+}
+
+/// 子代理活动流的一行（把消息摊平后的投影）。
+enum ActivityRow {
+    Thinking { key: String, text: String },
+    Text { key: String, text: String },
+    Tool { key: String, call: ToolCall },
+}
+
+impl ClientApp {
+    /// 子代理活动流（对齐 Web 版 `DelegateActivity`）。
+    ///
+    /// **紧凑单行列表**，不是消息气泡：图标 + 标签 + 摘要 + 字数/耗时，点开看原文。
+    /// 相邻同类段合并 —— 流式逐 delta 会切出大量碎片段，不合并会一行一个 token。
+    fn render_delegate_activity(
+        &self,
+        task_id: &str,
+        live: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let Some(messages) = self.task_messages.get(task_id) else {
+            return div()
+                .px_1()
+                .py_1()
+                .text_size(px(11.))
+                .text_color(rgb(colors::TEXT_TERTIARY))
+                .child(if live {
+                    "子智能体工作中…"
+                } else {
+                    "加载中…"
+                })
+                .into_any_element();
+        };
+        let mut rows: Vec<ActivityRow> = Vec::new();
+        for (mi, m) in messages.iter().enumerate() {
+            for (si, seg) in m.segs.iter().enumerate() {
+                let key = format!("{task_id}:{mi}:{si}");
+                match seg {
+                    Seg::Thinking(t) => {
+                        if let Some(ActivityRow::Thinking { text, .. }) = rows.last_mut() {
+                            text.push_str(t);
+                        } else {
+                            rows.push(ActivityRow::Thinking {
+                                key,
+                                text: t.clone(),
+                            });
+                        }
+                    }
+                    Seg::Text(t) => {
+                        if let Some(ActivityRow::Text { text, .. }) = rows.last_mut() {
+                            text.push_str(t);
+                        } else {
+                            rows.push(ActivityRow::Text {
+                                key,
+                                text: t.clone(),
+                            });
+                        }
+                    }
+                    Seg::Tool { id, name, .. } => {
+                        let call = m
+                            .tool_calls
+                            .iter()
+                            .find(|c| &c.id == id)
+                            .or_else(|| m.tool_calls.iter().find(|c| &c.name == name))
+                            .cloned()
+                            .unwrap_or_else(|| ToolCall {
+                                id: id.clone(),
+                                name: name.clone(),
+                                arguments: String::new(),
+                                presentation: "generic".to_string(),
+                                result: None,
+                                duration_ms: None,
+                                error: None,
+                            });
+                        rows.push(ActivityRow::Tool { key, call });
+                    }
+                }
+            }
+        }
+        if rows.is_empty() {
+            return div()
+                .px_1()
+                .py_1()
+                .text_size(px(11.))
+                .text_color(rgb(colors::TEXT_TERTIARY))
+                .child(if live {
+                    "子智能体工作中…"
+                } else {
+                    "无过程记录"
+                })
+                .into_any_element();
+        }
+        let mut list = div().max_h(px(360.)).flex().flex_col().gap_1().w_full();
+        for (ix, row) in rows.into_iter().enumerate() {
+            list = list.child(self.render_activity_row(ix, row, cx));
+        }
+        list.overflow_y_scrollbar().into_any_element()
+    }
+
+    /// 活动流的一行：收起态一行（图标 + 标签 + 摘要 + meta + 箭头），展开态一块原文。
+    fn render_activity_row(
+        &self,
+        ix: usize,
+        row: ActivityRow,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let open_key = self.expand.borrow().activity.clone();
+        let (key, is_tool) = match &row {
+            ActivityRow::Thinking { key, .. } | ActivityRow::Text { key, .. } => {
+                (key.clone(), false)
+            }
+            ActivityRow::Tool { key, .. } => (key.clone(), true),
+        };
+        let open = open_key.as_deref() == Some(key.as_str());
+        let chevron = if open {
+            IconName::ChevronDown
+        } else {
+            IconName::ChevronRight
+        };
+
+        // 头：图标 + 标签 + 摘要 + meta + 箭头
+        let mut head = div()
+            .id(("act", ix))
+            .w_full()
+            .px_1()
+            .py_1()
+            .rounded_md()
+            .cursor_pointer()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_1()
+            .text_size(px(11.));
+        let mut details: Vec<AnyElement> = Vec::new();
+        match row {
+            ActivityRow::Tool { call, .. } => {
+                let (icon, label) = presentation_of(&call.presentation);
+                let failed = call.error.is_some();
+                let settled = call.duration_ms.is_some() || call.result.is_some();
+                let target = summarize_tool_target(&call.arguments);
+                head = head
+                    .child(if failed {
+                        svg()
+                            .path(IconName::CircleX.path())
+                            .size(px(11.))
+                            .text_color(rgb(colors::ERROR))
+                            .into_any_element()
+                    } else {
+                        svg()
+                            .path(icon.path())
+                            .size(px(11.))
+                            .text_color(rgb(colors::TEXT_TERTIARY))
+                            .into_any_element()
+                    })
+                    .child(
+                        div()
+                            .flex_shrink_0()
+                            .text_color(rgb(colors::TEXT_SECONDARY))
+                            .child(label),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .whitespace_nowrap()
+                            .overflow_hidden()
+                            .text_color(rgb(colors::TEXT_TERTIARY))
+                            .child(target),
+                    );
+                if let Some(ms) = call.duration_ms {
+                    head = head.child(
+                        div()
+                            .flex_shrink_0()
+                            .text_size(px(10.))
+                            .text_color(rgb(colors::TEXT_TERTIARY))
+                            .child(format_duration(ms)),
+                    );
+                } else if !settled {
+                    head = head.child(
+                        div()
+                            .flex_shrink_0()
+                            .text_size(px(10.))
+                            .text_color(rgb(colors::TEXT_TERTIARY))
+                            .child("…"),
+                    );
+                }
+                details.push(
+                    div()
+                        .px_2()
+                        .py_1()
+                        .text_size(px(11.))
+                        .text_color(rgb(colors::TEXT_SECONDARY))
+                        .child(format_arguments(&call.arguments))
+                        .into_any_element(),
+                );
+                if let Some(err) = call.error {
+                    details.push(
+                        div()
+                            .px_2()
+                            .py_1()
+                            .text_size(px(11.))
+                            .text_color(rgb(colors::ERROR))
+                            .child(err)
+                            .into_any_element(),
+                    );
+                }
+                if let Some(result) = call.result.filter(|r| !r.is_empty()) {
+                    details.push(
+                        div()
+                            .px_2()
+                            .py_1()
+                            .max_h(px(220.))
+                            .overflow_hidden()
+                            .text_size(px(11.))
+                            .text_color(rgb(colors::TEXT_SECONDARY))
+                            .child(result)
+                            .into_any_element(),
+                    );
+                }
+            }
+            ActivityRow::Thinking { text, .. } => {
+                // 思考行摘要取**最后一行**（模型的当前念头），输出行取第一行
+                let banner = text
+                    .lines()
+                    .rev()
+                    .find(|l| !l.trim().is_empty())
+                    .unwrap_or_default()
+                    .trim()
+                    .to_string();
+                head = head
+                    .child(
+                        svg()
+                            .path(IconName::Brain.path())
+                            .size(px(11.))
+                            .text_color(rgb(colors::TEXT_TERTIARY)),
+                    )
+                    .child(
+                        div()
+                            .flex_shrink_0()
+                            .text_color(rgb(colors::TEXT_SECONDARY))
+                            .child("思考"),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .whitespace_nowrap()
+                            .overflow_hidden()
+                            .text_color(rgb(colors::TEXT_TERTIARY))
+                            .child(banner),
+                    )
+                    .child(
+                        div()
+                            .flex_shrink_0()
+                            .text_size(px(10.))
+                            .text_color(rgb(colors::TEXT_TERTIARY))
+                            .child(format!("{} 字", text.chars().count())),
+                    );
+                details.push(
+                    div()
+                        .px_2()
+                        .py_1()
+                        .text_size(px(11.))
+                        .text_color(rgb(colors::TEXT_SECONDARY))
+                        .child(text)
+                        .into_any_element(),
+                );
+            }
+            ActivityRow::Text { text, .. } => {
+                let banner = text
+                    .lines()
+                    .find(|l| !l.trim().is_empty())
+                    .unwrap_or_default()
+                    .trim()
+                    .to_string();
+                head = head
+                    .child(
+                        svg()
+                            .path(IconName::TextAlignStart.path())
+                            .size(px(11.))
+                            .text_color(rgb(colors::TEXT_TERTIARY)),
+                    )
+                    .child(
+                        div()
+                            .flex_shrink_0()
+                            .text_color(rgb(colors::TEXT_SECONDARY))
+                            .child("输出"),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .whitespace_nowrap()
+                            .overflow_hidden()
+                            .text_color(rgb(colors::TEXT_TERTIARY))
+                            .child(banner),
+                    )
+                    .child(
+                        div()
+                            .flex_shrink_0()
+                            .text_size(px(10.))
+                            .text_color(rgb(colors::TEXT_TERTIARY))
+                            .child(format!("{} 字", text.chars().count())),
+                    );
+                details.push(
+                    div()
+                        .px_2()
+                        .py_1()
+                        .text_size(px(11.))
+                        .text_color(rgb(colors::TEXT_SECONDARY))
+                        .child(text)
+                        .into_any_element(),
+                );
+            }
+        }
+        head = head.child(
+            svg()
+                .path(chevron.path())
+                .size(px(10.))
+                .text_color(rgb(colors::TEXT_TERTIARY)),
+        );
+        let _ = is_tool;
+        let head = head.on_click(cx.listener(move |this, _, _, cx| {
+            let key = key.clone();
+            let cur = this.expand.borrow().activity.clone();
+            this.expand.borrow_mut().activity = if cur.as_deref() == Some(key.as_str()) {
+                None
+            } else {
+                Some(key.clone())
+            };
+            cx.notify();
+        }));
+
+        let mut outer = div().flex().flex_col().w_full().child(head);
+        if open {
+            for d in details {
+                outer = outer.child(d);
+            }
+        }
+        outer.into_any_element()
     }
 }
 
