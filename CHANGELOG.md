@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+- **MCP 连接常驻吃满一个 CPU 核**（`rust-mcp-sdk 0.9.0` 内部忙循环）：现象是桌面端一开着就有一个线程接近满载——功能却完全正常（25 个 MCP 工具全部注册可用），因此长期被误当作「UI 渲染开销」。定位靠 GPUI 原生客户端里的 CPU 时间二分（5 秒窗口的进程 CPU 时间）：只跑 GPUI **0.14s** / 建 tokio runtime 不启 server **0.08s** / 完整 server **5.36s** → 落在 server 内部；按装配插槽再二分，`policies()`（去掉 MCP 动态工具 + LanceDB 两个插槽）**6.22s** 反而高于 `full()` 的 **5.45s** → 排除这两块；直接禁用 MCP **0.14s** vs 启用 **5.73s**（40 倍）；单独跑 playwright MCP 子进程也不忙 → 排除子进程自身与「连接失败重试」，锁定 SDK 内部。
+  - 修法：**`rust-mcp-sdk` 0.9.0 → 1.1.0**（连带 `rust-mcp-schema` 0.10.3 → 1.0.0、`rust-mcp-transport` 0.9.1 → 1.0.1）。天演自身代码**零改动**——`McpClient` 用到的 stdio / streamable-http 传输、client handler、工具列表在 1.x 保持兼容。验证：`cargo check` 零错误、`cargo test -p tianyan-mcp` **18/18 通过**、同一 5 秒窗口 CPU 从 5.28s → **0.19s（−96.4%）**，且 MCP 仍连接成功（25 个工具）。
+  - 影响面：**现有 Tauri 桌面版同样受益**（同一份 MCP 客户端代码），用户可感知的变化是「应用常开时风扇不再一直转」。
+
 ## [1.0.1] - 2026-10-24
 
 ### Added
