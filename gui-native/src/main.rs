@@ -6,16 +6,15 @@
 //! 当前进度：装配内核 → 起内嵌 server → 拉会话列表 → 点会话看消息（Markdown 渲染）。
 //! 未完成：SSE 流式发送、设置页/workspace/审批面板、托盘/通知/快捷键/updater、单实例保护。
 
-use gpui_kit::component::list::{List, ListDelegate, ListItem, ListState};
+use futures::StreamExt as _;
 use gpui_kit::component::input::{InputEvent, Textarea, TextareaState};
+use gpui_kit::component::list::{List, ListDelegate, ListItem, ListState};
+use gpui_kit::component::progress::ProgressCircle;
 use gpui_kit::component::text::TextView;
 use gpui_kit::component::theme::{Theme, ThemeMode};
 use gpui_kit::component::{IndexPath, Root};
-use gpui_kit::{
-    list as gpui_list, AppContext as _, IntoElement as _, ListAlignment, ListState as GpuiListState,
-};
 use gpui_kit::*;
-use futures::StreamExt as _;
+use gpui_kit::{list as gpui_list, ListAlignment, ListState as GpuiListState};
 use std::rc::Rc;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
@@ -49,7 +48,9 @@ async fn fetch_json(url: String) -> Result<serde_json::Value, String> {
     runtime()
         .spawn(async move {
             let resp = reqwest::get(&url).await.map_err(|e| e.to_string())?;
-            resp.json::<serde_json::Value>().await.map_err(|e| e.to_string())
+            resp.json::<serde_json::Value>()
+                .await
+                .map_err(|e| e.to_string())
         })
         .await
         .unwrap_or_else(|e| Err(format!("join: {e}")))
@@ -61,6 +62,35 @@ async fn post_json(url: String, body: serde_json::Value) -> Result<serde_json::V
         .spawn(async move {
             let resp = reqwest::Client::new()
                 .post(&url)
+                .json(&body)
+                .send()
+                .await
+                .map_err(|e| e.to_string())?;
+            let status = resp.status();
+            let text = resp.text().await.map_err(|e| e.to_string())?;
+            if !status.is_success() {
+                return Err(format!("HTTP {status}: {text}"));
+            }
+            serde_json::from_str::<serde_json::Value>(&text).map_err(|e| e.to_string())
+        })
+        .await
+        .unwrap_or_else(|e| Err(format!("join: {e}")))
+}
+
+/// 在 GPUI executor 上等一段时间：借 tokio runtime 睡（与 `fetch_json` 同一手法，
+/// 避免引入 GPUI 自己的 timer 类型）。
+async fn sleep_secs(secs: u64) {
+    let _ = runtime()
+        .spawn(async move { tokio::time::sleep(Duration::from_secs(secs)).await })
+        .await;
+}
+
+/// PUT 一段 JSON（会话级模型选择等）：与 [`post_json`] 同一手法。
+async fn put_json(url: String, body: serde_json::Value) -> Result<serde_json::Value, String> {
+    runtime()
+        .spawn(async move {
+            let resp = reqwest::Client::new()
+                .put(&url)
                 .json(&body)
                 .send()
                 .await
@@ -150,6 +180,99 @@ fn spawn_event_reader(port: u16, tx: tokio::sync::mpsc::UnboundedSender<serde_js
     });
 }
 
+/// 天演主题色（与 `gui-vite/src/index.css` 的 `.dark` 变量逐值对齐）。
+///
+/// 为什么不直接用 gpui-component 的 `Theme`：两套色板不同，混用会出现「侧栏是天演的
+/// 深蓝、消息区是库的灰黑」这种割裂感。用户要求与现役 Tauri 版视觉一致，所以这里以
+/// CSS 变量为单一事实源；`Theme::change(Dark)` 仍然保留（组件库内部控件需要它）。
+mod colors {
+    /// 页面底色（`--color-bg-primary`）
+    pub const BG_PRIMARY: u32 = 0x1a1a2e;
+    /// 侧栏 / 次级面（`--color-bg-secondary`）
+    pub const BG_SECONDARY: u32 = 0x16213e;
+    /// 三级面（`--color-bg-tertiary`）
+    pub const BG_TERTIARY: u32 = 0x0f3460;
+    /// hover 底色（`--color-bg-hover`）
+    pub const BG_HOVER: u32 = 0x1a1a3e;
+    /// 主文字（`--color-text-primary`）
+    pub const TEXT_PRIMARY: u32 = 0xe4e4e7;
+    /// 次文字（`--color-text-secondary`）
+    pub const TEXT_SECONDARY: u32 = 0xa1a1aa;
+    /// 弱文字（`--color-text-tertiary`）
+    pub const TEXT_TERTIARY: u32 = 0x71717a;
+    /// 分隔线（`--color-border`）
+    pub const BORDER: u32 = 0x27272a;
+    /// 强调色（`--color-accent`）
+    pub const ACCENT: u32 = 0x3b82f6;
+    /// 成功（`--color-success`）
+    pub const SUCCESS: u32 = 0x22c55e;
+    /// 错误（`--color-error`）
+    pub const ERROR: u32 = 0xef4444;
+    /// 警告（`--color-warning`）
+    pub const WARNING: u32 = 0xeab308;
+    /// 一级导航栏宽度（`--sidebar-collapsed-width`：64px 图标 rail）
+    pub const RAIL_WIDTH: f32 = 64.;
+    /// 会话列表宽度（`--sidebar-width`：280px）
+    pub const LIST_WIDTH: f32 = 280.;
+}
+
+/// 一级导航项（与 `gui-vite/src/components/sidebar/Sidebar.tsx` 的 `NAV_ITEMS` 逐项对齐）。
+///
+/// 第一列是 rail 上显示的单字（原生客户端没有 lucide 图标集，64px 宽度下用中文单字
+/// 代替，辨识度足够）；第三列是路由目标。未实现的入口渲染占位页。
+const NAV_ITEMS: [(&str, &str, View); 11] = [
+    ("会", "会话", View::Chat),
+    ("件", "文件", View::Workspace),
+    ("技", "技能", View::Skills),
+    ("智", "子智能体", View::Roles),
+    ("工", "工具", View::Tools),
+    ("知", "知识", View::Knowledge),
+    ("记", "记忆", View::Memory),
+    ("审", "审批", View::Approval),
+    ("时", "定时任务", View::Scheduled),
+    ("洞", "洞察", View::Insights),
+    ("设", "设置", View::Settings),
+];
+
+/// 当前视图（一级导航的 11 个入口；已实现的只有「会话」与「设置」）
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum View {
+    /// 会话：列表 + 消息 + 输入
+    Chat,
+    /// 文件（workspace）
+    Workspace,
+    /// 技能
+    Skills,
+    /// 子智能体（角色）
+    Roles,
+    /// 工具
+    Tools,
+    /// 知识
+    Knowledge,
+    /// 记忆
+    Memory,
+    /// 审批
+    Approval,
+    /// 定时任务
+    Scheduled,
+    /// 洞察
+    Insights,
+    /// 设置
+    Settings,
+}
+
+/// 设置页的模型行（只取展示与切换需要的字段）。
+#[derive(Clone, Debug)]
+struct ModelRow {
+    provider: String,
+    name: String,
+    /// 能力标签（kebab-case，逗号拼接；`chat` / `vision` / `text-embedding` …）
+    capabilities: String,
+    context: Option<u64>,
+    /// 是否为当前 chat 首选模型（`preferences.chat` 命中）
+    is_chat: bool,
+}
+
 /// 单行省略（ListItem 硬约束：每项必须等高，多行会溢出重叠）
 fn ellipsis(s: &str, max_chars: usize) -> String {
     let n = s.chars().count();
@@ -226,11 +349,110 @@ impl ListDelegate for SessionsDelegate {
 
 // ===== 消息（不再用虚拟列表：高度不定，几十到 200 条直接布局更简单可靠）=====
 
+/// 设置页的 provider 行。
+///
+/// **含 api_key**：编辑时要把它回填进输入框，而 `set_value` 需要 `&mut Window`
+/// （只有在点击处理器这种同步上下文里才有），所以不能在异步回调里回填——
+/// 只能随列表一起取回来。这条缓存**只用于展示与回填**；保存时仍然重新 GET 配置
+/// 再改（见 `save_provider`），不拿这份缓存去写。
+#[derive(Clone, Debug)]
+struct ProviderRow {
+    name: String,
+    endpoint: String,
+    api_key: String,
+    model_count: usize,
+}
+
+/// 解析 `ask_user` 工具调用参数里的问题列表。
+///
+/// 形态**唯一**（对齐后端 `AskUserParams`）：`arguments` 里只有 `questions` 数组，
+/// 每个问题 `{question, options?}`。`arguments` 在事件里可能是 JSON 字符串或对象，
+/// 两种都接（Tauri 版 `parseAskUserQuestions` 同口径）。
+fn parse_ask_user(args: &serde_json::Value) -> Vec<(String, Vec<String>)> {
+    let parsed: serde_json::Value = match args {
+        serde_json::Value::String(s) => {
+            serde_json::from_str(s).unwrap_or(serde_json::Value::Null)
+        }
+        v => v.clone(),
+    };
+    let mut out: Vec<(String, Vec<String>)> = Vec::new();
+    if let Some(qs) = parsed.get("questions").and_then(|v| v.as_array()) {
+        for q in qs {
+            let question = q
+                .get("question")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .to_string();
+            let options: Vec<String> = q
+                .get("options")
+                .and_then(|v| v.as_array())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|o| o.as_str().map(|s| s.to_string()))
+                        .collect()
+                })
+                .unwrap_or_default();
+            if !question.is_empty() {
+                out.push((question, options));
+            }
+        }
+    }
+    // 兼容「单个问题直接给 question/options」的朴素形态（没有 questions 数组）
+    if out.is_empty() {
+        if let Some(q) = parsed.get("question").and_then(|v| v.as_str()) {
+            let options: Vec<String> = parsed
+                .get("options")
+                .and_then(|v| v.as_array())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|o| o.as_str().map(|s| s.to_string()))
+                        .collect()
+                })
+                .unwrap_or_default();
+            out.push((q.to_string(), options));
+        }
+    }
+    out
+}
+
+/// 待审批操作（对齐 `GET /api/v1/approval/status` 的 `pending_approvals[]`）。
+#[derive(Clone, Debug)]
+struct ApprovalRow {
+    request_id: String,
+    description: String,
+    risk: String,
+}
+
+/// 后台任务面板的一行（对齐 Tauri 版 `AgentTasksPanel` 的展示字段）。
+#[derive(Clone, Debug)]
+struct TaskRow {
+    kind: String,
+    status: String,
+    description: String,
+}
+
+/// 消息内的一个展示块（口径对齐 Tauri 版 `MessageSegments` 的分段渲染）。
+#[derive(Clone, Debug)]
+enum Seg {
+    /// 正文（Markdown 渲染）
+    Text(String),
+    /// 思考过程（灰字，暂不折叠）
+    Thinking(String),
+    /// 工具调用（卡片：名称 + 参数摘要）
+    Tool { name: String, args: String },
+    /// 工具结果（名称 + 结果预览）
+    Observation { name: String, preview: String },
+}
+
 #[derive(Clone, Debug)]
 struct MsgRow {
     role: String,
     /// SharedString（Arc 语义）：clone 是 O(1)，避免每帧复制正文
     text: gpui_kit::SharedString,
+    /// 结构化分段：历史消息来自 `segments`，流式增量只有正文（segs 为空，用 text 兜底）
+    segs: Vec<Seg>,
+    /// 压缩点（`compression_marker`）：显示徽章，**不**渲染成用户气泡
+    compression: bool,
 }
 
 /// 从消息 JSON 的 segments 里拼接正文（ADR-002：正文单一事实源是 segments，
@@ -280,6 +502,68 @@ fn segments_text(msg: &serde_json::Value) -> String {
     out
 }
 
+/// 把消息 JSON 的 `segments` 解析成展示块。
+///
+/// ADR-002：正文的单一事实源是 `segments`（不是 `content`——后者只用于请求方向）。
+/// 与 [`segments_text`] 的区别：那个把思考/工具都拼成一段文字（早期纯文本渲染用），
+/// 这个保留块类型，交给渲染层分别画成 Markdown / 灰字思考 / 工具卡片。
+fn parse_segments(msg: &serde_json::Value) -> Vec<Seg> {
+    let mut out: Vec<Seg> = Vec::new();
+    let Some(arr) = msg.get("segments").and_then(|v| v.as_array()) else {
+        return out;
+    };
+    for seg in arr {
+        let ty = seg.get("type").and_then(|v| v.as_str()).unwrap_or_default();
+        match ty {
+            "text" => {
+                if let Some(t) = seg.get("text").and_then(|v| v.as_str()) {
+                    if !t.trim().is_empty() {
+                        out.push(Seg::Text(t.to_string()));
+                    }
+                }
+            }
+            "thinking" | "reasoning" => {
+                if let Some(t) = seg.get("text").and_then(|v| v.as_str()) {
+                    if !t.trim().is_empty() {
+                        out.push(Seg::Thinking(t.to_string()));
+                    }
+                }
+            }
+            "tool" => {
+                // 真实结构：{ type: "tool", tool_call: { name, arguments, .. } }
+                let tc = seg.get("tool_call");
+                let name = tc
+                    .and_then(|v| v.get("name"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("工具")
+                    .to_string();
+                let args = tc
+                    .and_then(|v| v.get("arguments"))
+                    .map(|v| v.to_string())
+                    .unwrap_or_default();
+                out.push(Seg::Tool { name, args });
+            }
+            "observation" | "tool_result" => {
+                let name = seg
+                    .get("tool_name")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("工具")
+                    .to_string();
+                let preview = seg
+                    .get("content")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default()
+                    .chars()
+                    .take(300)
+                    .collect::<String>();
+                out.push(Seg::Observation { name, preview });
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
 struct ClientApp {
     sessions: Entity<ListState<SessionsDelegate>>,
     /// 消息用 Rc 包一层：闭包驱动的虚拟列表需要把数据带进 'static 闭包，
@@ -299,6 +583,46 @@ struct ClientApp {
     input: Entity<TextareaState>,
     /// 是否有轮在跑（`turn_state` 驱动，同时闸住重复发送）
     streaming: bool,
+    /// 当前视图
+    view: View,
+    /// 设置页：模型列表（`GET /api/v1/config/models`）
+    models: Vec<ModelRow>,
+    /// 设置页状态行（切换结果 / 错误）
+    settings_status: String,
+    /// 设置页状态行是否为错误（决定用 `--color-error` 还是次级文字色）
+    settings_error: bool,
+    /// 会话级模型选择（`(provider, model)`）：None = 回落到 `preferences.chat`
+    session_model: Option<(String, String)>,
+    /// 模型下拉是否展开
+    model_menu_open: bool,
+    /// 最近一次 usage 上报的已用 token（上下文环分子）
+    ctx_used: u64,
+    /// 最近一次 usage 上报的上下文窗口（分母）
+    ctx_window: u64,
+    /// 本会话的后台任务（`GET /api/v1/tasks` 按 `parent_session_id` 过滤）
+    tasks: Vec<TaskRow>,
+    /// 任务面板是否折叠（折叠成 36px 竖条，对齐 Tauri 版 dock 的收起态）
+    tasks_collapsed: bool,
+    /// 会话待办（`(status, title)`，来自 `GET /todos?session_id=`）
+    todos: Vec<(String, String)>,
+    /// 会话目标（`(status, title)`，来自 `GET /goals?session_id=`）
+    goals: Vec<(String, String)>,
+    /// 待办/目标窄条是否折叠
+    todo_bar_collapsed: bool,
+    /// 本会话的待审批操作（`GET /api/v1/approval/status` 按 `session_id` 过滤）
+    pending_approvals: Vec<ApprovalRow>,
+    /// 待回答的追问（`ask_user` 同步工具挂起时）：`(问题, 选项)`
+    clarification: Option<Vec<(String, Vec<String>)>>,
+    /// 已选答案（与 `clarification` 等长；空串 = 未答）
+    clarify_answers: Vec<String>,
+    /// 设置页：provider 列表（含 endpoint / api_key，供编辑回填）
+    providers: Vec<ProviderRow>,
+    /// 设置页：正在编辑的 provider（None = 未打开编辑器）
+    editing_provider: Option<String>,
+    /// 编辑框：endpoint
+    edit_endpoint: Entity<TextareaState>,
+    /// 编辑框：api_key
+    edit_api_key: Entity<TextareaState>,
 }
 
 impl ClientApp {
@@ -324,6 +648,9 @@ impl ClientApp {
         let input = cx.new(|cx| {
             TextareaState::new(window, cx).placeholder("输入消息 · Enter 发送 / Shift+Enter 换行")
         });
+        // 设置页的两个编辑框：endpoint 与 api_key（打开编辑时从 `GET /config` 回填）
+        let endpoint_input = cx.new(|cx| TextareaState::new(window, cx).placeholder("API 端点（http(s)://…）"));
+        let key_input = cx.new(|cx| TextareaState::new(window, cx).placeholder("API 密钥"));
         // Enter 发送：Textarea 已按多行语义插入换行，发送成功后再清空即无残留
         cx.subscribe_in(
             &input,
@@ -350,6 +677,26 @@ impl ClientApp {
             current_session: None,
             input,
             streaming: false,
+            view: View::Chat,
+            models: Vec::new(),
+            settings_status: "正在加载模型列表…".to_string(),
+            settings_error: false,
+            session_model: None,
+            model_menu_open: false,
+            ctx_used: 0,
+            ctx_window: 0,
+            tasks: Vec::new(),
+            tasks_collapsed: false,
+            todos: Vec::new(),
+            goals: Vec::new(),
+            todo_bar_collapsed: false,
+            pending_approvals: Vec::new(),
+            clarification: None,
+            clarify_answers: Vec::new(),
+            providers: Vec::new(),
+            editing_provider: None,
+            edit_endpoint: endpoint_input,
+            edit_api_key: key_input,
         };
         // 统一事件常驻订阅（ADR-028）：订阅在窗口创建时建立，与「发送」解耦
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<serde_json::Value>();
@@ -367,6 +714,23 @@ impl ClientApp {
         })
         .detach();
         app.load_sessions(cx);
+        app.load_models(cx);
+        // 后台任务面板轮询（3s，对齐 Tauri 版 `AgentTasksPanel.POLL_INTERVAL_MS`）。
+        // 面板是观测面：只在有选中会话时拉，失败静默（`load_tasks` 内部处理）。
+        cx.spawn(async move |this, cx| loop {
+            sleep_secs(3).await;
+            let alive = this.update(cx, |this, cx| {
+                if this.current_session.is_some() {
+                    this.load_tasks(cx);
+                    this.load_todos_goals(cx);
+                    this.load_approvals(cx);
+                }
+            });
+            if alive.is_err() {
+                break;
+            }
+        })
+        .detach();
         app
     }
 
@@ -425,6 +789,1374 @@ impl ClientApp {
         .detach();
     }
 
+    /// 加载模型服务列表（`GET /api/v1/config/models`）。
+    ///
+    /// 只取展示与切换需要的字段：provider / 模型名 / 能力标签 / 上下文窗口 /
+    /// 是否为当前 chat 首选。`preferences.chat` 是 `{model, provider}`，provider
+    /// 可能缺省（同名模型只注册在一个 provider 上时）。
+    fn load_models(&self, cx: &mut Context<Self>) {
+        let port = self.port;
+        cx.spawn(async move |this, cx| {
+            let url = format!("http://{SERVER_HOST}:{port}/api/v1/config/models");
+            match fetch_json(url).await {
+                Ok(body) => {
+                    let pref = body.get("preferences").and_then(|p| p.get("chat"));
+                    let chat_model = pref
+                        .and_then(|c| c.get("model"))
+                        .and_then(|v| v.as_str())
+                        .unwrap_or_default()
+                        .to_string();
+                    let chat_provider = pref
+                        .and_then(|c| c.get("provider"))
+                        .and_then(|v| v.as_str())
+                        .unwrap_or_default()
+                        .to_string();
+                    let mut rows: Vec<ModelRow> = Vec::new();
+                    if let Some(models) = body.get("models").and_then(|v| v.as_array()) {
+                        for m in models {
+                            let name = m
+                                .get("name")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or_default()
+                                .to_string();
+                            let provider = m
+                                .get("provider")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or_default()
+                                .to_string();
+                            let capabilities = m
+                                .get("capabilities")
+                                .and_then(|v| v.as_array())
+                                .map(|a| {
+                                    a.iter()
+                                        .filter_map(|x| x.as_str())
+                                        .collect::<Vec<_>>()
+                                        .join("/")
+                                })
+                                .unwrap_or_default();
+                            let context = m.get("context_length").and_then(|v| v.as_u64());
+                            let is_chat = name == chat_model
+                                && (chat_provider.is_empty() || provider == chat_provider);
+                            rows.push(ModelRow {
+                                provider,
+                                name,
+                                capabilities,
+                                context,
+                                is_chat,
+                            });
+                        }
+                    }
+                    let n = rows.len();
+                    // 再拉一次整份配置：providers 的 endpoint / api_key 只在 `/config`
+                    // 里（`/config/models` 只给 name/endpoint/enabled/model_count）。
+                    // 编辑回填需要它们，而回填只能在同步点击处理器里做（要 `&mut Window`）。
+                    let cfg_res = fetch_json(format!(
+                        "http://{SERVER_HOST}:{port}/api/v1/config"
+                    ))
+                    .await;
+                    let mut providers: Vec<ProviderRow> = Vec::new();
+                    if let Ok(body) = cfg_res {
+                        if let Some(arr) = body
+                            .get("config")
+                            .and_then(|c| c.get("models"))
+                            .and_then(|m| m.get("providers"))
+                            .and_then(|p| p.as_array())
+                        {
+                            for p in arr {
+                                providers.push(ProviderRow {
+                                    name: p
+                                        .get("name")
+                                        .and_then(|v| v.as_str())
+                                        .unwrap_or_default()
+                                        .to_string(),
+                                    endpoint: p
+                                        .get("endpoint")
+                                        .and_then(|v| v.as_str())
+                                        .unwrap_or_default()
+                                        .to_string(),
+                                    api_key: p
+                                        .get("api_key")
+                                        .and_then(|v| v.as_str())
+                                        .unwrap_or_default()
+                                        .to_string(),
+                                    model_count: p
+                                        .get("models")
+                                        .and_then(|v| v.as_array())
+                                        .map(|a| a.len())
+                                        .unwrap_or(0),
+                                });
+                            }
+                        }
+                    }
+                    let _ = this.update(cx, |this, cx| {
+                        this.models = rows;
+                        this.providers = providers;
+                        this.settings_status = format!("模型 {n} 个");
+                        this.settings_error = false;
+                        cx.notify();
+                    });
+                }
+                Err(e) => {
+                    let _ = this.update(cx, |this, cx| {
+                        this.settings_status = format!("加载模型列表失败：{e}");
+                        this.settings_error = true;
+                        cx.notify();
+                    });
+                }
+            }
+        })
+        .detach();
+    }
+
+    /// 切换默认聊天模型（`POST /api/v1/config/models/switch`，持久化 preferences.chat）。
+    fn switch_chat_model(&mut self, provider: String, model: String, cx: &mut Context<Self>) {
+        let port = self.port;
+        self.settings_status = format!("正在切换到 {model}…");
+        cx.spawn(async move |this, cx| {
+            let url = format!("http://{SERVER_HOST}:{port}/api/v1/config/models/switch");
+            // capability 用 kebab-case（core 的 ModelCapability 序列化口径）
+            let body = serde_json::json!({
+                "model": model,
+                "capability": "chat",
+                "provider": provider,
+            });
+            match post_json(url, body).await {
+                Ok(_) => {
+                    let _ = this.update(cx, |this, cx| {
+                        this.settings_status = format!("已把 {model} 设为聊天模型");
+                        this.settings_error = false;
+                        this.load_models(cx);
+                        cx.notify();
+                    });
+                }
+                Err(e) => {
+                    let _ = this.update(cx, |this, cx| {
+                        this.settings_status = format!("切换失败：{e}");
+                        this.settings_error = true;
+                        cx.notify();
+                    });
+                }
+            }
+        })
+        .detach();
+    }
+
+    /// 全局一级导航栏（64px 图标 rail）。
+    ///
+    /// 与 Tauri 版 `Sidebar.tsx` 同构：**固定宽度、不做展开/收起**——会话列表在会话页
+    /// 左栏，不在 rail 里；rail 只放 11 个一级入口。未实现的入口点进去是占位页。
+    fn render_rail(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let mut rail = div()
+            .w(px(colors::RAIL_WIDTH))
+            .h_full()
+            .flex()
+            .flex_col()
+            .items_center()
+            .gap_1()
+            .py_3()
+            .bg(rgb(colors::BG_SECONDARY))
+            .border_r_1()
+            .border_color(rgb(colors::BORDER))
+            // 品牌块（Tauri 版是「天」字方块）
+            .child(
+                div()
+                    .w(px(36.))
+                    .h(px(36.))
+                    .mb_1()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded_lg()
+                    .bg(rgb(colors::BG_TERTIARY))
+                    .text_color(rgb(colors::ACCENT))
+                    .child("天"),
+            );
+        for (ix, entry) in NAV_ITEMS.iter().enumerate() {
+            let (glyph, _label, view) = *entry;
+            let mut item = div()
+                .id(("nav", ix))
+                .w(px(40.))
+                .h(px(36.))
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded_md()
+                .cursor_pointer()
+                .text_sm();
+            if self.view == view {
+                item = item
+                    .bg(rgb(colors::BG_TERTIARY))
+                    .text_color(rgb(colors::ACCENT));
+            } else {
+                item = item.text_color(rgb(colors::TEXT_SECONDARY));
+            }
+            rail = rail.child(item.child(glyph).on_click(cx.listener(
+                move |this, _, _window, cx| {
+                    this.view = view;
+                    if view == View::Settings {
+                        this.load_models(cx);
+                    }
+                    cx.notify();
+                },
+            )));
+        }
+        rail
+    }
+
+    /// 输入卡片底部显示的当前 chat 模型（`模型 · provider`）。
+    ///
+    /// 口径与 Tauri 版 `ModelSelector` 一致：未选中时回退到 `preferences.chat`
+    /// （`load_models` 已把它标成 `is_chat`），再没有就显示占位。
+    fn current_model_label(&self) -> String {
+        if let Some((provider, model)) = &self.session_model {
+            return format!("{model} · {provider}");
+        }
+        match self.models.iter().find(|m| m.is_chat) {
+            Some(m) => format!("{} · {}", m.name, m.provider),
+            None => "未选择模型".to_string(),
+        }
+    }
+
+    /// 拉取本会话的后台任务（`GET /api/v1/tasks`，按 `parent_session_id` 归属过滤）。
+    ///
+    /// Tauri 版靠「3s 轮询 + `task_status` 事件唤醒」双保险；这里先做轮询
+    /// （事件唤醒在 `handle_event` 里补，见 `task_status` 分支）。
+    /// 失败**静默保留旧值**——面板是观测面，不能因为一次网络抖动把已有列表清空。
+    fn load_tasks(&self, cx: &mut Context<Self>) {
+        let port = self.port;
+        let session = self.current_session.clone();
+        cx.spawn(async move |this, cx| {
+            let url = format!("http://{SERVER_HOST}:{port}/api/v1/tasks");
+            if let Ok(body) = fetch_json(url).await {
+                let arr = body.as_array().cloned().unwrap_or_default();
+                let rows: Vec<TaskRow> = arr
+                    .iter()
+                    .filter(|t| {
+                        let parent = t
+                            .get("parent_session_id")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or_default();
+                        session.as_deref().map(|s| s == parent).unwrap_or(false)
+                    })
+                    .map(|t| TaskRow {
+                        kind: t
+                            .get("kind")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("-")
+                            .to_string(),
+                        status: t
+                            .get("status")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("-")
+                            .to_string(),
+                        description: t
+                            .get("description")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or_default()
+                            .to_string(),
+                    })
+                    .collect();
+                let _ = this.update(cx, |this, cx| {
+                    this.tasks = rows;
+                    cx.notify();
+                });
+            }
+        })
+        .detach();
+    }
+
+    /// 会话后台任务停靠条（右侧 dock）。
+    ///
+    /// 对齐 Tauri 版 `AgentTasksPanel`：无任务时可折叠成竖条；活跃任务在上
+    /// （顺序由后端返回决定）、终态保留展示。**取消按钮暂未接**（`POST /tasks/{id}/cancel`）。
+    fn render_tasks_panel(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        if self.tasks_collapsed {
+            return div()
+                .id("tasks-expand")
+                .w(px(36.))
+                .h_full()
+                .flex()
+                .flex_col()
+                .items_center()
+                .py_2()
+                .border_l_1()
+                .border_color(rgb(colors::BORDER))
+                .bg(rgb(colors::BG_SECONDARY))
+                .cursor_pointer()
+                .on_click(cx.listener(|this, _, _window, cx| {
+                    this.tasks_collapsed = false;
+                    cx.notify();
+                }))
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(rgb(colors::TEXT_SECONDARY))
+                        .child("任务"),
+                );
+        }
+        let mut panel = div()
+            .w(px(300.))
+            .h_full()
+            .flex()
+            .flex_col()
+            .border_l_1()
+            .border_color(rgb(colors::BORDER))
+            .bg(rgb(colors::BG_SECONDARY))
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_2()
+                    .px_3()
+                    .py_2()
+                    .child(
+                        div()
+                            .flex_1()
+                            .text_xs()
+                            .text_color(rgb(colors::TEXT_SECONDARY))
+                            .child(format!("后台任务 {}", self.tasks.len())),
+                    )
+                    .child(
+                        div()
+                            .id("tasks-collapse")
+                            .px_2()
+                            .py_1()
+                            .rounded_md()
+                            .cursor_pointer()
+                            .text_xs()
+                            .text_color(rgb(colors::TEXT_TERTIARY))
+                            .child("⟩")
+                            .on_click(cx.listener(|this, _, _window, cx| {
+                                this.tasks_collapsed = true;
+                                cx.notify();
+                            })),
+                    ),
+            );
+        if self.tasks.is_empty() {
+            panel = panel.child(
+                div()
+                    .px_3()
+                    .py_2()
+                    .text_xs()
+                    .text_color(rgb(colors::TEXT_TERTIARY))
+                    .child("本会话暂无后台任务"),
+            );
+        }
+        for (ix, t) in self.tasks.iter().enumerate() {
+            let (dot, color) = match t.status.as_str() {
+                "running" | "pending" => ("●", colors::ACCENT),
+                "completed" | "success" => ("✓", colors::SUCCESS),
+                "failed" | "cancelled" | "canceled" => ("✗", colors::ERROR),
+                _ => ("○", colors::TEXT_TERTIARY),
+            };
+            panel = panel.child(
+                div()
+                    .id(("task", ix))
+                    .px_3()
+                    .py_2()
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .border_b_1()
+                    .border_color(rgb(colors::BORDER))
+                    .child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .gap_2()
+                            .child(div().text_xs().text_color(rgb(color)).child(dot))
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(rgb(colors::TEXT_PRIMARY))
+                                    .child(ellipsis(&t.description, 26)),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(rgb(colors::TEXT_TERTIARY))
+                            .child(format!("{} · {}", t.kind, t.status)),
+                    ),
+            );
+        }
+        panel.id("tasks-panel")
+    }
+
+    /// 提交追问回答（`POST /api/v1/chat/answer`）。
+    ///
+    /// `answers` 是 `ask_user` 工具的返回值（直接回给模型）：
+    /// `{ answers: [{question, answer}], extra }`——与 Tauri 版 `ClarificationBubble`
+    /// 的序列化口径一致，模型侧看到的形态不因客户端不同而变。
+    fn submit_clarification(&mut self, cx: &mut Context<Self>) {
+        let Some(questions) = self.clarification.clone() else {
+            return;
+        };
+        let Some(sid) = self.current_session.clone() else {
+            return;
+        };
+        let answers: Vec<serde_json::Value> = questions
+            .iter()
+            .enumerate()
+            .map(|(i, (q, _))| {
+                serde_json::json!({
+                    "question": q,
+                    "answer": self.clarify_answers.get(i).cloned().unwrap_or_default(),
+                })
+            })
+            .collect();
+        let port = self.port;
+        self.status = "正在提交回答…".to_string();
+        cx.spawn(async move |this, cx| {
+            let url = format!("http://{SERVER_HOST}:{port}/api/v1/chat/answer");
+            let body = serde_json::json!({
+                "session_id": sid,
+                "answers": { "answers": answers, "extra": "" },
+            });
+            let res = post_json(url, body).await;
+            let _ = this.update(cx, |this, cx| {
+                match res {
+                    Ok(_) => {
+                        this.status = "回答已提交".to_string();
+                        this.clarification = None;
+                        this.clarify_answers.clear();
+                    }
+                    Err(e) => this.status = format!("提交回答失败：{e}"),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// 追问卡片（`ask_user` 挂起时显示在输入区上方）。
+    ///
+    /// 对齐 Tauri 版 `ClarificationBubble` 的**语义**（不是像素）：问题 + 选项，
+    /// 全部答完才可提交。第一版只做「点选项作答」；无选项的问题给出提示让用户
+    /// 用输入框里的原话补（避免为极少数场景先造一个多行富文本表单）。
+    fn render_clarification(&self, cx: &mut Context<Self>) -> AnyElement {
+        let Some(questions) = &self.clarification else {
+            return div().into_any_element();
+        };
+        let all_answered = !questions.is_empty()
+            && self
+                .clarify_answers
+                .iter()
+                .take(questions.len())
+                .all(|a| !a.trim().is_empty());
+        let mut card = div().px_4().pb_2().child(
+            div()
+                .w_full()
+                .max_w(px(896.))
+                .mx_auto()
+                .rounded_lg()
+                .border_1()
+                .border_color(rgb(colors::ACCENT))
+                .bg(rgb(colors::BG_SECONDARY))
+                .p_3()
+                .flex()
+                .flex_col()
+                .gap_2()
+                .child(
+                    div()
+                        .text_sm()
+                        .text_color(rgb(colors::ACCENT))
+                        .child("模型在向你确认（回答后它继续执行）"),
+                ),
+        );
+        for (qi, (question, options)) in questions.iter().enumerate() {
+            let answered = self
+                .clarify_answers
+                .get(qi)
+                .map(|a| !a.trim().is_empty())
+                .unwrap_or(false);
+            let q_title = if answered {
+                format!("✓ {}. {}", qi + 1, question)
+            } else {
+                format!("{}. {}", qi + 1, question)
+            };
+            let mut q_block = div().flex().flex_col().gap_1().child(
+                div()
+                    .text_xs()
+                    .text_color(if answered {
+                        rgb(colors::SUCCESS)
+                    } else {
+                        rgb(colors::TEXT_PRIMARY)
+                    })
+                    .child(q_title),
+            );
+            if options.is_empty() {
+                q_block = q_block.child(
+                    div()
+                        .text_xs()
+                        .text_color(rgb(colors::TEXT_TERTIARY))
+                        .child("（该问题没有选项：把你输入框里写的原话作为回答）"),
+                );
+            }
+            for (oi, option) in options.iter().enumerate() {
+                let selected = self
+                    .clarify_answers
+                    .get(qi)
+                    .map(|a| a == option)
+                    .unwrap_or(false);
+                let mut chip = div()
+                    .id(("clarify", qi * 100 + oi))
+                    .px_2()
+                    .py_1()
+                    .rounded_md()
+                    .border_1()
+                    .border_color(rgb(colors::BORDER))
+                    .cursor_pointer()
+                    .text_xs();
+                if selected {
+                    chip = chip
+                        .bg(rgb(colors::ACCENT))
+                        .border_color(rgb(colors::ACCENT))
+                        .text_color(rgb(0xffffff));
+                } else {
+                    chip = chip
+                        .bg(rgb(colors::BG_HOVER))
+                        .text_color(rgb(colors::TEXT_PRIMARY));
+                }
+                let answer = option.clone();
+                q_block = q_block.child(chip.child(option.clone()).on_click(cx.listener(
+                    move |this, _, _w, cx| {
+                        if let Some(slot) = this.clarify_answers.get_mut(qi) {
+                            *slot = answer.clone();
+                        }
+                        cx.notify();
+                    },
+                )));
+            }
+            card = card.child(q_block);
+        }
+        let mut submit = div()
+            .id("clarify-submit")
+            .px_3()
+            .py_1()
+            .rounded_md()
+            .text_xs()
+            .text_color(rgb(0xffffff));
+        submit = if all_answered {
+            submit.bg(rgb(colors::ACCENT)).cursor_pointer()
+        } else {
+            submit.bg(rgb(colors::BG_TERTIARY))
+        };
+        card.child(
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap_2()
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(rgb(colors::TEXT_TERTIARY))
+                        .child(if all_answered {
+                            "已全部作答".to_string()
+                        } else {
+                            format!("还有 {} 个问题未回答", questions.len())
+                        }),
+                )
+                .child(div().flex_1())
+                .child(submit.child("提交回答").on_click(cx.listener(
+                    move |this, _, _w, cx| {
+                        if this.clarify_answers.iter().all(|a| !a.trim().is_empty()) {
+                            this.submit_clarification(cx);
+                        }
+                    },
+                ))),
+        )
+        .into_any_element()
+    }
+
+    /// 拉取本会话的待审批操作（`GET /api/v1/approval/status`）。
+    ///
+    /// 只保留 `session_id` 匹配当前会话的项——审批是**会话内**的挂起操作，
+    /// 别的会话的审批不该在本文出现（那会诱导用户给不相干的命令授权）。
+    fn load_approvals(&self, cx: &mut Context<Self>) {
+        let port = self.port;
+        let session = self.current_session.clone();
+        cx.spawn(async move |this, cx| {
+            let url = format!("http://{SERVER_HOST}:{port}/api/v1/approval/status");
+            if let Ok(body) = fetch_json(url).await {
+                let mut rows: Vec<ApprovalRow> = Vec::new();
+                if let Some(arr) = body.get("pending_approvals").and_then(|v| v.as_array()) {
+                    for a in arr {
+                        let sid = a
+                            .get("session_id")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or_default()
+                            .to_string();
+                        if session.as_deref() != Some(sid.as_str()) {
+                            continue;
+                        }
+                        rows.push(ApprovalRow {
+                            request_id: a
+                                .get("request_id")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or_default()
+                                .to_string(),
+                            description: a
+                                .get("action_description")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or_default()
+                                .to_string(),
+                            risk: a
+                                .get("risk_level")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("-")
+                                .to_string(),
+                        });
+                    }
+                }
+                let _ = this.update(cx, |this, cx| {
+                    this.pending_approvals = rows;
+                    cx.notify();
+                });
+            }
+        })
+        .detach();
+    }
+
+    /// 提交审批决策（`POST /api/v1/approval/respond`，decision = approve / deny）。
+    fn respond_approval(
+        &mut self,
+        request_id: String,
+        decision: &'static str,
+        cx: &mut Context<Self>,
+    ) {
+        let port = self.port;
+        self.status = format!("正在提交审批：{decision}");
+        cx.spawn(async move |this, cx| {
+            let url = format!("http://{SERVER_HOST}:{port}/api/v1/approval/respond");
+            let body = serde_json::json!({ "request_id": request_id, "decision": decision });
+            let res = post_json(url, body).await;
+            let _ = this.update(cx, |this, cx| {
+                this.status = match res {
+                    Ok(_) => format!("审批已提交（{decision}）"),
+                    Err(e) => format!("提交审批失败：{e}"),
+                };
+                this.load_approvals(cx);
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// 审批横幅（消息区顶部）：对齐 Tauri 版 `ApprovalBanner`（琥珀色告警 + 允许/拒绝）。
+    ///
+    /// 只显示**第一条**待审批：审批是一个个来的，堆一屏横幅既看不出关系也不知道点哪个；
+    /// 处理完一条，下一条自然顶上（轮询刷新）。
+    fn render_approval_banner(&self, cx: &mut Context<Self>) -> AnyElement {
+        let Some(a) = self.pending_approvals.first() else {
+            return div().into_any_element();
+        };
+        let rid_approve = a.request_id.clone();
+        let rid_deny = a.request_id.clone();
+        div()
+            .px_4()
+            .pb_2()
+            .child(
+                div()
+                    .w_full()
+                    .max_w(px(896.))
+                    .mx_auto()
+                    .rounded_lg()
+                    .border_1()
+                    .border_color(rgb(colors::WARNING))
+                    .bg(rgb(colors::BG_SECONDARY))
+                    .p_3()
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .gap_2()
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .text_color(rgb(colors::WARNING))
+                                    .child("⚠ 操作等待授权"),
+                            )
+                            .child(div().flex_1())
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(rgb(colors::TEXT_TERTIARY))
+                                    .child(format!("风险：{}", a.risk)),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(rgb(colors::TEXT_PRIMARY))
+                            .child(ellipsis(&a.description, 300)),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .gap_2()
+                            .child(
+                                div()
+                                    .id("approve")
+                                    .px_3()
+                                    .py_1()
+                                    .rounded_md()
+                                    .bg(rgb(colors::SUCCESS))
+                                    .text_color(rgb(0xffffff))
+                                    .cursor_pointer()
+                                    .text_xs()
+                                    .child("允许")
+                                    .on_click(cx.listener(move |this, _, _w, cx| {
+                                        this.respond_approval(rid_approve.clone(), "approve", cx);
+                                    })),
+                            )
+                            .child(
+                                div()
+                                    .id("deny")
+                                    .px_3()
+                                    .py_1()
+                                    .rounded_md()
+                                    .bg(rgb(colors::ERROR))
+                                    .text_color(rgb(0xffffff))
+                                    .cursor_pointer()
+                                    .text_xs()
+                                    .child("拒绝")
+                                    .on_click(cx.listener(move |this, _, _w, cx| {
+                                        this.respond_approval(rid_deny.clone(), "deny", cx);
+                                    })),
+                            ),
+                    ),
+            )
+            .into_any_element()
+    }
+
+    /// 拉取会话待办与目标（`GET /todos` + `/goals`，均按 `session_id` 过滤）。
+    ///
+    /// 两者都是**会话绑定**的推理辅助（ADR-022：无全局计划页），所以跟着当前会话走、
+    /// 切会话即重拉。失败静默（与任务面板同口径：观测面不因抖动清空）。
+    fn load_todos_goals(&self, cx: &mut Context<Self>) {
+        let Some(sid) = self.current_session.clone() else {
+            return;
+        };
+        let port = self.port;
+        cx.spawn(async move |this, cx| {
+            let base = format!("http://{SERVER_HOST}:{port}/api/v1");
+            let todos_res = fetch_json(format!("{base}/todos?session_id={sid}")).await;
+            let goals_res = fetch_json(format!("{base}/goals?session_id={sid}")).await;
+            let mut todos: Vec<(String, String)> = Vec::new();
+            if let Ok(body) = todos_res {
+                if let Some(arr) = body.get("todos").and_then(|v| v.as_array()) {
+                    for t in arr {
+                        todos.push((
+                            t.get("status")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("pending")
+                                .to_string(),
+                            t.get("title")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or_default()
+                                .to_string(),
+                        ));
+                    }
+                }
+            }
+            let mut goals: Vec<(String, String)> = Vec::new();
+            if let Ok(body) = goals_res {
+                if let Some(arr) = body.get("goals").and_then(|v| v.as_array()) {
+                    for g in arr {
+                        goals.push((
+                            g.get("status")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("active")
+                                .to_string(),
+                            g.get("title")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or_default()
+                                .to_string(),
+                        ));
+                    }
+                }
+            }
+            let _ = this.update(cx, |this, cx| {
+                this.todos = todos;
+                this.goals = goals;
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// 会话待办 / 目标窄条（在输入卡片**上方**，限宽 896px 居中）。
+    ///
+    /// 对齐 Tauri 版 `SessionTodoPanel`：两者都空时**整条不渲染**（不占位）；
+    /// 有内容时可折叠。待办状态用 `[ ]` / `[•]` / `[x]` 图标，已完成置灰。
+    fn render_todo_bar(&self, cx: &mut Context<Self>) -> AnyElement {
+        if self.todos.is_empty() && self.goals.is_empty() {
+            return div().into_any_element();
+        }
+        let collapsed = self.todo_bar_collapsed;
+        let mut bar = div().px_4().pb(px(6.)).child(
+            div()
+                .w_full()
+                .max_w(px(896.))
+                .mx_auto()
+                .rounded_lg()
+                .border_1()
+                .border_color(rgb(colors::BORDER))
+                .bg(rgb(colors::BG_SECONDARY))
+                .px_3()
+                .py_2()
+                .flex()
+                .flex_col()
+                .gap_1()
+                .child(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap_2()
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(rgb(colors::TEXT_SECONDARY))
+                                .child(format!(
+                                    "待办 {} · 目标 {}",
+                                    self.todos.len(),
+                                    self.goals.len()
+                                )),
+                        )
+                        .child(div().flex_1())
+                        .child(
+                            div()
+                                .id("todo-bar-toggle")
+                                .px_1()
+                                .cursor_pointer()
+                                .text_xs()
+                                .text_color(rgb(colors::TEXT_TERTIARY))
+                                .child(if collapsed { "▾" } else { "▴" })
+                                .on_click(cx.listener(|this, _, _window, cx| {
+                                    this.todo_bar_collapsed = !this.todo_bar_collapsed;
+                                    cx.notify();
+                                })),
+                        ),
+                ),
+        );
+        if collapsed {
+            return bar.into_any_element();
+        }
+        for (status, title) in &self.goals {
+            let (glyph, color) = match status.as_str() {
+                "completed" => ("✓", colors::SUCCESS),
+                "archived" => ("·", colors::TEXT_TERTIARY),
+                _ => ("🎯", colors::ACCENT),
+            };
+            bar = bar.child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_2()
+                    .text_xs()
+                    .child(div().text_color(rgb(color)).child(glyph))
+                    .child(div().text_color(rgb(colors::TEXT_PRIMARY)).child(ellipsis(title, 48))),
+            );
+        }
+        for (status, title) in &self.todos {
+            let (glyph, color) = match status.as_str() {
+                "completed" => ("[x]", colors::SUCCESS),
+                "in_progress" => ("[•]", colors::ACCENT),
+                _ => ("[ ]", colors::TEXT_TERTIARY),
+            };
+            let text_color = if status == "completed" {
+                colors::TEXT_TERTIARY
+            } else {
+                colors::TEXT_PRIMARY
+            };
+            bar = bar.child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_2()
+                    .text_xs()
+                    .child(div().text_color(rgb(color)).child(glyph))
+                    .child(
+                        div()
+                            .text_color(rgb(text_color))
+                            .child(ellipsis(title, 48)),
+                    ),
+            );
+        }
+        bar.into_any_element()
+    }
+
+    /// 上下文占用百分比（0 = 还没收到 usage 上报）
+    fn ctx_pct(&self) -> u64 {
+        if self.ctx_window == 0 {
+            0
+        } else {
+            self.ctx_used.saturating_mul(100) / self.ctx_window
+        }
+    }
+
+    /// 上下文占用文案。
+    ///
+    /// Tauri 版这块是一个环形进度（`ContextRing` + 库里的 `ProgressCircle`），
+    /// 先落成同色的文本百分比；环状绘制随后替换（数值口径已就绪）。
+    fn ctx_label(&self) -> String {
+        if self.ctx_window == 0 {
+            "上下文 --".to_string()
+        } else {
+            format!("上下文 {}%", self.ctx_pct())
+        }
+    }
+
+    /// 选择模型：写**当前会话**的模型（`PUT /sessions/{id}/model`）。
+    ///
+    /// 与 Tauri 版 `ModelSelector.selectModel` 同语义——**只改会话，不改全局默认**
+    /// （全局默认由设置页的 `POST /config/models/switch` 负责）。
+    /// 未创建会话时先记在本地：首条消息的 `ChatRequest` 会带上 `model`/`provider`，
+    /// 服务端建会话时即固化，不必等会话 id 生成后再补一次 PUT。
+    fn select_chat_model(&mut self, provider: String, model: String, cx: &mut Context<Self>) {
+        self.model_menu_open = false;
+        self.session_model = Some((provider.clone(), model.clone()));
+        let Some(sid) = self.current_session.clone() else {
+            self.status = format!("新会话将使用 {model} · {provider}");
+            cx.notify();
+            return;
+        };
+        let port = self.port;
+        self.status = format!("正在为会话切换模型到 {model}…");
+        cx.spawn(async move |this, cx| {
+            let url = format!("http://{SERVER_HOST}:{port}/api/v1/sessions/{sid}/model");
+            let body = serde_json::json!({ "provider": provider, "model": model });
+            let res = put_json(url, body).await;
+            let _ = this.update(cx, |this, cx| {
+                this.status = match res {
+                    Ok(_) => format!("会话模型已切换：{model}"),
+                    Err(e) => format!("设置会话模型失败：{e}"),
+                };
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// 未迁移入口的占位页。
+    ///
+    /// 明确写「未迁移 + 去 Tauri 版用」而不是留白——留白会被当成 bug 或加载失败。
+    fn render_placeholder(&self, view: View, _cx: &mut Context<Self>) -> impl IntoElement {
+        let label = NAV_ITEMS
+            .iter()
+            .find(|(_, _, v)| *v == view)
+            .map(|(_, label, _)| *label)
+            .unwrap_or("该页面");
+        div()
+            .size_full()
+            .flex()
+            .flex_col()
+            .items_center()
+            .justify_center()
+            .gap_2()
+            .bg(rgb(colors::BG_PRIMARY))
+            .text_color(rgb(colors::TEXT_PRIMARY))
+            .child(div().text_lg().child(format!("{label} · 未迁移")))
+            .child(
+                div()
+                    .text_sm()
+                    .text_color(rgb(colors::TEXT_TERTIARY))
+                    .child("该页面目前仍在 Tauri 版（gui-vite）中；原生客户端按 设置 → 任务/审批 → workspace 的顺序补齐"),
+            )
+    }
+
+    /// 打开 provider 编辑器：把该 provider 的 endpoint / api_key 回填进输入框。
+    ///
+    /// 必须**同步**做（`set_value` 要 `&mut Window`），所以值取自随列表缓存的那份
+    /// （见 [`ProviderRow`] 的注释：缓存只用于回填，不用于写）。
+    fn open_provider_editor(&mut self, name: String, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(row) = self.providers.iter().find(|p| p.name == name).cloned() else {
+            return;
+        };
+        self.edit_endpoint
+            .update(cx, |s, cx| s.set_value(row.endpoint, window, cx));
+        self.edit_api_key
+            .update(cx, |s, cx| s.set_value(row.api_key, window, cx));
+        self.editing_provider = Some(name);
+        self.settings_status = "编辑 provider：改完点「保存」（会先重读配置再写）".to_string();
+        self.settings_error = false;
+        cx.notify();
+    }
+
+    /// 测试 provider 连通性（`POST /api/v1/config/test-connection`）。
+    ///
+    /// 用**当前编辑框里的** endpoint / api_key 测——这样用户可以在保存前先验证，
+    /// 避免把错误的 key 写进配置再回滚。model 取该 provider 的第一个模型。
+    fn test_provider_connection(&mut self, cx: &mut Context<Self>) {
+        let endpoint = self.edit_endpoint.read(cx).value().to_string();
+        let api_key = self.edit_api_key.read(cx).value().to_string();
+        let model = self
+            .editing_provider
+            .as_ref()
+            .and_then(|name| {
+                self.models
+                    .iter()
+                    .find(|m| &m.provider == name && m.capabilities.contains("chat"))
+                    .or_else(|| self.models.iter().find(|m| &m.provider == name))
+                    .map(|m| m.name.clone())
+            })
+            .unwrap_or_default();
+        if endpoint.trim().is_empty() || api_key.trim().is_empty() || model.is_empty() {
+            self.settings_status = "测试连接需要 endpoint / api_key / 模型名都不为空".to_string();
+            self.settings_error = true;
+            cx.notify();
+            return;
+        }
+        let port = self.port;
+        self.settings_status = format!("正在测试 {model}…");
+        cx.spawn(async move |this, cx| {
+            let url = format!("http://{SERVER_HOST}:{port}/api/v1/config/test-connection");
+            let body = serde_json::json!({
+                "endpoint": endpoint,
+                "api_key": api_key,
+                "model": model,
+            });
+            let res = post_json(url, body).await;
+            let _ = this.update(cx, |this, cx| {
+                match res {
+                    Ok(v) => {
+                        let ok = v.get("success").and_then(|b| b.as_bool()).unwrap_or(false);
+                        let msg = v
+                            .get("message")
+                            .and_then(|m| m.as_str())
+                            .unwrap_or("")
+                            .to_string();
+                        this.settings_error = !ok;
+                        this.settings_status = if ok {
+                            format!("连接成功：{msg}")
+                        } else {
+                            format!("连接失败：{msg}")
+                        };
+                    }
+                    Err(e) => {
+                        this.settings_error = true;
+                        this.settings_status = format!("测试失败：{e}");
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// 保存 provider 的 endpoint / api_key。
+    ///
+    /// ⚠️ `PUT /config` 是**整份替换**（`persist_and_reload`），不是按段合并
+    /// （段保全只保「程序未建模的键」）。所以这里**先重新 GET 一份最新配置**，
+    /// 只改目标 provider 的两个字段，再整体提交——把「读-改-写」的覆盖窗口压到
+    /// 最短（一次往返），不要改成「用启动时缓存的配置提交」，那会冲掉期间别人
+    /// 改过的建模字段（例如 agent 刚切的模型、MCP 预热注入的东西）。
+    fn save_provider(&mut self, cx: &mut Context<Self>) {
+        let Some(name) = self.editing_provider.clone() else {
+            return;
+        };
+        let endpoint = self.edit_endpoint.read(cx).value().to_string();
+        let api_key = self.edit_api_key.read(cx).value().to_string();
+        let port = self.port;
+        self.settings_status = format!("正在保存 {name}…");
+        cx.spawn(async move |this, cx| {
+            let base = format!("http://{SERVER_HOST}:{port}/api/v1");
+            let mut cfg = match fetch_json(format!("{base}/config")).await {
+                Ok(body) => body.get("config").cloned().unwrap_or(serde_json::Value::Null),
+                Err(e) => {
+                    let _ = this.update(cx, |this, cx| {
+                        this.settings_status = format!("保存失败（读取配置）：{e}");
+                        this.settings_error = true;
+                        cx.notify();
+                    });
+                    return;
+                }
+            };
+            let mut found = false;
+            if let Some(arr) = cfg
+                .get_mut("models")
+                .and_then(|m| m.get_mut("providers"))
+                .and_then(|p| p.as_array_mut())
+            {
+                for p in arr.iter_mut() {
+                    if p.get("name").and_then(|v| v.as_str()) == Some(name.as_str()) {
+                        p["endpoint"] = serde_json::Value::String(endpoint.clone());
+                        p["api_key"] = serde_json::Value::String(api_key.clone());
+                        found = true;
+                    }
+                }
+            }
+            if !found {
+                let _ = this.update(cx, |this, cx| {
+                    this.settings_status = format!("保存失败：配置里没有 provider {name}");
+                    this.settings_error = true;
+                    cx.notify();
+                });
+                return;
+            }
+            let res = put_json(format!("{base}/config"), serde_json::json!({ "config": cfg })).await;
+            let _ = this.update(cx, |this, cx| {
+                match res {
+                    Ok(_) => {
+                        this.settings_status = format!("{name} 已保存");
+                        this.settings_error = false;
+                        this.editing_provider = None;
+                        this.load_models(cx);
+                    }
+                    Err(e) => {
+                        this.settings_status = format!("保存失败：{e}");
+                        this.settings_error = true;
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// 设置页（第一版）：模型列表 + 切换聊天模型。
+    ///
+    /// 只做「能日常用」的最小集合——没有它，换模型只能回 Tauri 版改配置。
+    /// 存储 / 安全 / MCP / soul 等分组按后续批次补（端点都已存在，见
+    /// `server/src/api/config/routes.rs`）。
+    fn render_settings(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        // 提供商区：endpoint / 密钥可编辑（保存时先重读配置再写，见 `save_provider`）
+        let mut providers_block = div()
+            .flex()
+            .flex_col()
+            .gap_1()
+            .px_4()
+            .pt_3()
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(rgb(colors::TEXT_SECONDARY))
+                    .child("提供商（端点 / 密钥）"),
+            );
+        for (ix, p) in self.providers.iter().enumerate() {
+            let name = p.name.clone();
+            providers_block = providers_block.child(
+                div()
+                    .id(("prov", ix))
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_3()
+                    .px_3()
+                    .py_1()
+                    .rounded_md()
+                    .child(div().w(px(110.)).text_xs().child(p.name.clone()))
+                    .child(
+                        div()
+                            .flex_1()
+                            .text_xs()
+                            .text_color(rgb(colors::TEXT_TERTIARY))
+                            .child(ellipsis(&p.endpoint, 44)),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(rgb(colors::TEXT_TERTIARY))
+                            .child(format!("{} 模型", p.model_count)),
+                    )
+                    .child(
+                        div()
+                            .id(("prov-edit", ix))
+                            .px_2()
+                            .py_1()
+                            .rounded_md()
+                            .bg(rgb(colors::BG_TERTIARY))
+                            .cursor_pointer()
+                            .text_xs()
+                            .child("编辑")
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.open_provider_editor(name.clone(), window, cx);
+                            })),
+                    ),
+            );
+        }
+        if let Some(name) = self.editing_provider.clone() {
+            providers_block = providers_block.child(
+                div()
+                    .mt_2()
+                    .rounded_lg()
+                    .border_1()
+                    .border_color(rgb(colors::BORDER))
+                    .bg(rgb(colors::BG_SECONDARY))
+                    .p_3()
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(rgb(colors::TEXT_SECONDARY))
+                            .child(format!("编辑 {name}")),
+                    )
+                    .child(Textarea::new(&self.edit_endpoint).h(px(40.)))
+                    .child(Textarea::new(&self.edit_api_key).h(px(40.)))
+                    .child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .gap_2()
+                            .child(
+                                div()
+                                    .id("prov-test")
+                                    .px_3()
+                                    .py_1()
+                                    .rounded_md()
+                                    .bg(rgb(colors::BG_TERTIARY))
+                                    .text_color(rgb(colors::TEXT_PRIMARY))
+                                    .cursor_pointer()
+                                    .text_xs()
+                                    .child("测试连接")
+                                    .on_click(cx.listener(|this, _, _w, cx| {
+                                        this.test_provider_connection(cx);
+                                    })),
+                            )
+                            .child(
+                                div()
+                                    .id("prov-save")
+                                    .px_3()
+                                    .py_1()
+                                    .rounded_md()
+                                    .bg(rgb(colors::ACCENT))
+                                    .text_color(rgb(0xffffff))
+                                    .cursor_pointer()
+                                    .text_xs()
+                                    .child("保存")
+                                    .on_click(cx.listener(|this, _, _w, cx| {
+                                        this.save_provider(cx);
+                                    })),
+                            )
+                            .child(
+                                div()
+                                    .id("prov-cancel")
+                                    .px_3()
+                                    .py_1()
+                                    .rounded_md()
+                                    .cursor_pointer()
+                                    .text_xs()
+                                    .text_color(rgb(colors::TEXT_TERTIARY))
+                                    .child("取消")
+                                    .on_click(cx.listener(|this, _, _w, cx| {
+                                        this.editing_provider = None;
+                                        cx.notify();
+                                    })),
+                            ),
+                    ),
+            );
+        }
+        let mut list = div().flex().flex_col().gap_1().p_4();
+        if self.models.is_empty() {
+            list = list.child(
+                div()
+                    .text_sm()
+                    .text_color(rgb(colors::TEXT_TERTIARY))
+                    .child("暂无模型：请先在配置里添加 provider 与模型"),
+            );
+        }
+        for (ix, m) in self.models.iter().enumerate() {
+            let provider = m.provider.clone();
+            let name = m.name.clone();
+            let meta = {
+                let mut parts: Vec<String> = Vec::new();
+                if !m.capabilities.is_empty() {
+                    parts.push(m.capabilities.clone());
+                }
+                if let Some(ctx_len) = m.context {
+                    parts.push(format!("ctx {ctx_len}"));
+                }
+                parts.join(" · ")
+            };
+            let mut row = div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap_3()
+                .px_3()
+                .py_2()
+                .rounded_md();
+            if m.is_chat {
+                row = row.bg(rgb(colors::BG_HOVER));
+            }
+            let action = if m.is_chat {
+                div()
+                    .text_xs()
+                    .text_color(rgb(colors::SUCCESS))
+                    .child("当前聊天模型")
+                    .into_any_element()
+            } else {
+                div()
+                    .id(("set-chat", ix))
+                    .px_2()
+                    .py_1()
+                    .rounded_md()
+                    .bg(rgb(colors::BG_TERTIARY))
+                    .text_color(rgb(colors::TEXT_PRIMARY))
+                    .cursor_pointer()
+                    .child("设为聊天模型")
+                    .on_click(cx.listener(move |this, _, _window, cx| {
+                        this.switch_chat_model(provider.clone(), name.clone(), cx);
+                    }))
+                    .into_any_element()
+            };
+            list = list.child(
+                row.child(div().w(px(110.)).text_xs().child(m.provider.clone()))
+                    .child(div().flex_1().child(m.name.clone()))
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(rgb(colors::TEXT_TERTIARY))
+                            .child(meta),
+                    )
+                    .child(action),
+            );
+        }
+        div()
+            .size_full()
+            .flex()
+            .flex_col()
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_3()
+                    .px_4()
+                    .py_2()
+                    .border_b_1()
+                    .border_color(rgb(colors::BORDER))
+                    .child(div().text_sm().child("设置 · 模型"))
+                    .child(div().flex_1())
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(if self.settings_error {
+                                rgb(colors::ERROR)
+                            } else {
+                                rgb(colors::TEXT_SECONDARY)
+                            })
+                            .child(self.settings_status.clone()),
+                    ),
+            )
+            .child(providers_block)
+            .child(div().flex_1().min_h_0().child(list))
+    }
+
     /// 显式停止当前轮：`POST /chat/streams/{id}/cancel`（ADR-036 的结构性取消
     /// 在服务端置位，客户端断线**不**取消——本地助手跑完再取）。
     fn stop_current_turn(&mut self, cx: &mut Context<Self>) {
@@ -452,6 +2184,11 @@ impl ClientApp {
         self.current_session = Some(id.clone());
         // 切会话即放弃上一会话的流式状态（本客户端只渲染当前会话的增量）
         self.streaming = false;
+        // 会话级模型 / 上下文进度都是**按会话**的：切走即回落（模型回到 preferences.chat）
+        self.session_model = None;
+        self.model_menu_open = false;
+        self.ctx_used = 0;
+        self.ctx_window = 0;
         self.load_messages(id, cx);
     }
 
@@ -479,6 +2216,15 @@ impl ClientApp {
             "answer" => {
                 let delta = ev.get("delta").and_then(|v| v.as_str()).unwrap_or_default();
                 self.append_delta(delta);
+                // 上下文占用（Tauri 版 `ContextRing` 的数据源）：usage 随 answer 块下发
+                if let Some(u) = ev.get("usage") {
+                    if let Some(used) = u.get("total_tokens").and_then(|v| v.as_u64()) {
+                        self.ctx_used = used;
+                    }
+                    if let Some(win) = u.get("context_window").and_then(|v| v.as_u64()) {
+                        self.ctx_window = win;
+                    }
+                }
             }
             // 思考增量暂不并入正文（会污染 Markdown 结构），待独立渲染区
             "thought" => {}
@@ -489,6 +2235,16 @@ impl ClientApp {
                     .and_then(|v| v.as_str())
                     .unwrap_or("工具");
                 self.append_delta(&format!("\n`🔧 {name}`\n"));
+                // ask_user 是**同步工具**：工具执行挂起等回答，输入区要被追问接管
+                if name == "ask_user" {
+                    if let Some(args) = ev.get("tool_call").and_then(|v| v.get("arguments")) {
+                        let questions = parse_ask_user(args);
+                        if !questions.is_empty() {
+                            self.clarify_answers = vec![String::new(); questions.len()];
+                            self.clarification = Some(questions);
+                        }
+                    }
+                }
             }
             "observation" => {}
             // 消息边界：流末尾的 assistant 完整消息（含工具段）为权威全文，替换占位
@@ -501,7 +2257,10 @@ impl ClientApp {
                 }
             }
             "error" => {
-                let msg = ev.get("delta").and_then(|v| v.as_str()).unwrap_or("未知错误");
+                let msg = ev
+                    .get("delta")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("未知错误");
                 self.streaming = false;
                 self.status = format!("出错：{msg}");
                 self.append_delta(&format!("\n\n> ⚠️ {msg}\n"));
@@ -588,10 +2347,14 @@ impl ClientApp {
         next.push(MsgRow {
             role: "user".to_string(),
             text: text.clone().into(),
+            segs: Vec::new(),
+            compression: false,
         });
         next.push(MsgRow {
             role: "assistant".to_string(),
             text: "".into(),
+            segs: Vec::new(),
+            compression: false,
         });
         if next.len() > RENDER_LIMIT {
             let drop_n = next.len() - RENDER_LIMIT;
@@ -605,13 +2368,18 @@ impl ClientApp {
         self.status = format!("生成中… · {session_id}");
 
         let port = self.port;
-        let body = serde_json::json!({
+        let mut body = serde_json::json!({
             "session_id": session_id,
             "message": { "role": "user", "content": text },
             "stream": true,
             "temperature": 0.7,
             "max_tokens": 2048
         });
+        // 会话级模型：随首条消息一起下发——服务端建会话时就固化，不必等会话 id 生成后再补 PUT
+        if let Some((provider, model)) = &self.session_model {
+            body["model"] = serde_json::Value::String(model.clone());
+            body["provider"] = serde_json::Value::String(provider.clone());
+        }
         cx.spawn(async move |this, cx| {
             let url = format!("http://{SERVER_HOST}:{port}/api/v1/chat/stream");
             match post_json(url, body).await {
@@ -658,6 +2426,11 @@ impl ClientApp {
                                 .unwrap_or("?")
                                 .to_string(),
                             text: segments_text(m).into(),
+                            segs: parse_segments(m),
+                            compression: m
+                                .get("compression_marker")
+                                .and_then(|v| v.as_bool())
+                                .unwrap_or(false),
                         })
                         .collect();
                     let n = rows.len();
@@ -704,25 +2477,87 @@ impl ClientApp {
     }
 }
 
-impl Render for ClientApp {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+impl ClientApp {
+    /// 会话视图：左列表 + 右消息 + 输入。
+    ///
+    /// 布局对齐 `gui-vite` 的 `SessionPage`（左栏会话列表 280px + 右栏 ChatPanel 撑满）。
+    fn render_chat(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        // 模型下拉候选：只列带 `chat` 能力的模型（与 Tauri 版 `ModelSelector` 同口径，
+        // capabilities 是 kebab-case 数组，后端拼成 `/` 分隔的串）
+        let chat_models: Vec<(String, String)> = self
+            .models
+            .iter()
+            .filter(|m| m.capabilities.split('/').any(|c| c == "chat"))
+            .map(|m| (m.provider.clone(), m.name.clone()))
+            .collect();
+        let menu_open = self.model_menu_open;
+        let ctx_label = self.ctx_label();
+        let ctx_high = self.ctx_pct() >= 80;
+        let mut menu = div()
+            .absolute()
+            .bottom(px(40.))
+            .right(px(0.))
+            .w(px(256.))
+            .rounded_lg()
+            .border_1()
+            .border_color(rgb(colors::BORDER))
+            .bg(rgb(colors::BG_PRIMARY))
+            .py_1()
+            .flex()
+            .flex_col();
+        for (ix, (provider, name)) in chat_models.iter().enumerate() {
+            let provider = provider.clone();
+            let name = name.clone();
+            let is_current = self
+                .session_model
+                .as_ref()
+                .map(|(p, m)| p == &provider && m == &name)
+                .unwrap_or(false);
+            let mut row = div()
+                .id(("model-option", ix))
+                .px_3()
+                .py_2()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap_3()
+                .cursor_pointer()
+                .text_xs();
+            if is_current {
+                row = row.text_color(rgb(colors::ACCENT));
+            } else {
+                row = row.text_color(rgb(colors::TEXT_PRIMARY));
+            }
+            let label = name.clone();
+            let prov = provider.clone();
+            menu = menu.child(
+                row.child(div().flex_1().child(name))
+                    .child(div().text_color(rgb(colors::TEXT_TERTIARY)).child(provider))
+                    .on_click(cx.listener(move |this, _, _window, cx| {
+                        this.select_chat_model(prov.clone(), label.clone(), cx);
+                    })),
+            );
+        }
         div()
             .size_full()
             .flex()
             .flex_row()
-            // 左：会话列表
+            // 左：会话列表（对齐 Tauri 版 SessionList：280px、bg-secondary、右侧分隔线）
             .child(
                 div()
-                    .w(px(300.))
+                    .w(px(colors::LIST_WIDTH))
                     .h_full()
                     .flex()
                     .flex_col()
+                    .bg(rgb(colors::BG_SECONDARY))
                     .border_r_1()
+                    .border_color(rgb(colors::BORDER))
                     .child(
                         div()
                             .px_3()
                             .py_2()
-                            .text_sm()
+                            .text_xs()
+                            .text_color(rgb(colors::TEXT_SECONDARY))
                             .child(self.status.clone()),
                     )
                     .child(div().flex_1().min_h_0().child(List::new(&self.sessions))),
@@ -734,75 +2569,308 @@ impl Render for ClientApp {
                     .min_w_0()
                     .h_full()
                     .flex()
-                    .flex_col()
+                    .flex_row()
                     .child(
                         div()
-                            .px_3()
-                            .py_2()
-                            .text_sm()
-                            .border_b_1()
-                            .child(self.current_title.clone()),
-                    )
-                    .child(
-                        div().flex_1().min_h_0().child({
-                            let items = self.messages.clone();
-                            gpui_list(self.msg_list_state.clone(), move |ix, _window, _cx| {
-                                let Some(m) = items.get(ix) else {
-                                    return div().into_any_element();
-                                };
-                                let (tag, tag_color) = match m.role.as_str() {
-                                    "user" => ("你", rgb(0x7aa2f7)),
-                                    "assistant" => ("天演", rgb(0x9ece6a)),
-                                    "tool" => ("工具", rgb(0xe0af68)),
-                                    _ => ("系统", rgb(0x888888)),
-                                };
-                                div()
-                                    .px_4()
-                                    .py_2()
-                                    .flex()
-                                    .flex_col()
-                                    .gap_1()
-                                    .child(div().text_xs().text_color(tag_color).child(tag))
-                                    .child(TextView::markdown(("msg", ix), m.text.clone()))
-                                    .into_any_element()
-                            })
-                        }),
-                    )
-                    // 底部输入区：Textarea（多行 + IME）与发送按钮
-                    .child(
-                        div()
-                            .border_t_1()
-                            .p_2()
+                            .flex_1()
+                            .min_w_0()
+                            .h_full()
                             .flex()
-                            .flex_row()
-                            .gap_2()
-                            .items_end()
+                            .flex_col()
                             .child(
                                 div()
-                                    .flex_1()
-                                    .min_w_0()
-                                    .child(Textarea::new(&self.input).h(px(76.))),
-                            )
-                            .child(
-                                div()
-                                    .id("send")
                                     .px_3()
                                     .py_2()
-                                    .rounded_md()
-                                    .bg(rgb(0x3b4252))
-                                    .text_color(rgb(0xeceff4))
-                                    .cursor_pointer()
-                                    .child(if self.streaming { "停止" } else { "发送" })
-                                    .on_click(cx.listener(|this, _, window, cx| {
-                                        if this.streaming {
-                                            this.stop_current_turn(cx);
-                                        } else {
-                                            this.send_current_input(window, cx);
+                                    .text_sm()
+                                    .border_b_1()
+                                    .child(self.current_title.clone()),
+                            )
+                            .child(div().flex_1().min_h_0().child({
+                                let items = self.messages.clone();
+                                gpui_list(self.msg_list_state.clone(), move |ix, _window, _cx| {
+                                    let Some(m) = items.get(ix) else {
+                                        return div().into_any_element();
+                                    };
+                                    // 气泡口径对齐 Tauri 版 `MessageBubble`：
+                                    //   用户 = 右对齐蓝气泡（限宽、右下小圆角）
+                                    //   助手 = **无外层框**、全宽平铺（各段独立成块，避免宽窄不一）
+                                    //   压缩点 = 徽章 + 细线（它不是用户输入，不画成气泡）
+                                    let is_user = m.role == "user" && !m.compression;
+                                    let mut body = div().flex().flex_col().gap_2();
+                                    if m.compression {
+                                        body = body.child(
+                                            div()
+                                                .flex()
+                                                .flex_row()
+                                                .items_center()
+                                                .gap_2()
+                                                .child(
+                                                    div()
+                                                        .rounded_full()
+                                                        .border_1()
+                                                        .border_color(rgb(colors::BORDER))
+                                                        .bg(rgb(colors::BG_HOVER))
+                                                        .px_2()
+                                                        .py_1()
+                                                        .text_xs()
+                                                        .text_color(rgb(colors::TEXT_SECONDARY))
+                                                        .child("压缩点"),
+                                                )
+                                                .child(
+                                                    div()
+                                                        .flex_1()
+                                                        .h(px(1.))
+                                                        .bg(rgb(colors::BORDER)),
+                                                ),
+                                        );
+                                    }
+                                    if m.segs.is_empty() {
+                                        if !m.text.is_empty() {
+                                            body = body.child(TextView::markdown(
+                                                ("msg", ix),
+                                                m.text.clone(),
+                                            ));
                                         }
-                                    })),
+                                    } else {
+                                        for (si, seg) in m.segs.iter().enumerate() {
+                                            let sid = ix * 1000 + si;
+                                            body = match seg {
+                                                Seg::Text(t) => body.child(TextView::markdown(
+                                                    ("msg", sid),
+                                                    t.clone(),
+                                                )),
+                                                Seg::Thinking(t) => body.child(
+                                                    div()
+                                                        .text_xs()
+                                                        .text_color(rgb(colors::TEXT_TERTIARY))
+                                                        .child(format!("🧠 {t}")),
+                                                ),
+                                                Seg::Tool { name, args } => body.child(
+                                                    div()
+                                                        .rounded_md()
+                                                        .border_1()
+                                                        .border_color(rgb(colors::BORDER))
+                                                        .bg(rgb(colors::BG_SECONDARY))
+                                                        .px_3()
+                                                        .py_2()
+                                                        .flex()
+                                                        .flex_col()
+                                                        .gap_1()
+                                                        .child(
+                                                            div()
+                                                                .text_xs()
+                                                                .text_color(rgb(colors::WARNING))
+                                                                .child(format!("🔧 {name}")),
+                                                        )
+                                                        .child(
+                                                            div()
+                                                                .text_xs()
+                                                                .text_color(rgb(
+                                                                    colors::TEXT_TERTIARY,
+                                                                ))
+                                                                .child(ellipsis(args, 160)),
+                                                        ),
+                                                ),
+                                                Seg::Observation { name, preview } => body.child(
+                                                    div()
+                                                        .rounded_md()
+                                                        .bg(rgb(colors::BG_SECONDARY))
+                                                        .px_3()
+                                                        .py_2()
+                                                        .flex()
+                                                        .flex_col()
+                                                        .gap_1()
+                                                        .child(
+                                                            div()
+                                                                .text_xs()
+                                                                .text_color(rgb(
+                                                                    colors::TEXT_SECONDARY,
+                                                                ))
+                                                                .child(format!("📄 {name}")),
+                                                        )
+                                                        .child(
+                                                            div()
+                                                                .text_xs()
+                                                                .text_color(rgb(
+                                                                    colors::TEXT_TERTIARY,
+                                                                ))
+                                                                .child(ellipsis(preview, 200)),
+                                                        ),
+                                                ),
+                                            };
+                                        }
+                                    }
+                                    if is_user {
+                                        div()
+                                            .px_4()
+                                            .py_1()
+                                            .flex()
+                                            .flex_row()
+                                            .justify_end()
+                                            .child(
+                                                div()
+                                                    .max_w(px(640.))
+                                                    .rounded_2xl()
+                                                    .bg(rgb(colors::ACCENT))
+                                                    .text_color(rgb(0xffffff))
+                                                    .px_4()
+                                                    .py_2()
+                                                    .child(body),
+                                            )
+                                            .into_any_element()
+                                    } else {
+                                        div().px_4().py_2().w_full().child(body).into_any_element()
+                                    }
+                                })
+                            }))
+                            // 会话待办 / 目标窄条（在输入卡片上方；两者都空时整条不渲染）
+                            .child(self.render_approval_banner(cx))
+                            .child(self.render_clarification(cx))
+                            .child(self.render_todo_bar(cx))
+                            // 底部输入区 = **一体式卡片**（对齐 Tauri 版 `ChatInput`）：
+                            //   外框限宽 896px 居中、bg-secondary、rounded-2xl；
+                            //   卡片内 = 编辑器 + 底部控件行（当前模型 / 发送或停止）。
+                            // 顶部有 border-t 与底色，和消息区之间靠这条线分隔。
+                            .child(
+                                div()
+                                    .border_t_1()
+                                    .border_color(rgb(colors::BORDER))
+                                    .bg(rgb(colors::BG_PRIMARY))
+                                    .px_4()
+                                    .pt_3()
+                                    .pb_3()
+                                    .child(
+                                        div()
+                                            .w_full()
+                                            .max_w(px(896.))
+                                            .mx_auto()
+                                            .rounded_2xl()
+                                            .border_1()
+                                            .border_color(rgb(colors::BORDER))
+                                            .bg(rgb(colors::BG_SECONDARY))
+                                            .p_2()
+                                            .flex()
+                                            .flex_col()
+                                            .gap_2()
+                                            .child(Textarea::new(&self.input).h(px(64.)))
+                                            .child(
+                                                div()
+                                                    .relative()
+                                                    .flex()
+                                                    .flex_row()
+                                                    .items_center()
+                                                    .gap_2()
+                                                    .child(div().flex_1())
+                                                    .child(
+                                                        div()
+                                                            .flex()
+                                                            .flex_row()
+                                                            .items_center()
+                                                            .gap_1()
+                                                            .child(
+                                                                ProgressCircle::new("ctx-ring")
+                                                                    .value(
+                                                                        self.ctx_pct() as f32 / 100.0,
+                                                                    )
+                                                                    .color(
+                                                                        Hsla::from(rgb(if ctx_high {
+                                                                            colors::WARNING
+                                                                        } else {
+                                                                            colors::ACCENT
+                                                                        })),
+                                                                    ),
+                                                            )
+                                                            .child(
+                                                                div()
+                                                                    .text_xs()
+                                                                    .text_color(if ctx_high {
+                                                                        rgb(colors::WARNING)
+                                                                    } else {
+                                                                        rgb(colors::TEXT_TERTIARY)
+                                                                    })
+                                                                    .child(ctx_label),
+                                                            ),
+                                                    )
+                                                    .child(
+                                                        div()
+                                                            .id("model-select")
+                                                            .px_2()
+                                                            .py_1()
+                                                            .rounded_lg()
+                                                            .cursor_pointer()
+                                                            .text_xs()
+                                                            .text_color(rgb(colors::TEXT_PRIMARY))
+                                                            .child(self.current_model_label())
+                                                            .on_click(cx.listener(
+                                                                |this, _, _window, cx| {
+                                                                    this.model_menu_open =
+                                                                        !this.model_menu_open;
+                                                                    cx.notify();
+                                                                },
+                                                            )),
+                                                    )
+                                                    .child({
+                                                        let stopping = self.streaming;
+                                                        div()
+                                                            .id("send")
+                                                            .px_3()
+                                                            .py_1()
+                                                            .rounded_xl()
+                                                            .bg(if stopping {
+                                                                rgb(colors::ERROR)
+                                                            } else {
+                                                                rgb(colors::ACCENT)
+                                                            })
+                                                            .text_color(rgb(0xffffff))
+                                                            .cursor_pointer()
+                                                            .child(if stopping {
+                                                                "停止"
+                                                            } else {
+                                                                "发送"
+                                                            })
+                                                            .on_click(cx.listener(
+                                                                |this, _, window, cx| {
+                                                                    if this.streaming {
+                                                                        this.stop_current_turn(cx);
+                                                                    } else {
+                                                                        this.send_current_input(
+                                                                            window, cx,
+                                                                        );
+                                                                    }
+                                                                },
+                                                            ))
+                                                    })
+                                                    .children(if menu_open {
+                                                        Some(menu)
+                                                    } else {
+                                                        None
+                                                    }),
+                                            ),
+                                    ),
                             ),
-                    ),
+                    )
+                    .child(self.render_tasks_panel(cx)),
             )
+            .into_any_element()
+    }
+}
+
+impl Render for ClientApp {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // 整体骨架与 `gui-vite/src/components/layout/AppLayout.tsx` 一致：
+        //   一级 rail(64px) + main(flex-1, bg-primary)
+        div()
+            .size_full()
+            .flex()
+            .flex_row()
+            .bg(rgb(colors::BG_PRIMARY))
+            .text_color(rgb(colors::TEXT_PRIMARY))
+            .child(self.render_rail(cx))
+            .child(div().flex_1().min_w_0().h_full().child(match self.view {
+                View::Chat => self.render_chat(cx).into_any_element(),
+                View::Settings => self.render_settings(cx).into_any_element(),
+                other => self.render_placeholder(other, cx).into_any_element(),
+            }))
     }
 }
 
