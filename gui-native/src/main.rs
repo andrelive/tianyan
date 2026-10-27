@@ -481,6 +481,15 @@ enum SessionListRow {
     /// 组内折叠的「查看更多 (n)」行
     More { key: String, hidden: usize },
 }
+/// 目录选择器选中的目录用在哪里。
+#[derive(Clone, Copy, PartialEq)]
+enum PickerTarget {
+    /// 绑定到当前会话（`PUT /sessions/{id}/workspace`）
+    Session,
+    /// 作为下一个新会话的待绑定目录（本地状态，首条消息时下发）
+    NewSession,
+}
+
 #[derive(Clone)]
 /// 需要用户确认的模态对话框（自绘覆盖层，不依赖组件库 Dialog）。
 enum Dialog {
@@ -489,7 +498,8 @@ enum Dialog {
     /// 重命名会话（输入框实体在 `ClientApp::dialog_input`）
     RenameSession { id: String },
     /// 新建会话并绑定工作目录（「＋新目录」；输入框实体同上）
-    NewWorkspace,
+    /// 目录选择器（逐级浏览后选定）
+    WorkspacePicker { target: PickerTarget },
     /// 回退内置种子（`POST /roles/{name}/reset`）
     ResetRole { name: String },
     /// 退役删除角色（`DELETE /roles/{name}`）
@@ -1491,6 +1501,14 @@ struct ClientApp {
     roles_status: String,
     /// 角色操作结果提示（回退/退役后的一行反馈）
     roles_action_msg: Option<String>,
+    /// 目录选择器：当前浏览目录（绝对路径；浏览根时为「浏览根」）
+    picker_current: String,
+    /// 目录选择器：上级目录（None = 已在浏览根）
+    picker_parent: Option<String>,
+    /// 目录选择器：子目录 `(名称, 完整路径)`
+    picker_entries: Vec<(String, String)>,
+    /// 目录选择器状态行
+    picker_status: String,
     /// 文件页：工作区根（绝对路径，来自 tree 响应）
     ws_root: String,
     /// 文件页：当前目录（相对根；`""` = 根）
@@ -1644,6 +1662,10 @@ impl ClientApp {
             role_detail: None,
             roles_status: "正在加载子智能体…".to_string(),
             roles_action_msg: None,
+            picker_current: String::new(),
+            picker_parent: None,
+            picker_entries: Vec::new(),
+            picker_status: String::new(),
             ws_root: String::new(),
             ws_path: String::new(),
             ws_entries: Vec::new(),
@@ -1811,38 +1833,131 @@ impl ClientApp {
         cx.notify();
     }
 
-    /// 打开「新建会话并绑定目录」对话框。
+    /// 打开目录选择器（先拉浏览根 = 盘符/家目录，再逐级进入）。
     ///
-    /// 预填当前会话的工作目录——多数场景是「在同一个项目下再开一条会话」。
-    fn open_new_workspace(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let current = self
-            .current_session
-            .as_ref()
-            .and_then(|id| self.sessions_data.iter().find(|s| &s.id == id))
-            .map(|s| s.working_directory.clone())
-            .unwrap_or_default();
-        self.dialog_input = Some(cx.new(|cx| InputState::new(window, cx).default_value(current)));
-        self.dialog = Some(Dialog::NewWorkspace);
+    /// 取代此前的「手输绝对路径」：路径打错不会有任何提示，浏览选择才是正常交互。
+    fn open_workspace_picker(&mut self, target: PickerTarget, cx: &mut Context<Self>) {
+        self.dialog = Some(Dialog::WorkspacePicker { target });
+        self.picker_current.clear();
+        self.picker_parent = None;
+        self.picker_entries.clear();
+        self.picker_status = "正在读取目录…".to_string();
+        self.load_picker_dirs(String::new(), cx);
         cx.notify();
     }
 
-    /// 提交「新目录」：记下待绑定目录并进入新会话空态，目录在首条消息时生效。
-    fn submit_new_workspace(&mut self, cx: &mut Context<Self>) {
-        let path = self
-            .dialog_input
-            .as_ref()
-            .map(|input| input.read(cx).value().trim().to_string())
-            .unwrap_or_default();
-        self.dialog = None;
-        self.dialog_input = None;
-        if path.is_empty() {
+    /// 拉某一级目录的子目录列表（`GET /workspace/dirs?path=`；空串 = 浏览根）。
+    fn load_picker_dirs(&self, path: String, cx: &mut Context<Self>) {
+        let port = self.port;
+        cx.spawn(async move |this, cx| {
+            let url = if path.is_empty() {
+                format!("http://{SERVER_HOST}:{port}/api/v1/workspace/dirs")
+            } else {
+                format!(
+                    "http://{SERVER_HOST}:{port}/api/v1/workspace/dirs?path={}",
+                    url_encode(&path)
+                )
+            };
+            match fetch_json(url).await {
+                Ok(body) => {
+                    let current = body
+                        .get("current")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or_default()
+                        .to_string();
+                    let parent = body
+                        .get("parent")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string());
+                    let entries: Vec<(String, String)> = body
+                        .get("entries")
+                        .and_then(|v| v.as_array())
+                        .map(|arr| {
+                            arr.iter()
+                                .filter_map(|e| {
+                                    Some((
+                                        e.get("name")?.as_str()?.to_string(),
+                                        e.get("path")?.as_str()?.to_string(),
+                                    ))
+                                })
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    let n = entries.len();
+                    let _ = this.update(cx, |this, cx| {
+                        this.picker_current = current;
+                        this.picker_parent = parent;
+                        this.picker_entries = entries;
+                        this.picker_status = format!("{n} 个子目录");
+                        cx.notify();
+                    });
+                }
+                Err(e) => {
+                    let _ = this.update(cx, |this, cx| {
+                        this.picker_status = format!("读取目录失败：{e}");
+                        cx.notify();
+                    });
+                }
+            }
+        })
+        .detach();
+    }
+
+    /// 目录选择器「选这个目录」：按目标分派（新会话待绑定 / 绑定当前会话）。
+    fn confirm_workspace_picker(&mut self, target: PickerTarget, cx: &mut Context<Self>) {
+        // 浏览根（未进入任何盘符）时不可选
+        if self.picker_current.is_empty() || self.picker_current == "浏览根" {
+            self.picker_status = "请先进入一个目录".to_string();
             cx.notify();
             return;
         }
-        self.new_session_workspace = Some(path.clone());
-        self.start_new_session(cx);
-        self.status = format!("新会话将绑定目录：{path}");
-        cx.notify();
+        let path = self.picker_current.clone();
+        self.dialog = None;
+        match target {
+            PickerTarget::NewSession => {
+                self.new_session_workspace = Some(path.clone());
+                self.start_new_session(cx);
+                self.status = format!("新会话将绑定目录：{path}");
+                cx.notify();
+            }
+            PickerTarget::Session => {
+                let Some(sid) = self.current_session.clone() else {
+                    self.ws_status = "没有活动会话，无法绑定目录".to_string();
+                    cx.notify();
+                    return;
+                };
+                let port = self.port;
+                cx.spawn(async move |this, cx| {
+                    let url =
+                        format!("http://{SERVER_HOST}:{port}/api/v1/sessions/{sid}/workspace");
+                    match put_json(url, serde_json::json!({ "working_directory": path })).await {
+                        Ok(_) => {
+                            let _ = this.update(cx, |this, cx| {
+                                if let Some(s) = this.sessions_data.iter_mut().find(|s| s.id == sid)
+                                {
+                                    s.working_directory = path.clone();
+                                }
+                                // 目录变了：文件页缓存作废并重新拉树
+                                this.ws_root.clear();
+                                this.ws_entries.clear();
+                                this.ws_file = None;
+                                this.ws_path.clear();
+                                this.load_workspace_tree(String::new(), cx);
+                                this.rebuild_session_rows(cx);
+                                cx.notify();
+                            });
+                        }
+                        Err(e) => {
+                            let _ = this.update(cx, |this, cx| {
+                                this.ws_status = format!("绑定目录失败：{e}");
+                                cx.notify();
+                            });
+                        }
+                    }
+                })
+                .detach();
+            }
+        }
     }
 
     /// 提交重命名（`POST /sessions/{id}/title`），成功后就地更新左栏标题。
@@ -1933,6 +2048,10 @@ impl ClientApp {
         let Some(dialog) = self.dialog.clone() else {
             return div().into_any_element();
         };
+        // 目录选择器是「列表 + 逐级导航」的独立形态，不走下面那条卡片骨架
+        if let Dialog::WorkspacePicker { target } = dialog {
+            return self.render_workspace_picker_dialog(target, cx);
+        }
         let (heading, message, confirm_label, danger) = match &dialog {
             Dialog::DeleteSession { title, .. } => (
                 "删除会话".to_string(),
@@ -1943,16 +2062,11 @@ impl ClientApp {
             Dialog::RenameSession { .. } => {
                 ("重命名会话".to_string(), None, "保存".to_string(), false)
             }
-            Dialog::NewWorkspace => (
-                "新建会话并绑定目录".to_string(),
-                Some(
-                    "填工作目录的绝对路径（如 F:\\work\\my-project）。\
-                     该目录会成为新会话的工作区归属，并出现在左栏分组里。"
-                        .to_string(),
-                ),
-                "新建".to_string(),
-                false,
-            ),
+            // 目录选择器是独立形态（列表 + 导航），在 `render_dialog` 开头就被分流，
+            // 走不到这里；给个兜底以免新增变体时漏配
+            Dialog::WorkspacePicker { .. } => {
+                ("选择目录".to_string(), None, "选择".to_string(), false)
+            }
             Dialog::ResetRole { name } => (
                 "回退内置种子".to_string(),
                 Some(format!(
@@ -1992,10 +2106,8 @@ impl ClientApp {
                     .child(msg),
             );
         }
-        // 重命名与新目录共用一个输入框实体（两个弹窗互斥，不会同时打开）
-        if let (Dialog::RenameSession { .. } | Dialog::NewWorkspace, Some(input)) =
-            (&dialog, self.dialog_input.as_ref())
-        {
+        // 重命名用输入框（目录选择器是独立形态，走别的分支）
+        if let (Dialog::RenameSession { .. }, Some(input)) = (&dialog, self.dialog_input.as_ref()) {
             card = card.child(
                 div()
                     .w_full()
@@ -2050,7 +2162,7 @@ impl ClientApp {
                             cx.listener(move |this, _, _, cx| match this.dialog.clone() {
                                 Some(Dialog::DeleteSession { .. }) => this.confirm_delete(cx),
                                 Some(Dialog::RenameSession { .. }) => this.submit_rename(cx),
-                                Some(Dialog::NewWorkspace) => this.submit_new_workspace(cx),
+                                Some(Dialog::WorkspacePicker { .. }) => {}
                                 Some(Dialog::ResetRole { name }) => {
                                     this.confirm_reset_role(name, cx)
                                 }
@@ -4581,6 +4693,34 @@ impl ClientApp {
                             .text_color(rgb(colors::TEXT_TERTIARY))
                             .child(self.ws_status.clone()),
                     )
+                    // 选择工作目录：逐级浏览后绑定到当前会话
+                    .child(
+                        div()
+                            .id("ws-pick-dir")
+                            .flex_shrink_0()
+                            .px_3()
+                            .py_1()
+                            .rounded_md()
+                            .border_1()
+                            .border_color(rgb(colors::BORDER))
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .gap_1()
+                            .text_size(px(11.))
+                            .text_color(rgb(colors::TEXT_SECONDARY))
+                            .cursor_pointer()
+                            .child(
+                                svg()
+                                    .path(IconName::FolderOpen.path())
+                                    .size(px(12.))
+                                    .text_color(rgb(colors::TEXT_SECONDARY)),
+                            )
+                            .child("选择目录")
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.open_workspace_picker(PickerTarget::Session, cx);
+                            })),
+                    )
                     // Diff 开关：右侧展开「工作区改动」面板（对照会话快照基线）
                     .child(
                         div()
@@ -4804,7 +4944,8 @@ impl ClientApp {
             // 内容会溢出盖到下面的 diff 区（实测二十多个文件时整片文字重叠）
             .child(
                 div()
-                    .max_h(px(220.))
+                    // 同 picker：滚动容器必须落在确定高度里（`max_h` 会让它塌成 0）
+                    .h(px(240.))
                     .min_h_0()
                     .p_2()
                     .child(files.overflow_y_scrollbar()),
@@ -5215,6 +5356,209 @@ impl ClientApp {
     ///
     /// 「回退」在 `builtin && version == 1` 时禁用 —— 内置种子本来就是 v1，
     /// 没有可回退的内容（Web 版同口径）。
+    /// 目录选择器弹窗：当前路径 + 逐级浏览 + 「选择此目录」。
+    ///
+    /// 浏览根（盘符列表）不允许直接选中 —— 后端要求的是具体目录。
+    fn render_workspace_picker_dialog(
+        &self,
+        target: PickerTarget,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let mut list = div().flex().flex_col().gap_1().w_full();
+        if let Some(parent) = self.picker_parent.clone() {
+            list = list.child(
+                div()
+                    .id("picker-up")
+                    .w_full()
+                    .px_2()
+                    .py_1()
+                    .rounded_md()
+                    .cursor_pointer()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_2()
+                    .text_size(px(12.))
+                    .text_color(rgb(colors::TEXT_SECONDARY))
+                    .child(
+                        svg()
+                            .path(IconName::CornerLeftUp.path())
+                            .size(px(12.))
+                            .text_color(rgb(colors::TEXT_TERTIARY)),
+                    )
+                    .child("上级目录")
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.load_picker_dirs(parent.clone(), cx);
+                    })),
+            );
+        }
+        for (ix, (name, path)) in self.picker_entries.iter().enumerate() {
+            let path = path.clone();
+            list = list.child(
+                div()
+                    .id(("picker-dir", ix))
+                    .w_full()
+                    .px_2()
+                    .py_1()
+                    .rounded_md()
+                    .cursor_pointer()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_2()
+                    .text_size(px(12.))
+                    .text_color(rgb(colors::TEXT_SECONDARY))
+                    .child(
+                        svg()
+                            .path(IconName::Folder.path())
+                            .size(px(12.))
+                            .text_color(rgb(colors::TEXT_TERTIARY)),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .whitespace_nowrap()
+                            .overflow_hidden()
+                            .child(name.clone()),
+                    )
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.load_picker_dirs(path.clone(), cx);
+                    })),
+            );
+        }
+        if self.picker_entries.is_empty() && self.picker_parent.is_none() {
+            list = list.child(
+                div()
+                    .px_2()
+                    .py_2()
+                    .text_size(px(11.))
+                    .text_color(rgb(colors::TEXT_TERTIARY))
+                    .child(self.picker_status.clone()),
+            );
+        }
+
+        let can_pick = !self.picker_current.is_empty() && self.picker_current != "浏览根";
+        let pick_label = match target {
+            PickerTarget::NewSession => "用它新建会话",
+            PickerTarget::Session => "绑定到当前会话",
+        };
+
+        div()
+            .absolute()
+            .top(px(0.))
+            .left(px(0.))
+            .size_full()
+            .flex()
+            .items_center()
+            .justify_center()
+            .bg(rgba(0x000000a0))
+            .child(
+                div()
+                    .w(px(560.))
+                    .rounded_xl()
+                    .border_1()
+                    .border_color(rgb(colors::BORDER))
+                    .bg(rgb(colors::BG_SECONDARY))
+                    .p_4()
+                    .flex()
+                    .flex_col()
+                    .gap_3()
+                    .child(
+                        div()
+                            .text_size(px(15.))
+                            .text_color(rgb(colors::TEXT_PRIMARY))
+                            .child("选择工作目录"),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .gap_2()
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .whitespace_nowrap()
+                                    .overflow_hidden()
+                                    .text_size(px(11.))
+                                    .text_color(rgb(colors::TEXT_SECONDARY))
+                                    .child(self.picker_current.clone()),
+                            )
+                            .child(
+                                div()
+                                    .flex_shrink_0()
+                                    .text_size(px(10.))
+                                    .text_color(rgb(colors::TEXT_TERTIARY))
+                                    .child(self.picker_status.clone()),
+                            ),
+                    )
+                    .child(
+                        div()
+                            // 必须给**确定高度**：`overflow_y_scrollbar()` 内部按父高布局，
+                            // 父容器只有 `max_h` 时高度会塌成 0（实测列表区只留一条空白）。
+                            .h(px(300.))
+                            .min_h_0()
+                            .rounded_lg()
+                            .border_1()
+                            .border_color(rgb(colors::BORDER))
+                            .bg(rgb(colors::BG_PRIMARY))
+                            .p_2()
+                            .child(list.overflow_y_scrollbar()),
+                    )
+                    .child(
+                        div()
+                            .w_full()
+                            .flex()
+                            .flex_row()
+                            .justify_end()
+                            .gap_2()
+                            .child(
+                                div()
+                                    .id("picker-cancel")
+                                    .px_3()
+                                    .py_1()
+                                    .rounded_lg()
+                                    .cursor_pointer()
+                                    .text_sm()
+                                    .text_color(rgb(colors::TEXT_SECONDARY))
+                                    .child("取消")
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.dialog = None;
+                                        cx.notify();
+                                    })),
+                            )
+                            .child(
+                                div()
+                                    .id("picker-confirm")
+                                    .px_3()
+                                    .py_1()
+                                    .rounded_lg()
+                                    .cursor_pointer()
+                                    .text_sm()
+                                    .bg(rgb(if can_pick {
+                                        colors::ACCENT
+                                    } else {
+                                        colors::BG_TERTIARY
+                                    }))
+                                    .text_color(rgb(if can_pick {
+                                        0xffffff
+                                    } else {
+                                        colors::TEXT_TERTIARY
+                                    }))
+                                    .child(pick_label)
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        if can_pick {
+                                            this.confirm_workspace_picker(target, cx);
+                                        }
+                                    })),
+                            ),
+                    ),
+            )
+            .into_any_element()
+    }
+
     fn render_role_actions(&self, role: &RoleRow, cx: &mut Context<Self>) -> AnyElement {
         let reset_name = role.name.clone();
         let delete_name = role.name.clone();
@@ -6125,7 +6469,8 @@ impl ClientApp {
                                             .text_color(rgb(colors::TEXT_SECONDARY)),
                                     )
                                     .on_click(cx.listener(|this, _, window, cx| {
-                                        this.open_new_workspace(window, cx);
+                                        let _ = window;
+                                        this.open_workspace_picker(PickerTarget::NewSession, cx);
                                     })),
                             ),
                     )
