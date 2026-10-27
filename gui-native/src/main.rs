@@ -17,7 +17,7 @@ use gpui_kit::component::Root;
 use gpui_kit::*;
 use gpui_kit::{list as gpui_list, ListAlignment, ListState as GpuiListState};
 use std::rc::Rc;
-use std::sync::OnceLock;
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 use tokio::runtime::Runtime;
 
@@ -600,16 +600,37 @@ struct TaskRow {
 }
 
 /// 消息内的一个展示块（口径对齐 Tauri 版 `MessageSegments` 的分段渲染）。
+///
+/// **工具执行结果不在段里**：后端 `MessageSegment` 只有 thinking / text / tool
+/// 三种，结果挂在消息级 `tool_calls`（`ToolCallWithResult`），按 `id` 关联。
 #[derive(Clone, Debug)]
 enum Seg {
     /// 正文（Markdown 渲染）
     Text(String),
-    /// 思考过程（灰字，暂不折叠）
+    /// 思考过程（折叠卡片；收起时显示最后一行）
     Thinking(String),
-    /// 工具调用（卡片：名称 + 参数摘要）
-    Tool { name: String, args: String },
-    /// 工具结果（名称 + 结果预览）
-    Observation { name: String, preview: String },
+    /// 工具调用（卡片：展示意图 + 名称 + 参数；结果按 `id` 从 `tool_calls` 取）
+    Tool {
+        id: String,
+        name: String,
+        arguments: String,
+        presentation: String,
+    },
+}
+
+/// 工具调用 + 执行结果（与后端 `ToolCallWithResult` 同构）。
+///
+/// `result` 是**完整**内容（后端不截断），`duration_ms` / `error` 由
+/// `Part::ToolResult` 推导 —— 三者共同决定卡片的状态角标与展开内容。
+#[derive(Clone, Debug)]
+struct ToolCall {
+    id: String,
+    name: String,
+    arguments: String,
+    presentation: String,
+    result: Option<String>,
+    duration_ms: Option<i64>,
+    error: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -619,6 +640,8 @@ struct MsgRow {
     text: gpui_kit::SharedString,
     /// 结构化分段：历史消息来自 `segments`，流式增量只有正文（segs 为空，用 text 兜底）
     segs: Vec<Seg>,
+    /// 本条消息的工具调用（含结果）；段里的 `Tool` 按 `id` 找它取结果与耗时
+    tool_calls: Vec<ToolCall>,
     /// 压缩点（`compression_marker`）：显示徽章，**不**渲染成用户气泡
     compression: bool,
 }
@@ -675,62 +698,642 @@ fn segments_text(msg: &serde_json::Value) -> String {
 /// ADR-002：正文的单一事实源是 `segments`（不是 `content`——后者只用于请求方向）。
 /// 与 [`segments_text`] 的区别：那个把思考/工具都拼成一段文字（早期纯文本渲染用），
 /// 这个保留块类型，交给渲染层分别画成 Markdown / 灰字思考 / 工具卡片。
-fn parse_segments(msg: &serde_json::Value) -> Vec<Seg> {
-    let mut out: Vec<Seg> = Vec::new();
-    let Some(arr) = msg.get("segments").and_then(|v| v.as_array()) else {
-        return out;
-    };
-    for seg in arr {
-        let ty = seg.get("type").and_then(|v| v.as_str()).unwrap_or_default();
-        match ty {
-            "text" => {
-                if let Some(t) = seg.get("text").and_then(|v| v.as_str()) {
-                    if !t.trim().is_empty() {
-                        out.push(Seg::Text(t.to_string()));
+/// 解析消息的时间线段与工具调用（含结果）。
+///
+/// 返回 `(段, 工具调用)`：段只负责**顺序**，工具结果挂在消息级 `tool_calls`
+/// （后端 `ToolCallWithResult`），渲染时按 `id` 关联 —— 与 Web 版
+/// `SegmentBlocks` 的合并口径一致。
+fn parse_segments(msg: &serde_json::Value) -> (Vec<Seg>, Vec<ToolCall>) {
+    let mut segs: Vec<Seg> = Vec::new();
+    if let Some(arr) = msg.get("segments").and_then(|v| v.as_array()) {
+        for seg in arr {
+            match seg.get("type").and_then(|v| v.as_str()).unwrap_or_default() {
+                "text" => {
+                    if let Some(t) = seg.get("text").and_then(|v| v.as_str()) {
+                        if !t.trim().is_empty() {
+                            segs.push(Seg::Text(t.to_string()));
+                        }
                     }
                 }
-            }
-            "thinking" | "reasoning" => {
-                if let Some(t) = seg.get("text").and_then(|v| v.as_str()) {
-                    if !t.trim().is_empty() {
-                        out.push(Seg::Thinking(t.to_string()));
+                "thinking" | "reasoning" => {
+                    if let Some(t) = seg.get("text").and_then(|v| v.as_str()) {
+                        if !t.trim().is_empty() {
+                            segs.push(Seg::Thinking(t.to_string()));
+                        }
                     }
                 }
+                "tool" => {
+                    // 真实结构：{ type: "tool", tool_call: { id, name, arguments, presentation } }
+                    let tc = seg.get("tool_call");
+                    segs.push(Seg::Tool {
+                        id: tc
+                            .and_then(|v| v.get("id"))
+                            .and_then(|v| v.as_str())
+                            .unwrap_or_default()
+                            .to_string(),
+                        name: tc
+                            .and_then(|v| v.get("name"))
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("工具")
+                            .to_string(),
+                        arguments: tc
+                            .and_then(|v| v.get("arguments"))
+                            .map(json_as_string)
+                            .unwrap_or_default(),
+                        presentation: tc
+                            .and_then(|v| v.get("presentation"))
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("generic")
+                            .to_string(),
+                    });
+                }
+                _ => {}
             }
-            "tool" => {
-                // 真实结构：{ type: "tool", tool_call: { name, arguments, .. } }
-                let tc = seg.get("tool_call");
-                let name = tc
-                    .and_then(|v| v.get("name"))
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("工具")
-                    .to_string();
-                let args = tc
-                    .and_then(|v| v.get("arguments"))
-                    .map(|v| v.to_string())
-                    .unwrap_or_default();
-                out.push(Seg::Tool { name, args });
-            }
-            "observation" | "tool_result" => {
-                let name = seg
-                    .get("tool_name")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("工具")
-                    .to_string();
-                let preview = seg
-                    .get("content")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or_default()
-                    .chars()
-                    .take(300)
-                    .collect::<String>();
-                out.push(Seg::Observation { name, preview });
-            }
-            _ => {}
         }
     }
-    out
+    let mut tools: Vec<ToolCall> = Vec::new();
+    if let Some(arr) = msg.get("tool_calls").and_then(|v| v.as_array()) {
+        for tc in arr {
+            let Some(id) = tc.get("id").and_then(|v| v.as_str()) else {
+                continue;
+            };
+            tools.push(ToolCall {
+                id: id.to_string(),
+                name: tc
+                    .get("name")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("工具")
+                    .to_string(),
+                arguments: tc.get("arguments").map(json_as_string).unwrap_or_default(),
+                presentation: tc
+                    .get("presentation")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("generic")
+                    .to_string(),
+                result: tc
+                    .get("result")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string()),
+                duration_ms: tc.get("duration_ms").and_then(|v| v.as_i64()),
+                error: tc
+                    .get("error")
+                    .and_then(|v| v.as_str())
+                    .filter(|s| !s.is_empty())
+                    .map(|s| s.to_string()),
+            });
+        }
+    }
+    (segs, tools)
 }
+
+/// JSON 值 → 字符串：字符串原样取，对象/数组序列化（工具参数可能两种形态）。
+fn json_as_string(v: &serde_json::Value) -> String {
+    match v {
+        serde_json::Value::String(s) => s.clone(),
+        other => other.to_string(),
+    }
+}
+
+/// 工具展示意图 → `(图标, 标签)`。
+///
+/// 与 Web 版 `tool-presentation.ts` / `TOOL_PRESENTATION_LABELS` 逐项对齐：
+/// 后端在工具注册时声明 `presentation`，前端只做投影 —— 同一个工具在主对话流
+/// 与子代理活动流里必须叫同一个名字（两处各维护一套是口径漂移的经典来源）。
+fn presentation_of(presentation: &str) -> (IconName, &'static str) {
+    match presentation {
+        "read" => (IconName::FileText, "读取文件"),
+        "write" => (IconName::FilePlus, "写入文件"),
+        "terminal" => (IconName::Terminal, "执行命令"),
+        "diff" => (IconName::PenLine, "编辑文件"),
+        "search" => (IconName::Search, "搜索"),
+        "web" => (IconName::Globe, "浏览网页"),
+        "skill" => (IconName::Brain, "调用技能"),
+        "knowledge" => (IconName::FilePlus, "导入知识"),
+        "delegate" => (IconName::GitBranch, "委托子代理"),
+        "code" => (IconName::Code, "代码分析"),
+        "image" => (IconName::Image, "查看图片"),
+        _ => (IconName::Wrench, "工具"),
+    }
+}
+
+/// 毫秒 → 人类可读耗时（≥1s 用秒、两位小数），对齐 Web 版 `formatDuration`。
+fn format_duration(ms: i64) -> String {
+    if ms >= 1000 {
+        format!("{:.2}s", ms as f64 / 1000.0)
+    } else {
+        format!("{ms}ms")
+    }
+}
+/// 工具参数 JSON 美化（缩进 2）。
+///
+/// 非法 JSON **原样返回**——宁可显示原始参数，也不要把内容吞掉（对齐 Web 版
+/// `formatArguments`）。`apply_patch` 这类工具的参数是包在 JSON 里的 diff 文本，
+/// 美化后换行才可读。
+fn format_arguments(raw: &str) -> String {
+    match serde_json::from_str::<serde_json::Value>(raw) {
+        Ok(v) => serde_json::to_string_pretty(&v).unwrap_or_else(|_| raw.to_string()),
+        Err(_) => raw.to_string(),
+    }
+}
+
+/// 从工具参数里提取「一句话目标」（窄列单行展示用）。
+///
+/// 只挑常见字段、**不做语义推断**：猜错比截断更误导，取不到就把原始参数压成
+/// 一行截断（与 Web 版 `summarizeToolTarget` 同口径）。`apply_patch` 的参数是
+/// diff 信封而不是 JSON，单独走 `*** Update File: <路径>` 提取。
+fn summarize_tool_target(raw: &str) -> String {
+    const FIELDS: [&str; 13] = [
+        "path",
+        "file_path",
+        "filePath",
+        "pattern",
+        "query",
+        "command",
+        "cmd",
+        "url",
+        "title",
+        "task",
+        "goal",
+        "description",
+        "name",
+    ];
+    fn clip(text: &str) -> String {
+        let one = text.split_whitespace().collect::<Vec<_>>().join(" ");
+        if one.chars().count() > 80 {
+            format!("{}…", one.chars().take(80).collect::<String>())
+        } else {
+            one
+        }
+    }
+    for marker in ["*** Update File:", "*** Add File:", "*** Delete File:"] {
+        if let Some(pos) = raw.find(marker) {
+            let line = raw[pos + marker.len()..].lines().next().unwrap_or_default();
+            if !line.trim().is_empty() {
+                return clip(line.trim());
+            }
+        }
+    }
+    if let Ok(serde_json::Value::Object(map)) = serde_json::from_str::<serde_json::Value>(raw) {
+        for field in FIELDS {
+            if let Some(serde_json::Value::String(v)) = map.get(field) {
+                if !v.trim().is_empty() {
+                    return clip(v.trim());
+                }
+            }
+        }
+        for v in map.values() {
+            if let serde_json::Value::String(s) = v {
+                if !s.trim().is_empty() {
+                    return clip(s.trim());
+                }
+            }
+        }
+        return String::new();
+    }
+    clip(raw.trim())
+}
+
+/// 把折叠键写回 view 并重绘（`gpui_list` 的渲染闭包只有 `&mut App`）。
+fn toggle_expand(
+    app: &AppRef,
+    key: String,
+    which: fn(&mut ExpandState) -> &mut std::collections::HashSet<String>,
+    cx: &mut App,
+) {
+    let weak = app.lock().ok().and_then(|g| g.clone());
+    if let Some(w) = weak {
+        let _ = w.update(cx, |this: &mut ClientApp, cx| {
+            let mut state = this.expand.borrow_mut();
+            let set = which(&mut state);
+            if !set.remove(&key) {
+                set.insert(key.clone());
+            }
+            cx.notify();
+        });
+    }
+}
+
+/// 可折叠的思考块（对齐 Web 版 `ThinkingBlock`）。
+///
+/// 收起态在 header 上单行显示思考输出的**最后一行**（流式期间实时更新）——
+/// 用户既能一眼看到模型在想什么，又不会被大段思考撑满屏幕。
+fn render_thinking(
+    mi: usize,
+    si: usize,
+    text: String,
+    expand: &ExpandRef,
+    app: &AppRef,
+) -> AnyElement {
+    let key = format!("t:{mi}:{si}");
+    let open = expand.borrow().thinking.contains(&key);
+    let banner = text
+        .lines()
+        .rev()
+        .find(|l| !l.trim().is_empty())
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+    let chevron = if open {
+        IconName::ChevronDown
+    } else {
+        IconName::ChevronRight
+    };
+    let mut head = div()
+        .id(("think-head", mi * 1000 + si))
+        .px_2()
+        .py_1()
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap_2()
+        .cursor_pointer()
+        .child(
+            svg()
+                .path(chevron.path())
+                .size(px(12.))
+                .text_color(rgb(colors::TEXT_TERTIARY)),
+        )
+        .child(
+            div()
+                .flex_shrink_0()
+                .text_size(px(13.))
+                .text_color(rgb(colors::TEXT_TERTIARY))
+                .child("思考过程"),
+        );
+    if !open && !banner.is_empty() {
+        head = head.child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .whitespace_nowrap()
+                .overflow_hidden()
+                .italic()
+                .text_size(px(13.))
+                .text_color(rgb(colors::TEXT_TERTIARY))
+                .child(banner),
+        );
+    }
+    let app2 = app.clone();
+    let key2 = key.clone();
+    let head = head.on_click(move |_, _, cx| {
+        toggle_expand(&app2, key2.clone(), |s| &mut s.thinking, cx);
+    });
+    let mut card = div()
+        .rounded_lg()
+        .border_1()
+        .border_color(rgb(colors::BORDER))
+        .bg(rgb(colors::BG_TERTIARY))
+        .overflow_hidden()
+        .child(head);
+    if open {
+        card = card.child(
+            div()
+                .px_3()
+                .pb_2()
+                .italic()
+                .text_size(px(13.))
+                .text_color(rgb(colors::TEXT_SECONDARY))
+                .child(text),
+        );
+    }
+    card.into_any_element()
+}
+
+/// 工具调用卡片（对齐 Web 版 `ToolCallCard`）：头部徽标 + 目标摘要 + 状态，
+/// 展开看完整参数；结果单独一层折叠（`tool.result` 是完整内容，不截断）。
+#[allow(clippy::too_many_arguments)]
+fn render_tool_card(
+    mi: usize,
+    si: usize,
+    name: String,
+    arguments: String,
+    presentation: String,
+    tool: Option<&ToolCall>,
+    expand: &ExpandRef,
+    app: &AppRef,
+) -> AnyElement {
+    let args_key = format!("a:{mi}:{si}");
+    let result_key = format!("r:{mi}:{si}");
+    let (args_open, result_open) = {
+        let state = expand.borrow();
+        (
+            state.tool_args.contains(&args_key),
+            state.tool_result.contains(&result_key),
+        )
+    };
+    let (icon, label) = presentation_of(&presentation);
+    let error = tool.and_then(|t| t.error.clone());
+    let failed = error.is_some();
+    let has_result = tool.and_then(|t| t.result.as_ref()).is_some();
+    let duration = tool.and_then(|t| t.duration_ms);
+    let target = summarize_tool_target(&arguments);
+
+    let mut head = div()
+        .id(("tool-head", mi * 1000 + si))
+        .px_2()
+        .py_1()
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap_2()
+        .cursor_pointer()
+        .child(
+            svg()
+                .path(icon.path())
+                .size(px(14.))
+                .text_color(rgb(colors::TEXT_TERTIARY)),
+        )
+        .child(
+            div()
+                .flex_shrink_0()
+                .text_size(px(13.))
+                .text_color(rgb(colors::TEXT_SECONDARY))
+                .child(label),
+        )
+        .child(
+            div()
+                .flex_shrink_0()
+                .text_size(px(13.))
+                .text_color(rgb(colors::TEXT_PRIMARY))
+                .child(name),
+        )
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .whitespace_nowrap()
+                .overflow_hidden()
+                .text_size(px(12.))
+                .text_color(rgb(colors::TEXT_TERTIARY))
+                .child(target),
+        );
+    // 状态角标：失败红 ✗ / 有结果绿 ✓ / 还没结果时省略号
+    if failed {
+        head = head.child(
+            svg()
+                .path(IconName::CircleX.path())
+                .size(px(13.))
+                .text_color(rgb(colors::ERROR)),
+        );
+    } else if has_result {
+        head = head.child(
+            svg()
+                .path(IconName::CircleCheck.path())
+                .size(px(13.))
+                .text_color(rgb(colors::SUCCESS)),
+        );
+    } else {
+        head = head.child(
+            div()
+                .text_size(px(13.))
+                .text_color(rgb(colors::TEXT_TERTIARY))
+                .child("…"),
+        );
+    }
+    if let Some(ms) = duration {
+        head = head.child(
+            div()
+                .text_size(px(11.))
+                .text_color(rgb(colors::TEXT_TERTIARY))
+                .child(format_duration(ms)),
+        );
+    }
+    let app_args = app.clone();
+    let key_args = args_key.clone();
+    let head = head.on_click(move |_, _, cx| {
+        toggle_expand(&app_args, key_args.clone(), |s| &mut s.tool_args, cx);
+    });
+
+    let mut card = div()
+        .rounded_lg()
+        .border_1()
+        .border_color(rgb(if failed {
+            colors::ERROR
+        } else {
+            colors::BORDER
+        }))
+        .bg(rgb(colors::BG_SECONDARY))
+        .overflow_hidden()
+        .child(head);
+    if let Some(err) = error {
+        card = card.child(
+            div()
+                .px_3()
+                .py_2()
+                .border_t_1()
+                .border_color(rgb(colors::ERROR))
+                .text_size(px(12.))
+                .text_color(rgb(colors::ERROR))
+                .child(err),
+        );
+    }
+    if args_open {
+        card = card.child(
+            div()
+                .px_3()
+                .py_2()
+                .border_t_1()
+                .border_color(rgb(colors::BORDER))
+                .max_h(px(180.))
+                .overflow_hidden()
+                .text_size(px(12.))
+                .text_color(rgb(colors::TEXT_SECONDARY))
+                .child(format_arguments(&arguments)),
+        );
+    }
+    if let Some(result) = tool.and_then(|t| t.result.clone()) {
+        let chevron = if result_open {
+            IconName::ChevronDown
+        } else {
+            IconName::ChevronRight
+        };
+        let app_res = app.clone();
+        let key_res = result_key.clone();
+        let result_head = div()
+            .id(("tool-result-head", mi * 1000 + si))
+            .px_2()
+            .py_1()
+            .border_t_1()
+            .border_color(rgb(colors::BORDER))
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_2()
+            .cursor_pointer()
+            .child(
+                svg()
+                    .path(chevron.path())
+                    .size(px(12.))
+                    .text_color(rgb(colors::TEXT_TERTIARY)),
+            )
+            .child(
+                div()
+                    .text_size(px(13.))
+                    .text_color(rgb(colors::TEXT_TERTIARY))
+                    .child("工具结果"),
+            )
+            .on_click(move |_, _, cx| {
+                toggle_expand(&app_res, key_res.clone(), |s| &mut s.tool_result, cx);
+            });
+        card = card.child(result_head);
+        if result_open {
+            card = card.child(
+                div()
+                    .px_3()
+                    .pb_2()
+                    .max_h(px(320.))
+                    .overflow_hidden()
+                    .text_size(px(12.))
+                    .text_color(rgb(colors::TEXT_SECONDARY))
+                    .child(result),
+            );
+        }
+    }
+    card.into_any_element()
+}
+
+/// 单条消息的正文（口径对齐 Web 版 `SegmentBlocks`）。
+///
+/// **相邻同类段合并**（thinking / text 各自连成一块）：模型一次输出常被切成
+/// 多个同类增量，逐段渲染会让同一条思考碎成十几个小卡片。
+fn render_msg_body(msg: &MsgRow, mi: usize, expand: &ExpandRef, app: &AppRef) -> AnyElement {
+    let is_user = msg.role == "user" && !msg.compression;
+    let mut body = div().flex().flex_col().gap_2();
+    if msg.compression {
+        body = body.child(
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap_2()
+                .child(
+                    div()
+                        .rounded_full()
+                        .border_1()
+                        .border_color(rgb(colors::BORDER))
+                        .bg(rgb(colors::BG_HOVER))
+                        .px_2()
+                        .py_1()
+                        .text_size(px(11.))
+                        .text_color(rgb(colors::TEXT_SECONDARY))
+                        .child("压缩点"),
+                )
+                .child(div().flex_1().h(px(1.)).bg(rgb(colors::BORDER))),
+        );
+    }
+    if msg.segs.is_empty() {
+        if !msg.text.is_empty() {
+            body = body.child(TextView::markdown(("msg", mi), msg.text.clone()));
+        }
+    } else {
+        let mut i = 0usize;
+        while i < msg.segs.len() {
+            match &msg.segs[i] {
+                Seg::Thinking(_) => {
+                    let start = i;
+                    let mut merged = String::new();
+                    while i < msg.segs.len() {
+                        match &msg.segs[i] {
+                            Seg::Thinking(t) => {
+                                merged.push_str(t);
+                                i += 1;
+                            }
+                            _ => break,
+                        }
+                    }
+                    body = body.child(render_thinking(mi, start, merged, expand, app));
+                }
+                Seg::Text(_) => {
+                    let start = i;
+                    let mut merged = String::new();
+                    while i < msg.segs.len() {
+                        match &msg.segs[i] {
+                            Seg::Text(t) => {
+                                merged.push_str(t);
+                                i += 1;
+                            }
+                            _ => break,
+                        }
+                    }
+                    body = body.child(TextView::markdown(("msg", mi * 1000 + start), merged));
+                }
+                Seg::Tool {
+                    id,
+                    name,
+                    arguments,
+                    presentation,
+                } => {
+                    // 按 id 关联结果；无 id 时退回「同名且无 id」的调用（历史数据）
+                    let tool = msg.tool_calls.iter().find(|t| &t.id == id).or_else(|| {
+                        msg.tool_calls
+                            .iter()
+                            .find(|t| t.id.is_empty() && &t.name == name)
+                    });
+                    // 段里的参数/展示意图可能缺失（老数据只存了 name），用 `tool_calls`
+                    // 里那份兜底：展示意图决定卡片图标与标签，不能默认成「工具」
+                    let args = if arguments.is_empty() {
+                        tool.map(|t| t.arguments.clone()).unwrap_or_default()
+                    } else {
+                        arguments.clone()
+                    };
+                    let pres = match tool {
+                        Some(t) if !t.presentation.is_empty() => t.presentation.clone(),
+                        _ => presentation.clone(),
+                    };
+                    body = body.child(render_tool_card(
+                        mi,
+                        i,
+                        name.clone(),
+                        args,
+                        pres,
+                        tool,
+                        expand,
+                        app,
+                    ));
+                    i += 1;
+                }
+            }
+        }
+    }
+    if is_user {
+        div()
+            .px_4()
+            .py_1()
+            .flex()
+            .flex_row()
+            .justify_end()
+            .child(
+                div()
+                    .max_w(px(640.))
+                    .rounded_2xl()
+                    .bg(rgb(colors::ACCENT))
+                    .text_color(rgb(0xffffff))
+                    .px_4()
+                    .py_2()
+                    .child(body),
+            )
+            .into_any_element()
+    } else {
+        div().px_4().py_2().w_full().child(body).into_any_element()
+    }
+}
+/// 消息区里可折叠块的展开状态（思考块 / 工具参数 / 工具结果）。
+///
+/// 放 `Rc<RefCell>` 而不是放在 `ClientApp` 上：`gpui_list` 的渲染闭包签名是
+/// `FnMut(usize, &mut Window, &mut App)`，**拿不到** `&ClientApp`；而点击回调
+/// 又必须能把状态写回去并触发重绘 —— 共享句柄 + `AppRef` 是这套框架下唯一
+/// 不引入第二份真相的写法。
+#[derive(Default)]
+struct ExpandState {
+    thinking: std::collections::HashSet<String>,
+    tool_args: std::collections::HashSet<String>,
+    tool_result: std::collections::HashSet<String>,
+}
+
+type ExpandRef = Rc<std::cell::RefCell<ExpandState>>;
+
+/// 反向弱引用（点击回调里 `update` 回 view）。
+type AppRef = Arc<Mutex<Option<WeakEntity<ClientApp>>>>;
 
 struct ClientApp {
     /// 左栏派生行（分组 / 会话 / 查看更多）：由 `rebuild_session_rows` 从
@@ -748,6 +1351,11 @@ struct ClientApp {
     expanded_task: Option<String>,
     /// 子代理任务的消息缓存（`task_id` = 子会话 id → `[(role, text)]`）
     task_messages: std::collections::HashMap<String, Vec<(String, String)>>,
+    /// 消息区折叠状态（思考块 / 工具参数 / 工具结果）
+    expand: ExpandRef,
+    /// 反向弱引用：`gpui_list` 的渲染闭包只能拿 `&mut App`，点击折叠块时要
+    /// 回写 view 状态 → 与旧 `SessionsDelegate` 同一手法
+    app_ref: AppRef,
     /// 当前打开的模态对话框（删除确认 / 重命名）
     dialog: Option<Dialog>,
     /// 新会话待绑定的工作目录（「＋新目录」设置）：随首条消息以
@@ -823,6 +1431,8 @@ struct ClientApp {
 
 impl ClientApp {
     fn new(window: &mut Window, cx: &mut Context<Self>, port: u16) -> Self {
+        let expand: ExpandRef = Rc::new(std::cell::RefCell::new(ExpandState::default()));
+        let app_ref: AppRef = Arc::new(Mutex::new(None));
         let messages: Rc<Vec<MsgRow>> = Rc::new(Vec::new());
         let total: usize = 0;
 
@@ -855,6 +1465,8 @@ impl ClientApp {
             all_tasks: Vec::new(),
             expanded_task: None,
             task_messages: std::collections::HashMap::new(),
+            expand,
+            app_ref: app_ref.clone(),
             dialog: None,
             new_session_workspace: None,
             dialog_input: None,
@@ -891,6 +1503,10 @@ impl ClientApp {
             edit_endpoint: endpoint_input,
             edit_api_key: key_input,
         };
+        // 回填自身弱引用：消息区折叠块的点击回调要用它 update 回 view
+        if let Ok(mut g) = app_ref.lock() {
+            *g = Some(cx.entity().downgrade());
+        }
         // 统一事件常驻订阅（ADR-028）：订阅在窗口创建时建立，与「发送」解耦
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<serde_json::Value>();
         spawn_event_reader(port, tx);
@@ -3523,12 +4139,14 @@ impl ClientApp {
             role: "user".to_string(),
             text: text.clone().into(),
             segs: Vec::new(),
+            tool_calls: Vec::new(),
             compression: false,
         });
         next.push(MsgRow {
             role: "assistant".to_string(),
             text: "".into(),
             segs: Vec::new(),
+            tool_calls: Vec::new(),
             compression: false,
         });
         if next.len() > RENDER_LIMIT {
@@ -3599,18 +4217,22 @@ impl ClientApp {
                         .unwrap_or_default();
                     let rows: Vec<MsgRow> = arr
                         .iter()
-                        .map(|m| MsgRow {
-                            role: m
-                                .get("role")
-                                .and_then(|v| v.as_str())
-                                .unwrap_or("?")
-                                .to_string(),
-                            text: segments_text(m).into(),
-                            segs: parse_segments(m),
-                            compression: m
-                                .get("compression_marker")
-                                .and_then(|v| v.as_bool())
-                                .unwrap_or(false),
+                        .map(|m| {
+                            let (segs, tool_calls) = parse_segments(m);
+                            MsgRow {
+                                role: m
+                                    .get("role")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("?")
+                                    .to_string(),
+                                text: segments_text(m).into(),
+                                segs,
+                                tool_calls,
+                                compression: m
+                                    .get("compression_marker")
+                                    .and_then(|v| v.as_bool())
+                                    .unwrap_or(false),
+                            }
                         })
                         .collect();
                     let n = rows.len();
@@ -3889,162 +4511,19 @@ impl ClientApp {
                                             .max_w(px(colors::CHAT_MAX_W))
                                             .child({
                                                 let items = self.messages.clone();
+                                                let expand = self.expand.clone();
+                                                let app = self.app_ref.clone();
                                                 gpui_list(
                                                     self.msg_list_state.clone(),
                                                     move |ix, _window, _cx| {
                                                         let Some(m) = items.get(ix) else {
                                                             return div().into_any_element();
                                                         };
-                                                        // 气泡口径对齐 Tauri 版 `MessageBubble`：
-                                                        //   用户 = 右对齐蓝气泡（限宽、右下小圆角）
-                                                        //   助手 = **无外层框**、全宽平铺（各段独立成块，避免宽窄不一）
-                                                        //   压缩点 = 徽章 + 细线（它不是用户输入，不画成气泡）
-                                                        let is_user =
-                                                            m.role == "user" && !m.compression;
-                                                        let mut body =
-                                                            div().flex().flex_col().gap_2();
-                                                        if m.compression {
-                                                            body = body.child(
-                                            div()
-                                                .flex()
-                                                .flex_row()
-                                                .items_center()
-                                                .gap_2()
-                                                .child(
-                                                    div()
-                                                        .rounded_full()
-                                                        .border_1()
-                                                        .border_color(rgb(colors::BORDER))
-                                                        .bg(rgb(colors::BG_HOVER))
-                                                        .px_2()
-                                                        .py_1()
-                                                        .text_xs()
-                                                        .text_color(rgb(colors::TEXT_SECONDARY))
-                                                        .child("压缩点"),
-                                                )
-                                                .child(
-                                                    div()
-                                                        .flex_1()
-                                                        .h(px(1.))
-                                                        .bg(rgb(colors::BORDER)),
-                                                ),
-                                        );
-                                                        }
-                                                        if m.segs.is_empty() {
-                                                            if !m.text.is_empty() {
-                                                                body =
-                                                                    body.child(TextView::markdown(
-                                                                        ("msg", ix),
-                                                                        m.text.clone(),
-                                                                    ));
-                                                            }
-                                                        } else {
-                                                            for (si, seg) in
-                                                                m.segs.iter().enumerate()
-                                                            {
-                                                                let sid = ix * 1000 + si;
-                                                                body = match seg {
-                                                Seg::Text(t) => body.child(TextView::markdown(
-                                                    ("msg", sid),
-                                                    t.clone(),
-                                                )),
-                                                Seg::Thinking(t) => body.child(
-                                                    div()
-                                                        .text_xs()
-                                                        .text_color(rgb(colors::TEXT_TERTIARY))
-                                                        .child(format!("🧠 {t}")),
-                                                ),
-                                                Seg::Tool { name, args } => body.child(
-                                                    div()
-                                                        .rounded_md()
-                                                        .border_1()
-                                                        .border_color(rgb(colors::BORDER))
-                                                        .bg(rgb(colors::BG_SECONDARY))
-                                                        .px_3()
-                                                        .py_2()
-                                                        .flex()
-                                                        .flex_col()
-                                                        .gap_1()
-                                                        .child(
-                                                            div()
-                                                                .text_xs()
-                                                                .text_color(rgb(colors::WARNING))
-                                                                .child(format!("🔧 {name}")),
-                                                        )
-                                                        .child(
-                                                            div()
-                                                                .text_xs()
-                                                                .text_color(rgb(
-                                                                    colors::TEXT_TERTIARY,
-                                                                ))
-                                                                .child(ellipsis(args, 160)),
-                                                        ),
-                                                ),
-                                                Seg::Observation { name, preview } => body.child(
-                                                    div()
-                                                        .rounded_md()
-                                                        .bg(rgb(colors::BG_SECONDARY))
-                                                        .px_3()
-                                                        .py_2()
-                                                        .flex()
-                                                        .flex_col()
-                                                        .gap_1()
-                                                        .child(
-                                                            div()
-                                                                .text_xs()
-                                                                .text_color(rgb(
-                                                                    colors::TEXT_SECONDARY,
-                                                                ))
-                                                                .child(format!("📄 {name}")),
-                                                        )
-                                                        .child(
-                                                            div()
-                                                                .text_xs()
-                                                                .text_color(rgb(
-                                                                    colors::TEXT_TERTIARY,
-                                                                ))
-                                                                .child(ellipsis(preview, 200)),
-                                                        ),
-                                                ),
-                                            };
-                                                            }
-                                                        }
-                                                        if is_user {
-                                                            div()
-                                                                .px_4()
-                                                                .py_1()
-                                                                .flex()
-                                                                .flex_row()
-                                                                .justify_end()
-                                                                .child(
-                                                                    div()
-                                                                        .max_w(px(640.))
-                                                                        .rounded_2xl()
-                                                                        .bg(rgb(colors::ACCENT))
-                                                                        .text_color(rgb(0xffffff))
-                                                                        .px_4()
-                                                                        .py_2()
-                                                                        .child(body),
-                                                                )
-                                                                .into_any_element()
-                                                        } else {
-                                                            div()
-                                                                .px_4()
-                                                                .py_2()
-                                                                .w_full()
-                                                                .child(body)
-                                                                .into_any_element()
-                                                        }
+                                                        // 段渲染口径见 `render_msg_body`（思考块 / 工具卡可折叠，
+                                                        // 结果按 `tool_calls` 的 id 关联）
+                                                        render_msg_body(m, ix, &expand, &app)
                                                     },
                                                 )
-                                                // GPUI 内置 `list` 的默认 `sizing_behavior = Auto`：它自己
-                                                // **不带任何尺寸**（`request_layout` 只把空 style 交给内核），
-                                                // 宽度与高度都取「内容尺寸」。实测 `on_children_prepainted`
-                                                // 打印出 `w=636px h=0px` —— 高度塌成 0，`prepaint` 拿到的
-                                                // bounds 高 0，于是一条消息都画不出来（症状：标题正确显示
-                                                // 「会话消息（共 72 条，显示最近 60 条）」，消息区全空）。
-                                                // 必须显式给尺寸；`.size_full()` = 100% x 100%，父容器
-                                                // （`flex_1` 分配的高度）是确定值，百分比可解析。
                                                 .size_full()
                                             }),
                                     ),
