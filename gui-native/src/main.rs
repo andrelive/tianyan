@@ -7,13 +7,13 @@
 //! 未完成：SSE 流式发送、设置页/workspace/审批面板、托盘/通知/快捷键/updater、单实例保护。
 
 use futures::StreamExt as _;
+use gpui_kit::assets::{IconName, IconNamed as _};
 use gpui_kit::component::input::{InputEvent, Textarea, TextareaState};
 use gpui_kit::component::list::{List, ListDelegate, ListItem, ListState};
 use gpui_kit::component::progress::ProgressCircle;
 use gpui_kit::component::text::TextView;
 use gpui_kit::component::theme::{Theme, ThemeMode};
 use gpui_kit::component::{IndexPath, Root};
-use gpui_kit::assets::{IconName, IconNamed as _};
 use gpui_kit::*;
 use gpui_kit::{list as gpui_list, ListAlignment, ListState as GpuiListState};
 use std::rc::Rc;
@@ -215,6 +215,10 @@ mod colors {
     pub const RAIL_WIDTH: f32 = 64.;
     /// 会话列表宽度（`--sidebar-width`：280px）
     pub const LIST_WIDTH: f32 = 280.;
+    /// 会话内容列宽度（Tailwind `max-w-4xl` = 896px）：消息列、底部状态条与输入卡片
+    /// 三者必须同宽同左边界——`gui-vite` 的 `ChatPanel` 用 `w-full max-w-4xl mx-auto px-4`，
+    /// `ChatInput` 用 `mx-auto max-w-4xl`，靠同一个 max-width 对齐。
+    pub const CHAT_MAX_W: f32 = 896.;
 }
 
 /// 一级导航项（与 `gui-vite/src/components/sidebar/Sidebar.tsx` 的 `NAV_ITEMS` 逐项对齐）。
@@ -389,9 +393,7 @@ struct ProviderRow {
 /// 两种都接（Tauri 版 `parseAskUserQuestions` 同口径）。
 fn parse_ask_user(args: &serde_json::Value) -> Vec<(String, Vec<String>)> {
     let parsed: serde_json::Value = match args {
-        serde_json::Value::String(s) => {
-            serde_json::from_str(s).unwrap_or(serde_json::Value::Null)
-        }
+        serde_json::Value::String(s) => serde_json::from_str(s).unwrap_or(serde_json::Value::Null),
         v => v.clone(),
     };
     let mut out: Vec<(String, Vec<String>)> = Vec::new();
@@ -668,7 +670,8 @@ impl ClientApp {
             TextareaState::new(window, cx).placeholder("输入消息 · Enter 发送 / Shift+Enter 换行")
         });
         // 设置页的两个编辑框：endpoint 与 api_key（打开编辑时从 `GET /config` 回填）
-        let endpoint_input = cx.new(|cx| TextareaState::new(window, cx).placeholder("API 端点（http(s)://…）"));
+        let endpoint_input =
+            cx.new(|cx| TextareaState::new(window, cx).placeholder("API 端点（http(s)://…）"));
         let key_input = cx.new(|cx| TextareaState::new(window, cx).placeholder("API 密钥"));
         // Enter 发送：Textarea 已按多行语义插入换行，发送成功后再清空即无残留
         cx.subscribe_in(
@@ -869,10 +872,8 @@ impl ClientApp {
                     // 再拉一次整份配置：providers 的 endpoint / api_key 只在 `/config`
                     // 里（`/config/models` 只给 name/endpoint/enabled/model_count）。
                     // 编辑回填需要它们，而回填只能在同步点击处理器里做（要 `&mut Window`）。
-                    let cfg_res = fetch_json(format!(
-                        "http://{SERVER_HOST}:{port}/api/v1/config"
-                    ))
-                    .await;
+                    let cfg_res =
+                        fetch_json(format!("http://{SERVER_HOST}:{port}/api/v1/config")).await;
                     let mut providers: Vec<ProviderRow> = Vec::new();
                     if let Ok(body) = cfg_res {
                         if let Some(arr) = body
@@ -1008,27 +1009,20 @@ impl ClientApp {
                 .cursor_pointer()
                 .text_sm();
             if self.view == view {
-                item = item
-                    .bg(rgb(colors::BG_TERTIARY))
-                    .text_color(rgb(tint));
+                item = item.bg(rgb(colors::BG_TERTIARY)).text_color(rgb(tint));
             } else {
                 item = item.text_color(rgb(tint));
             }
             // Lucide SVG（stroke 用 currentColor → 由 text_color 上色，可随选中态换色）
             rail = rail.child(
-                item.child(
-                    svg()
-                        .path(icon.path())
-                        .size(px(18.))
-                        .text_color(rgb(tint)),
-                )
-                .on_click(cx.listener(move |this, _, _window, cx| {
-                    this.view = view;
-                    if view == View::Settings {
-                        this.load_models(cx);
-                    }
-                    cx.notify();
-                })),
+                item.child(svg().path(icon.path()).size(px(18.)).text_color(rgb(tint)))
+                    .on_click(cx.listener(move |this, _, _window, cx| {
+                        this.view = view;
+                        if view == View::Settings {
+                            this.load_models(cx);
+                        }
+                        cx.notify();
+                    })),
             );
         }
         rail
@@ -1392,13 +1386,15 @@ impl ClientApp {
                         }),
                 )
                 .child(div().flex_1())
-                .child(submit.child("提交回答").on_click(cx.listener(
-                    move |this, _, _w, cx| {
-                        if this.clarify_answers.iter().all(|a| !a.trim().is_empty()) {
-                            this.submit_clarification(cx);
-                        }
-                    },
-                ))),
+                .child(
+                    submit
+                        .child("提交回答")
+                        .on_click(cx.listener(move |this, _, _w, cx| {
+                            if this.clarify_answers.iter().all(|a| !a.trim().is_empty()) {
+                                this.submit_clarification(cx);
+                            }
+                        })),
+                ),
         )
         .into_any_element()
     }
@@ -1742,11 +1738,7 @@ impl ClientApp {
                     .gap_2()
                     .text_xs()
                     .child(div().text_color(rgb(color)).child(glyph))
-                    .child(
-                        div()
-                            .text_color(rgb(text_color))
-                            .child(ellipsis(title, 48)),
-                    ),
+                    .child(div().text_color(rgb(text_color)).child(ellipsis(title, 48))),
             );
         }
         bar.into_any_element()
@@ -1928,7 +1920,10 @@ impl ClientApp {
         cx.spawn(async move |this, cx| {
             let base = format!("http://{SERVER_HOST}:{port}/api/v1");
             let mut cfg = match fetch_json(format!("{base}/config")).await {
-                Ok(body) => body.get("config").cloned().unwrap_or(serde_json::Value::Null),
+                Ok(body) => body
+                    .get("config")
+                    .cloned()
+                    .unwrap_or(serde_json::Value::Null),
                 Err(e) => {
                     let _ = this.update(cx, |this, cx| {
                         this.settings_status = format!("保存失败（读取配置）：{e}");
@@ -1960,7 +1955,11 @@ impl ClientApp {
                 });
                 return;
             }
-            let res = put_json(format!("{base}/config"), serde_json::json!({ "config": cfg })).await;
+            let res = put_json(
+                format!("{base}/config"),
+                serde_json::json!({ "config": cfg }),
+            )
+            .await;
             let _ = this.update(cx, |this, cx| {
                 match res {
                     Ok(_) => {
@@ -1987,18 +1986,12 @@ impl ClientApp {
     /// `server/src/api/config/routes.rs`）。
     fn render_settings(&self, cx: &mut Context<Self>) -> impl IntoElement {
         // 提供商区：endpoint / 密钥可编辑（保存时先重读配置再写，见 `save_provider`）
-        let mut providers_block = div()
-            .flex()
-            .flex_col()
-            .gap_1()
-            .px_4()
-            .pt_3()
-            .child(
-                div()
-                    .text_xs()
-                    .text_color(rgb(colors::TEXT_SECONDARY))
-                    .child("提供商（端点 / 密钥）"),
-            );
+        let mut providers_block = div().flex().flex_col().gap_1().px_4().pt_3().child(
+            div()
+                .text_xs()
+                .text_color(rgb(colors::TEXT_SECONDARY))
+                .child("提供商（端点 / 密钥）"),
+        );
         for (ix, p) in self.providers.iter().enumerate() {
             let name = p.name.clone();
             providers_block = providers_block.child(
@@ -2639,20 +2632,41 @@ impl ClientApp {
                                     .border_b_1()
                                     .child(self.current_title.clone()),
                             )
-                            .child(div().flex_1().min_h_0().child({
-                                let items = self.messages.clone();
-                                gpui_list(self.msg_list_state.clone(), move |ix, _window, _cx| {
-                                    let Some(m) = items.get(ix) else {
-                                        return div().into_any_element();
-                                    };
-                                    // 气泡口径对齐 Tauri 版 `MessageBubble`：
-                                    //   用户 = 右对齐蓝气泡（限宽、右下小圆角）
-                                    //   助手 = **无外层框**、全宽平铺（各段独立成块，避免宽窄不一）
-                                    //   压缩点 = 徽章 + 细线（它不是用户输入，不画成气泡）
-                                    let is_user = m.role == "user" && !m.compression;
-                                    let mut body = div().flex().flex_col().gap_2();
-                                    if m.compression {
-                                        body = body.child(
+                            // 消息列：限宽 896 居中（与输入卡片同宽、同左边界）。
+                            // 父级用 `flex_col + items_center` 让限宽块水平居中；
+                            // 限宽块自身 `w_full + max_w` 才会在宽窗口下取 896。
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_h_0()
+                                    .w_full()
+                                    .flex()
+                                    .flex_col()
+                                    .items_center()
+                                    .child(
+                                        div()
+                                            .flex_1()
+                                            .min_h_0()
+                                            .w_full()
+                                            .max_w(px(colors::CHAT_MAX_W))
+                                            .child({
+                                                let items = self.messages.clone();
+                                                gpui_list(
+                                                    self.msg_list_state.clone(),
+                                                    move |ix, _window, _cx| {
+                                                        let Some(m) = items.get(ix) else {
+                                                            return div().into_any_element();
+                                                        };
+                                                        // 气泡口径对齐 Tauri 版 `MessageBubble`：
+                                                        //   用户 = 右对齐蓝气泡（限宽、右下小圆角）
+                                                        //   助手 = **无外层框**、全宽平铺（各段独立成块，避免宽窄不一）
+                                                        //   压缩点 = 徽章 + 细线（它不是用户输入，不画成气泡）
+                                                        let is_user =
+                                                            m.role == "user" && !m.compression;
+                                                        let mut body =
+                                                            div().flex().flex_col().gap_2();
+                                                        if m.compression {
+                                                            body = body.child(
                                             div()
                                                 .flex()
                                                 .flex_row()
@@ -2677,18 +2691,21 @@ impl ClientApp {
                                                         .bg(rgb(colors::BORDER)),
                                                 ),
                                         );
-                                    }
-                                    if m.segs.is_empty() {
-                                        if !m.text.is_empty() {
-                                            body = body.child(TextView::markdown(
-                                                ("msg", ix),
-                                                m.text.clone(),
-                                            ));
-                                        }
-                                    } else {
-                                        for (si, seg) in m.segs.iter().enumerate() {
-                                            let sid = ix * 1000 + si;
-                                            body = match seg {
+                                                        }
+                                                        if m.segs.is_empty() {
+                                                            if !m.text.is_empty() {
+                                                                body =
+                                                                    body.child(TextView::markdown(
+                                                                        ("msg", ix),
+                                                                        m.text.clone(),
+                                                                    ));
+                                                            }
+                                                        } else {
+                                                            for (si, seg) in
+                                                                m.segs.iter().enumerate()
+                                                            {
+                                                                let sid = ix * 1000 + si;
+                                                                body = match seg {
                                                 Seg::Text(t) => body.child(TextView::markdown(
                                                     ("msg", sid),
                                                     t.clone(),
@@ -2752,44 +2769,75 @@ impl ClientApp {
                                                         ),
                                                 ),
                                             };
-                                        }
-                                    }
-                                    if is_user {
+                                                            }
+                                                        }
+                                                        if is_user {
+                                                            div()
+                                                                .px_4()
+                                                                .py_1()
+                                                                .flex()
+                                                                .flex_row()
+                                                                .justify_end()
+                                                                .child(
+                                                                    div()
+                                                                        .max_w(px(640.))
+                                                                        .rounded_2xl()
+                                                                        .bg(rgb(colors::ACCENT))
+                                                                        .text_color(rgb(0xffffff))
+                                                                        .px_4()
+                                                                        .py_2()
+                                                                        .child(body),
+                                                                )
+                                                                .into_any_element()
+                                                        } else {
+                                                            div()
+                                                                .px_4()
+                                                                .py_2()
+                                                                .w_full()
+                                                                .child(body)
+                                                                .into_any_element()
+                                                        }
+                                                    },
+                                                )
+                                                // GPUI 内置 `list` 的默认 `sizing_behavior = Auto`：它自己
+                                                // **不带任何尺寸**（`request_layout` 只把空 style 交给内核），
+                                                // 宽度与高度都取「内容尺寸」。实测 `on_children_prepainted`
+                                                // 打印出 `w=636px h=0px` —— 高度塌成 0，`prepaint` 拿到的
+                                                // bounds 高 0，于是一条消息都画不出来（症状：标题正确显示
+                                                // 「会话消息（共 72 条，显示最近 60 条）」，消息区全空）。
+                                                // 必须显式给尺寸；`.size_full()` = 100% x 100%，父容器
+                                                // （`flex_1` 分配的高度）是确定值，百分比可解析。
+                                                .size_full()
+                                            }),
+                                    ),
+                            )
+                            // 审批横幅 / 追问卡片 / 待办窄条：与消息列、输入卡片同宽居中
+                            // （三者空时各自返回 0 高元素，不占位）
+                            .child(
+                                div()
+                                    .w_full()
+                                    .flex()
+                                    .flex_col()
+                                    .items_center()
+                                    .child(
                                         div()
-                                            .px_4()
-                                            .py_1()
-                                            .flex()
-                                            .flex_row()
-                                            .justify_end()
-                                            .child(
-                                                div()
-                                                    .max_w(px(640.))
-                                                    .rounded_2xl()
-                                                    .bg(rgb(colors::ACCENT))
-                                                    .text_color(rgb(0xffffff))
-                                                    .px_4()
-                                                    .py_2()
-                                                    .child(body),
-                                            )
-                                            .into_any_element()
-                                    } else {
-                                        div().px_4().py_2().w_full().child(body).into_any_element()
-                                    }
-                                })
-                                // GPUI 内置 `list` 的默认 `sizing_behavior = Auto`：它自己
-                                // **不带任何尺寸**（`request_layout` 只把空 style 交给内核），
-                                // 宽度与高度都取「内容尺寸」。实测 `on_children_prepainted`
-                                // 打印出 `w=636px h=0px` —— 高度塌成 0，`prepaint` 拿到的
-                                // bounds 高 0，于是一条消息都画不出来（症状：标题正确显示
-                                // 「会话消息（共 72 条，显示最近 60 条）」，消息区全空）。
-                                // 必须显式给尺寸；`.size_full()` = 100% x 100%，父容器
-                                // （`flex_1` 分配的高度）是确定值，百分比可解析。
-                                .size_full()
-                            }))
-                            // 会话待办 / 目标窄条（在输入卡片上方；两者都空时整条不渲染）
-                            .child(self.render_approval_banner(cx))
-                            .child(self.render_clarification(cx))
-                            .child(self.render_todo_bar(cx))
+                                            .w_full()
+                                            .max_w(px(colors::CHAT_MAX_W))
+                                            .child(self.render_approval_banner(cx)),
+                                    )
+                                    .child(
+                                        div()
+                                            .w_full()
+                                            .max_w(px(colors::CHAT_MAX_W))
+                                            .child(self.render_clarification(cx)),
+                                    )
+                                    .child(
+                                        div()
+                                            .w_full()
+                                            .max_w(px(colors::CHAT_MAX_W))
+                                            .child(self.render_todo_bar(cx)),
+                                    ),
+                            )
                             // 底部输入区 = **一体式卡片**（对齐 Tauri 版 `ChatInput`）：
                             //   外框限宽 896px 居中、bg-secondary、rounded-2xl；
                             //   卡片内 = 编辑器 + 底部控件行（当前模型 / 发送或停止）。
@@ -2815,7 +2863,15 @@ impl ClientApp {
                                             .flex()
                                             .flex_col()
                                             .gap_2()
-                                            .child(Textarea::new(&self.input).h(px(64.)))
+                                            // 编辑器自身不画边框与底色（`appearance(false)`），
+                                            // 由外层卡片充当「输入框」——否则会看成上下分离的
+                                            // 两块（上面一个输入框 + 下面一排按钮），与 Tauri
+                                            // 版「按钮在输入框内」的形态不符。
+                                            .child(
+                                                Textarea::new(&self.input)
+                                                    .h(px(64.))
+                                                    .appearance(false),
+                                            )
                                             .child(
                                                 div()
                                                     .relative()
@@ -2833,15 +2889,16 @@ impl ClientApp {
                                                             .child(
                                                                 ProgressCircle::new("ctx-ring")
                                                                     .value(
-                                                                        self.ctx_pct() as f32 / 100.0,
+                                                                        self.ctx_pct() as f32
+                                                                            / 100.0,
                                                                     )
-                                                                    .color(
-                                                                        Hsla::from(rgb(if ctx_high {
+                                                                    .color(Hsla::from(rgb(
+                                                                        if ctx_high {
                                                                             colors::WARNING
                                                                         } else {
                                                                             colors::ACCENT
-                                                                        })),
-                                                                    ),
+                                                                        },
+                                                                    ))),
                                                             )
                                                             .child(
                                                                 div()
@@ -2879,6 +2936,10 @@ impl ClientApp {
                                                             .px_3()
                                                             .py_1()
                                                             .rounded_xl()
+                                                            .flex()
+                                                            .flex_row()
+                                                            .items_center()
+                                                            .gap_1()
                                                             .bg(if stopping {
                                                                 rgb(colors::ERROR)
                                                             } else {
@@ -2886,6 +2947,18 @@ impl ClientApp {
                                                             })
                                                             .text_color(rgb(0xffffff))
                                                             .cursor_pointer()
+                                                            // 与 Tauri 版 `ChatInput` 同形：图标 + 文案
+                                                            // （发送 = lucide `Send`，停止 = `Square`）
+                                                            .child(
+                                                                svg()
+                                                                    .path(if stopping {
+                                                                        IconName::Square.path()
+                                                                    } else {
+                                                                        IconName::Send.path()
+                                                                    })
+                                                                    .size(px(14.))
+                                                                    .text_color(rgb(0xffffff)),
+                                                            )
                                                             .child(if stopping {
                                                                 "停止"
                                                             } else {
