@@ -558,6 +558,19 @@ struct WsEntry {
     size: u64,
 }
 
+/// 工作区改动文件（`GET /workspace/diff` 的列表项）。
+#[derive(Clone, Debug)]
+struct WsDiffFile {
+    /// 相对工作区根的路径
+    path: String,
+    /// modified / added / removed / binary / unchanged
+    status: String,
+    /// 旧文件行数（新增文件为 0）
+    old_lines: u64,
+    /// 新文件行数（删除文件为 0）
+    new_lines: u64,
+}
+
 /// 角色详情（`GET /roles/{name}`）：完整系统提示 + 工具白名单。
 #[derive(Clone, Debug, Default)]
 struct RoleDetail {
@@ -1488,6 +1501,14 @@ struct ClientApp {
     ws_file: Option<(String, String)>,
     /// 文件页状态行（加载中 / 截断提示 / 错误）
     ws_status: String,
+    /// 文件页：diff 面板是否展开
+    ws_diff_open: bool,
+    /// 文件页：改动文件列表
+    ws_diff_files: Vec<WsDiffFile>,
+    /// 文件页：当前查看的 diff（相对路径 + unified 文本）
+    ws_diff: Option<(String, String)>,
+    /// 文件页：diff 面板状态行
+    ws_diff_status: String,
     /// 反向弱引用：`gpui_list` 的渲染闭包只能拿 `&mut App`，点击折叠块时要
     /// 回写 view 状态 → 与旧 `SessionsDelegate` 同一手法
     app_ref: AppRef,
@@ -1628,6 +1649,10 @@ impl ClientApp {
             ws_entries: Vec::new(),
             ws_file: None,
             ws_status: String::new(),
+            ws_diff_open: false,
+            ws_diff_files: Vec::new(),
+            ws_diff: None,
+            ws_diff_status: String::new(),
             dialog: None,
             new_session_workspace: None,
             dialog_input: None,
@@ -2638,6 +2663,119 @@ impl ClientApp {
                 Err(e) => {
                     let _ = this.update(cx, |this, cx| {
                         this.ws_status = format!("读取文件失败：{e}");
+                        cx.notify();
+                    });
+                }
+            }
+        })
+        .detach();
+    }
+
+    /// 拉工作区改动文件列表（`GET /workspace/diff?base=snapshot`，不带 path）。
+    ///
+    /// 这是「AI 到底改了什么」的入口。**快照是按消息存的**（后端要求
+    /// `message_id` 或 `index`，缺了直接 400）—— `index=0` = 会话起点那一刻的
+    /// 工作区快照，也就是「本次会话从头到现在改了什么」。
+    fn load_workspace_diff_list(&self, cx: &mut Context<Self>) {
+        let port = self.port;
+        let session = self.current_session.clone();
+        cx.spawn(async move |this, cx| {
+            let mut url =
+                format!("http://{SERVER_HOST}:{port}/api/v1/workspace/diff?base=snapshot&index=0");
+            if let Some(sid) = &session {
+                url.push_str(&format!("&session_id={sid}"));
+            }
+            match fetch_json(url).await {
+                Ok(body) => {
+                    let files: Vec<WsDiffFile> = body
+                        .get("files")
+                        .and_then(|v| v.as_array())
+                        .map(|arr| {
+                            arr.iter()
+                                .filter_map(|f| {
+                                    Some(WsDiffFile {
+                                        path: f.get("path")?.as_str()?.to_string(),
+                                        status: f
+                                            .get("status")
+                                            .and_then(|v| v.as_str())
+                                            .unwrap_or("modified")
+                                            .to_string(),
+                                        old_lines: f
+                                            .get("old_lines")
+                                            .and_then(|v| v.as_u64())
+                                            .unwrap_or(0),
+                                        new_lines: f
+                                            .get("new_lines")
+                                            .and_then(|v| v.as_u64())
+                                            .unwrap_or(0),
+                                    })
+                                })
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    let n = files.len();
+                    let _ = this.update(cx, |this, cx| {
+                        this.ws_diff_files = files;
+                        this.ws_diff_status = if n == 0 {
+                            "工作区无改动（相对本次会话快照）".to_string()
+                        } else {
+                            format!("{n} 个文件有改动")
+                        };
+                        cx.notify();
+                    });
+                }
+                Err(e) => {
+                    let _ = this.update(cx, |this, cx| {
+                        this.ws_diff_status = format!("读取改动列表失败：{e}");
+                        cx.notify();
+                    });
+                }
+            }
+        })
+        .detach();
+    }
+
+    /// 拉单个文件的 unified diff（`GET /workspace/diff?base=snapshot&index=0&path=`）。
+    fn load_workspace_diff(&self, path: String, cx: &mut Context<Self>) {
+        let port = self.port;
+        let session = self.current_session.clone();
+        cx.spawn(async move |this, cx| {
+            let mut url = format!(
+                "http://{SERVER_HOST}:{port}/api/v1/workspace/diff?base=snapshot&index=0&path={}",
+                url_encode(&path)
+            );
+            if let Some(sid) = &session {
+                url.push_str(&format!("&session_id={sid}"));
+            }
+            match fetch_json(url).await {
+                Ok(body) => {
+                    let unified = body
+                        .get("unified")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or_default()
+                        .to_string();
+                    let status = body
+                        .get("status")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("modified")
+                        .to_string();
+                    let text = if unified.is_empty() {
+                        match status.as_str() {
+                            "binary" => "（二进制文件，无文本 diff）".to_string(),
+                            "unchanged" => "（无改动）".to_string(),
+                            _ => "（服务端未返回 unified diff）".to_string(),
+                        }
+                    } else {
+                        unified
+                    };
+                    let _ = this.update(cx, |this, cx| {
+                        this.ws_diff = Some((path, text));
+                        cx.notify();
+                    });
+                }
+                Err(e) => {
+                    let _ = this.update(cx, |this, cx| {
+                        this.ws_diff_status = format!("读取 diff 失败：{e}");
                         cx.notify();
                     });
                 }
@@ -4442,6 +4580,36 @@ impl ClientApp {
                             .text_size(px(11.))
                             .text_color(rgb(colors::TEXT_TERTIARY))
                             .child(self.ws_status.clone()),
+                    )
+                    // Diff 开关：右侧展开「工作区改动」面板（对照会话快照基线）
+                    .child(
+                        div()
+                            .id("ws-diff-toggle")
+                            .flex_shrink_0()
+                            .px_3()
+                            .py_1()
+                            .rounded_md()
+                            .border_1()
+                            .border_color(rgb(if self.ws_diff_open {
+                                colors::ACCENT
+                            } else {
+                                colors::BORDER
+                            }))
+                            .text_size(px(11.))
+                            .text_color(rgb(if self.ws_diff_open {
+                                colors::ACCENT
+                            } else {
+                                colors::TEXT_SECONDARY
+                            }))
+                            .cursor_pointer()
+                            .child("Diff")
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.ws_diff_open = !this.ws_diff_open;
+                                if this.ws_diff_open {
+                                    this.load_workspace_diff_list(cx);
+                                }
+                                cx.notify();
+                            })),
                     ),
             )
             .child(
@@ -4490,8 +4658,151 @@ impl ClientApp {
                             .flex_col()
                             .bg(rgb(colors::BG_PRIMARY))
                             .child(content),
-                    ),
+                    )
+                    // diff 面板（右侧，可开关）：AI 改了什么，一眼看到
+                    .children(if self.ws_diff_open {
+                        Some(self.render_diff_panel(cx))
+                    } else {
+                        None
+                    }),
             )
+    }
+    /// diff 面板（右侧）：改动文件列表 + 选中文件的 unified diff（+/- 染色）。
+    fn render_diff_panel(&self, cx: &mut Context<Self>) -> AnyElement {
+        let mut files = div().flex().flex_col().gap_1().w_full();
+        if self.ws_diff_files.is_empty() {
+            files = files.child(
+                div()
+                    .text_size(px(11.))
+                    .text_color(rgb(colors::TEXT_TERTIARY))
+                    .child(self.ws_diff_status.clone()),
+            );
+        }
+        for (ix, f) in self.ws_diff_files.iter().enumerate() {
+            let selected = self
+                .ws_diff
+                .as_ref()
+                .map(|(p, _)| p == &f.path)
+                .unwrap_or(false);
+            let (color, label) = match f.status.as_str() {
+                "added" => (colors::SUCCESS, "A"),
+                "removed" => (colors::ERROR, "D"),
+                "binary" => (colors::WARNING, "B"),
+                _ => (colors::ACCENT, "M"),
+            };
+            let path = f.path.clone();
+            files = files.child(
+                div()
+                    .id(("ws-diff-file", ix))
+                    .w_full()
+                    .px_2()
+                    .py_1()
+                    .rounded_md()
+                    .cursor_pointer()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_2()
+                    .bg(rgb(if selected {
+                        colors::BG_TERTIARY
+                    } else {
+                        colors::BG_SECONDARY
+                    }))
+                    .child(
+                        div()
+                            .flex_shrink_0()
+                            .text_size(px(10.))
+                            .text_color(rgb(color))
+                            .child(label),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .whitespace_nowrap()
+                            .overflow_hidden()
+                            .text_size(px(11.))
+                            .text_color(rgb(colors::TEXT_SECONDARY))
+                            .child(f.path.clone()),
+                    )
+                    .child(
+                        div()
+                            .flex_shrink_0()
+                            .text_size(px(10.))
+                            .text_color(rgb(colors::TEXT_TERTIARY))
+                            .child(format!("+{} −{}", f.new_lines, f.old_lines)),
+                    )
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.load_workspace_diff(path.clone(), cx);
+                    })),
+            );
+        }
+
+        let detail = match &self.ws_diff {
+            None => div()
+                .flex_1()
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(
+                    div()
+                        .text_size(px(11.))
+                        .text_color(rgb(colors::TEXT_TERTIARY))
+                        .child("选一个文件查看 diff"),
+                )
+                .into_any_element(),
+            Some((_, unified)) => {
+                let mut lines = div().flex().flex_col().w_full();
+                for line in unified.lines().take(3000) {
+                    let color = if line.starts_with("+++") || line.starts_with("---") {
+                        colors::TEXT_TERTIARY
+                    } else if line.starts_with('+') {
+                        colors::SUCCESS
+                    } else if line.starts_with('-') {
+                        colors::ERROR
+                    } else if line.starts_with("@@") {
+                        colors::ACCENT
+                    } else {
+                        colors::TEXT_SECONDARY
+                    };
+                    lines = lines.child(
+                        div()
+                            .text_size(px(11.))
+                            .text_color(rgb(color))
+                            .child(line.to_string()),
+                    );
+                }
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    .w_full()
+                    .p_2()
+                    .child(lines.overflow_y_scrollbar())
+                    .into_any_element()
+            }
+        };
+
+        div()
+            .w(px(380.))
+            .h_full()
+            .flex()
+            .flex_col()
+            .border_l_1()
+            .border_color(rgb(colors::BORDER))
+            .bg(rgb(colors::BG_SECONDARY))
+            .child(
+                div()
+                    .px_3()
+                    .py_2()
+                    .border_b_1()
+                    .border_color(rgb(colors::BORDER))
+                    .text_size(px(11.))
+                    .text_color(rgb(colors::TEXT_SECONDARY))
+                    .child("工作区改动（相对会话起点快照）"),
+            )
+            .child(div().max_h(px(220.)).p_2().child(files))
+            .child(detail)
+            .into_any_element()
     }
 
     fn render_roles(&self, cx: &mut Context<Self>) -> impl IntoElement {
