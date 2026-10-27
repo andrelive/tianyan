@@ -490,6 +490,10 @@ enum Dialog {
     RenameSession { id: String },
     /// 新建会话并绑定工作目录（「＋新目录」；输入框实体同上）
     NewWorkspace,
+    /// 回退内置种子（`POST /roles/{name}/reset`）
+    ResetRole { name: String },
+    /// 退役删除角色（`DELETE /roles/{name}`）
+    DeleteRole { name: String },
 }
 
 // 左栏行由 `ClientApp::rebuild_session_rows` 直接产生（行类型混排 + 行高不一，
@@ -1415,6 +1419,8 @@ struct ClientApp {
     role_detail: Option<RoleDetail>,
     /// 角色页状态行（加载中 / 操作结果）
     roles_status: String,
+    /// 角色操作结果提示（回退/退役后的一行反馈）
+    roles_action_msg: Option<String>,
     /// 反向弱引用：`gpui_list` 的渲染闭包只能拿 `&mut App`，点击折叠块时要
     /// 回写 view 状态 → 与旧 `SessionsDelegate` 同一手法
     app_ref: AppRef,
@@ -1549,6 +1555,7 @@ impl ClientApp {
             roles_selected: None,
             role_detail: None,
             roles_status: "正在加载子智能体…".to_string(),
+            roles_action_msg: None,
             dialog: None,
             new_session_workspace: None,
             dialog_input: None,
@@ -1849,6 +1856,20 @@ impl ClientApp {
                 "新建".to_string(),
                 false,
             ),
+            Dialog::ResetRole { name } => (
+                "回退内置种子".to_string(),
+                Some(format!(
+                    "将 {name} 回退到内置种子定义（学习演化结果会被覆盖）？"
+                )),
+                "回退".to_string(),
+                true,
+            ),
+            Dialog::DeleteRole { name } => (
+                "退役删除角色".to_string(),
+                Some(format!("退役并删除角色 {name}（定义与会话一并删除）？")),
+                "删除".to_string(),
+                true,
+            ),
         };
         let mut card = div()
             .w(px(420.))
@@ -1933,6 +1954,12 @@ impl ClientApp {
                                 Some(Dialog::DeleteSession { .. }) => this.confirm_delete(cx),
                                 Some(Dialog::RenameSession { .. }) => this.submit_rename(cx),
                                 Some(Dialog::NewWorkspace) => this.submit_new_workspace(cx),
+                                Some(Dialog::ResetRole { name }) => {
+                                    this.confirm_reset_role(name, cx)
+                                }
+                                Some(Dialog::DeleteRole { name }) => {
+                                    this.confirm_delete_role(name, cx)
+                                }
                                 None => {}
                             }),
                         ),
@@ -2354,6 +2381,67 @@ impl ClientApp {
                     this.roles_stats = stats;
                     cx.notify();
                 });
+            }
+        })
+        .detach();
+    }
+
+    /// 回退内置种子（`POST /roles/{name}/reset`）：成功后刷新列表 / 统计 / 详情。
+    ///
+    /// 服务端语义是「下次会话边界生效」——已在跑的会话仍用旧定义，所以提示里
+    /// 明说这一点，避免用户以为立刻变了。
+    fn confirm_reset_role(&mut self, name: String, cx: &mut Context<Self>) {
+        self.dialog = None;
+        let port = self.port;
+        cx.spawn(async move |this, cx| {
+            let url = format!("http://{SERVER_HOST}:{port}/api/v1/roles/{name}/reset");
+            match post_json(url, serde_json::json!({})).await {
+                Ok(_) => {
+                    let _ = this.update(cx, |this, cx| {
+                        this.roles_action_msg =
+                            Some("已回退内置种子（下次会话边界生效）".to_string());
+                        this.load_roles(cx);
+                        this.load_roles_stats(cx);
+                        this.load_role_detail(name.clone(), cx);
+                        cx.notify();
+                    });
+                }
+                Err(e) => {
+                    let _ = this.update(cx, |this, cx| {
+                        this.roles_action_msg = Some(format!("操作失败：{e}"));
+                        cx.notify();
+                    });
+                }
+            }
+        })
+        .detach();
+    }
+
+    /// 退役删除角色（`DELETE /roles/{name}`）：成功后清空选中并刷新列表。
+    fn confirm_delete_role(&mut self, name: String, cx: &mut Context<Self>) {
+        self.dialog = None;
+        let port = self.port;
+        cx.spawn(async move |this, cx| {
+            let url = format!("http://{SERVER_HOST}:{port}/api/v1/roles/{name}");
+            match delete_json(url).await {
+                Ok(()) => {
+                    let _ = this.update(cx, |this, cx| {
+                        this.roles_action_msg = Some("角色已退役删除".to_string());
+                        if this.roles_selected.as_deref() == Some(name.as_str()) {
+                            this.roles_selected = None;
+                            this.role_detail = None;
+                        }
+                        this.load_roles(cx);
+                        this.load_roles_stats(cx);
+                        cx.notify();
+                    });
+                }
+                Err(e) => {
+                    let _ = this.update(cx, |this, cx| {
+                        this.roles_action_msg = Some(format!("操作失败：{e}"));
+                        cx.notify();
+                    });
+                }
             }
         })
         .detach();
@@ -4194,6 +4282,8 @@ impl ClientApp {
                                     .child(role.purpose.clone()),
                             ),
                     )
+                    // 操作栏（对齐 Web 版 RolesPanel）：回退内置种子 / 退役删除
+                    .child(self.render_role_actions(role, cx))
                     .child(
                         div()
                             .flex_1()
@@ -4333,6 +4423,98 @@ impl ClientApp {
                     .child(stats_bar)
                     .child(detail),
             )
+    }
+
+    /// 角色操作栏：回退内置种子 / 退役删除（都走确认弹窗）。
+    ///
+    /// 「回退」在 `builtin && version == 1` 时禁用 —— 内置种子本来就是 v1，
+    /// 没有可回退的内容（Web 版同口径）。
+    fn render_role_actions(&self, role: &RoleRow, cx: &mut Context<Self>) -> AnyElement {
+        let reset_name = role.name.clone();
+        let delete_name = role.name.clone();
+        let reset_disabled = role.source == "builtin" && role.version <= 1;
+        let reset_color = if reset_disabled {
+            colors::TEXT_TERTIARY
+        } else {
+            colors::TEXT_SECONDARY
+        };
+        div()
+            .px_6()
+            .py_2()
+            .border_b_1()
+            .border_color(rgb(colors::BORDER))
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_2()
+            .child(
+                div()
+                    .id("role-reset")
+                    .px_3()
+                    .py_1()
+                    .rounded_lg()
+                    .border_1()
+                    .border_color(rgb(colors::BORDER))
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_1()
+                    .text_size(px(12.))
+                    .text_color(rgb(reset_color))
+                    .cursor_pointer()
+                    .child(
+                        svg()
+                            .path(IconName::RotateCcw.path())
+                            .size(px(12.))
+                            .text_color(rgb(reset_color)),
+                    )
+                    .child("回退内置种子")
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        if reset_disabled {
+                            return;
+                        }
+                        this.dialog = Some(Dialog::ResetRole {
+                            name: reset_name.clone(),
+                        });
+                        cx.notify();
+                    })),
+            )
+            .child(
+                div()
+                    .id("role-delete")
+                    .px_3()
+                    .py_1()
+                    .rounded_lg()
+                    .border_1()
+                    .border_color(rgb(colors::ERROR))
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_1()
+                    .text_size(px(12.))
+                    .text_color(rgb(colors::ERROR))
+                    .cursor_pointer()
+                    .child(
+                        svg()
+                            .path(IconName::Trash.path())
+                            .size(px(12.))
+                            .text_color(rgb(colors::ERROR)),
+                    )
+                    .child("退役删除")
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.dialog = Some(Dialog::DeleteRole {
+                            name: delete_name.clone(),
+                        });
+                        cx.notify();
+                    })),
+            )
+            .children(self.roles_action_msg.clone().map(|m| {
+                div()
+                    .text_size(px(11.))
+                    .text_color(rgb(colors::TEXT_TERTIARY))
+                    .child(m)
+            }))
+            .into_any_element()
     }
 
     /// 角色列表项：名称 + 来源徽章 + 职责 + 版本 / 工具数 / 成功率。
