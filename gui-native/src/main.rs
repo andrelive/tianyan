@@ -586,11 +586,17 @@ struct ApprovalRow {
 /// 后台任务面板的一行（对齐 Tauri 版 `AgentTasksPanel` 的展示字段）。
 #[derive(Clone, Debug)]
 struct TaskRow {
+    /// 任务 id（`bt_xxx` 委托 / `cmd_xxx` 终端；也是子代理的**子会话 id**）
+    id: String,
     kind: String,
     status: String,
     description: String,
     /// 归属会话 id（左栏角标按它聚合；子代理/终端任务才有）
     parent_session_id: String,
+    /// 终端输出尾部（后端 `OUTPUT_TAIL_MAX_BYTES` 截断；委托任务为空）
+    output_tail: String,
+    /// 失败原因（`failed` 时非空）
+    error: String,
 }
 
 /// 消息内的一个展示块（口径对齐 Tauri 版 `MessageSegments` 的分段渲染）。
@@ -738,6 +744,10 @@ struct ClientApp {
     expanded_groups: std::collections::HashMap<String, usize>,
     /// 全量后台任务（会话角标聚合用；面板展示的是按当前会话过滤后的 `tasks`）
     all_tasks: Vec<TaskRow>,
+    /// 任务面板里展开的任务 id（同时只展开一个，与 Tauri 版 `openId` 同口径）
+    expanded_task: Option<String>,
+    /// 子代理任务的消息缓存（`task_id` = 子会话 id → `[(role, text)]`）
+    task_messages: std::collections::HashMap<String, Vec<(String, String)>>,
     /// 当前打开的模态对话框（删除确认 / 重命名）
     dialog: Option<Dialog>,
     /// 新会话待绑定的工作目录（「＋新目录」设置）：随首条消息以
@@ -843,6 +853,8 @@ impl ClientApp {
             collapsed_groups: std::collections::HashSet::new(),
             expanded_groups: std::collections::HashMap::new(),
             all_tasks: Vec::new(),
+            expanded_task: None,
+            task_messages: std::collections::HashMap::new(),
             dialog: None,
             new_session_workspace: None,
             dialog_input: None,
@@ -1908,6 +1920,11 @@ impl ClientApp {
                 let all: Vec<TaskRow> = arr
                     .iter()
                     .map(|t| TaskRow {
+                        id: t
+                            .get("id")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or_default()
+                            .to_string(),
                         kind: t
                             .get("kind")
                             .and_then(|v| v.as_str())
@@ -1925,6 +1942,16 @@ impl ClientApp {
                             .to_string(),
                         parent_session_id: t
                             .get("parent_session_id")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or_default()
+                            .to_string(),
+                        output_tail: t
+                            .get("output_tail")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or_default()
+                            .to_string(),
+                        error: t
+                            .get("error")
                             .and_then(|v| v.as_str())
                             .unwrap_or_default()
                             .to_string(),
@@ -2028,46 +2055,279 @@ impl ClientApp {
                     .child("本会话暂无后台任务"),
             );
         }
+        // 任务卡片（对齐 Tauri 版 `AgentTasksPanel`）：头 = 箭头 + 状态 + 类型徽章 +
+        // 描述 + 状态文案 + 取消；展开体 = 终端输出尾部 / 子代理消息流。
+        let mut cards: Vec<AnyElement> = Vec::new();
         for (ix, t) in self.tasks.iter().enumerate() {
-            let (dot, color) = match t.status.as_str() {
+            let open = self.expanded_task.as_deref() == Some(t.id.as_str());
+            let terminal = matches!(
+                t.status.as_str(),
+                "completed" | "success" | "failed" | "cancelled" | "canceled"
+            );
+            let (glyph, color) = match t.status.as_str() {
                 "running" | "pending" => ("●", colors::ACCENT),
                 "completed" | "success" => ("✓", colors::SUCCESS),
                 "failed" | "cancelled" | "canceled" => ("✗", colors::ERROR),
                 _ => ("○", colors::TEXT_TERTIARY),
             };
-            panel = panel.child(
+            // 失败要带原因（截断），与 Tauri 版 `statusLabel` 同口径
+            let status_label: String = match t.status.as_str() {
+                "pending" => "等待中".to_string(),
+                "running" => "运行中".to_string(),
+                "completed" | "success" => "已完成".to_string(),
+                "cancelled" | "canceled" => "已取消".to_string(),
+                "failed" if !t.error.is_empty() => {
+                    format!("失败（{}）", ellipsis(&t.error, 20))
+                }
+                "failed" => "失败".to_string(),
+                other => other.to_string(),
+            };
+            let is_command = t.kind == "command";
+            let kind_label = if is_command { "终端" } else { "委托" };
+            let kind_color = if is_command {
+                colors::TEXT_TERTIARY
+            } else {
+                colors::ACCENT
+            };
+            let chevron = if open {
+                IconName::ChevronDown
+            } else {
+                IconName::ChevronRight
+            };
+            let mut head = div()
+                .id(("task-head", ix))
+                .px_2()
+                .py_1()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap_2()
+                .cursor_pointer()
+                .child(
+                    svg()
+                        .path(chevron.path())
+                        .size(px(12.))
+                        .text_color(rgb(colors::TEXT_TERTIARY)),
+                )
+                .child(div().text_xs().text_color(rgb(color)).child(glyph))
+                .child(
+                    div()
+                        .px_1()
+                        .rounded_md()
+                        .border_1()
+                        .border_color(rgb(kind_color))
+                        .text_size(px(10.))
+                        .text_color(rgb(kind_color))
+                        .child(kind_label),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .whitespace_nowrap()
+                        .overflow_hidden()
+                        .text_xs()
+                        .text_color(rgb(colors::TEXT_PRIMARY))
+                        .child(ellipsis(&t.description, 26)),
+                )
+                .child(
+                    div()
+                        .text_size(px(10.))
+                        .text_color(rgb(if t.status == "failed" {
+                            colors::ERROR
+                        } else {
+                            colors::TEXT_TERTIARY
+                        }))
+                        .child(status_label),
+                );
+            // 非终态才给「取消」；点它不能顺带把卡片展开（stop_propagation）
+            if !terminal {
+                let cancel_id = t.id.clone();
+                head = head.child(
+                    div()
+                        .id(("task-cancel", ix))
+                        .px_1()
+                        .py_1()
+                        .rounded_md()
+                        .border_1()
+                        .border_color(rgb(colors::BORDER))
+                        .text_size(px(10.))
+                        .text_color(rgb(colors::TEXT_TERTIARY))
+                        .cursor_pointer()
+                        .child("取消")
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            cx.stop_propagation();
+                            this.cancel_task(cancel_id.clone(), cx);
+                        })),
+                );
+            }
+            let open_id = t.id.clone();
+            let head = head.on_click(cx.listener(move |this, _, _, cx| {
+                let id = open_id.clone();
+                if this.expanded_task.as_deref() == Some(id.as_str()) {
+                    this.expanded_task = None;
+                } else {
+                    this.expanded_task = Some(id.clone());
+                    // 委托任务的子代理消息按需拉一次并缓存（task_id 即子会话 id）
+                    if this.task_messages.get(&id).is_none() {
+                        this.load_task_messages(id.clone(), cx);
+                    }
+                }
+                cx.notify();
+            }));
+            let mut card = div()
+                .flex()
+                .flex_col()
+                .rounded_lg()
+                .border_1()
+                .border_color(rgb(if t.status == "failed" {
+                    colors::ERROR
+                } else {
+                    colors::BORDER
+                }))
+                .bg(rgb(colors::BG_PRIMARY))
+                .overflow_hidden()
+                .child(head);
+            if open {
+                let mut body = div()
+                    .border_t_1()
+                    .border_color(rgb(colors::BORDER))
+                    .p_2()
+                    .flex()
+                    .flex_col()
+                    .gap_1();
+                // 失败任务：展开体顶部给完整原因（头部只放截断版）
+                if t.status == "failed" && !t.error.is_empty() {
+                    body = body.child(
+                        div()
+                            .text_size(px(11.))
+                            .text_color(rgb(colors::ERROR))
+                            .child(t.error.clone()),
+                    );
+                }
+                if is_command {
+                    let text = if t.output_tail.is_empty() {
+                        "（暂无输出）".to_string()
+                    } else {
+                        t.output_tail.clone()
+                    };
+                    body = body.child(
+                        div()
+                            .max_h(px(200.))
+                            .overflow_hidden()
+                            .rounded_md()
+                            .bg(rgb(0x0d1117))
+                            .p_2()
+                            .text_size(px(11.))
+                            .text_color(rgb(0xc9d1d9))
+                            .child(text),
+                    );
+                } else {
+                    match self.task_messages.get(&t.id) {
+                        Some(list) if !list.is_empty() => {
+                            let start = list.len().saturating_sub(8);
+                            for (role, text) in list.iter().skip(start) {
+                                body = body.child(
+                                    div()
+                                        .flex()
+                                        .flex_col()
+                                        .gap_1()
+                                        .child(
+                                            div()
+                                                .text_size(px(10.))
+                                                .text_color(rgb(if role == "user" {
+                                                    colors::ACCENT
+                                                } else {
+                                                    colors::TEXT_TERTIARY
+                                                }))
+                                                .child(role.clone()),
+                                        )
+                                        .child(
+                                            div()
+                                                .text_size(px(11.))
+                                                .text_color(rgb(colors::TEXT_SECONDARY))
+                                                .child(ellipsis(text, 300)),
+                                        ),
+                                );
+                            }
+                        }
+                        _ => {
+                            body = body.child(
+                                div()
+                                    .text_size(px(11.))
+                                    .text_color(rgb(colors::TEXT_TERTIARY))
+                                    .child("加载子代理消息…"),
+                            );
+                        }
+                    }
+                }
+                card = card.child(body);
+            }
+            cards.push(card.into_any_element());
+        }
+        panel
+            .child(
                 div()
-                    .id(("task", ix))
-                    .px_3()
-                    .py_2()
+                    .flex_1()
+                    .min_h_0()
                     .flex()
                     .flex_col()
                     .gap_1()
-                    .border_b_1()
-                    .border_color(rgb(colors::BORDER))
-                    .child(
-                        div()
-                            .flex()
-                            .flex_row()
-                            .items_center()
-                            .gap_2()
-                            .child(div().text_xs().text_color(rgb(color)).child(dot))
-                            .child(
-                                div()
-                                    .text_xs()
-                                    .text_color(rgb(colors::TEXT_PRIMARY))
-                                    .child(ellipsis(&t.description, 26)),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(rgb(colors::TEXT_TERTIARY))
-                            .child(format!("{} · {}", t.kind, t.status)),
-                    ),
-            );
-        }
-        panel.id("tasks-panel")
+                    .p_2()
+                    .children(cards)
+                    .overflow_y_scrollbar(),
+            )
+            .id("tasks-panel")
+    }
+
+    /// 取消一个后台任务（`POST /tasks/{id}/cancel`），随后刷新任务列表。
+    ///
+    /// 失败静默：任务可能已自行结束，下一次轮询会把真实状态带回来
+    /// （与 Web 版「取消失败不弹错、等轮询」同口径）。
+    fn cancel_task(&mut self, task_id: String, cx: &mut Context<Self>) {
+        let port = self.port;
+        cx.spawn(async move |this, cx| {
+            let url = format!("http://{SERVER_HOST}:{port}/api/v1/tasks/{task_id}/cancel");
+            let _ = post_json(url, serde_json::json!({})).await;
+            let _ = this.update(cx, |this, cx| this.load_tasks(cx));
+        })
+        .detach();
+    }
+
+    /// 拉子代理任务的消息（展开委托任务时用）。
+    ///
+    /// 子代理是**带父会话引用的独立会话**（ADR-030：`task_id` 即 `session_id`），
+    /// 所以直接读它的消息接口即可，不需要另开一条流。
+    fn load_task_messages(&self, task_id: String, cx: &mut Context<Self>) {
+        let port = self.port;
+        cx.spawn(async move |this, cx| {
+            let url =
+                format!("http://{SERVER_HOST}:{port}/api/v1/sessions/{task_id}/messages?limit=20");
+            if let Ok(body) = fetch_json(url).await {
+                let arr = body
+                    .get("messages")
+                    .and_then(|v| v.as_array())
+                    .cloned()
+                    .unwrap_or_default();
+                let rows: Vec<(String, String)> = arr
+                    .iter()
+                    .map(|m| {
+                        (
+                            m.get("role")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("?")
+                                .to_string(),
+                            segments_text(m),
+                        )
+                    })
+                    .collect();
+                let _ = this.update(cx, |this, cx| {
+                    this.task_messages.insert(task_id, rows);
+                    cx.notify();
+                });
+            }
+        })
+        .detach();
     }
 
     /// 提交追问回答（`POST /api/v1/chat/answer`）。
