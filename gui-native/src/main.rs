@@ -44,6 +44,40 @@ fn new_session_id() -> String {
         .unwrap_or(0);
     format!("session-{nanos:x}")
 }
+/// 千分位分组（`1234567` → `1,234,567`；对齐 Web 版 `formatNumber`）。
+fn group_thousands(n: u64) -> String {
+    let s = n.to_string();
+    let mut out = String::with_capacity(s.len() + s.len() / 3);
+    for (i, ch) in s.chars().enumerate() {
+        if i > 0 && (s.len() - i) % 3 == 0 {
+            out.push(',');
+        }
+        out.push(ch);
+    }
+    out
+}
+
+/// 毫秒 → 人类可读（`820` → `820 ms`，`1530` → `1.5 s`）。
+fn format_ms(ms: i64) -> String {
+    if ms < 1000 {
+        format!("{ms} ms")
+    } else {
+        format!("{:.1} s", ms as f64 / 1000.0)
+    }
+}
+
+/// 生成速度（tok/s）= 输出 token / **纯生成时长**（扣掉首 token 等待）。
+///
+/// 分母扣 TTFT 是 Web 版的口径：首包等待不属于生成阶段，否则慢首包会把速度
+/// 一起拖低，两个指标就失去正交性。
+fn tokens_per_sec(ttft_ms: Option<i64>, duration_ms: i64, completion: u64) -> Option<u64> {
+    let gen_ms = duration_ms - ttft_ms.unwrap_or(0);
+    if completion == 0 || gen_ms <= 0 {
+        return None;
+    }
+    Some((completion as f64 / (gen_ms as f64 / 1000.0)).round() as u64)
+}
+
 /// 当前 Unix 时间（秒）。
 fn now_unix_secs() -> i64 {
     std::time::SystemTime::now()
@@ -707,6 +741,12 @@ struct ClientApp {
     ctx_used: u64,
     /// 最近一次 usage 上报的上下文窗口（分母）
     ctx_window: u64,
+    /// 会话 token 汇总（`GET /usage/stats?days=0&session_id=`）：
+    /// `(未命中输入, 缓存命中输入, 输出)`；全零时 `None`（不显示统计行）
+    session_usage: Option<(u64, u64, u64)>,
+    /// 最近一次请求性能（`GET /usage/recent?limit=1`）：
+    /// `(ttft_ms, duration_ms, completion_tokens)`；`duration_ms < 0` 时 `None`
+    request_perf: Option<(Option<i64>, i64, u64)>,
     /// 本会话的后台任务（`GET /api/v1/tasks` 按 `parent_session_id` 过滤）
     tasks: Vec<TaskRow>,
     /// 任务面板是否折叠（折叠成 36px 竖条，对齐 Tauri 版 dock 的收起态）
@@ -783,6 +823,8 @@ impl ClientApp {
             model_menu_open: false,
             ctx_used: 0,
             ctx_window: 0,
+            session_usage: None,
+            request_perf: None,
             tasks: Vec::new(),
             tasks_collapsed: false,
             todos: Vec::new(),
@@ -1054,6 +1096,73 @@ impl ClientApp {
                 }))
                 .into_any_element(),
         }
+    }
+
+    /// 拉本会话的 token 汇总与最近一次请求性能（输入卡片底部统计行）。
+    ///
+    /// 对应 Web 版两个接口：
+    /// - `/usage/stats?days=0&session_id=` 按会话聚合 `usage_logs`（全时段，与消息分页无关）
+    /// - `/usage/recent?limit=1&session_id=` 最近一条样本（ttft / 时长 / 输出 token）
+    ///
+    /// 失败**静默保留旧值**：统计条是观测面，不能因一次抖动把已有数字清空。
+    fn load_session_usage(&self, cx: &mut Context<Self>) {
+        let Some(sid) = self.current_session.clone() else {
+            return;
+        };
+        let port = self.port;
+        cx.spawn(async move |this, cx| {
+            let stats = fetch_json(format!(
+                "http://{SERVER_HOST}:{port}/api/v1/usage/stats?days=0&session_id={sid}"
+            ))
+            .await
+            .ok();
+            let recent = fetch_json(format!(
+                "http://{SERVER_HOST}:{port}/api/v1/usage/recent?limit=1&session_id={sid}"
+            ))
+            .await
+            .ok();
+            let usage = stats
+                .as_ref()
+                .and_then(|b| b.get("total"))
+                .map(|t| {
+                    (
+                        t.get("uncached_input")
+                            .and_then(|v| v.as_u64())
+                            .unwrap_or(0),
+                        t.get("cached_input").and_then(|v| v.as_u64()).unwrap_or(0),
+                        t.get("completion_tokens")
+                            .and_then(|v| v.as_u64())
+                            .unwrap_or(0),
+                    )
+                })
+                .filter(|(a, b, c)| a + b + c > 0);
+            let perf = recent
+                .as_ref()
+                .and_then(|b| b.get("samples"))
+                .and_then(|v| v.as_array())
+                .and_then(|a| a.first())
+                .and_then(|s| {
+                    let duration = s.get("duration_ms").and_then(|v| v.as_i64())?;
+                    if duration < 0 {
+                        return None;
+                    }
+                    let ttft = s
+                        .get("ttft_ms")
+                        .and_then(|v| v.as_i64())
+                        .filter(|v| *v >= 0);
+                    let completion = s
+                        .get("completion_tokens")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0);
+                    Some((ttft, duration, completion))
+                });
+            let _ = this.update(cx, |this, cx| {
+                this.session_usage = usage;
+                this.request_perf = perf;
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     /// 该会话正在跑的后台任务数（`pending` / `running` 计）。
@@ -2628,7 +2737,11 @@ impl ClientApp {
         self.model_menu_open = false;
         self.ctx_used = 0;
         self.ctx_window = 0;
+        // 统计行是按会话的：切走即清空，由新会话的两次 GET 重新填
+        self.session_usage = None;
+        self.request_perf = None;
         self.load_messages(id, cx);
+        self.load_session_usage(cx);
         // 选中态与「当前会话始终可见」都体现在左栏行上
         self.rebuild_session_rows(cx);
     }
@@ -2715,6 +2828,8 @@ impl ClientApp {
                 self.streaming = state == "running";
                 if !self.streaming {
                     self.status = format!("空闲 · {sid}");
+                    // 本轮结束：刷新底部统计行（token 汇总 + 最近一次请求性能）
+                    self.load_session_usage(cx);
                 }
             }
             _ => {}
@@ -3460,6 +3575,83 @@ impl ClientApp {
                                                         None
                                                     }),
                                             ),
+                                    )
+                                    // 底部统计行（对齐 Tauri 版 `ChatInput`）：未命中输入 /
+                                    // 缓存命中输入 / 输出 / 缓存命中率 / TTFT / tok/s。
+                                    // 两路数据都为空时整行不渲染（不留空白条）。
+                                    .child(
+                                        if self.session_usage.is_none()
+                                            && self.request_perf.is_none()
+                                        {
+                                            div().into_any_element()
+                                        } else {
+                                            let mut line = div()
+                                                .w_full()
+                                                .max_w(px(colors::CHAT_MAX_W))
+                                                .mx_auto()
+                                                .pt_2()
+                                                .flex()
+                                                .flex_row()
+                                                .items_center()
+                                                .justify_center()
+                                                .gap_2()
+                                                .text_size(px(11.))
+                                                .text_color(rgb(colors::TEXT_TERTIARY));
+                                            let dot =
+                                                || div().text_color(rgb(colors::BORDER)).child("·");
+                                            if let Some((uncached, cached, completion)) =
+                                                self.session_usage
+                                            {
+                                                let total = uncached + cached;
+                                                let hit_rate = if total > 0 {
+                                                    (cached as f64 / total as f64 * 100.0).round()
+                                                        as u64
+                                                } else {
+                                                    0
+                                                };
+                                                line = line
+                                                    .child(div().child(format!(
+                                                        "未命中输入 {}",
+                                                        group_thousands(uncached)
+                                                    )))
+                                                    .child(dot())
+                                                    .child(div().child(format!(
+                                                        "缓存命中输入 {}",
+                                                        group_thousands(cached)
+                                                    )))
+                                                    .child(dot())
+                                                    .child(div().child(format!(
+                                                        "输出 {}",
+                                                        group_thousands(completion)
+                                                    )))
+                                                    .child(dot())
+                                                    .child(
+                                                        div().child(format!(
+                                                            "缓存命中率 {hit_rate}%"
+                                                        )),
+                                                    );
+                                            }
+                                            if let Some((ttft, duration, completion)) =
+                                                self.request_perf
+                                            {
+                                                if self.session_usage.is_some() {
+                                                    line = line.child(dot());
+                                                }
+                                                line = line.child(div().child(format!(
+                                                "TTFT {}",
+                                                ttft.map(format_ms)
+                                                    .unwrap_or_else(|| "—".to_string())
+                                            )));
+                                                if let Some(tps) =
+                                                    tokens_per_sec(ttft, duration, completion)
+                                                {
+                                                    line = line
+                                                        .child(dot())
+                                                        .child(div().child(format!("{tps} tok/s")));
+                                                }
+                                            }
+                                            line.into_any_element()
+                                        },
                                     ),
                             ),
                     )
