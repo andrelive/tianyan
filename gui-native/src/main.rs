@@ -13,6 +13,7 @@ use gpui_kit::component::progress::ProgressCircle;
 use gpui_kit::component::text::TextView;
 use gpui_kit::component::theme::{Theme, ThemeMode};
 use gpui_kit::component::{IndexPath, Root};
+use gpui_kit::assets::{IconName, IconNamed as _};
 use gpui_kit::*;
 use gpui_kit::{list as gpui_list, ListAlignment, ListState as GpuiListState};
 use std::rc::Rc;
@@ -218,20 +219,23 @@ mod colors {
 
 /// 一级导航项（与 `gui-vite/src/components/sidebar/Sidebar.tsx` 的 `NAV_ITEMS` 逐项对齐）。
 ///
-/// 第一列是 rail 上显示的单字（原生客户端没有 lucide 图标集，64px 宽度下用中文单字
-/// 代替，辨识度足够）；第三列是路由目标。未实现的入口渲染占位页。
-const NAV_ITEMS: [(&str, &str, View); 11] = [
-    ("会", "会话", View::Chat),
-    ("件", "文件", View::Workspace),
-    ("技", "技能", View::Skills),
-    ("智", "子智能体", View::Roles),
-    ("工", "工具", View::Tools),
-    ("知", "知识", View::Knowledge),
-    ("记", "记忆", View::Memory),
-    ("审", "审批", View::Approval),
-    ("时", "定时任务", View::Scheduled),
-    ("洞", "洞察", View::Insights),
-    ("设", "设置", View::Settings),
+/// 第一列是 rail 上显示的 **Lucide 图标**：`gpui_kit::assets::IconName` 就是完整 Lucide
+/// 目录（1800+ 个，`gpui-kit-assets` 内嵌 SVG），与 Tauri 版 `lucide-react` 同一套图形，
+/// 逐项对齐（MessageSquare / FileText / Wrench / Users / Hammer / BookOpen /
+/// MemoryStick / ShieldCheck / CalendarClock / Gauge / Settings）。第三列是路由目标，
+/// 未实现的入口渲染占位页。
+const NAV_ITEMS: [(IconName, &str, View); 11] = [
+    (IconName::MessageSquare, "会话", View::Chat),
+    (IconName::FileText, "文件", View::Workspace),
+    (IconName::Wrench, "技能", View::Skills),
+    (IconName::Users, "子智能体", View::Roles),
+    (IconName::Hammer, "工具", View::Tools),
+    (IconName::BookOpen, "知识", View::Knowledge),
+    (IconName::MemoryStick, "记忆", View::Memory),
+    (IconName::ShieldCheck, "审批", View::Approval),
+    (IconName::CalendarClock, "定时任务", View::Scheduled),
+    (IconName::Gauge, "洞察", View::Insights),
+    (IconName::Settings, "设置", View::Settings),
 ];
 
 /// 当前视图（一级导航的 11 个入口；已实现的只有「会话」与「设置」）
@@ -987,7 +991,12 @@ impl ClientApp {
                     .child("天"),
             );
         for (ix, entry) in NAV_ITEMS.iter().enumerate() {
-            let (glyph, _label, view) = *entry;
+            let (icon, _label, view) = *entry;
+            let tint = if self.view == view {
+                colors::ACCENT
+            } else {
+                colors::TEXT_SECONDARY
+            };
             let mut item = div()
                 .id(("nav", ix))
                 .w(px(40.))
@@ -1001,19 +1010,26 @@ impl ClientApp {
             if self.view == view {
                 item = item
                     .bg(rgb(colors::BG_TERTIARY))
-                    .text_color(rgb(colors::ACCENT));
+                    .text_color(rgb(tint));
             } else {
-                item = item.text_color(rgb(colors::TEXT_SECONDARY));
+                item = item.text_color(rgb(tint));
             }
-            rail = rail.child(item.child(glyph).on_click(cx.listener(
-                move |this, _, _window, cx| {
+            // Lucide SVG（stroke 用 currentColor → 由 text_color 上色，可随选中态换色）
+            rail = rail.child(
+                item.child(
+                    svg()
+                        .path(icon.path())
+                        .size(px(18.))
+                        .text_color(rgb(tint)),
+                )
+                .on_click(cx.listener(move |this, _, _window, cx| {
                     this.view = view;
                     if view == View::Settings {
                         this.load_models(cx);
                     }
                     cx.notify();
-                },
-            )));
+                })),
+            );
         }
         rail
     }
@@ -2950,7 +2966,11 @@ fn main() {
         println!("[启动] 内嵌 server 已就绪（端口 {port}）");
     }
 
-    gpui_kit::application().run(move |cx| {
+    // 图标资源：`gpui-kit-assets` 内嵌完整 Lucide 目录（`AllAssets`），
+    // 必须在 `application()` 上注册 —— 否则 `svg().path("icons/*.svg")`
+    // 加载不到，图标静默空白（不报错）。
+    let app = gpui_kit::application().with_assets(gpui_kit::assets::AllAssets::new(""));
+    app.run(move |cx| {
         gpui_kit::init(cx);
         Theme::change(ThemeMode::Dark, None, cx);
         let bounds = Bounds::centered(None, size(px(1280.), px(820.)), cx);

@@ -91,6 +91,8 @@ GPUI 侧分档：
 | 9 | **`POST /chat/stream` 的响应体不是 SSE** | 按「边发边读响应流」实现，永远收不到增量（只有一个 `{status:started}`） | ADR-028：它是**开关**，输出全走 `GET /events` 常驻流；两个连接必须分开建 |
 | 10 | **事件按 `session_id` 路由，新会话 id 必须提前确定** | 等 `POST` 响应再拿 id，会丢掉最先到的几条增量 | 发起前就本地生成 id（服务端接受前端传入的 id 并据此新建） |
 | 11 | **SSE 不能按 `String` 攒缓冲** | 中文被 chunk 切断 → 半截 UTF-8 → 替换字符乱码 | 用 `Vec<u8>` 攒、按 `\n\n` **字节**分帧，每帧再 `from_utf8_lossy` |
+| 12 | **GPUI 内置 `list()` 不自带尺寸** | `gpui::list` 的 `ListSizingBehavior` 默认 `Auto`：`request_layout` 只把空 style 交给内核，宽高都取「内容尺寸」。放进 `flex_1` 容器里**高度不会被拉伸**（实测 `bounds w=636 h=0`），消息区一片空白但标题/条数正常 | 显式 `.size_full()`（或 `.flex_1()`）；排查用 `on_children_prepainted` 打印真实 bounds，别靠眼睛猜 |
+| 13 | **图标要注册资产源** | `IconName::X` 是完整 Lucide 目录（`gpui-kit-assets` 内嵌 1800+ SVG，与 Tauri 版 `lucide-react` 同一套），但没注册就**静默空白、不报错** | `gpui_kit::application().with_assets(gpui_kit::assets::AllAssets::new(""))`；`assets` 是 gpui-kit 的默认 feature |
 
 ## API 备忘（实测签名，省一次翻源码）
 
