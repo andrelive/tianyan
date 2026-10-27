@@ -69,6 +69,11 @@ GPUI 侧分档：
 - [x] **虚拟列表**：5 万条稳态只渲染 **40 项**；滚动 3000+ 行内存 131–139MB 不涨
 - [x] **代码编辑器语法高亮**：tree-sitter，需显式开 feature + 设语言
 - [x] **超大文件**：10 万行 / 2.9MB，`EditorState` 创建 **43.95 ms**，不崩
+- [x] **SSE 常驻订阅 + 发送闭环**（`GET /events` + `POST /chat/stream`）：无人值守自测通过——
+      13 个 `chat_stream` 事件、`delta` 共 9 字、"消息 2 条"、`turn_state` 回 `idle` 后
+      `streaming=false`；新会话 id 由客户端本地生成、服务端据此新建（列表 49 → 50 条）
+- [x] **输入框**：`Textarea`（IME / 选区 / 撤销由组件管）+ Enter 发送 / Shift+Enter 换行
+- [x] **停止**：`streaming` 时按钮切「停止」→ `POST /chat/streams/{id}/cancel`
 - [x] **MSI 打包 + 静默升级**（见文末）
 
 ## 踩坑记录（复用价值最高）
@@ -83,6 +88,9 @@ GPUI 侧分档：
 | 6 | **流式跟随要手动做** | 内容变长，滚动条停在原地 | 每次追加后 `state.list_state().scroll_to_end()`；`AutoScroll` 是**拖拽选择**用的，不是流式跟随 |
 | 7 | **语法高亮要开 feature** | `Editor` 静默无高亮、不报错 | `gpui-kit` 开 `tree-sitter` + `tree-sitter-<lang>`，并 `EditorState::language("rust")` |
 | 8 | **`App` 命名冲突** | 自定义 `struct App` 与 `gpui::App` 撞，`items_count(&App)` 报类型不匹配 | 自己的根视图别叫 `App`（本项目用 `DemoApp`） |
+| 9 | **`POST /chat/stream` 的响应体不是 SSE** | 按「边发边读响应流」实现，永远收不到增量（只有一个 `{status:started}`） | ADR-028：它是**开关**，输出全走 `GET /events` 常驻流；两个连接必须分开建 |
+| 10 | **事件按 `session_id` 路由，新会话 id 必须提前确定** | 等 `POST` 响应再拿 id，会丢掉最先到的几条增量 | 发起前就本地生成 id（服务端接受前端传入的 id 并据此新建） |
+| 11 | **SSE 不能按 `String` 攒缓冲** | 中文被 chunk 切断 → 半截 UTF-8 → 替换字符乱码 | 用 `Vec<u8>` 攒、按 `\n\n` **字节**分帧，每帧再 `from_utf8_lossy` |
 
 ## API 备忘（实测签名，省一次翻源码）
 
@@ -114,16 +122,56 @@ impl ListDelegate for D {
 }
 List::new(&entity)                              // IndexPath 从 gpui_kit::component 导入
 
-// 输入框
-TextareaState::new(window, cx)                  // 注意 2 个参数
-Textarea::new(&entity).h(px(110.)).w_full()     // 无 .placeholder()
+// 输入框（Textarea = 多行 + IME + 选区 + 撤销，全由组件管，不要自造）
+let input = cx.new(|cx| TextareaState::new(window, cx).placeholder("输入消息…"));  // placeholder 在 State 上
+Textarea::new(&entity).h(px(110.))              // 渲染；.h() 收 DefiniteLength
+state.value() -> SharedString
+state.set_value("", window, cx)                 // 清空（窗口参数不可省）
+// Enter 提交：订阅 InputEvent（多行框自己已插入换行，发送后清空即可）
+cx.subscribe_in(&input, window, |this, _input, ev: &InputEvent, window, cx| {
+    if let InputEvent::PressEnter { shift, .. } = ev { if !shift { /* 发送 */ } }
+}).detach();
 
 // 异步
 cx.background_executor().timer(Duration::from_millis(25)).await
 entity.update(&mut app, |state, cx| {...})      // 返回 ()，不是 Result
 ```
 
+## 开工途中挖出的产品级问题：MCP 客户端忙循环（已修）
+
+原生客户端空闲时有一个线程接近满载——**功能完全正常**（25 个 MCP 工具全部可用），
+所以此前一直被当作「UI 渲染开销」。用 GPUI 侧的干净窗口做 CPU 时间二分（5 秒窗口的
+进程 CPU 时间）才定位到真正的源头：
+
+| 分组 | 5 秒窗口 CPU 时间 |
+|---|---|
+| 只跑 GPUI（不启 server） | 0.14s |
+| 建 tokio runtime、不启 server | 0.08s |
+| 完整 server | 5.36s |
+| `full()` 装配（11 插槽） | 5.45s |
+| `policies()` 装配（去掉 MCP 动态工具 + LanceDB） | 6.22s ← 反而更高，排除这两块 |
+| 禁用 MCP（同 `full()`） | **0.14s** |
+| 启用 MCP（playwright，连接成功 25 工具） | **5.73s** |
+| 单独跑 playwright MCP 子进程 | 不忙 ← 排除子进程自身与「连接失败重试」 |
+| **升级 `rust-mcp-sdk` 0.9.0 → 1.1.0 后** | **0.19s（−96.4%）** |
+
+结论：忙循环在 `rust-mcp-sdk 0.9.0` 内部（与连接成败无关，连上了也忙）。
+修法是升级到 1.1.0，**天演自身代码零改动**（stdio / streamable-http 传输、
+client handler、工具列表在 1.x 保持兼容），`cargo test -p tianyan-mcp` 18/18 通过。
+**这条修复对现有 Tauri 桌面版同样生效**（同一份 MCP 客户端代码）——用户可感知的变化
+是「应用常开时风扇不再一直转」。变更记录见根 `CHANGELOG.md` 的 `[Unreleased]`。
+
+> 方法学备忘：**「server 慢」不等于「server 代码有问题」**。这次二分先按「是不是
+> runtime」「是不是某个插槽」推进，两轮都空手——真正的判据是「把 MCP 关掉就干净」。
+> 遇到「功能正常但白烧 CPU」时，先按**外部依赖**（子进程 / SDK / 网络客户端）分叉，
+> 比按自己的模块分叉收敛得快。
+
 ## 已知限制与行为
+
+- **没有单实例保护**（实测发现的风险）：同时跑桌面版（3000）与 gui-native（3001）时，
+  两个内嵌 server **共享同一个数据目录**（`D:\tianyan`）——定时任务会被两个进程各跑一遍，
+  SQLite 也存在并发写。端口探测只能避免「同端口冲突」，不能避免「同数据目录双写」。
+  正解是抽 `desktop/` 共享启动编排 + 单实例锁（待做）。
 
 - **变高列表启动有 O(n) 测高**：5 万条 → `render_item` 5080 次 / 2.9s CPU（一次性）。
   稳态渲染量与总数无关（40 项）。改造方向：消息行高设上限，或改用 `v_virtual_list`。
