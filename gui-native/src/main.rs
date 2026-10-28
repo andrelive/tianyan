@@ -991,6 +991,28 @@ impl PickerTarget {
     }
 }
 
+/// 文件选择弹窗的用途：**同一套浏览 UI，选中之后做什么不同**。
+///
+/// 复用一个弹窗而不是写两个：目录导航 / 名称过滤 / 隐藏项开关 / 大小格式化
+/// 逐字相同，分叉只在「确认动作」上。多一个枚举比重写一遍弹窗安全。
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum FilePickPurpose {
+    /// 知识导入：多选，勾满后点「导入选中」，逐个 ingest
+    KbIngest,
+    /// @ 文件引用：单选，**点中即插入**输入框并关闭（不需要勾选 + 确认两步）
+    Mention,
+}
+
+impl FilePickPurpose {
+    /// 稳定标识（自动化 API 契约值；`state.file_picker.purpose`）。
+    fn key(self) -> &'static str {
+        match self {
+            FilePickPurpose::KbIngest => "kb_ingest",
+            FilePickPurpose::Mention => "mention",
+        }
+    }
+}
+
 #[derive(Clone)]
 /// 需要用户确认的模态对话框（自绘覆盖层，不依赖组件库 Dialog）。
 enum Dialog {
@@ -1005,8 +1027,8 @@ enum Dialog {
     ResetRole { name: String },
     /// 退役删除角色（`DELETE /roles/{name}`）
     DeleteRole { name: String },
-    /// 知识导入的文件选择弹窗（**GPUI 自绘**，不是 OS 对话框 —— 所以自动化点得到）
-    KbFilePicker,
+    /// 文件选择弹窗（**GPUI 自绘**，不是 OS 对话框 —— 所以自动化点得到）
+    FilePicker { purpose: FilePickPurpose },
     /// 回退到某条用户输入之前（`POST /sessions/{id}/messages/delete`，ADR-040 事务）
     RollbackMessage {
         session_id: String,
@@ -1025,7 +1047,11 @@ impl Dialog {
             Dialog::WorkspacePicker { .. } => "workspace_picker",
             Dialog::ResetRole { .. } => "reset_role",
             Dialog::DeleteRole { .. } => "delete_role",
-            Dialog::KbFilePicker => "kb_file_picker",
+            // 用途直接体现在 kind 里：自动化断言要能区分「导入弹窗」与「引用弹窗」
+            Dialog::FilePicker { purpose } => match purpose {
+                FilePickPurpose::KbIngest => "kb_file_picker",
+                FilePickPurpose::Mention => "mention_file_picker",
+            },
             Dialog::RollbackMessage { .. } => "rollback_message",
         }
     }
@@ -2727,6 +2753,12 @@ struct ClientApp {
     edit_endpoint: Entity<TextareaState>,
     /// 编辑框：api_key
     edit_api_key: Entity<TextareaState>,
+    /// 本窗口句柄。
+    ///
+    /// 自动化端口在 `Context` 里执行动作时**没有 `&mut Window`**，而往输入框插文本
+    /// （`TextareaState::insert`）需要它——用句柄现取，让两条路径（真实点击 /
+    /// 自动化动作）最后都落到同一个插入 API，不出现第二套插入逻辑。
+    window_handle: gpui_kit::AnyWindowHandle,
 }
 
 impl ClientApp {
@@ -2960,6 +2992,7 @@ impl ClientApp {
             editing_provider: None,
             edit_endpoint: endpoint_input,
             edit_api_key: key_input,
+            window_handle: window.window_handle(),
         };
         // 回填自身弱引用：消息区折叠块的点击回调要用它 update 回 view
         if let Ok(mut g) = app_ref.lock() {
@@ -3423,9 +3456,9 @@ impl ClientApp {
         if let Dialog::WorkspacePicker { target } = dialog {
             return self.render_workspace_picker_dialog(target, cx);
         }
-        // 知识导入的文件选择弹窗同理：列表 + 勾选 + 导航，独立形态
-        if let Dialog::KbFilePicker = dialog {
-            return self.render_kb_picker_dialog(cx);
+        // 文件选择弹窗同理：列表 + 导航 + 选中动作，独立形态
+        if let Dialog::FilePicker { purpose } = dialog {
+            return self.render_file_picker_dialog(purpose, cx);
         }
         let (heading, message, confirm_label, danger) = match &dialog {
             Dialog::DeleteSession { title, .. } => (
@@ -3442,7 +3475,10 @@ impl ClientApp {
             Dialog::WorkspacePicker { .. } => {
                 ("选择目录".to_string(), None, "选择".to_string(), false)
             }
-            Dialog::KbFilePicker => ("选择文件".to_string(), None, "导入".to_string(), false),
+            // 文件选择弹窗在 `render_dialog` 开头就分流了，走不到这里
+            Dialog::FilePicker { .. } => {
+                ("选择文件".to_string(), None, "确定".to_string(), false)
+            }
             Dialog::ResetRole { name } => (
                 "回退内置种子".to_string(),
                 Some(format!(
@@ -3548,7 +3584,7 @@ impl ClientApp {
                                 Some(Dialog::RenameSession { .. }) => this.submit_rename(cx),
                                 Some(Dialog::WorkspacePicker { .. }) => {}
                                 // 文件选择弹窗同样是独立形态（不走这条骨架）
-                                Some(Dialog::KbFilePicker) => {}
+                                Some(Dialog::FilePicker { .. }) => {}
                                 Some(Dialog::ResetRole { name }) => {
                                     this.confirm_reset_role(name, cx)
                                 }
@@ -3907,12 +3943,88 @@ impl ClientApp {
     /// 直接落在盘符根是很糟的默认值 —— 一屏全是 `hiberfil.sys` / `pagefile.sys`
     /// 这类系统文件，既找不到东西也说明不了从哪开始找。
     fn open_kb_picker(&mut self, cx: &mut Context<Self>) {
-        self.dialog = Some(Dialog::KbFilePicker);
+        self.open_file_picker(FilePickPurpose::KbIngest, cx);
+    }
+
+    /// 打开文件选择弹窗（知识导入 / @ 引用共用一套浏览 UI）。
+    fn open_file_picker(&mut self, purpose: FilePickPurpose, cx: &mut Context<Self>) {
+        self.dialog = Some(Dialog::FilePicker { purpose });
         self.kb_picked.clear();
         let start = self.kb_picker_start_dir();
         self.load_kb_browse(start, cx);
         cx.notify();
     }
+    /// 在输入框**光标处**插入一段文本（光标自动前移到插入内容之后）。
+    ///
+    /// 用 `TextareaState::insert` 而不是「读 value → 拼串 → `set_value`」：
+    /// `set_value` 会把选区重置到开头并清空撤销栈，用户接着打字的位置就丢了。
+    fn insert_into_composer(
+        &mut self,
+        text: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let input = self.input.clone();
+        input.update(cx, |state, cx| {
+            state.insert(text, window, cx);
+        });
+        cx.notify();
+    }
+
+    /// @ 文件引用：把选中的文件序列化成 `` `@file:"<绝对路径>"` `` 插入输入框并关闭弹窗。
+    ///
+    /// 序列化口径与 Web 版 **逐字一致**（`gui-vite/src/lib/attachments.ts` 的
+    /// `serializeInlineChip`：Markdown 行内代码 + 绝对路径）：
+    /// - 模型侧看到的是连贯句子里的行内 code，路径直白，`read_file` 直接可用；
+    /// - 消息区渲染不需要特殊处理（行内 code 是 markdown 原生语法）；
+    /// - 跨端复制粘贴、草稿恢复都只是纯文本。
+    ///
+    /// 末尾补一个空格：连续引用两个文件时 chip 之间不会粘在一起。
+    fn mention_file(&mut self, path: String, window: &mut Window, cx: &mut Context<Self>) {
+        let snippet = format!("`@file:\"{path}\"` ");
+        self.insert_into_composer(snippet, window, cx);
+        self.dialog = None;
+        cx.notify();
+    }
+
+    /// @ 文件引用（无 `&mut Window` 的入口：自动化端口）。
+    ///
+    /// `Context` 里拿不到 window，就用保存的窗口句柄现取；**最终仍调
+    /// `TextareaState::insert`**（与真实点击路径同一个 API），不复制插入逻辑。
+    fn mention_file_auto(&mut self, path: String, cx: &mut Context<Self>) -> Result<(), String> {
+        let handle = self.window_handle;
+        let input = self.input.clone();
+        let snippet = format!("`@file:\"{path}\"` ");
+        handle
+            .update(cx, move |_, window, cx| {
+                input.update(cx, |state, cx| {
+                    state.insert(snippet, window, cx);
+                });
+            })
+            .map_err(|e| format!("窗口已关闭，无法插入：{e}"))?;
+        self.dialog = None;
+        cx.notify();
+        Ok(())
+    }
+
+    /// 清空输入框。
+    ///
+    /// 只给自动化收尾用（测完不让残留文本污染用户下一次发送）。转的是
+    /// `TextareaState::set_value` 这个既有 API，没有第二套写入口。
+    fn clear_composer(&mut self, cx: &mut Context<Self>) -> Result<(), String> {
+        let handle = self.window_handle;
+        let input = self.input.clone();
+        handle
+            .update(cx, move |_, window, cx| {
+                input.update(cx, |state, cx| {
+                    state.set_value("", window, cx);
+                });
+            })
+            .map_err(|e| format!("窗口已关闭：{e}"))?;
+        cx.notify();
+        Ok(())
+    }
+
 
     /// 文件选择弹窗的起始目录。
     fn kb_picker_start_dir(&self) -> String {
@@ -10930,7 +11042,15 @@ impl ClientApp {
     /// 形态与 workspace 目录选择器一致（遮罩 + 居中卡片 + 列表），因为它们是同一类
     /// 任务（在文件系统里定位）。弹窗而不是平铺：导入 tab 的主任务只有「选文件 +
     /// 导入」，把一张常驻的文件列表铺在页面上会把主次关系拉平。
-    fn render_kb_picker_dialog(&self, cx: &mut Context<Self>) -> AnyElement {
+    /// 文件选择弹窗（知识导入 / @ 引用共用）。
+    ///
+    /// 两种用途的差别全部集中在本函数的三处 `purpose` 分支上：标题、点文件的
+    /// 动作、底部按钮组。其余（上级目录 / 过滤 / 隐藏项 / 大小）逐字共用。
+    fn render_file_picker_dialog(
+        &self,
+        purpose: FilePickPurpose,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         // 列表：上级目录 → 子目录 → 文件
         let mut list = div().flex().flex_col().gap_1().w_full();
         if !self.kb_browse_dir.is_empty() && self.kb_browse_dir != "浏览根" {
@@ -11080,9 +11200,12 @@ impl ClientApp {
                                     "○"
                                 }),
                         )
-                        .on_click(cx.listener(move |this, _, _, cx| {
+                        .on_click(cx.listener(move |this, _, window, cx| {
                             if is_dir {
                                 this.load_kb_browse(dir.clone(), cx);
+                            } else if purpose == FilePickPurpose::Mention {
+                                // @ 引用单选：点中即插入并关闭，不要「勾选 + 确认」两步
+                                this.mention_file(picked_path.clone(), window, cx);
                             } else {
                                 this.toggle_kb_pick(picked_path.clone());
                                 cx.notify();
@@ -11123,7 +11246,10 @@ impl ClientApp {
                                 .flex_1()
                                 .text_size(px(14.))
                                 .text_color(rgb(colors::TEXT_PRIMARY()))
-                                .child("选择要导入知识库的文件"),
+                                .child(match purpose {
+                                    FilePickPurpose::KbIngest => "选择要导入知识库的文件",
+                                    FilePickPurpose::Mention => "选择要引用的文件（点中即插入）",
+                                }),
                         )
                         .child(
                             div()
@@ -11272,29 +11398,42 @@ impl ClientApp {
                                 .overflow_hidden()
                                 .text_size(px(11.))
                                 .text_color(rgb(colors::TEXT_TERTIARY()))
-                                .child(if self.kb_picked.is_empty() {
-                                    "点目录进入，点文件勾选".to_string()
-                                } else {
-                                    format!("已选 {} 个文件", self.kb_picked.len())
+                                .child(match purpose {
+                                    FilePickPurpose::Mention => {
+                                        "点目录进入，点文件即插入引用".to_string()
+                                    }
+                                    FilePickPurpose::KbIngest => {
+                                        if self.kb_picked.is_empty() {
+                                            "点目录进入，点文件勾选".to_string()
+                                        } else {
+                                            format!("已选 {} 个文件", self.kb_picked.len())
+                                        }
+                                    }
                                 }),
                         )
-                        .child(
-                            div()
-                                .id("kbp-clear")
-                                .px_3()
-                                .py_2()
-                                .rounded_md()
-                                .border_1()
-                                .border_color(rgb(colors::BORDER()))
-                                .cursor_pointer()
-                                .text_size(px(11.))
-                                .text_color(rgb(colors::TEXT_SECONDARY()))
-                                .child("清空")
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.kb_picked.clear();
-                                    cx.notify();
-                                })),
-                        )
+                        // 「清空 / 导入选中」只属于多选的导入用途；引用是单选即插入，
+                        // 留着这两个按钮只会让人以为要先勾选
+                        .children(if purpose == FilePickPurpose::KbIngest {
+                            Some(
+                                div()
+                                    .id("kbp-clear")
+                                    .px_3()
+                                    .py_2()
+                                    .rounded_md()
+                                    .border_1()
+                                    .border_color(rgb(colors::BORDER()))
+                                    .cursor_pointer()
+                                    .text_size(px(11.))
+                                    .text_color(rgb(colors::TEXT_SECONDARY()))
+                                    .child("清空")
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.kb_picked.clear();
+                                        cx.notify();
+                                    })),
+                            )
+                        } else {
+                            None
+                        })
                         .child(
                             div()
                                 .id("kbp-cancel")
@@ -11312,23 +11451,27 @@ impl ClientApp {
                                     cx.notify();
                                 })),
                         )
-                        .child(
-                            div()
-                                .id("kbp-confirm")
-                                .px_4()
-                                .py_2()
-                                .rounded_md()
-                                .bg(rgb(colors::ACCENT()))
-                                .cursor_pointer()
-                                .text_size(px(11.))
-                                .text_color(rgb(colors::TEXT_PRIMARY()))
-                                .child("导入选中")
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.import_kb_picked(cx);
-                                    this.dialog = None;
-                                    cx.notify();
-                                })),
-                        ),
+                        .children(if purpose == FilePickPurpose::KbIngest {
+                            Some(
+                                div()
+                                    .id("kbp-confirm")
+                                    .px_4()
+                                    .py_2()
+                                    .rounded_md()
+                                    .bg(rgb(colors::ACCENT()))
+                                    .cursor_pointer()
+                                    .text_size(px(11.))
+                                    .text_color(rgb(colors::TEXT_PRIMARY()))
+                                    .child("导入选中")
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.import_kb_picked(cx);
+                                        this.dialog = None;
+                                        cx.notify();
+                                    })),
+                            )
+                        } else {
+                            None
+                        }),
                 );
 
         div()
@@ -12872,6 +13015,32 @@ impl ClientApp {
                                     .items_center()
                                     .gap_1()
                                     // 控件顺序对齐 vite `ChatInput`：模型 → 思考 → 上下文环 → 发送
+                                    // @ 文件引用：弹窗选文件 → 光标处插入 `@file:"<路径>"`
+                                    // （序列化口径与 Web 版 `serializeInlineChip` 逐字一致）
+                                    .child(
+                                        div()
+                                            .id("mention-file")
+                                            .px_1()
+                                            .py_1()
+                                            .rounded_lg()
+                                            .cursor_pointer()
+                                            .child(
+                                                svg()
+                                                    .path(IconName::AtSign.path())
+                                                    .size(px(14.))
+                                                    .text_color(rgb(
+                                                        colors::TEXT_SECONDARY(),
+                                                    )),
+                                            )
+                                            .on_click(cx.listener(
+                                                |this, _, _window, cx| {
+                                                    this.open_file_picker(
+                                                        FilePickPurpose::Mention,
+                                                        cx,
+                                                    )
+                                                },
+                                            )),
+                                    )
                                     // 附件（图片）：OS 选择器 → data URL 挂到待发送列表
                                     .child(
                                         div()

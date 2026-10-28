@@ -176,6 +176,45 @@ if (-not $SkipBinding -and $cur -eq $target.working_directory) {
     Write-Host "  （已取消，未做绑定验证）" -ForegroundColor Yellow
 }
 
+Write-Host "== 6.5 @ 文件引用（按钮 → 弹窗 → 光标处插入）==" -ForegroundColor Cyan
+# 先在输入框里放一段文字，验证插入是「插在光标处」而不是「覆盖整个输入框」
+$r = Act @{ action = "composer_clear" }
+Check ($r.state.usage.composer_text -eq "") "输入框已清空（测试前置）"
+
+$r = Act @{ action = "mention_file"; settle_ms = 1500 }
+Check ($r.state.dialog.kind -eq "mention_file_picker") "打开的是引用弹窗（不是知识导入弹窗）"
+Check ($r.state.dialog.purpose -eq "mention") "弹窗用途 = mention（自动化可区分）"
+Check ($r.state.knowledge.browse.dir -ne "") "弹窗已定位到起始目录（$($r.state.knowledge.browse.dir)）"
+
+$files = @($r.state.knowledge.browse.entries) | Where-Object { -not $_.is_dir }
+Check ($files.Count -gt 0) "起始目录有可选文件（$($files.Count) 个）"
+if ($files.Count -gt 0) {
+    $f = $files | Select-Object -First 1
+    $r2 = Act @{ action = "mention_pick"; path = $f.path; settle_ms = 500 }
+    Check ($r2.ok -eq $true) "点文件即插入（不需要勾选 + 确认两步）"
+    Check ($null -eq $r2.state.dialog) "插入后弹窗自动关闭"
+
+    # 契约断言：序列化口径必须与 Web 版 `serializeInlineChip` 逐字一致
+    # （Markdown 行内代码 + 绝对路径），否则同一句话在两个客户端里格式不同
+    $expect = '@file:"' + $f.path + '"'
+    $text = [string]$r2.state.usage.composer_text
+    Check ($text.Contains($expect)) "输入框含 @file 引用路径"
+    Check ($text.Contains('`' + $expect + '`')) "序列化口径 = Markdown 行内 code（与 Web 版一致）"
+    Write-Host ("  插入结果：{0}" -f $text.Trim())
+
+    # 连续引用两个文件：末尾补了空格，两个 chip 不会粘在一起
+    $r3 = Act @{ action = "mention_pick"; path = $f.path; settle_ms = 300 }
+    $text3 = [string]$r3.state.usage.composer_text
+    # 用正则计数而不是 `.Split()`：PowerShell 的 `String.Split(string)` 会退化成
+    # 按**字符**切分（`Split('.')` 切句号就是这么来的），数出来永远是 0
+    $hits = ([regex]::Matches($text3, [regex]::Escape('@file:"'))).Count
+    Check ($hits -eq 2) "可连续引用同一个文件（插入不覆盖已有内容，出现 $hits 次）"
+}
+
+# 收尾：别让测试文本留在用户输入框里
+$r = Act @{ action = "composer_clear" }
+Check ($r.state.usage.composer_text -eq "") "收尾清空输入框（不污染下次发送）"
+
 Write-Host "== 7. 错误路径 ==" -ForegroundColor Cyan
 $r = Act @{ action = "no_such_action" }
 Check ($r.ok -eq $false -and $r.error) "未知动作 -> ok=false + error"

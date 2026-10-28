@@ -40,8 +40,8 @@ use gpui_kit::{App, AsyncApp, WeakEntity};
 use tokio::sync::{mpsc, oneshot};
 
 use crate::{
-    decode_data_url, tokens_per_sec, ClientApp, Dialog, PickerTarget, SessionListRow, View,
-    SERVER_HOST,
+    decode_data_url, tokens_per_sec, ClientApp, Dialog, FilePickPurpose, PickerTarget,
+    SessionListRow, View, SERVER_HOST,
 };
 
 /// 自动化端口的环境变量名：存在且能解析成端口才监听。
@@ -295,6 +295,9 @@ impl ClientApp {
                 let mut v = serde_json::json!({ "kind": d.key() });
                 if let Dialog::WorkspacePicker { target } = d {
                     v["target"] = serde_json::json!(target.key());
+                }
+                if let Dialog::FilePicker { purpose } = d {
+                    v["purpose"] = serde_json::json!(purpose.key());
                 }
                 v
             }),
@@ -582,6 +585,9 @@ impl ClientApp {
                 "zoomed_image": self.zoomed_image.is_some(),
                 // 待发送附件数（图片）
                 "composer_images": self.composer_images.len(),
+                // 输入框正文（@ 引用插入后断言它含 `@file:"..."`；
+                // 走 `read(cx)` 拿实体真值，不是副本——副本会和实体漂移）
+                "composer_text": self.input.read(cx).value(),
                 "ctx_compress": self.ctx_compress.as_ref().map(|(ok, m)| serde_json::json!({
                     "ok": ok, "message": m,
                 })),
@@ -1025,6 +1031,19 @@ impl ClientApp {
             "kb_open_picker" => {
                 // 打开文件选择弹窗（GPUI 自绘、非 OS 对话框）：默认定位到会话工作目录
                 self.open_kb_picker(cx);
+            }
+            // @ 文件引用：同一个弹窗，用途 = Mention（点中文件即插入输入框）
+            "mention_file" => {
+                self.open_file_picker(FilePickPurpose::Mention, cx);
+            }
+            // 点中一个文件（真实点击路径是弹窗里的文件行 → `mention_file`；
+            // 自动化没有 window，走 `mention_file_auto`，插入 API 同一个）
+            "mention_pick" => {
+                self.mention_file_auto(arg_str(cmd, "path")?, cx)?;
+            }
+            // 清空输入框（测试收尾；真实路径里发送成功后也会清）
+            "composer_clear" => {
+                self.clear_composer(cx)?;
             }
             "kb_close_picker" => {
                 self.dialog = None;
