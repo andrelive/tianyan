@@ -168,12 +168,31 @@ client handler、工具列表在 1.x 保持兼容），`cargo test -p tianyan-mc
 > 遇到「功能正常但白烧 CPU」时，先按**外部依赖**（子进程 / SDK / 网络客户端）分叉，
 > 比按自己的模块分叉收敛得快。
 
+## 页面覆盖（11 / 11）
+
+| 入口 | 关键接口 |
+|---|---|
+| 会话 | `/sessions` · `/chat/stream` · `/usage/*` · `/todos` · `/goals` · `/tasks` |
+| 文件 | `/workspace/tree` · `/read` · `/dirs` · `/diff` · `PUT /sessions/{id}/workspace` |
+| 技能 | `/skills` · `/skills/stats` · `/skills/{id}`（只列 `category=custom` 的方法论） |
+| 子智能体 | `/roles` · `/roles/stats` · `/roles/{name}` · reset / delete |
+| 工具 | `/tools`（与 LLM 收到的 tools 同源；右侧只读 schema，不做表单） |
+| 知识 | `/knowledge/entries` · `/read` · `/delete` · `/ingest`(multipart) · `/search` |
+| 记忆 | `/memory`（`memory/` + `user/` + `agent/patterns` 聚合，L0/L1/L2 三层） |
+| 审批 | `/approval/status` · `/approval/respond` |
+| 定时任务 | `/scheduled-tasks` GET / POST / DELETE |
+| 洞察 | `/stats` · `/usage/stats?days=` · `/scheduler/status` |
+| 设置 | `/config` · `/config/models` · provider 编辑 / 测试连接 |
+
+验证：`pwsh -NoProfile -File .\scripts\automation-pages.ps1`（只读冒烟，含「11 个入口
+全部可达」；做法见上文「自动验证」——全程不截图、不点坐标）。
+
 ## 已知限制与行为
 
-- **没有单实例保护**（实测发现的风险）：同时跑桌面版（3000）与 gui-native（3001）时，
-  两个内嵌 server **共享同一个数据目录**（`D:\tianyan`）——定时任务会被两个进程各跑一遍，
-  SQLite 也存在并发写。端口探测只能避免「同端口冲突」，不能避免「同数据目录双写」。
-  正解是抽 `desktop/` 共享启动编排 + 单实例锁（待做）。
+- ~~没有单实例保护~~ **已解决（ADR-051）**：抽了 `desktop/` 启动编排段，`ensure_server`
+  先发现「服务同一数据目录」的已有实例并复用（判据 = `/health` 的 `service` **且**
+  `data_dir`），未命中才自起。当初实测到的问题：同时跑桌面版（3000）与 gui-native（3001）
+  时两个内嵌 server 共享同一个数据目录（`D:\tianyan`）——定时任务各跑一遍、SQLite 并发写。
 
 - **变高列表启动有 O(n) 测高**：5 万条 → `render_item` 5080 次 / 2.9s CPU（一次性）。
   稳态渲染量与总数无关（40 项）。改造方向：消息行高设上限，或改用 `v_virtual_list`。

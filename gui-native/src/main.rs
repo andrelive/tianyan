@@ -3,8 +3,12 @@
 //! 与 `gui-vite`（Tauri + React）**并存**的第二个客户端，连同一个内嵌 axum server，
 //! 走同一套 HTTP/SSE 协议。gui-vite 退役前 `tauri/` 必须保留。
 //!
-//! 当前进度：装配内核 → 起内嵌 server → 拉会话列表 → 点会话看消息（Markdown 渲染）。
-//! 未完成：SSE 流式发送、设置页/workspace/审批面板、托盘/通知/快捷键/updater、单实例保护。
+//! 当前进度：**11 个一级入口全部实现**（会话 / 文件 / 技能 / 子智能体 / 工具 /
+//! 知识 / 记忆 / 审批 / 定时任务 / 洞察 / 设置），另有内建 GUI 自动化端口
+//! （ADR-052）：`TIANYAN_GUI_AUTOMATION_PORT` 设置时监听本机回环，供 agent 读
+//! 界面状态、触发语义动作，取代「DPI 抓屏 + 坐标点击」的进程外验证。
+//!
+//! 未完成：托盘 / 通知 / 全局快捷键 / updater 编排 / MSI 代码签名。
 
 #![recursion_limit = "512"]
 
