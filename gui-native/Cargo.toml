@@ -55,6 +55,8 @@ png = "0.17"
 windows = { version = "0.62", features = [
     "Win32_Foundation",
     "Win32_UI_WindowsAndMessaging",
+    # 全局快捷键：RegisterHotKey 在 Input::KeyboardAndMouse
+    "Win32_UI_Input_KeyboardAndMouse",
 ] }
 
 # 开发构建下让 GPUI / 组件库 / 文本栈走 release 级优化

@@ -247,6 +247,21 @@ Check ($r.state.usage.tray.quitting -eq $false) "未进入退出状态（能被 
 $r = Act @{ action = "tray_show"; settle_ms = 600 }
 Check ($r.state.usage.tray.window_visible -eq $true) "从托盘恢复窗口"
 
+Write-Host "== 6.8 全局快捷键（D3：动作路径；真实按键见 simulate-hotkey.ps1）==" -ForegroundColor Cyan
+Check ($null -ne $r.state.usage.hotkey) "快捷键状态可读（combo=$($r.state.usage.hotkey.combo)）"
+if ($r.state.usage.hotkey.registered) {
+    Check ($true) "组合键 $($r.state.usage.hotkey.combo) 已注册"
+} else {
+    # 不算失败：组合键被占用（例如 tauri 版正在跑，它也注册 Ctrl+Alt+T）是环境的
+    # 正确行为，不是代码缺陷。真正验证按键路径的是 simulate-hotkey.ps1。
+    Write-Host "  [注意] 组合键未注册（被其他程序占用？tauri 版也注册 Ctrl+Alt+T）" -ForegroundColor Yellow
+}
+# 动作本身（热键线程收到 WM_HOTKEY 后调的就是这个函数）：不依赖注册是否成功
+$r = Act @{ action = "hotkey_toggle"; settle_ms = 600 }
+Check ($r.state.usage.tray.window_visible -eq $false) "toggle 动作：可见 → 隐藏"
+$r = Act @{ action = "hotkey_toggle"; settle_ms = 600 }
+Check ($r.state.usage.tray.window_visible -eq $true) "toggle 动作：隐藏 → 可见"
+
 Write-Host "== 7. 错误路径 ==" -ForegroundColor Cyan
 $r = Act @{ action = "no_such_action" }
 Check ($r.ok -eq $false -and $r.error) "未知动作 -> ok=false + error"

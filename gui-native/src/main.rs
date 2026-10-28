@@ -30,6 +30,7 @@ use std::time::Duration;
 use tokio::runtime::Runtime;
 
 mod automation;
+mod hotkey;
 mod notify;
 mod tray;
 
@@ -14093,6 +14094,9 @@ fn main() {
         // `ClientApp::new` 里注册。
         let (tray_tx, tray_rx) = tokio::sync::mpsc::unbounded_channel::<tray::TrayCommand>();
         tray::spawn(tray_tx);
+        // 全局快捷键（D3）：Ctrl+Alt+T 切换主窗口显隐。与托盘共用 `tray::*`
+        // 的窗口操作函数——两条入口同一份实现，不会出现"托盘能显示、热键不显示"。
+        hotkey::spawn();
         cx.spawn(async move |cx| {
             cx.open_window(
                 WindowOptions {

@@ -591,6 +591,11 @@ impl ClientApp {
                     "quitting": crate::tray::is_quitting(),
                     "window_visible": crate::tray::is_main_window_visible(),
                 },
+                // 全局快捷键（D3）：注册失败通常是组合键被其他程序占用
+                "hotkey": {
+                    "combo": crate::hotkey::combo(),
+                    "registered": crate::hotkey::is_registered(),
+                },
                 // 输入框正文（@ 引用插入后断言它含 `@file:"..."`；
                 // 走 `read(cx)` 拿实体真值，不是副本——副本会和实体漂移）
                 "composer_text": self.input.read(cx).value(),
@@ -1068,6 +1073,12 @@ impl ClientApp {
             // 等价于点标题栏的关闭按钮（WM_CLOSE）：验证「关闭 → 藏托盘、进程不退」
             "window_close" => {
                 crate::tray::post_close();
+            }
+            // 全局快捷键的**动作**（不是按键本身）：热键线程收到 WM_HOTKEY 后
+            // 调的就是这个函数。真正的按键路径由 `simulate_hotkey.ps1` 端到端验证。
+            "hotkey_toggle" => {
+                crate::hotkey::toggle_main_window();
+                cx.notify();
             }
             "kb_close_picker" => {
                 self.dialog = None;
