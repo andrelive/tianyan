@@ -204,6 +204,12 @@ client handler、工具列表在 1.x 保持兼容），`cargo test -p tianyan-mc
   `SyntaxHighlighter` / `LanguageRegistry` / `HighlightTheme` 是公开可复用组件。
   → 天演的 `DiffView` / `WorkspaceDiffPanel` 需自组装双栏 List，约 100–200 行。
 
+- **关闭按钮 = 藏到托盘，不是退出**：这是托盘应用的常规语义，但第一次遇到会以为
+  "关不掉"。真退出走**托盘右键菜单 → 退出天演**。自动化里 `window_close` 动作
+  （发 `WM_CLOSE`）走的是同一条路径，可用来确认行为。
+- **`Ctrl+Alt+T` 与 tauri 版冲突**：一个组合键只能属于一个进程，两个客户端同跑时
+  后注册的那个失败（日志写明原因）。用 `TIANYAN_GUI_HOTKEY` 覆盖即可。
+
 ## 未验证项
 
 | 项目 | 备注 |
@@ -213,6 +219,7 @@ client handler、工具列表在 1.x 保持兼容），`cargo test -p tianyan-mc
 | IME 候选窗定位 | 上屏已验正确，选字框位置只能人眼确认 |
 | 代码签名 | 现状 `certificateThumbprint: null`（未签名 → SmartScreen 警告），换方案不改变 |
 | 多语言 MSI | 现状 Tauri 出 `zh-CN` / `en-US` 两份，WiX 需配 culture 文件 |
+| 托盘右键菜单的人工交互 | 菜单项动作与自动化走**同一对** `tray::*` 函数（已断言），但"右键弹出菜单、点菜单项"这一步只能人眼确认 |
 | 系统集成：托盘 / 通知 / 全局快捷键 / updater 编排 | tauri/ 那 1163 行的 B 类职责需逐个接管 |
 
 ## MSI 打包与自动更新（已实测）
@@ -291,13 +298,29 @@ Invoke-RestMethod http://127.0.0.1:3010/act -Method Post -ContentType applicatio
 > 端口**默认不开**：没设 `TIANYAN_GUI_AUTOMATION_PORT` 就不监听（生产 MSI 不带该变量）。
 > 只绑 `127.0.0.1`，且 `state` 不含 `api_key`。
 
-### 次选：DPI-aware 截图 + 坐标点击（仅用于像素级观感核对）
+### 像素级核对：内建截图优先，抓屏兜底
 
-配色 / 间距 / 字体这类「好看不好看」还得看像素。**状态验证不要再用它**：
+配色 / 间距 / 字体这类「好看不好看」还得看像素。**状态验证不要用截图**。
+
+**首选内建**（`render_to_image`，需 `--features screenshot` 构建）：
+
+```powershell
+cargo build --features screenshot
+$env:TIANYAN_GUI_AUTOMATION_PORT = "3010"; .\target\debug\tianyan-gui-native.exe
+Invoke-RestMethod http://127.0.0.1:3010/act -Method Post -ContentType application/json `
+  -Body '{"action":"screenshot","path":"C:\\tmp\\shot.png"}'
+```
+
+它拿的是**渲染输出**而不是屏幕像素，所以三件事都不受：DPI 缩放、窗口被遮挡、
+**窗口是否可见**（藏在托盘里也能截——实测隐藏态与可见态字节数完全一致）。
+尺寸是纯客户区物理像素（本机 1920×1230），不含窗口边框。
+
+**兜底：进程外抓屏**（生产构建没有 `screenshot` feature 时）：
 
 ```powershell
 .\scripts\ui-click.ps1 -X 260 -Y 120     # 坐标 = 截图里的像素坐标，原点是窗口左上角
 .\scripts\ui-shot.ps1 -Out "$env:TEMP\shot.png"
+.\scripts\ui-shot-full.ps1 -Out "$env:TEMP\full.png"   # 全屏（看系统通知/托盘这类窗口外的东西）
 ```
 
 > ⛔ **必读坑：PowerShell 默认 DPI-unaware。** 本机 2560×1440 @150%，`GetWindowRect`
@@ -312,6 +335,32 @@ Invoke-RestMethod http://127.0.0.1:3010/act -Method Post -ContentType applicatio
 GPUI 自己的 `#[gpui_kit::test]`（headless 窗口 + 真实事件 + 断言，需开 `test-support`
 feature）适合**纯视图逻辑的单元级验证**（不进真实 app 状态机）；而自动化端口验证的是
 **运行中的整个界面**（有后端数据、有 SSE、有异步加载）。两者互补，都不是观感。
+
+## 系统集成（D 组：通知 / 托盘 / 全局快捷键）
+
+三个能力都不在 GPUI 的 API 里，全部要自己接 Win32。共同的做法：**独立线程 + 自己的
+win32 消息循环**（GPUI 独占主线程循环且不暴露 hook），主线程只执行动作。
+
+| 能力 | 文件 | 关键实现 | 验证方式 |
+|---|---|---|---|
+| 系统通知 | `notify.rs` | `core::notification::NotificationSink` 的原生实现 + 注册 AUMID | 截图（通知在窗口外，`/state` 读不到）+ 断言注册表 |
+| 系统托盘 | `tray.rs` | `tray-icon` + `EnumWindows` 找主窗口 + `ShowWindow(SW_HIDE/SW_SHOW)` | 断言 `tray.window_visible` 翻转；`WM_CLOSE` 验证"关闭到托盘" |
+| 全局快捷键 | `hotkey.rs` | `RegisterHotKey` + `GetMessageW` 阻塞等待 | `simulate-hotkey.ps1` **真的按键**（`keybd_event`） |
+
+三个坑（都实测踩过）：
+
+1. **通知必须要 AppUserModelID**。不注册也能弹，但归属名退回 `Windows PowerShell`
+   ——「PowerShell 发来一条通知」比不弹更糟。启动时写
+   `HKCU\Software\Classes\AppUserModelId\Tianyan.GuiNative`（`DisplayName` + `IconUri`，
+   **免管理员**）。
+2. **托盘找窗口不能只看 `IsWindowVisible`**。窗口一被 `SW_HIDE`，可见性就是 false，
+   于是"隐藏之后再显示"找不到窗口、永久失效且**毫无报错**。必须缓存 `HWND`
+   （命中后只校验 `IsWindow`）。`automation-smoke` 里「隐藏后仍持有句柄」就是这条的回归断言。
+3. **`Ctrl+Alt+T` 与 tauri 版冲突**。一个组合键只能属于一个进程，两客户端同跑时后注册
+   的必然失败。用 `TIANYAN_GUI_HOTKEY` 覆盖（同时也解决"用户机器上被别的软件占用"）。
+
+`unsafe` 只出现在 `tray.rs` / `hotkey.rs` 的 Win32 边界（枚举窗口、显隐窗口、泵消息、
+注册热键），每处都有 SAFETY 注释。
 
 打包 MSI（需先 `dotnet tool install --global wix --version 6.0.2`）：
 
