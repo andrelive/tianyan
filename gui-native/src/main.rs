@@ -12668,7 +12668,8 @@ impl ClientApp {
                                                     })
                                             ),
                                     )
-                                    // 底部统计行（对齐 Tauri 版 `ChatInput`）：未命中输入 /
+                            )
+                            // 底部统计行（对齐 Tauri 版 `ChatInput`）：未命中输入 /
                                     // 缓存命中输入 / 输出 / 缓存命中率 / TTFT / tok/s。
                                     // 两路数据都为空时整行不渲染（不留空白条）。
                                     .child(
@@ -12746,7 +12747,6 @@ impl ClientApp {
                                             line.into_any_element()
                                         },
                                     ),
-                            ),
                     )
             )
                     .child(self.render_tasks_panel(cx)),
