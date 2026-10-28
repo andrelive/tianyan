@@ -58,6 +58,15 @@ windows = { version = "0.62", features = [
     # 全局快捷键：RegisterHotKey 在 Input::KeyboardAndMouse
     "Win32_UI_Input_KeyboardAndMouse",
 ] }
+# 内建截图：`Window::render_to_image` 返回 `image::RgbaImage`，存盘要 image。
+# 可选依赖 —— 只有 `--features screenshot` 构建才编进来。
+image = { version = "0.25", optional = true }
+
+[features]
+# 内建截图（`Window::render_to_image`）依赖 gpui 的 `test-support`。
+# **默认关闭**：那个 feature 会打开 gpui 的测试支撑代码（含额外传输后端），
+# 生产 MSI 不该带。只在需要像素级验证时 `--features screenshot` 构建。
+screenshot = ["gpui-kit/test-support", "dep:image"]
 
 # 开发构建下让 GPUI / 组件库 / 文本栈走 release 级优化
 [profile.dev.package]

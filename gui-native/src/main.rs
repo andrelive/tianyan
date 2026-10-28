@@ -8,9 +8,10 @@
 //! （ADR-052）：`TIANYAN_GUI_AUTOMATION_PORT` 设置时监听本机回环，供 agent 读
 //! 界面状态、触发语义动作，取代「DPI 抓屏 + 坐标点击」的进程外验证。
 //!
-//! 系统集成（D 组）：系统通知 ✅（`notify.rs`，`NotificationSink` 的原生实现）。
+//! 系统集成：通知（`notify.rs`）/ 托盘（`tray.rs`）/ 全局快捷键（`hotkey.rs`）
+//! 已具备；内建截图在 `--features screenshot` 构建里可用（`ClientApp::screenshot_to`）。
 //!
-//! 未完成：托盘 / 全局快捷键 / updater 编排 / MSI 代码签名。
+//! 未完成：updater 编排 / MSI 代码签名。
 
 #![recursion_limit = "512"]
 
@@ -2764,6 +2765,11 @@ struct ClientApp {
     /// （`TextareaState::insert`）需要它——用句柄现取，让两条路径（真实点击 /
     /// 自动化动作）最后都落到同一个插入 API，不出现第二套插入逻辑。
     window_handle: gpui_kit::AnyWindowHandle,
+    /// 最近一次内建截图的结果：`(路径, 宽, 高)`。
+    ///
+    /// 只在 `--features screenshot` 构建里有意义（该构建下动作会写它）；
+    /// 生产构建恒为 `None`，字段本身零开销。
+    last_screenshot: Option<(String, u32, u32)>,
 }
 
 impl ClientApp {
@@ -3003,6 +3009,7 @@ impl ClientApp {
             edit_endpoint: endpoint_input,
             edit_api_key: key_input,
             window_handle: window.window_handle(),
+            last_screenshot: None,
         };
         // 回填自身弱引用：消息区折叠块的点击回调要用它 update 回 view
         if let Ok(mut g) = app_ref.lock() {
@@ -4044,6 +4051,38 @@ impl ClientApp {
             })
             .map_err(|e| format!("窗口已关闭，无法插入：{e}"))?;
         self.dialog = None;
+        cx.notify();
+        Ok(())
+    }
+
+    /// 内建截图：把当前帧渲染成 PNG 写盘（需 `--features screenshot`）。
+    ///
+    /// 与 `scripts/ui-shot.ps1`（进程外 DPI 抓屏）的三点区别，正是那个脚本踩过的坑：
+    /// 1. **不受 DPI 影响**：拿的是渲染输出，不是屏幕像素（抓屏必须
+    ///    `SetProcessDpiAwareness(2)`，否则 150% 缩放下只抓到窗口左上角）；
+    /// 2. **不受遮挡影响**：不需要把窗口置顶，别的窗口盖着也能截；
+    /// 3. **窗口隐藏时也能截**：`render_to_image` 渲染的是"这一帧本该画成什么"，
+    ///    不读屏幕——所以「藏到托盘」状态下仍然可以验证界面。
+    ///
+    /// 生产构建不带这个能力（`screenshot` feature 默认关闭，见 Cargo.toml）：
+    /// 它依赖 gpui 的 `test-support`，那套测试支撑不该进 MSI。
+    #[cfg(feature = "screenshot")]
+    fn screenshot_to(&mut self, path: String, cx: &mut Context<Self>) -> Result<(), String> {
+        let handle = self.window_handle;
+        let target = path.clone();
+        let size = handle
+            .update(cx, move |_, window, _cx| {
+                let img = window
+                    .render_to_image()
+                    .map_err(|e| format!("渲染当前帧失败：{e}"))?;
+                let (w, h) = (img.width(), img.height());
+                img.save(&target)
+                    .map_err(|e| format!("写 PNG 失败（{target}）：{e}"))?;
+                Ok::<(u32, u32), String>((w, h))
+            })
+            .map_err(|e| format!("窗口已关闭，无法截图：{e}"))??;
+
+        self.last_screenshot = Some((path, size.0, size.1));
         cx.notify();
         Ok(())
     }

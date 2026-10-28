@@ -262,6 +262,26 @@ Check ($r.state.usage.tray.window_visible -eq $false) "toggle 动作：可见 �
 $r = Act @{ action = "hotkey_toggle"; settle_ms = 600 }
 Check ($r.state.usage.tray.window_visible -eq $true) "toggle 动作：隐藏 → 可见"
 
+Write-Host "== 6.9 内建截图（C：需 --features screenshot 构建）==" -ForegroundColor Cyan
+$shotPath = Join-Path $env:TEMP "tianyan-smoke-shot.png"
+Remove-Item $shotPath -ErrorAction SilentlyContinue
+$r = Act @{ action = "screenshot"; path = $shotPath; settle_ms = 400 }
+if ($r.ok -eq $true) {
+    Check (Test-Path $shotPath) "截图文件已落盘"
+    $dim = $r.state.usage.screenshot
+    Check ($dim.width -gt 0 -and $dim.height -gt 0) "截图尺寸有效（$($dim.width)x$($dim.height)）"
+    # 隐藏态截图是内建方案独有的能力：render_to_image 渲染的是 scene，
+    # 不读屏幕 —— 抓屏方案此时只会拍到桌面
+    $r = Act @{ action = "tray_hide"; settle_ms = 500 }
+    $r = Act @{ action = "screenshot"; path = $shotPath; settle_ms = 400 }
+    Check ($r.ok -eq $true) "窗口隐藏时仍能截图（抓屏方案做不到）"
+    $r = Act @{ action = "tray_show"; settle_ms = 500 }
+    Check ($r.state.usage.tray.window_visible -eq $true) "截图后恢复窗口"
+} else {
+    Write-Host "  [跳过] 本二进制未启用截图：$($r.error)" -ForegroundColor Yellow
+    Write-Host "         需要像素级验证时用 cargo build --features screenshot" -ForegroundColor Yellow
+}
+
 Write-Host "== 7. 错误路径 ==" -ForegroundColor Cyan
 $r = Act @{ action = "no_such_action" }
 Check ($r.ok -eq $false -and $r.error) "未知动作 -> ok=false + error"

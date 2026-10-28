@@ -1,5 +1,12 @@
 # ui-shot.ps1 — 原生客户端（GPUI）截图：本机无 Playwright 时的自动验证手段
 #
+# ⚠️ 首选内建截图（更准更稳，且窗口隐藏时也能截）：
+#     cargo build --features screenshot
+#     POST /act {"action":"screenshot","path":"...png"}
+#   本脚本保留为**兜底**：生产构建没有 `screenshot` feature 时用它（进程外抓屏）。
+#   内建方案不读屏幕，因此不受 DPI 缩放、窗口遮挡、窗口可见性影响；而本脚本三样都受
+#   （下面两个"坑"就是它们的成因）。
+#
 # 用法：
 #   pwsh -NoProfile -File gui-native/scripts/ui-shot.ps1 -Out "$env:TEMP\shot.png"
 #   pwsh -NoProfile -File gui-native/scripts/ui-shot.ps1 -Out shot.png -MinW 800 -MinH 600

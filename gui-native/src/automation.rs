@@ -596,6 +596,11 @@ impl ClientApp {
                     "combo": crate::hotkey::combo(),
                     "registered": crate::hotkey::is_registered(),
                 },
+                // 内建截图（C）：仅 `--features screenshot` 构建会产生值。
+                // 与 `scripts/ui-shot.ps1` 的区别见 `ClientApp::screenshot_to` 的文档
+                "screenshot": self.last_screenshot.as_ref().map(|(p, w, h)| {
+                    serde_json::json!({ "path": p, "width": w, "height": h })
+                }),
                 // 输入框正文（@ 引用插入后断言它含 `@file:"..."`；
                 // 走 `read(cx)` 拿实体真值，不是副本——副本会和实体漂移）
                 "composer_text": self.input.read(cx).value(),
@@ -1079,6 +1084,20 @@ impl ClientApp {
             "hotkey_toggle" => {
                 crate::hotkey::toggle_main_window();
                 cx.notify();
+            }
+            // 内建截图：写 PNG 到指定路径（需 `--features screenshot` 构建；
+            // 生产构建里这个动作返回明确错误，而不是静默什么都不做）
+            "screenshot" => {
+                let path = arg_str(cmd, "path")?;
+                #[cfg(feature = "screenshot")]
+                self.screenshot_to(path, cx)?;
+                #[cfg(not(feature = "screenshot"))]
+                {
+                    let _ = path;
+                    return Err(
+                        "本二进制未启用截图（需 `cargo build --features screenshot`）".to_string()
+                    );
+                }
             }
             "kb_close_picker" => {
                 self.dialog = None;
