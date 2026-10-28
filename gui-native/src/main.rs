@@ -289,6 +289,15 @@ struct ClientApp {
     pub(crate) settings_status: String,
     /// 设置页状态行是否为错误（决定用 `--color-error` 还是次级文字色）
     pub(crate) settings_error: bool,
+    /// 设置页当前二级栏目（与 vite `SettingsPanel` 的 `activeTab` 同口径）。
+    pub(crate) settings_tab: SettingsTab,
+    /// `GET /api/v1/config` 返回的 `config` 段原文。
+    ///
+    /// 设置页大多数栏目（存储/Agent/安全/日志/记忆/检索/MCP/Web）目前**只读展示**
+    /// 这几段配置——写路径要逐个字段确认语义（`PUT /config` 是整份替换），一次全做
+    /// 会把回归面摊太开。留原始 JSON 是为了「配置里有的字段都能看到」，不必为每个
+    /// 字段在 GUI 侧建模。
+    pub(crate) raw_config: Option<serde_json::Value>,
     /// 会话级模型选择（`(provider, model)`）：None = 回落到 `preferences.chat`
     pub(crate) session_model: Option<(String, String)>,
     /// 模型下拉是否展开

@@ -26,6 +26,136 @@ pub(crate) const NAV_ITEMS: [(IconName, &str, View); 11] = [
     (IconName::Settings, "设置", View::Settings),
 ];
 
+/// 设置页的二级栏目（与 `gui-vite/src/components/settings/SettingsPanel.tsx` 的
+/// `TABS` **逐项对齐**：顺序、id、label、图标全一致）。
+///
+/// 为什么要有它：设置页是一个大杂烩（模型/存储/安全/日志/…），vite 把它分成 14 个
+/// 二级栏目，原生端先前把全部内容堆成一个长页面——用户一进去找不到东西，也无法
+/// 与 Web 版对上。
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum SettingsTab {
+    Models,
+    Storage,
+    Agent,
+    Soul,
+    Security,
+    Logging,
+    Memory,
+    Retrieval,
+    Appearance,
+    Connection,
+    Mcp,
+    Usage,
+    Web,
+    About,
+}
+
+impl SettingsTab {
+    /// 与 vite `TABS` 同序。
+    pub(crate) const ALL: [SettingsTab; 14] = [
+        SettingsTab::Models,
+        SettingsTab::Storage,
+        SettingsTab::Agent,
+        SettingsTab::Soul,
+        SettingsTab::Security,
+        SettingsTab::Logging,
+        SettingsTab::Memory,
+        SettingsTab::Retrieval,
+        SettingsTab::Appearance,
+        SettingsTab::Connection,
+        SettingsTab::Mcp,
+        SettingsTab::Usage,
+        SettingsTab::Web,
+        SettingsTab::About,
+    ];
+
+    /// 稳定标识（自动化 API 契约值，与 vite 的 `tab.id` 一致）。
+    pub(crate) fn key(self) -> &'static str {
+        match self {
+            SettingsTab::Models => "models",
+            SettingsTab::Storage => "storage",
+            SettingsTab::Agent => "agent",
+            SettingsTab::Soul => "soul",
+            SettingsTab::Security => "security",
+            SettingsTab::Logging => "logging",
+            SettingsTab::Memory => "memory",
+            SettingsTab::Retrieval => "retrieval",
+            SettingsTab::Appearance => "appearance",
+            SettingsTab::Connection => "connection",
+            SettingsTab::Mcp => "mcp",
+            SettingsTab::Usage => "usage",
+            SettingsTab::Web => "web",
+            SettingsTab::About => "about",
+        }
+    }
+
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            SettingsTab::Models => "模型服务",
+            SettingsTab::Storage => "数据存储",
+            SettingsTab::Agent => "Agent 行为",
+            SettingsTab::Soul => "人设编辑",
+            SettingsTab::Security => "安全",
+            SettingsTab::Logging => "日志",
+            SettingsTab::Memory => "记忆",
+            SettingsTab::Retrieval => "检索",
+            SettingsTab::Appearance => "外观",
+            SettingsTab::Connection => "连接",
+            SettingsTab::Mcp => "MCP",
+            SettingsTab::Usage => "用量统计",
+            SettingsTab::Web => "Web 搜索",
+            SettingsTab::About => "关于",
+        }
+    }
+
+    /// 图标（Lucide，与 vite 的 `icon` 同款）。
+    pub(crate) fn icon(self) -> IconName {
+        match self {
+            SettingsTab::Models => IconName::Cpu,
+            SettingsTab::Storage => IconName::Database,
+            SettingsTab::Agent => IconName::Bot,
+            SettingsTab::Soul => IconName::User,
+            SettingsTab::Security => IconName::Shield,
+            SettingsTab::Logging => IconName::FileText,
+            SettingsTab::Memory => IconName::Brain,
+            SettingsTab::Retrieval => IconName::Search,
+            SettingsTab::Appearance => IconName::Palette,
+            SettingsTab::Connection => IconName::Wifi,
+            SettingsTab::Mcp => IconName::Server,
+            SettingsTab::Usage => IconName::ChartPie,
+            SettingsTab::Web => IconName::Globe,
+            SettingsTab::About => IconName::Info,
+        }
+    }
+
+    pub(crate) fn from_key(key: &str) -> Option<Self> {
+        Self::ALL.iter().copied().find(|t| t.key() == key)
+    }
+
+    /// 该栏目在 `GET /api/v1/config` 的 `config` 段里对应的键。
+    ///
+    /// `None` = 不走 config 段（外观是前端本地、连接/关于走 `/health`、
+    /// 人设走 `/config/soul`、用量走 `/usage/stats`）。
+    pub(crate) fn config_key(self) -> Option<&'static str> {
+        match self {
+            SettingsTab::Models => Some("models"),
+            SettingsTab::Storage => Some("storage"),
+            SettingsTab::Agent => Some("agent"),
+            SettingsTab::Security => Some("security"),
+            SettingsTab::Logging => Some("logging"),
+            SettingsTab::Memory => Some("memory"),
+            SettingsTab::Retrieval => Some("retrieval"),
+            SettingsTab::Mcp => Some("mcp"),
+            SettingsTab::Web => Some("web"),
+            SettingsTab::Soul
+            | SettingsTab::Appearance
+            | SettingsTab::Connection
+            | SettingsTab::Usage
+            | SettingsTab::About => None,
+        }
+    }
+}
+
 /// 当前视图（一级导航的 11 个入口；已实现的只有「会话」与「设置」）
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum View {

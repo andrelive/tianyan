@@ -2,6 +2,8 @@
 //!
 
 use crate::*;
+// 滚动扩展方法（.overflow_y_scrollbar()）来自这个 trait，必须 in scope
+use gpui_kit::component::scroll::ScrollableElement as _;
 // 显式导入：gpui 也导出 `View`（trait）与 `AppRef`，glob 会与我们的同名枚举/别名歧义
 use crate::theme::colors;
 use gpui_kit::component::input::Textarea;
@@ -9,10 +11,234 @@ use crate::types::*;
 use crate::format::*;
 
 impl ClientApp {
-    pub(crate) fn render_settings(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        // 外观：三套色板（石墨灰 / 羊皮纸 / 午夜蓝）。切换只改全局色板 + 组件库
-        // 的 ThemeMode，随后 `cx.notify()` 全量重绘 —— 所有颜色都是**渲染时**读的，
-        // 没有任何缓存，所以切完立刻生效。
+    /// 设置页（对齐 `gui-vite` 的 `SettingsPanel`）：左侧 14 个二级栏目 + 右侧内容。
+    ///
+    /// 之前是一个长页面（外观 → 提供商 → 模型全部堆在一起），用户一进去找不到东西，
+    /// 也没法和 Web 版对上。栏目顺序 / 文案 / 图标与 vite 的 `TABS` 逐项一致。
+    pub(crate) fn render_settings(&self, cx: &mut Context<Self>) -> AnyElement {
+        div()
+            .size_full()
+            .flex()
+            .flex_row()
+            .child(self.render_settings_nav(cx))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .h_full()
+                    .flex()
+                    .flex_col()
+                    // 顶部：栏目名 + 全局状态行（状态是整页共用的，切栏目不丢）
+                    .child(self.render_settings_header())
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_h_0()
+                            .child(self.render_settings_panel(cx)),
+                    ),
+            )
+            .into_any_element()
+    }
+
+    /// 左侧二级栏目（对齐 vite `SettingsPanel` 的 `role="tablist"`）。
+    ///
+    /// 选中态用「左侧 2px 竖条 + accent 文字」，与 vite 的
+    /// `border-l-2 border-accent text-accent` 同形。
+    fn render_settings_nav(&self, cx: &mut Context<Self>) -> AnyElement {
+        let mut nav = div()
+            .w(px(196.))
+            .h_full()
+            .flex()
+            .flex_col()
+            .py_2()
+            .bg(rgb(colors::BG_SECONDARY()))
+            .border_r_1()
+            .border_color(rgb(colors::BORDER()));
+        for tab in SettingsTab::ALL {
+            let active = self.settings_tab == tab;
+            let fg = if active {
+                colors::ACCENT()
+            } else {
+                colors::TEXT_SECONDARY()
+            };
+            let icon_fg = if active {
+                colors::ACCENT()
+            } else {
+                colors::TEXT_TERTIARY()
+            };
+            nav = nav.child(
+                div()
+                    .id(("set-tab", tab as usize))
+                    .w_full()
+                    .px_3()
+                    .py_2()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_2()
+                    .cursor_pointer()
+                    .text_size(px(13.))
+                    .border_l_2()
+                    .border_color(rgb(if active {
+                        colors::ACCENT()
+                    } else {
+                        colors::BG_SECONDARY()
+                    }))
+                    .text_color(rgb(fg))
+                    .child(
+                        svg()
+                            .path(tab.icon().path())
+                            .size(px(15.))
+                            .text_color(rgb(icon_fg)),
+                    )
+                    .child(tab.label())
+                    .on_click(cx.listener(move |this, _, _window, cx| {
+                        this.settings_tab = tab;
+                        // 配置段是懒加载的：切到第一个需要的栏目时才拉（见 load_config_summary）
+                        if tab.config_key().is_some() && this.raw_config.is_none() {
+                            this.load_config_summary(cx);
+                        }
+                        cx.notify();
+                    })),
+            );
+        }
+        nav.into_any_element()
+    }
+
+    /// 右上角状态行（`settings_status` 整页共用）。
+    fn render_settings_header(&self) -> AnyElement {
+        div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_3()
+            .px_4()
+            .py_2()
+            .border_b_1()
+            .border_color(rgb(colors::BORDER()))
+            .child(
+                div()
+                    .text_sm()
+                    .child(format!("设置 · {}", self.settings_tab.label())),
+            )
+            .child(div().flex_1())
+            // 状态行是「模型服务」栏目的加载/切换结果（如「模型 8 个」），
+            // 挂在其他栏目上会让人以为那是本栏目的状态——只在模型服务显示。
+            .children(if self.settings_tab == SettingsTab::Models {
+                Some(
+                    div()
+                        .text_xs()
+                        .text_color(if self.settings_error {
+                            rgb(colors::ERROR())
+                        } else {
+                            rgb(colors::TEXT_SECONDARY())
+                        })
+                        .child(self.settings_status.clone()),
+                )
+            } else {
+                None
+            })
+            .into_any_element()
+    }
+
+    /// 右侧内容区：按栏目分派。
+    fn render_settings_panel(&self, cx: &mut Context<Self>) -> AnyElement {
+        match self.settings_tab {
+            SettingsTab::Models => self.render_settings_models(cx),
+            SettingsTab::Appearance => self.render_settings_appearance(cx),
+            SettingsTab::Connection => self.render_settings_connection(),
+            SettingsTab::About => self.render_settings_about(),
+            tab => self.render_settings_config_readonly(tab),
+        }
+    }
+
+    /// 只在 `config` 段里的栏目：**只读**渲染该段当前生效值。
+    ///
+    /// 为什么先只读：`PUT /config` 是**整份替换**，每个字段的写都要先确认语义
+    /// （枚举值域 / 联动约束 / 是否需重启）。一次把八个段都做成可编辑，回归面比
+    /// 收益大；而「把配置里到底有什么如实摆出来」本身就有用，也不假装支持编辑。
+    /// 真正要改的用户可以编辑 `~/.tianyan/tianyan.toml` 后重启，或去 Web 版。
+    fn render_settings_config_readonly(&self, tab: SettingsTab) -> AnyElement {
+        let Some(key) = tab.config_key() else {
+            return div()
+                .p_4()
+                .text_sm()
+                .text_color(rgb(colors::TEXT_TERTIARY()))
+                .child("该栏目暂未在原生端实现")
+                .into_any_element();
+        };
+        let mut body = div()
+            .flex()
+            .flex_col()
+            .gap_3()
+            .p_4()
+            .overflow_y_scrollbar()
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(rgb(colors::TEXT_TERTIARY()))
+                    .child(
+                        "以下为该段当前生效的配置（只读）。修改请编辑 ~/.tianyan/tianyan.toml \
+                         后重启，或到 Web 版设置页。",
+                    ),
+            );
+        match self.raw_config.as_ref().and_then(|c| c.get(key)) {
+            Some(seg) => body = body.child(config_rows(key, seg)),
+            None => {
+                body = body.child(
+                    div()
+                        .text_sm()
+                        .text_color(rgb(colors::TEXT_TERTIARY()))
+                        .child("配置尚未加载…"),
+                )
+            }
+        }
+        body.into_any_element()
+    }
+
+    /// 「连接」栏目：探活 `/health`（vite `ConnectionTab` 同口径，3 秒超时）。
+    fn render_settings_connection(&self) -> AnyElement {
+        let port = self.port;
+        let mut col = div().flex().flex_col().gap_3().p_4().child(
+            div()
+                .text_xs()
+                .text_color(rgb(colors::TEXT_TERTIARY()))
+                .child("内嵌服务连通性"),
+        );
+        col = col.child(kv_line("服务地址", format!("http://{SERVER_HOST}:{port}")));
+        col = col.child(kv_line("健康检查", format!("/health · 端口 {port}")));
+        col = col.child(kv_line(
+            "实测",
+            if self.status.contains("空闲") {
+                "上次交互正常（状态行显示空闲）".to_string()
+            } else {
+                self.status.clone()
+            },
+        ));
+        col.into_any_element()
+    }
+
+    /// 「关于」栏目：版本 + 运行时信息（后端不提供版本接口时用编译期常量兜底）。
+    fn render_settings_about(&self) -> AnyElement {
+        let mut col = div().flex().flex_col().gap_2().p_4();
+        col = col.child(kv_line("客户端", "天演 · GPUI 原生端".to_string()));
+        col = col.child(kv_line(
+            "版本",
+            option_env!("CARGO_PKG_VERSION").unwrap_or("0.1.0").to_string(),
+        ));
+        col = col.child(kv_line(
+            "服务端口",
+            self.port.to_string(),
+        ));
+        col = col.child(kv_line(
+            "与 Web 版关系",
+            "同一内嵌 server、同一套 HTTP/SSE 协议".to_string(),
+        ));
+        col.into_any_element()
+    }
+
+    /// 「外观」栏目（原 `render_settings` 的主题块原样搬来）。
+    fn render_settings_appearance(&self, cx: &mut Context<Self>) -> AnyElement {
         let mut theme_block = div().flex().flex_col().gap_2().px_4().pt_3().child(
             div()
                 .text_xs()
@@ -90,7 +316,11 @@ impl ClientApp {
             );
         }
         theme_block = theme_block.child(theme_cards);
-        // 提供商区：endpoint / 密钥可编辑（保存时先重读配置再写，见 `save_provider`）
+        theme_block.into_any_element()
+    }
+
+    /// 「模型服务」栏目：provider（端点 / 密钥，可编辑）+ 模型列表（可切换聊天模型）。
+    fn render_settings_models(&self, cx: &mut Context<Self>) -> AnyElement {
         let mut providers_block = div().flex().flex_col().gap_1().px_4().pt_3().child(
             div()
                 .text_xs()
@@ -279,36 +509,37 @@ impl ClientApp {
             );
         }
         div()
-            .size_full()
             .flex()
             .flex_col()
-            .child(
-                div()
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap_3()
-                    .px_4()
-                    .py_2()
-                    .border_b_1()
-                    .border_color(rgb(colors::BORDER()))
-                    .child(div().text_sm().child("设置 · 模型"))
-                    .child(div().flex_1())
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(if self.settings_error {
-                                rgb(colors::ERROR())
-                            } else {
-                                rgb(colors::TEXT_SECONDARY())
-                            })
-                            .child(self.settings_status.clone()),
-                    ),
-            )
-            .child(theme_block)
+            .gap_1()
+            .overflow_y_scrollbar()
             .child(providers_block)
             .child(div().flex_1().min_h_0().child(list))
+            .into_any_element()
     }
+
+    /// 拉 `GET /api/v1/config`，只留 `config` 段（设置页只读栏目用）。
+    ///
+    /// 懒加载：切到第一个需要配置的栏目时才拉（`render_settings_nav` 的点击回调
+    /// 里判断 `raw_config.is_none()`）。失败时**不清空**已加载的数据——配置页显示
+    /// 一次旧值，比整页变成「加载失败」有用。
+    pub(crate) fn load_config_summary(&self, cx: &mut Context<Self>) {
+        let port = self.port;
+        cx.spawn(async move |this, cx| {
+            let url = format!("http://{SERVER_HOST}:{port}/api/v1/config");
+            if let Ok(body) = fetch_json(url).await {
+                let cfg = body.get("config").cloned();
+                if cfg.is_some() {
+                    let _ = this.update(cx, |this, cx| {
+                        this.raw_config = cfg;
+                        cx.notify();
+                    });
+                }
+            }
+        })
+        .detach();
+    }
+
 
     /// 加载模型服务列表（`GET /api/v1/config/models`）。
     ///
@@ -627,4 +858,109 @@ impl ClientApp {
         })
         .detach();
     }
+}
+
+/// 把一个配置段渲染成「键 → 值」行（值过长截断）。
+///
+/// 不做多层递归：配置段嵌套最多两层（如 `storage` 下的路径），嵌套值用紧凑 JSON
+/// 展示并截断即可——目标是「能看清当前生效的是什么」，不是一个配置编辑器。
+fn config_rows(key: &str, seg: &serde_json::Value) -> AnyElement {
+    let mut col = div()
+        .flex()
+        .flex_col()
+        .rounded_lg()
+        .border_1()
+        .border_color(rgb(colors::BORDER()))
+        .bg(rgb(colors::BG_SECONDARY()))
+        .p_3()
+        .child(
+            div()
+                .pb_2()
+                .text_size(px(11.))
+                .text_color(rgb(colors::TEXT_TERTIARY()))
+                .child(format!("config.{key}")),
+        );
+    if let Some(map) = seg.as_object() {
+        for (k, v) in map {
+            let text = match v {
+                serde_json::Value::String(s) => s.clone(),
+                serde_json::Value::Null => "（空）".to_string(),
+                serde_json::Value::Bool(b) => b.to_string(),
+                serde_json::Value::Number(n) => n.to_string(),
+                other => {
+                    let s = serde_json::to_string(other).unwrap_or_default();
+                    if s.chars().count() > 110 {
+                        format!("{}…", s.chars().take(110).collect::<String>())
+                    } else {
+                        s
+                    }
+                }
+            };
+            let dim = v.is_null()
+                || matches!(v, serde_json::Value::String(s) if s.trim().is_empty());
+            col = col.child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_start()
+                    .gap_3()
+                    .py_1()
+                    .border_t_1()
+                    .border_color(rgb(colors::BORDER()))
+                    .child(
+                        div()
+                            .w(px(190.))
+                            .min_w_0()
+                            .text_size(px(11.))
+                            .text_color(rgb(colors::TEXT_SECONDARY()))
+                            .child(k.clone()),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .text_size(px(11.))
+                            .text_color(rgb(if dim {
+                                colors::TEXT_TERTIARY()
+                            } else {
+                                colors::TEXT_PRIMARY()
+                            }))
+                            .child(text),
+                    ),
+            );
+        }
+    } else {
+        col = col.child(
+            div()
+                .text_size(px(11.))
+                .text_color(rgb(colors::TEXT_TERTIARY()))
+                .child(serde_json::to_string(seg).unwrap_or_default()),
+        );
+    }
+    col.into_any_element()
+}
+
+/// 「左标签 / 右值」一行（连接栏目与关于栏目共用）。
+fn kv_line(label: &'static str, value: String) -> AnyElement {
+    div()
+        .flex()
+        .flex_row()
+        .items_start()
+        .gap_3()
+        .child(
+            div()
+                .w(px(120.))
+                .text_size(px(12.))
+                .text_color(rgb(colors::TEXT_SECONDARY()))
+                .child(label),
+        )
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .text_size(px(12.))
+                .text_color(rgb(colors::TEXT_PRIMARY()))
+                .child(value),
+        )
+        .into_any_element()
 }

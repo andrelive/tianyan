@@ -230,6 +230,8 @@ impl ClientApp {
             models: Vec::new(),
             settings_status: "正在加载模型列表…".to_string(),
             settings_error: false,
+            settings_tab: SettingsTab::Models,
+            raw_config: None,
             session_model: None,
             model_menu_open: false,
             thinking: None,

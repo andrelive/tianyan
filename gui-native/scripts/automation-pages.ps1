@@ -137,6 +137,27 @@ if ($dir) {
     Check ($r6.state.knowledge.path -eq "") "可回知识库根"
 }
 
+Write-Host "== 设置页二级栏目（14 个，对齐 vite SettingsPanel）==" -ForegroundColor Cyan
+$r = Tab "settings" 800
+$tabs = @($r.state.settings.tabs)
+Check ($tabs.Count -eq 14) "设置页有 14 个二级栏目（实际 $($tabs.Count)）"
+$expect = @("models", "storage", "agent", "soul", "security", "logging", "memory", "retrieval", "appearance", "connection", "mcp", "usage", "web", "about")
+$diff = @()
+foreach ($k in $expect) { if ($tabs -notcontains $k) { $diff += $k } }
+Check ($diff.Count -eq 0) ("栏目 id 与 vite TABS 一致" + $(if ($diff.Count -gt 0) { "（缺：$($diff -join ', ')）" } else { "" }))
+$badTab = @()
+foreach ($k in $tabs) {
+    $x = Act @{ action = "settings_tab"; tab = $k; settle_ms = 300 }
+    if ($x.state.settings.tab -ne $k) { $badTab += $k }
+}
+Check ($badTab.Count -eq 0) ("14 个栏目逐个可切换" + $(if ($badTab.Count -gt 0) { "（失败：$($badTab -join ', ')）" } else { "" }))
+# 切到需要配置段的栏目后才懒加载（验证「不白拉一次大配置」）
+$r = Act @{ action = "settings_tab"; tab = "security"; settle_ms = 900 }
+Check ($r.state.settings.config_loaded -eq $true) "只读栏目已加载到配置段（config_loaded）"
+$r = Act @{ action = "settings_tab"; tab = "nosuchtab" }
+Check ($r.ok -eq $false -and $r.error) "未知栏目 -> ok=false + error"
+$r = Tab "chat" 500
+
 Write-Host "== 收尾：11 个入口全部可达 ==" -ForegroundColor Cyan
 $all = @("chat", "workspace", "skills", "roles", "tools", "knowledge", "memory", "approval", "scheduled", "insights", "settings")
 $bad = @()

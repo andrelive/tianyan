@@ -41,7 +41,7 @@ use tokio::sync::{mpsc, oneshot};
 
 use crate::{
     decode_data_url, tokens_per_sec, ClientApp, Dialog, FilePickPurpose, PickerTarget, Seg,
-    SessionListRow, View, SERVER_HOST,
+    SessionListRow, SettingsTab, View, SERVER_HOST,
 };
 
 /// 自动化端口的环境变量名：存在且能解析成端口才监听。
@@ -596,6 +596,10 @@ impl ClientApp {
             "settings": {
                 "status": &self.settings_status,
                 "error": self.settings_error,
+                // 设置页二级栏目（14 个，与 vite `SettingsPanel` 的 TABS 同序）
+                "tab": self.settings_tab.key(),
+                "tabs": SettingsTab::ALL.iter().map(|t| t.key()).collect::<Vec<_>>(),
+                "config_loaded": self.raw_config.is_some(),
                 "menu_open": self.model_menu_open,
                 "session_model": &self.session_model,
                 "current_model": self.current_model_label(),
@@ -1018,6 +1022,25 @@ impl ClientApp {
                 // 与设置页点击共用同一份（要同步组件库 ThemeMode + 持久化）；
                 // 自动化上下文没有 `&mut Window`，传 None 只改全局主题
                 self.apply_theme_with(kind, None, cx);
+            }
+            // 设置页二级栏目：与界面点击**同一条**路径（切栏目 + 需要配置段时懒加载）
+            "settings_tab" => {
+                let key = arg_str(cmd, "tab")?;
+                let tab = SettingsTab::from_key(&key).ok_or_else(|| {
+                    format!(
+                        "未知设置栏目：{key}（可选 {}）",
+                        SettingsTab::ALL
+                            .iter()
+                            .map(|t| t.key())
+                            .collect::<Vec<_>>()
+                            .join(" / ")
+                    )
+                })?;
+                self.settings_tab = tab;
+                if tab.config_key().is_some() && self.raw_config.is_none() {
+                    self.load_config_summary(cx);
+                }
+                cx.notify();
             }
             "reload_scheduled" => self.load_sched_tasks(cx),
             // ---- 记忆 ----
