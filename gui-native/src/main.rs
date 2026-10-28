@@ -1537,6 +1537,7 @@ fn render_thinking(
                 .flex_1()
                 .min_w_0()
                 .whitespace_nowrap()
+                .text_ellipsis()
                 .overflow_hidden()
                 .italic()
                 .text_size(px(13.))
@@ -1633,6 +1634,7 @@ fn render_tool_card(
                 .flex_1()
                 .min_w_0()
                 .whitespace_nowrap()
+                .text_ellipsis()
                 .overflow_hidden()
                 .text_size(px(12.))
                 .text_color(rgb(colors::TEXT_TERTIARY))
@@ -2900,6 +2902,7 @@ impl ClientApp {
                             .flex_1()
                             .min_w_0()
                             .whitespace_nowrap()
+                            .text_ellipsis()
                             .overflow_hidden()
                             .text_size(px(11.))
                             .text_color(rgb(colors::TEXT_SECONDARY))
@@ -2936,6 +2939,7 @@ impl ClientApp {
                         .flex_1()
                         .min_w_0()
                         .whitespace_nowrap()
+                        .text_ellipsis()
                         .overflow_hidden()
                         .text_sm()
                         .text_color(rgb(if selected {
@@ -2966,17 +2970,17 @@ impl ClientApp {
                     );
                 }
                 // 行内操作：重命名 / 删除。**只在悬停这一行时渲染**（对齐 Web 版
-                // `hoveredSession === session.id`）；容器宽度固定，避免鼠标进出时标题区
-                // 反复变宽变窄。两个回调都 `stop_propagation()`——整行的 on_click 是
-                // 「打开会话」，不拦住会把弹窗和切会话一起触发。
+                // `hoveredSession === session.id`），且**不预留宽度**——留着 50px
+                // 空位的话，标题在非悬停时就被白占了，hover 与不 hover 看起来没差别
+                // （用户指出过）。代价是悬停时标题区会窄 50px，与 Web 版一致。
+                // 两个回调都 `stop_propagation()`——整行的 on_click 是「打开会话」，
+                // 不拦住会把弹窗和切会话一起触发。
                 head = head.child(
                     div()
-                        .w(px(50.))
                         .flex_shrink_0()
                         .flex()
                         .flex_row()
                         .items_center()
-                        .justify_end()
                         .gap_1()
                         .child(if is_hovered {
                             div()
@@ -3054,6 +3058,7 @@ impl ClientApp {
                             .text_size(px(11.))
                             .text_color(rgb(colors::TEXT_SECONDARY))
                             .whitespace_nowrap()
+                            .text_ellipsis()
                             .overflow_hidden()
                             .child(meta),
                     )
@@ -5378,6 +5383,7 @@ impl ClientApp {
                         .flex_1()
                         .min_w_0()
                         .whitespace_nowrap()
+                        .text_ellipsis()
                         .overflow_hidden()
                         .text_xs()
                         .text_color(rgb(colors::TEXT_PRIMARY))
@@ -6393,6 +6399,7 @@ impl ClientApp {
                             .flex_1()
                             .min_w_0()
                             .whitespace_nowrap()
+                            .text_ellipsis()
                             .overflow_hidden()
                             .text_color(rgb(if is_dir {
                                 colors::TEXT_PRIMARY
@@ -6458,6 +6465,7 @@ impl ClientApp {
                         .text_size(px(11.))
                         .text_color(rgb(colors::TEXT_TERTIARY))
                         .whitespace_nowrap()
+                        .text_ellipsis()
                         .overflow_hidden()
                         .child(path.clone()),
                 )
@@ -6506,6 +6514,7 @@ impl ClientApp {
                             .flex_1()
                             .min_w_0()
                             .whitespace_nowrap()
+                            .text_ellipsis()
                             .overflow_hidden()
                             .text_size(px(11.))
                             .text_color(rgb(colors::TEXT_TERTIARY))
@@ -6685,6 +6694,7 @@ impl ClientApp {
                             .flex_1()
                             .min_w_0()
                             .whitespace_nowrap()
+                            .text_ellipsis()
                             .overflow_hidden()
                             .text_size(px(11.))
                             .text_color(rgb(colors::TEXT_SECONDARY))
@@ -6978,6 +6988,7 @@ impl ClientApp {
                                         colors::TEXT_PRIMARY
                                     }))
                                     .whitespace_nowrap()
+                                    .text_ellipsis()
                                     .overflow_hidden()
                                     .child(format!(
                                         "{}{}",
@@ -7068,6 +7079,7 @@ impl ClientApp {
                                             .text_size(px(11.))
                                             .text_color(rgb(colors::TEXT_SECONDARY))
                                             .whitespace_nowrap()
+                                            .text_ellipsis()
                                             .overflow_hidden()
                                             .child(uri_owned.clone()),
                                     )
@@ -7189,6 +7201,7 @@ impl ClientApp {
                             .flex_1()
                             .min_w_0()
                             .whitespace_nowrap()
+                            .text_ellipsis()
                             .overflow_hidden()
                             .text_size(px(11.))
                             .text_color(rgb(colors::TEXT_SECONDARY))
@@ -7352,6 +7365,7 @@ impl ClientApp {
                                     .text_size(px(10.))
                                     .text_color(rgb(colors::TEXT_TERTIARY))
                                     .whitespace_nowrap()
+                                    .text_ellipsis()
                                     .overflow_hidden()
                                     .child(r.source.clone()),
                             )
@@ -7523,6 +7537,7 @@ impl ClientApp {
                                 .text_size(px(10.))
                                 .text_color(rgb(colors::TEXT_SECONDARY))
                                 .whitespace_nowrap()
+                                .text_ellipsis()
                                 .overflow_hidden()
                                 .child(r.name.clone()),
                         )
@@ -7741,6 +7756,7 @@ impl ClientApp {
                             .text_size(px(10.))
                             .text_color(rgb(colors::TEXT_SECONDARY))
                             .whitespace_nowrap()
+                            .text_ellipsis()
                             .overflow_hidden()
                             .child(h.description.clone()),
                     )
@@ -7935,6 +7951,7 @@ impl ClientApp {
                                     .text_size(px(11.))
                                     .text_color(rgb(colors::TEXT_SECONDARY))
                                     .whitespace_nowrap()
+                                    .text_ellipsis()
                                     .overflow_hidden()
                                     .child(g.group.clone()),
                             )
@@ -8023,6 +8040,7 @@ impl ClientApp {
                             .text_size(px(11.))
                             .text_color(rgb(colors::TEXT_SECONDARY))
                             .whitespace_nowrap()
+                            .text_ellipsis()
                             .overflow_hidden()
                             .child(t.name.clone()),
                     )
@@ -8263,6 +8281,7 @@ impl ClientApp {
                                             colors::TEXT_PRIMARY
                                         }))
                                         .whitespace_nowrap()
+                                        .text_ellipsis()
                                         .overflow_hidden()
                                         .child(m.name.clone()),
                                 )
@@ -8278,6 +8297,7 @@ impl ClientApp {
                                 .text_size(px(10.))
                                 .text_color(rgb(colors::TEXT_TERTIARY))
                                 .whitespace_nowrap()
+                                .text_ellipsis()
                                 .overflow_hidden()
                                 .child(
                                     m.abstract_text
@@ -8922,6 +8942,7 @@ impl ClientApp {
                         .text_size(px(11.))
                         .text_color(rgb(colors::TEXT_TERTIARY))
                         .whitespace_nowrap()
+                        .text_ellipsis()
                         .overflow_hidden()
                         .child(ellipsis(&skill.description, 52)),
                 );
@@ -9225,6 +9246,7 @@ impl ClientApp {
                             .text_size(px(11.))
                             .text_color(rgb(colors::TEXT_TERTIARY))
                             .whitespace_nowrap()
+                            .text_ellipsis()
                             .overflow_hidden()
                             .child(ellipsis(&tool.description, 56)),
                     )
@@ -9921,6 +9943,7 @@ impl ClientApp {
                                 .flex_1()
                                 .min_w_0()
                                 .whitespace_nowrap()
+                                .text_ellipsis()
                                 .overflow_hidden()
                                 .text_size(px(12.))
                                 .text_color(rgb(if is_picked {
@@ -10033,6 +10056,7 @@ impl ClientApp {
                                 .flex_1()
                                 .min_w_0()
                                 .whitespace_nowrap()
+                                .text_ellipsis()
                                 .overflow_hidden()
                                 .text_size(px(11.))
                                 .text_color(rgb(colors::TEXT_TERTIARY))
@@ -10143,6 +10167,7 @@ impl ClientApp {
                                 .flex_1()
                                 .min_w_0()
                                 .whitespace_nowrap()
+                                .text_ellipsis()
                                 .overflow_hidden()
                                 .text_size(px(11.))
                                 .text_color(rgb(colors::TEXT_TERTIARY))
@@ -10278,6 +10303,7 @@ impl ClientApp {
                             .flex_1()
                             .min_w_0()
                             .whitespace_nowrap()
+                            .text_ellipsis()
                             .overflow_hidden()
                             .child(name.clone()),
                     )
@@ -10340,6 +10366,7 @@ impl ClientApp {
                                     .flex_1()
                                     .min_w_0()
                                     .whitespace_nowrap()
+                                    .text_ellipsis()
                                     .overflow_hidden()
                                     .text_size(px(11.))
                                     .text_color(rgb(colors::TEXT_SECONDARY))
@@ -10547,6 +10574,7 @@ impl ClientApp {
                             .flex_1()
                             .min_w_0()
                             .whitespace_nowrap()
+                            .text_ellipsis()
                             .overflow_hidden()
                             .text_size(px(13.))
                             .text_color(rgb(if selected {
@@ -10587,6 +10615,7 @@ impl ClientApp {
                     .text_size(px(11.))
                     .text_color(rgb(colors::TEXT_TERTIARY))
                     .whitespace_nowrap()
+                    .text_ellipsis()
                     .overflow_hidden()
                     .child(role.purpose.clone()),
             )
@@ -11288,6 +11317,7 @@ impl ClientApp {
                                     .text_xs()
                                     .text_color(rgb(colors::TEXT_SECONDARY))
                                     .whitespace_nowrap()
+                                    .text_ellipsis()
                                     .overflow_hidden()
                                     .child(self.status.clone()),
                             )
@@ -11898,6 +11928,7 @@ impl ClientApp {
                             .flex_1()
                             .min_w_0()
                             .whitespace_nowrap()
+                            .text_ellipsis()
                             .overflow_hidden()
                             .text_color(rgb(colors::TEXT_TERTIARY))
                             .child(target),
@@ -11980,6 +12011,7 @@ impl ClientApp {
                             .flex_1()
                             .min_w_0()
                             .whitespace_nowrap()
+                            .text_ellipsis()
                             .overflow_hidden()
                             .text_color(rgb(colors::TEXT_TERTIARY))
                             .child(banner),
@@ -12026,6 +12058,7 @@ impl ClientApp {
                             .flex_1()
                             .min_w_0()
                             .whitespace_nowrap()
+                            .text_ellipsis()
                             .overflow_hidden()
                             .text_color(rgb(colors::TEXT_TERTIARY))
                             .child(banner),
