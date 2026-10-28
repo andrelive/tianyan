@@ -12748,8 +12748,9 @@ impl ClientApp {
                                     ),
                             ),
                     )
+            )
                     .child(self.render_tasks_panel(cx)),
-            ))
+            )
             .into_any_element()
     }
 }
