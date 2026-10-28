@@ -38,6 +38,24 @@ axum = "0.8"
 futures = "0.3"
 tracing = "0.1"
 anyhow = "1.0"
+# 系统通知（D1）：Windows toast。与 tauri 版同一个底层（`tauri-plugin-notification`
+# 的 Windows 后端也是 notify-rust 的 WinRT 实现），只是没有 Tauri 那层插件壳。
+notify-rust = "4"
+# AUMID 注册（通知归属的应用标识）：HKCU 下写一个 key，无需管理员。
+# 不注册也能弹，但通知会显示成 `Windows PowerShell`（WinRT 的默认 AppID）。
+winreg = "0.52"
+# 系统托盘（D2）：`tray-icon` 是 tauri 生态的托盘库；它的 Windows 后端要求
+# 「创建托盘的线程上有 win32 消息循环」——不必是主线程，见 `tray.rs` 的独立线程。
+tray-icon = "0.24"
+# 托盘图标解码：`tray-icon::Icon` 要 RGBA 缓冲，而资源是 PNG（`include_bytes!`
+# 嵌进二进制，不依赖安装目录里有图片文件）
+png = "0.17"
+# Win32 窗口显隐（GPUI 只暴露 minimize/activate，没有 hide）：`ShowWindow` +
+# `EnumWindows` 找本进程主窗口。与 tray-icon 共用同一个 windows 0.62。
+windows = { version = "0.62", features = [
+    "Win32_Foundation",
+    "Win32_UI_WindowsAndMessaging",
+] }
 
 # 开发构建下让 GPUI / 组件库 / 文本栈走 release 级优化
 [profile.dev.package]

@@ -8,7 +8,9 @@
 //! （ADR-052）：`TIANYAN_GUI_AUTOMATION_PORT` 设置时监听本机回环，供 agent 读
 //! 界面状态、触发语义动作，取代「DPI 抓屏 + 坐标点击」的进程外验证。
 //!
-//! 未完成：托盘 / 通知 / 全局快捷键 / updater 编排 / MSI 代码签名。
+//! 系统集成（D 组）：系统通知 ✅（`notify.rs`，`NotificationSink` 的原生实现）。
+//!
+//! 未完成：托盘 / 全局快捷键 / updater 编排 / MSI 代码签名。
 
 #![recursion_limit = "512"]
 
@@ -28,6 +30,8 @@ use std::time::Duration;
 use tokio::runtime::Runtime;
 
 mod automation;
+mod notify;
+mod tray;
 
 const SERVER_HOST: &str = "127.0.0.1";
 const PREFERRED_PORT: u16 = 3000;
@@ -2762,7 +2766,12 @@ struct ClientApp {
 }
 
 impl ClientApp {
-    fn new(window: &mut Window, cx: &mut Context<Self>, port: u16) -> Self {
+    fn new(
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        port: u16,
+        tray_rx: tokio::sync::mpsc::UnboundedReceiver<tray::TrayCommand>,
+    ) -> Self {
         let expand: ExpandRef = Rc::new(std::cell::RefCell::new(ExpandState::default()));
         let app_ref: AppRef = Arc::new(Mutex::new(None));
         let messages: Rc<Vec<MsgRow>> = Rc::new(Vec::new());
@@ -2998,6 +3007,37 @@ impl ClientApp {
         if let Ok(mut g) = app_ref.lock() {
             *g = Some(cx.entity().downgrade());
         }
+        // 关闭按钮 → 藏到托盘（不是退出）。托盘「退出天演」会先 `begin_quit()`
+        // 置位，这里的回调据此放行——否则用户永远关不掉这个程序。
+        window.on_window_should_close(cx, |_window, _cx| {
+            if tray::is_quitting() {
+                true
+            } else {
+                tray::hide_main_window();
+                false
+            }
+        });
+        // 托盘菜单动作（主线程执行）：显隐窗口 / 退出。
+        // 窗口操作走 `tray::*` 的 Win32 自由函数而不是 GPUI API —— 后者只有
+        // minimize/activate，没有 hide（而托盘语义要求窗口从任务栏消失）。
+        cx.spawn(async move |this, cx| {
+            let mut tray_rx = tray_rx;
+            while let Some(cmd) = tray_rx.recv().await {
+                match cmd {
+                    tray::TrayCommand::Show => tray::show_main_window(),
+                    tray::TrayCommand::Hide => tray::hide_main_window(),
+                    tray::TrayCommand::Quit => {
+                        tray::begin_quit();
+                        let _ = this.update(cx, |this, cx| {
+                            let handle = this.window_handle;
+                            let _ = handle.update(cx, |_, window, _cx| window.remove_window());
+                        });
+                        break;
+                    }
+                }
+            }
+        })
+        .detach();
         // 统一事件常驻订阅（ADR-028）：订阅在窗口创建时建立，与「发送」解耦
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<serde_json::Value>();
         spawn_event_reader(port, tx);
@@ -14016,6 +14056,15 @@ fn main() {
     } else {
         println!("[启动] 内嵌 server 已就绪（端口 {port}）");
     }
+    // 系统通知通道：注册之后 core 的所有通知场景自动生效（后台任务完成/失败、
+    // 主动提醒、审批挂起）—— 它们在构建时注入的是动态包装
+    // `global_notification_sink()`，读的就是这个全局槽，注册即刻生效。
+    //
+    // 复用已有 server 时（`endpoint.reused`）core 组件在**另一个进程**里，本进程
+    // 注册不到它们（通知归那个进程的宿主负责，tauri 版自带 sink）。这里不特判：
+    // 注册是幂等的，代价为零，而加分支只会掩盖真实的装配关系。
+    notify::install();
+
 
     // 图标资源：`gpui-kit-assets` 内嵌完整 Lucide 目录（`AllAssets`），
     // 必须在 `application()` 上注册 —— 否则 `svg().path("icons/*.svg")`
@@ -14039,6 +14088,11 @@ fn main() {
         // 自动化端口（ADR-052）：服务在 tokio 线程、动作用 UI 线程执行，所以先把
         // `AsyncApp` 取出来带进窗口构建闭包——窗口建好才有状态可读。
         let async_cx = cx.to_async();
+        // 系统托盘（D2）：图标 + 菜单住在自己的线程（win32 消息循环），动作经
+        // channel 回主线程执行。窗口还没建，`on_window_should_close` 在
+        // `ClientApp::new` 里注册。
+        let (tray_tx, tray_rx) = tokio::sync::mpsc::unbounded_channel::<tray::TrayCommand>();
+        tray::spawn(tray_tx);
         cx.spawn(async move |cx| {
             cx.open_window(
                 WindowOptions {
@@ -14050,7 +14104,7 @@ fn main() {
                     ..Default::default()
                 },
                 move |window, cx| {
-                    let view = cx.new(|cx| ClientApp::new(window, cx, port));
+                    let view = cx.new(|cx| ClientApp::new(window, cx, port, tray_rx));
                     // 未设 `TIANYAN_GUI_AUTOMATION_PORT` 时是空操作
                     automation::maybe_start(&async_cx, view.downgrade());
                     cx.new(|cx| Root::new(view, window, cx))

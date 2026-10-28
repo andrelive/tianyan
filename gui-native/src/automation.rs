@@ -585,6 +585,12 @@ impl ClientApp {
                 "zoomed_image": self.zoomed_image.is_some(),
                 // 待发送附件数（图片）
                 "composer_images": self.composer_images.len(),
+                // 系统托盘（D2）：是否找到了本进程的主窗口（找不到 = 托盘显隐失效）
+                "tray": {
+                    "available": crate::tray::is_available(),
+                    "quitting": crate::tray::is_quitting(),
+                    "window_visible": crate::tray::is_main_window_visible(),
+                },
                 // 输入框正文（@ 引用插入后断言它含 `@file:"..."`；
                 // 走 `read(cx)` 拿实体真值，不是副本——副本会和实体漂移）
                 "composer_text": self.input.read(cx).value(),
@@ -1044,6 +1050,24 @@ impl ClientApp {
             // 清空输入框（测试收尾；真实路径里发送成功后也会清）
             "composer_clear" => {
                 self.clear_composer(cx)?;
+            }
+            // 系统通知：走全局通道发一条，验证「注册 → 全局包装 → WinRT」整条链路
+            // （通知是否真的弹出来只能人眼/截图确认，这里保证调用链没断）
+            "test_notification" => {
+                crate::notify::send_test_notification();
+            }
+            // 托盘：显隐主窗口走的是托盘菜单**同一对**自由函数（不新造路径）
+            "tray_hide" => {
+                crate::tray::hide_main_window();
+                cx.notify();
+            }
+            "tray_show" => {
+                crate::tray::show_main_window();
+                cx.notify();
+            }
+            // 等价于点标题栏的关闭按钮（WM_CLOSE）：验证「关闭 → 藏托盘、进程不退」
+            "window_close" => {
+                crate::tray::post_close();
             }
             "kb_close_picker" => {
                 self.dialog = None;

@@ -215,6 +215,38 @@ if ($files.Count -gt 0) {
 $r = Act @{ action = "composer_clear" }
 Check ($r.state.usage.composer_text -eq "") "收尾清空输入框（不污染下次发送）"
 
+Write-Host "== 6.6 系统通知（D1：AUMID 注册 → 全局通道 → WinRT）==" -ForegroundColor Cyan
+# 通知是否真的弹出来只能截图确认（系统通知浮在窗口之外，/state 读不到）；
+# 能自动断言的是「链路没断」+「归属名不是系统默认的 Windows PowerShell」。
+$appId = Get-ItemProperty "HKCU:\Software\Classes\AppUserModelId\Tianyan.GuiNative" -ErrorAction SilentlyContinue
+Check ($null -ne $appId) "AppUserModelID 已注册（HKCU，免管理员）"
+Check ($appId.DisplayName -eq "天演") "通知归属名 = 天演（不是 Windows PowerShell）"
+$r = Act @{ action = "test_notification"; settle_ms = 600 }
+Check ($r.ok -eq $true) "测试通知经全局通道发出（注册 → 弹窗链路通）"
+
+Write-Host "== 6.7 系统托盘（D2：图标 / 显隐 / 关闭到托盘）==" -ForegroundColor Cyan
+$r = Act @{ action = "switch_tab"; view = "chat"; settle_ms = 400 }
+Check ($r.state.usage.tray.available -eq $true) "已定位主窗口（托盘显隐的句柄来源）"
+Check ($r.state.usage.tray.window_visible -eq $true) "主窗口当前可见"
+
+# 隐藏：窗口从任务栏消失（真 hide，不是 minimize —— 后者任务栏仍有按钮）
+$r = Act @{ action = "tray_hide"; settle_ms = 600 }
+Check ($r.state.usage.tray.window_visible -eq $false) "隐藏后窗口不可见"
+# 这条是回归断言：句柄按 IsWindowVisible 枚举时，藏起来就再也找不回来，
+# 「再显示」会静默失效（实测踩过）。缓存后隐藏态仍须持有句柄。
+Check ($r.state.usage.tray.available -eq $true) "隐藏后仍持有句柄（否则「再显示」永久失效）"
+
+$r = Act @{ action = "tray_show"; settle_ms = 600 }
+Check ($r.state.usage.tray.window_visible -eq $true) "显示后窗口恢复可见"
+
+# 关闭按钮 → 藏到托盘（进程不退）。走 WM_CLOSE，与用户点标题栏 × 完全同一条路径。
+$r = Act @{ action = "window_close"; settle_ms = 900 }
+Check ($r.state.usage.tray.window_visible -eq $false) "点关闭按钮 = 藏到托盘（不是退出）"
+Check ($r.state.usage.tray.quitting -eq $false) "未进入退出状态（能被 /act 应答即进程仍活）"
+
+$r = Act @{ action = "tray_show"; settle_ms = 600 }
+Check ($r.state.usage.tray.window_visible -eq $true) "从托盘恢复窗口"
+
 Write-Host "== 7. 错误路径 ==" -ForegroundColor Cyan
 $r = Act @{ action = "no_such_action" }
 Check ($r.ok -eq $false -and $r.error) "未知动作 -> ok=false + error"
