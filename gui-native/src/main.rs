@@ -340,36 +340,254 @@ fn spawn_event_reader(port: u16, tx: tokio::sync::mpsc::UnboundedSender<serde_js
     });
 }
 
-/// 天演主题色（与 `gui-vite/src/index.css` 的 `.dark` 变量逐值对齐）。
+/// 界面色板（运行时可切换：设置 → 外观）。
+///
+/// 用 `Copy` 的纯数据而不是 trait 对象：614 处引用都是「取一个颜色值」，
+/// 为它引入间接层不值当。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Palette {
+    bg_primary: u32,
+    bg_secondary: u32,
+    bg_tertiary: u32,
+    bg_hover: u32,
+    text_primary: u32,
+    text_secondary: u32,
+    text_tertiary: u32,
+    border: u32,
+    accent: u32,
+    success: u32,
+    error: u32,
+    warning: u32,
+}
+
+/// 石墨灰（默认）：中性深灰，不带蓝调。
+const PALETTE_GRAPHITE: Palette = Palette {
+    bg_primary: 0x18181b,
+    bg_secondary: 0x1f1f23,
+    bg_tertiary: 0x2b2b31,
+    bg_hover: 0x26262b,
+    text_primary: 0xe9e9ec,
+    text_secondary: 0xa1a1a8,
+    text_tertiary: 0x75757d,
+    border: 0x2f2f35,
+    accent: 0x60a5fa,
+    success: 0x22c55e,
+    error: 0xf87171,
+    warning: 0xeab308,
+};
+
+/// 羊皮纸：暖米黄纸面 + 深棕墨字（白天长时间阅读比深色底省眼）。
+const PALETTE_PARCHMENT: Palette = Palette {
+    bg_primary: 0xf3ead6,
+    bg_secondary: 0xe9dfc6,
+    bg_tertiary: 0xdccea9,
+    bg_hover: 0xe4d9bf,
+    text_primary: 0x3b3226,
+    text_secondary: 0x6a5c48,
+    text_tertiary: 0x93856e,
+    border: 0xd0c2a2,
+    accent: 0x8a5524,
+    success: 0x4a7c3f,
+    error: 0xa5372a,
+    warning: 0x9a6b00,
+};
+
+/// 午夜蓝（原配色）：保留给习惯旧观感的人。
+const PALETTE_MIDNIGHT: Palette = Palette {
+    bg_primary: 0x1a1a2e,
+    bg_secondary: 0x16213e,
+    bg_tertiary: 0x0f3460,
+    bg_hover: 0x1a1a3e,
+    text_primary: 0xe4e4e7,
+    text_secondary: 0xa1a1aa,
+    text_tertiary: 0x71717a,
+    border: 0x27272a,
+    accent: 0x3b82f6,
+    success: 0x22c55e,
+    error: 0xef4444,
+    warning: 0xeab308,
+};
+
+/// 可选外观。判别值（0/1/2）被 `ACTIVE_THEME` 当作索引，**顺序不要动**。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ThemeKind {
+    /// 石墨灰（默认）
+    Graphite,
+    /// 羊皮纸
+    Parchment,
+    /// 午夜蓝（旧配色）
+    Midnight,
+}
+
+impl ThemeKind {
+    /// 全部可选外观（设置页按此顺序列出）。
+    const ALL: [ThemeKind; 3] = [
+        ThemeKind::Graphite,
+        ThemeKind::Parchment,
+        ThemeKind::Midnight,
+    ];
+
+    /// 稳定标识（配置文件与自动化 API 的契约值）。
+    fn key(self) -> &'static str {
+        match self {
+            ThemeKind::Graphite => "graphite",
+            ThemeKind::Parchment => "parchment",
+            ThemeKind::Midnight => "midnight",
+        }
+    }
+
+    /// 中文名（设置页展示）。
+    fn label(self) -> &'static str {
+        match self {
+            ThemeKind::Graphite => "石墨灰",
+            ThemeKind::Parchment => "羊皮纸",
+            ThemeKind::Midnight => "午夜蓝",
+        }
+    }
+
+    /// 一句话说明（设置页副标题）。
+    fn hint(self) -> &'static str {
+        match self {
+            ThemeKind::Graphite => "中性深灰，长时间盯屏不偏色",
+            ThemeKind::Parchment => "暖米黄纸面 + 深棕墨字，白天看更省眼",
+            ThemeKind::Midnight => "原来的深蓝配色（保留）",
+        }
+    }
+
+    /// 对应色板。
+    fn palette(self) -> Palette {
+        match self {
+            ThemeKind::Graphite => PALETTE_GRAPHITE,
+            ThemeKind::Parchment => PALETTE_PARCHMENT,
+            ThemeKind::Midnight => PALETTE_MIDNIGHT,
+        }
+    }
+
+    /// 由标识反查。
+    fn from_key(key: &str) -> Option<Self> {
+        Self::ALL.iter().copied().find(|t| t.key() == key)
+    }
+}
+
+/// 当前外观（**无锁原子索引**：`colors::*()` 每帧被调几百次，连读锁都嫌重）。
+static ACTIVE_THEME: std::sync::atomic::AtomicU8 =
+    std::sync::atomic::AtomicU8::new(ThemeKind::Graphite as u8);
+
+/// 当前色板。
+fn palette() -> Palette {
+    match ACTIVE_THEME.load(std::sync::atomic::Ordering::Relaxed) {
+        1 => PALETTE_PARCHMENT,
+        2 => PALETTE_MIDNIGHT,
+        _ => PALETTE_GRAPHITE,
+    }
+}
+
+/// 切换外观（只改变量；调用方负责 `cx.notify()` 触发重绘）。
+fn set_theme(kind: ThemeKind) {
+    ACTIVE_THEME.store(kind as u8, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// 当前外观。
+fn current_theme() -> ThemeKind {
+    match ACTIVE_THEME.load(std::sync::atomic::Ordering::Relaxed) {
+        1 => ThemeKind::Parchment,
+        2 => ThemeKind::Midnight,
+        _ => ThemeKind::Graphite,
+    }
+}
+
+/// 客户端偏好文件（外观这类 GUI 侧选择）。
+///
+/// 不进 `tianyan.toml`：那是**服务端配置**，改它要走 `PUT /config` 热更新
+/// （整个 agent 会被重建）—— 为切个主题重建 agent 显然不对。也不进 VFS：
+/// 这是本机 UI 偏好，与 `todos.json` / `scheduled_agent_tasks.json` 同类，
+/// 属运行期状态文件。
+fn gui_prefs_path() -> std::path::PathBuf {
+    tianyan::config::get_config()
+        .storage
+        .data_dir
+        .join("gui_prefs.json")
+}
+
+/// 读上次选的外观（缺失/损坏一律回落默认，不报错）。
+fn load_theme_pref() -> ThemeKind {
+    std::fs::read_to_string(gui_prefs_path())
+        .ok()
+        .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+        .and_then(|v| v.get("theme").and_then(|t| t.as_str()).map(str::to_string))
+        .and_then(|k| ThemeKind::from_key(&k))
+        .unwrap_or(ThemeKind::Graphite)
+}
+
+/// 写外观偏好（失败静默：丢了只是回默认主题，不值得打扰用户）。
+fn save_theme_pref(kind: ThemeKind) {
+    if let Ok(text) = serde_json::to_string_pretty(&serde_json::json!({ "theme": kind.key() })) {
+        let _ = std::fs::write(gui_prefs_path(), text);
+    }
+}
+
+/// 天演主题色（**运行时读全局色板**，见 [`Palette`]）。
 ///
 /// 为什么不直接用 gpui-component 的 `Theme`：两套色板不同，混用会出现「侧栏是天演的
-/// 深蓝、消息区是库的灰黑」这种割裂感。用户要求与现役 Tauri 版视觉一致，所以这里以
-/// CSS 变量为单一事实源；`Theme::change(Dark)` 仍然保留（组件库内部控件需要它）。
+/// 深灰、消息区是库的灰黑」这种割裂感。这里以自有色板为单一事实源；
+/// `Theme::change` 仍然保留（组件库内部控件需要它）。
+///
+/// 为什么是「大写函数」而不是字段访问：614 处引用都是 `colors::BG_PRIMARY()` 这种
+/// 点号取值。改成 `self.palette.bg_primary` 得让每处都拿到 `self`/`cx`（渲染函数
+/// 签名连带全改），为一个取色动作不值当。
 mod colors {
-    /// 页面底色（`--color-bg-primary`）
-    pub const BG_PRIMARY: u32 = 0x1a1a2e;
-    /// 侧栏 / 次级面（`--color-bg-secondary`）
-    pub const BG_SECONDARY: u32 = 0x16213e;
-    /// 三级面（`--color-bg-tertiary`）
-    pub const BG_TERTIARY: u32 = 0x0f3460;
-    /// hover 底色（`--color-bg-hover`）
-    pub const BG_HOVER: u32 = 0x1a1a3e;
-    /// 主文字（`--color-text-primary`）
-    pub const TEXT_PRIMARY: u32 = 0xe4e4e7;
-    /// 次文字（`--color-text-secondary`）
-    pub const TEXT_SECONDARY: u32 = 0xa1a1aa;
-    /// 弱文字（`--color-text-tertiary`）
-    pub const TEXT_TERTIARY: u32 = 0x71717a;
-    /// 分隔线（`--color-border`）
-    pub const BORDER: u32 = 0x27272a;
-    /// 强调色（`--color-accent`）
-    pub const ACCENT: u32 = 0x3b82f6;
-    /// 成功（`--color-success`）
-    pub const SUCCESS: u32 = 0x22c55e;
-    /// 错误（`--color-error`）
-    pub const ERROR: u32 = 0xef4444;
-    /// 警告（`--color-warning`）
-    pub const WARNING: u32 = 0xeab308;
+    #![allow(non_snake_case)]
+
+    use super::palette;
+
+    /// 页面底色。
+    pub fn BG_PRIMARY() -> u32 {
+        palette().bg_primary
+    }
+    /// 侧栏 / 次级面。
+    pub fn BG_SECONDARY() -> u32 {
+        palette().bg_secondary
+    }
+    /// 三级面（选中块 / 强调块）。
+    pub fn BG_TERTIARY() -> u32 {
+        palette().bg_tertiary
+    }
+    /// hover 底色。
+    pub fn BG_HOVER() -> u32 {
+        palette().bg_hover
+    }
+    /// 主文字。
+    pub fn TEXT_PRIMARY() -> u32 {
+        palette().text_primary
+    }
+    /// 次文字。
+    pub fn TEXT_SECONDARY() -> u32 {
+        palette().text_secondary
+    }
+    /// 弱文字。
+    pub fn TEXT_TERTIARY() -> u32 {
+        palette().text_tertiary
+    }
+    /// 分隔线。
+    pub fn BORDER() -> u32 {
+        palette().border
+    }
+    /// 强调色。
+    pub fn ACCENT() -> u32 {
+        palette().accent
+    }
+    /// 成功。
+    pub fn SUCCESS() -> u32 {
+        palette().success
+    }
+    /// 错误。
+    pub fn ERROR() -> u32 {
+        palette().error
+    }
+    /// 警告。
+    pub fn WARNING() -> u32 {
+        palette().warning
+    }
     /// 一级导航栏宽度（`--sidebar-collapsed-width`：64px 图标 rail）
     pub const RAIL_WIDTH: f32 = 64.;
     /// 会话列表宽度（`--sidebar-width`：280px）
@@ -554,8 +772,8 @@ fn field_wrap(input: &Entity<InputState>) -> gpui_kit::AnyElement {
         .w_full()
         .rounded_md()
         .border_1()
-        .border_color(rgb(colors::BORDER))
-        .bg(rgb(colors::BG_PRIMARY))
+        .border_color(rgb(colors::BORDER()))
+        .bg(rgb(colors::BG_PRIMARY()))
         .px_2()
         .py_1()
         .child(Input::new(input).appearance(false))
@@ -570,27 +788,27 @@ fn stat_card(label: &'static str, value: String, sub: String) -> gpui_kit::AnyEl
         .p_3()
         .rounded_lg()
         .border_1()
-        .border_color(rgb(colors::BORDER))
-        .bg(rgb(colors::BG_SECONDARY))
+        .border_color(rgb(colors::BORDER()))
+        .bg(rgb(colors::BG_SECONDARY()))
         .flex()
         .flex_col()
         .gap_1()
         .child(
             div()
                 .text_size(px(10.))
-                .text_color(rgb(colors::TEXT_TERTIARY))
+                .text_color(rgb(colors::TEXT_TERTIARY()))
                 .child(label),
         )
         .child(
             div()
                 .text_size(px(18.))
-                .text_color(rgb(colors::TEXT_PRIMARY))
+                .text_color(rgb(colors::TEXT_PRIMARY()))
                 .child(value),
         )
         .child(
             div()
                 .text_size(px(10.))
-                .text_color(rgb(colors::TEXT_TERTIARY))
+                .text_color(rgb(colors::TEXT_TERTIARY()))
                 .child(sub),
         )
         .into_any_element()
@@ -612,9 +830,9 @@ fn format_secs_short(secs: u64) -> String {
 /// 风险等级 → 颜色（审批页与对话横幅共用口径）。
 fn risk_color(risk: &str) -> u32 {
     match risk.to_lowercase().as_str() {
-        "low" => colors::SUCCESS,
-        "medium" => colors::WARNING,
-        _ => colors::ERROR,
+        "low" => colors::SUCCESS(),
+        "medium" => colors::WARNING(),
+        _ => colors::ERROR(),
     }
 }
 
@@ -624,8 +842,8 @@ fn field_wrap_area(input: &Entity<TextareaState>) -> gpui_kit::AnyElement {
         .w_full()
         .rounded_md()
         .border_1()
-        .border_color(rgb(colors::BORDER))
-        .bg(rgb(colors::BG_PRIMARY))
+        .border_color(rgb(colors::BORDER()))
+        .bg(rgb(colors::BG_PRIMARY()))
         .px_2()
         .py_1()
         .child(Textarea::new(input).appearance(false))
@@ -672,13 +890,13 @@ fn memory_block(label: &'static str, text: String) -> gpui_kit::AnyElement {
         .child(
             div()
                 .text_size(px(10.))
-                .text_color(rgb(colors::TEXT_TERTIARY))
+                .text_color(rgb(colors::TEXT_TERTIARY()))
                 .child(label),
         )
         .child(
             div()
                 .text_size(px(12.))
-                .text_color(rgb(colors::TEXT_SECONDARY))
+                .text_color(rgb(colors::TEXT_SECONDARY()))
                 .child(text),
         )
         .into_any_element()
@@ -1350,10 +1568,10 @@ fn format_size(bytes: u64) -> String {
 /// 内置蓝 / 用户配置绿 / 学习演化紫）。
 fn source_of(source: &str) -> (&'static str, u32) {
     match source {
-        "builtin" => ("内置", colors::ACCENT),
-        "user" => ("用户配置", colors::SUCCESS),
+        "builtin" => ("内置", colors::ACCENT()),
+        "user" => ("用户配置", colors::SUCCESS()),
         "learned" => ("学习演化", 0xa855f7),
-        _ => ("未知", colors::TEXT_TERTIARY),
+        _ => ("未知", colors::TEXT_TERTIARY()),
     }
 }
 
@@ -1522,13 +1740,13 @@ fn render_thinking(
             svg()
                 .path(chevron.path())
                 .size(px(12.))
-                .text_color(rgb(colors::TEXT_TERTIARY)),
+                .text_color(rgb(colors::TEXT_TERTIARY())),
         )
         .child(
             div()
                 .flex_shrink_0()
                 .text_size(px(13.))
-                .text_color(rgb(colors::TEXT_TERTIARY))
+                .text_color(rgb(colors::TEXT_TERTIARY()))
                 .child("思考过程"),
         );
     if !open && !banner.is_empty() {
@@ -1541,7 +1759,7 @@ fn render_thinking(
                 .overflow_hidden()
                 .italic()
                 .text_size(px(13.))
-                .text_color(rgb(colors::TEXT_TERTIARY))
+                .text_color(rgb(colors::TEXT_TERTIARY()))
                 .child(banner),
         );
     }
@@ -1553,8 +1771,8 @@ fn render_thinking(
     let mut card = div()
         .rounded_lg()
         .border_1()
-        .border_color(rgb(colors::BORDER))
-        .bg(rgb(colors::BG_TERTIARY))
+        .border_color(rgb(colors::BORDER()))
+        .bg(rgb(colors::BG_TERTIARY()))
         .overflow_hidden()
         .child(head);
     if open {
@@ -1564,7 +1782,7 @@ fn render_thinking(
                 .pb_2()
                 .italic()
                 .text_size(px(13.))
-                .text_color(rgb(colors::TEXT_SECONDARY))
+                .text_color(rgb(colors::TEXT_SECONDARY()))
                 .child(text),
         );
     }
@@ -1613,20 +1831,20 @@ fn render_tool_card(
             svg()
                 .path(icon.path())
                 .size(px(14.))
-                .text_color(rgb(colors::TEXT_TERTIARY)),
+                .text_color(rgb(colors::TEXT_TERTIARY())),
         )
         .child(
             div()
                 .flex_shrink_0()
                 .text_size(px(13.))
-                .text_color(rgb(colors::TEXT_SECONDARY))
+                .text_color(rgb(colors::TEXT_SECONDARY()))
                 .child(label),
         )
         .child(
             div()
                 .flex_shrink_0()
                 .text_size(px(13.))
-                .text_color(rgb(colors::TEXT_PRIMARY))
+                .text_color(rgb(colors::TEXT_PRIMARY()))
                 .child(name),
         )
         .child(
@@ -1637,7 +1855,7 @@ fn render_tool_card(
                 .text_ellipsis()
                 .overflow_hidden()
                 .text_size(px(12.))
-                .text_color(rgb(colors::TEXT_TERTIARY))
+                .text_color(rgb(colors::TEXT_TERTIARY()))
                 .child(target),
         );
     // 状态角标：失败红 ✗ / 有结果绿 ✓ / 还没结果时省略号
@@ -1646,20 +1864,20 @@ fn render_tool_card(
             svg()
                 .path(IconName::CircleX.path())
                 .size(px(13.))
-                .text_color(rgb(colors::ERROR)),
+                .text_color(rgb(colors::ERROR())),
         );
     } else if has_result {
         head = head.child(
             svg()
                 .path(IconName::CircleCheck.path())
                 .size(px(13.))
-                .text_color(rgb(colors::SUCCESS)),
+                .text_color(rgb(colors::SUCCESS())),
         );
     } else {
         head = head.child(
             div()
                 .text_size(px(13.))
-                .text_color(rgb(colors::TEXT_TERTIARY))
+                .text_color(rgb(colors::TEXT_TERTIARY()))
                 .child("…"),
         );
     }
@@ -1667,7 +1885,7 @@ fn render_tool_card(
         head = head.child(
             div()
                 .text_size(px(11.))
-                .text_color(rgb(colors::TEXT_TERTIARY))
+                .text_color(rgb(colors::TEXT_TERTIARY()))
                 .child(format_duration(ms)),
         );
     }
@@ -1681,11 +1899,11 @@ fn render_tool_card(
         .rounded_lg()
         .border_1()
         .border_color(rgb(if failed {
-            colors::ERROR
+            colors::ERROR()
         } else {
-            colors::BORDER
+            colors::BORDER()
         }))
-        .bg(rgb(colors::BG_SECONDARY))
+        .bg(rgb(colors::BG_SECONDARY()))
         .overflow_hidden()
         .child(head);
     if let Some(err) = error {
@@ -1694,9 +1912,9 @@ fn render_tool_card(
                 .px_3()
                 .py_2()
                 .border_t_1()
-                .border_color(rgb(colors::ERROR))
+                .border_color(rgb(colors::ERROR()))
                 .text_size(px(12.))
-                .text_color(rgb(colors::ERROR))
+                .text_color(rgb(colors::ERROR()))
                 .child(err),
         );
     }
@@ -1706,11 +1924,11 @@ fn render_tool_card(
                 .px_3()
                 .py_2()
                 .border_t_1()
-                .border_color(rgb(colors::BORDER))
+                .border_color(rgb(colors::BORDER()))
                 .max_h(px(180.))
                 .overflow_hidden()
                 .text_size(px(12.))
-                .text_color(rgb(colors::TEXT_SECONDARY))
+                .text_color(rgb(colors::TEXT_SECONDARY()))
                 .child(format_arguments(&arguments)),
         );
     }
@@ -1727,7 +1945,7 @@ fn render_tool_card(
             .px_2()
             .py_1()
             .border_t_1()
-            .border_color(rgb(colors::BORDER))
+            .border_color(rgb(colors::BORDER()))
             .flex()
             .flex_row()
             .items_center()
@@ -1737,12 +1955,12 @@ fn render_tool_card(
                 svg()
                     .path(chevron.path())
                     .size(px(12.))
-                    .text_color(rgb(colors::TEXT_TERTIARY)),
+                    .text_color(rgb(colors::TEXT_TERTIARY())),
             )
             .child(
                 div()
                     .text_size(px(13.))
-                    .text_color(rgb(colors::TEXT_TERTIARY))
+                    .text_color(rgb(colors::TEXT_TERTIARY()))
                     .child("工具结果"),
             )
             .on_click(move |_, _, cx| {
@@ -1757,7 +1975,7 @@ fn render_tool_card(
                     .max_h(px(320.))
                     .overflow_hidden()
                     .text_size(px(12.))
-                    .text_color(rgb(colors::TEXT_SECONDARY))
+                    .text_color(rgb(colors::TEXT_SECONDARY()))
                     .child(result),
             );
         }
@@ -1783,15 +2001,15 @@ fn render_msg_body(msg: &MsgRow, mi: usize, expand: &ExpandRef, app: &AppRef) ->
                     div()
                         .rounded_full()
                         .border_1()
-                        .border_color(rgb(colors::BORDER))
-                        .bg(rgb(colors::BG_HOVER))
+                        .border_color(rgb(colors::BORDER()))
+                        .bg(rgb(colors::BG_HOVER()))
                         .px_2()
                         .py_1()
                         .text_size(px(11.))
-                        .text_color(rgb(colors::TEXT_SECONDARY))
+                        .text_color(rgb(colors::TEXT_SECONDARY()))
                         .child("压缩点"),
                 )
-                .child(div().flex_1().h(px(1.)).bg(rgb(colors::BORDER))),
+                .child(div().flex_1().h(px(1.)).bg(rgb(colors::BORDER()))),
         );
     }
     if msg.segs.is_empty() {
@@ -1879,7 +2097,7 @@ fn render_msg_body(msg: &MsgRow, mi: usize, expand: &ExpandRef, app: &AppRef) ->
                 div()
                     .max_w(px(640.))
                     .rounded_2xl()
-                    .bg(rgb(colors::ACCENT))
+                    .bg(rgb(colors::ACCENT()))
                     .text_color(rgb(0xffffff))
                     .px_4()
                     .py_2()
@@ -2751,8 +2969,8 @@ impl ClientApp {
             .w(px(420.))
             .rounded_xl()
             .border_1()
-            .border_color(rgb(colors::BORDER))
-            .bg(rgb(colors::BG_SECONDARY))
+            .border_color(rgb(colors::BORDER()))
+            .bg(rgb(colors::BG_SECONDARY()))
             .p_4()
             .flex()
             .flex_col()
@@ -2760,14 +2978,14 @@ impl ClientApp {
             .child(
                 div()
                     .text_size(px(15.))
-                    .text_color(rgb(colors::TEXT_PRIMARY))
+                    .text_color(rgb(colors::TEXT_PRIMARY()))
                     .child(heading),
             );
         if let Some(msg) = message {
             card = card.child(
                 div()
                     .text_sm()
-                    .text_color(rgb(colors::TEXT_SECONDARY))
+                    .text_color(rgb(colors::TEXT_SECONDARY()))
                     .child(msg),
             );
         }
@@ -2778,8 +2996,8 @@ impl ClientApp {
                     .w_full()
                     .rounded_lg()
                     .border_1()
-                    .border_color(rgb(colors::BORDER))
-                    .bg(rgb(colors::BG_PRIMARY))
+                    .border_color(rgb(colors::BORDER()))
+                    .bg(rgb(colors::BG_PRIMARY()))
                     .px_2()
                     .py_1()
                     .child(Input::new(input).appearance(false)),
@@ -2800,7 +3018,7 @@ impl ClientApp {
                         .rounded_lg()
                         .cursor_pointer()
                         .text_sm()
-                        .text_color(rgb(colors::TEXT_SECONDARY))
+                        .text_color(rgb(colors::TEXT_SECONDARY()))
                         .child("取消")
                         .on_click(cx.listener(|this, _, _, cx| {
                             this.dialog = None;
@@ -2817,9 +3035,9 @@ impl ClientApp {
                         .cursor_pointer()
                         .text_sm()
                         .bg(rgb(if danger {
-                            colors::ERROR
+                            colors::ERROR()
                         } else {
-                            colors::ACCENT
+                            colors::ACCENT()
                         }))
                         .text_color(rgb(0xffffff))
                         .child(confirm_label)
@@ -2889,13 +3107,13 @@ impl ClientApp {
                         svg()
                             .path(chevron.path())
                             .size(px(11.))
-                            .text_color(rgb(colors::TEXT_TERTIARY)),
+                            .text_color(rgb(colors::TEXT_TERTIARY())),
                     )
                     .child(
                         svg()
                             .path(IconName::FolderOpen.path())
                             .size(px(12.))
-                            .text_color(rgb(colors::TEXT_TERTIARY)),
+                            .text_color(rgb(colors::TEXT_TERTIARY())),
                     )
                     .child(
                         div()
@@ -2905,13 +3123,13 @@ impl ClientApp {
                             .text_ellipsis()
                             .overflow_hidden()
                             .text_size(px(11.))
-                            .text_color(rgb(colors::TEXT_SECONDARY))
+                            .text_color(rgb(colors::TEXT_SECONDARY()))
                             .child(label),
                     )
                     .child(
                         div()
                             .text_size(px(10.))
-                            .text_color(rgb(colors::TEXT_TERTIARY))
+                            .text_color(rgb(colors::TEXT_TERTIARY()))
                             .child(format!("{count}")),
                     )
                     .on_click(cx.listener(move |this, _, _, cx| {
@@ -2943,9 +3161,9 @@ impl ClientApp {
                         .overflow_hidden()
                         .text_sm()
                         .text_color(rgb(if selected {
-                            colors::ACCENT
+                            colors::ACCENT()
                         } else {
-                            colors::TEXT_PRIMARY
+                            colors::TEXT_PRIMARY()
                         }))
                         .child(if title.is_empty() {
                             "新对话".to_string()
@@ -2959,7 +3177,7 @@ impl ClientApp {
                             .flex_shrink_0()
                             .px_1()
                             .rounded_full()
-                            .bg(rgb(colors::ERROR))
+                            .bg(rgb(colors::ERROR()))
                             .text_size(px(9.))
                             .text_color(rgb(0xffffff))
                             .child(if tasks > 99 {
@@ -3001,7 +3219,7 @@ impl ClientApp {
                                             svg()
                                                 .path(IconName::Pencil.path())
                                                 .size(px(12.))
-                                                .text_color(rgb(colors::TEXT_TERTIARY)),
+                                                .text_color(rgb(colors::TEXT_TERTIARY())),
                                         )
                                         .on_click(cx.listener(move |this, _, window, cx| {
                                             cx.stop_propagation();
@@ -3021,7 +3239,7 @@ impl ClientApp {
                                             svg()
                                                 .path(IconName::Trash.path())
                                                 .size(px(12.))
-                                                .text_color(rgb(colors::TEXT_TERTIARY)),
+                                                .text_color(rgb(colors::TEXT_TERTIARY())),
                                         )
                                         .on_click(cx.listener(move |this, _, _, cx| {
                                             cx.stop_propagation();
@@ -3044,9 +3262,9 @@ impl ClientApp {
                     .py_1()
                     .rounded_md()
                     .bg(rgb(if selected {
-                        colors::BG_TERTIARY
+                        colors::BG_TERTIARY()
                     } else {
-                        colors::BG_SECONDARY
+                        colors::BG_SECONDARY()
                     }))
                     .cursor_pointer()
                     .flex()
@@ -3056,7 +3274,7 @@ impl ClientApp {
                     .child(
                         div()
                             .text_size(px(11.))
-                            .text_color(rgb(colors::TEXT_SECONDARY))
+                            .text_color(rgb(colors::TEXT_SECONDARY()))
                             .whitespace_nowrap()
                             .text_ellipsis()
                             .overflow_hidden()
@@ -3092,11 +3310,11 @@ impl ClientApp {
                 .items_center()
                 .gap_1()
                 .text_size(px(11.))
-                .text_color(rgb(colors::TEXT_SECONDARY))
+                .text_color(rgb(colors::TEXT_SECONDARY()))
                 .child("查看更多")
                 .child(
                     div()
-                        .text_color(rgb(colors::TEXT_TERTIARY))
+                        .text_color(rgb(colors::TEXT_TERTIARY()))
                         .child(format!("({hidden})")),
                 )
                 .on_click(cx.listener(move |this, _, _, cx| {
@@ -5031,9 +5249,9 @@ impl ClientApp {
             .items_center()
             .gap_1()
             .py_3()
-            .bg(rgb(colors::BG_SECONDARY))
+            .bg(rgb(colors::BG_SECONDARY()))
             .border_r_1()
-            .border_color(rgb(colors::BORDER))
+            .border_color(rgb(colors::BORDER()))
             // 品牌块（Tauri 版是「天」字方块）
             .child(
                 div()
@@ -5044,16 +5262,16 @@ impl ClientApp {
                     .items_center()
                     .justify_center()
                     .rounded_lg()
-                    .bg(rgb(colors::BG_TERTIARY))
-                    .text_color(rgb(colors::ACCENT))
+                    .bg(rgb(colors::BG_TERTIARY()))
+                    .text_color(rgb(colors::ACCENT()))
                     .child("天"),
             );
         for (ix, entry) in NAV_ITEMS.iter().enumerate() {
             let (icon, _label, view) = *entry;
             let tint = if self.view == view {
-                colors::ACCENT
+                colors::ACCENT()
             } else {
-                colors::TEXT_SECONDARY
+                colors::TEXT_SECONDARY()
             };
             let mut item = div()
                 .id(("nav", ix))
@@ -5066,7 +5284,7 @@ impl ClientApp {
                 .cursor_pointer()
                 .text_sm();
             if self.view == view {
-                item = item.bg(rgb(colors::BG_TERTIARY)).text_color(rgb(tint));
+                item = item.bg(rgb(colors::BG_TERTIARY())).text_color(rgb(tint));
             } else {
                 item = item.text_color(rgb(tint));
             }
@@ -5100,6 +5318,31 @@ impl ClientApp {
     /// 「首次进入才补拉」的逻辑必须住在这里。早先它内联在侧栏的 `on_click` 闭包
     /// 里，于是点侧栏会拉数据、而自动化 `switch_tab` 只改 `view` 不拉 —— 两条
     /// 路径分叉，验证结论随即失真（ADR-052 D8 的实例，实测踩过：文件页树一直空）。
+    /// 切换外观：改全局色板 + 同步组件库 `ThemeMode` + 持久化 + 重绘。
+    ///
+    /// 组件库控件（`Input` / `Textarea` / 按钮）走它自己的 `Theme`，不同步切就会
+    /// 出现「天演是羊皮纸、输入框还是深灰」的割裂。
+    ///
+    /// `window` 为 `None` 时（自动化端口调用）只改全局主题，不碰窗口局部状态。
+    fn apply_theme_with(
+        &mut self,
+        kind: ThemeKind,
+        window: Option<&mut Window>,
+        cx: &mut Context<Self>,
+    ) {
+        set_theme(kind);
+        Theme::change(
+            match kind {
+                ThemeKind::Parchment => ThemeMode::Light,
+                _ => ThemeMode::Dark,
+            },
+            window,
+            cx,
+        );
+        save_theme_pref(kind);
+        cx.notify();
+    }
+
     fn switch_view(&mut self, view: View, cx: &mut Context<Self>) {
         self.view = view;
         if view == View::Settings {
@@ -5250,8 +5493,8 @@ impl ClientApp {
                 .items_center()
                 .py_2()
                 .border_l_1()
-                .border_color(rgb(colors::BORDER))
-                .bg(rgb(colors::BG_SECONDARY))
+                .border_color(rgb(colors::BORDER()))
+                .bg(rgb(colors::BG_SECONDARY()))
                 .cursor_pointer()
                 .on_click(cx.listener(|this, _, _window, cx| {
                     this.tasks_collapsed = false;
@@ -5260,7 +5503,7 @@ impl ClientApp {
                 .child(
                     div()
                         .text_xs()
-                        .text_color(rgb(colors::TEXT_SECONDARY))
+                        .text_color(rgb(colors::TEXT_SECONDARY()))
                         .child("任务"),
                 );
         }
@@ -5270,8 +5513,8 @@ impl ClientApp {
             .flex()
             .flex_col()
             .border_l_1()
-            .border_color(rgb(colors::BORDER))
-            .bg(rgb(colors::BG_SECONDARY))
+            .border_color(rgb(colors::BORDER()))
+            .bg(rgb(colors::BG_SECONDARY()))
             .child(
                 div()
                     .flex()
@@ -5284,7 +5527,7 @@ impl ClientApp {
                         div()
                             .flex_1()
                             .text_xs()
-                            .text_color(rgb(colors::TEXT_SECONDARY))
+                            .text_color(rgb(colors::TEXT_SECONDARY()))
                             .child(format!("后台任务 {}", self.tasks.len())),
                     )
                     .child(
@@ -5295,7 +5538,7 @@ impl ClientApp {
                             .rounded_md()
                             .cursor_pointer()
                             .text_xs()
-                            .text_color(rgb(colors::TEXT_TERTIARY))
+                            .text_color(rgb(colors::TEXT_TERTIARY()))
                             .child("⟩")
                             .on_click(cx.listener(|this, _, _window, cx| {
                                 this.tasks_collapsed = true;
@@ -5309,7 +5552,7 @@ impl ClientApp {
                     .px_3()
                     .py_2()
                     .text_xs()
-                    .text_color(rgb(colors::TEXT_TERTIARY))
+                    .text_color(rgb(colors::TEXT_TERTIARY()))
                     .child("本会话暂无后台任务"),
             );
         }
@@ -5323,10 +5566,10 @@ impl ClientApp {
                 "completed" | "success" | "failed" | "cancelled" | "canceled"
             );
             let (glyph, color) = match t.status.as_str() {
-                "running" | "pending" => ("●", colors::ACCENT),
-                "completed" | "success" => ("✓", colors::SUCCESS),
-                "failed" | "cancelled" | "canceled" => ("✗", colors::ERROR),
-                _ => ("○", colors::TEXT_TERTIARY),
+                "running" | "pending" => ("●", colors::ACCENT()),
+                "completed" | "success" => ("✓", colors::SUCCESS()),
+                "failed" | "cancelled" | "canceled" => ("✗", colors::ERROR()),
+                _ => ("○", colors::TEXT_TERTIARY()),
             };
             // 失败要带原因（截断），与 Tauri 版 `statusLabel` 同口径
             let status_label: String = match t.status.as_str() {
@@ -5343,9 +5586,9 @@ impl ClientApp {
             let is_command = t.kind == "command";
             let kind_label = if is_command { "终端" } else { "委托" };
             let kind_color = if is_command {
-                colors::TEXT_TERTIARY
+                colors::TEXT_TERTIARY()
             } else {
-                colors::ACCENT
+                colors::ACCENT()
             };
             let chevron = if open {
                 IconName::ChevronDown
@@ -5365,7 +5608,7 @@ impl ClientApp {
                     svg()
                         .path(chevron.path())
                         .size(px(12.))
-                        .text_color(rgb(colors::TEXT_TERTIARY)),
+                        .text_color(rgb(colors::TEXT_TERTIARY())),
                 )
                 .child(div().text_xs().text_color(rgb(color)).child(glyph))
                 .child(
@@ -5386,16 +5629,16 @@ impl ClientApp {
                         .text_ellipsis()
                         .overflow_hidden()
                         .text_xs()
-                        .text_color(rgb(colors::TEXT_PRIMARY))
+                        .text_color(rgb(colors::TEXT_PRIMARY()))
                         .child(ellipsis(&t.description, 26)),
                 )
                 .child(
                     div()
                         .text_size(px(10.))
                         .text_color(rgb(if t.status == "failed" {
-                            colors::ERROR
+                            colors::ERROR()
                         } else {
-                            colors::TEXT_TERTIARY
+                            colors::TEXT_TERTIARY()
                         }))
                         .child(status_label),
                 );
@@ -5409,9 +5652,9 @@ impl ClientApp {
                         .py_1()
                         .rounded_md()
                         .border_1()
-                        .border_color(rgb(colors::BORDER))
+                        .border_color(rgb(colors::BORDER()))
                         .text_size(px(10.))
-                        .text_color(rgb(colors::TEXT_TERTIARY))
+                        .text_color(rgb(colors::TEXT_TERTIARY()))
                         .cursor_pointer()
                         .child("取消")
                         .on_click(cx.listener(move |this, _, _, cx| {
@@ -5440,17 +5683,17 @@ impl ClientApp {
                 .rounded_lg()
                 .border_1()
                 .border_color(rgb(if t.status == "failed" {
-                    colors::ERROR
+                    colors::ERROR()
                 } else {
-                    colors::BORDER
+                    colors::BORDER()
                 }))
-                .bg(rgb(colors::BG_PRIMARY))
+                .bg(rgb(colors::BG_PRIMARY()))
                 .overflow_hidden()
                 .child(head);
             if open {
                 let mut body = div()
                     .border_t_1()
-                    .border_color(rgb(colors::BORDER))
+                    .border_color(rgb(colors::BORDER()))
                     .p_2()
                     .flex()
                     .flex_col()
@@ -5460,7 +5703,7 @@ impl ClientApp {
                     body = body.child(
                         div()
                             .text_size(px(11.))
-                            .text_color(rgb(colors::ERROR))
+                            .text_color(rgb(colors::ERROR()))
                             .child(t.error.clone()),
                     );
                 }
@@ -5630,8 +5873,8 @@ impl ClientApp {
                 .mx_auto()
                 .rounded_lg()
                 .border_1()
-                .border_color(rgb(colors::ACCENT))
-                .bg(rgb(colors::BG_SECONDARY))
+                .border_color(rgb(colors::ACCENT()))
+                .bg(rgb(colors::BG_SECONDARY()))
                 .p_3()
                 .flex()
                 .flex_col()
@@ -5639,7 +5882,7 @@ impl ClientApp {
                 .child(
                     div()
                         .text_sm()
-                        .text_color(rgb(colors::ACCENT))
+                        .text_color(rgb(colors::ACCENT()))
                         .child("模型在向你确认（回答后它继续执行）"),
                 ),
         );
@@ -5658,9 +5901,9 @@ impl ClientApp {
                 div()
                     .text_xs()
                     .text_color(if answered {
-                        rgb(colors::SUCCESS)
+                        rgb(colors::SUCCESS())
                     } else {
-                        rgb(colors::TEXT_PRIMARY)
+                        rgb(colors::TEXT_PRIMARY())
                     })
                     .child(q_title),
             );
@@ -5668,7 +5911,7 @@ impl ClientApp {
                 q_block = q_block.child(
                     div()
                         .text_xs()
-                        .text_color(rgb(colors::TEXT_TERTIARY))
+                        .text_color(rgb(colors::TEXT_TERTIARY()))
                         .child("（该问题没有选项：把你输入框里写的原话作为回答）"),
                 );
             }
@@ -5684,18 +5927,18 @@ impl ClientApp {
                     .py_1()
                     .rounded_md()
                     .border_1()
-                    .border_color(rgb(colors::BORDER))
+                    .border_color(rgb(colors::BORDER()))
                     .cursor_pointer()
                     .text_xs();
                 if selected {
                     chip = chip
-                        .bg(rgb(colors::ACCENT))
-                        .border_color(rgb(colors::ACCENT))
+                        .bg(rgb(colors::ACCENT()))
+                        .border_color(rgb(colors::ACCENT()))
                         .text_color(rgb(0xffffff));
                 } else {
                     chip = chip
-                        .bg(rgb(colors::BG_HOVER))
-                        .text_color(rgb(colors::TEXT_PRIMARY));
+                        .bg(rgb(colors::BG_HOVER()))
+                        .text_color(rgb(colors::TEXT_PRIMARY()));
                 }
                 let answer = option.clone();
                 q_block = q_block.child(chip.child(option.clone()).on_click(cx.listener(
@@ -5717,9 +5960,9 @@ impl ClientApp {
             .text_xs()
             .text_color(rgb(0xffffff));
         submit = if all_answered {
-            submit.bg(rgb(colors::ACCENT)).cursor_pointer()
+            submit.bg(rgb(colors::ACCENT())).cursor_pointer()
         } else {
-            submit.bg(rgb(colors::BG_TERTIARY))
+            submit.bg(rgb(colors::BG_TERTIARY()))
         };
         card.child(
             div()
@@ -5730,7 +5973,7 @@ impl ClientApp {
                 .child(
                     div()
                         .text_xs()
-                        .text_color(rgb(colors::TEXT_TERTIARY))
+                        .text_color(rgb(colors::TEXT_TERTIARY()))
                         .child(if all_answered {
                             "已全部作答".to_string()
                         } else {
@@ -5845,8 +6088,8 @@ impl ClientApp {
                     .mx_auto()
                     .rounded_lg()
                     .border_1()
-                    .border_color(rgb(colors::WARNING))
-                    .bg(rgb(colors::BG_SECONDARY))
+                    .border_color(rgb(colors::WARNING()))
+                    .bg(rgb(colors::BG_SECONDARY()))
                     .p_3()
                     .flex()
                     .flex_col()
@@ -5860,21 +6103,21 @@ impl ClientApp {
                             .child(
                                 div()
                                     .text_sm()
-                                    .text_color(rgb(colors::WARNING))
+                                    .text_color(rgb(colors::WARNING()))
                                     .child("⚠ 操作等待授权"),
                             )
                             .child(div().flex_1())
                             .child(
                                 div()
                                     .text_xs()
-                                    .text_color(rgb(colors::TEXT_TERTIARY))
+                                    .text_color(rgb(colors::TEXT_TERTIARY()))
                                     .child(format!("风险：{}", a.risk)),
                             ),
                     )
                     .child(
                         div()
                             .text_xs()
-                            .text_color(rgb(colors::TEXT_PRIMARY))
+                            .text_color(rgb(colors::TEXT_PRIMARY()))
                             .child(ellipsis(&a.description, 300)),
                     )
                     .child(
@@ -5888,7 +6131,7 @@ impl ClientApp {
                                     .px_3()
                                     .py_1()
                                     .rounded_md()
-                                    .bg(rgb(colors::SUCCESS))
+                                    .bg(rgb(colors::SUCCESS()))
                                     .text_color(rgb(0xffffff))
                                     .cursor_pointer()
                                     .text_xs()
@@ -5903,7 +6146,7 @@ impl ClientApp {
                                     .px_3()
                                     .py_1()
                                     .rounded_md()
-                                    .bg(rgb(colors::ERROR))
+                                    .bg(rgb(colors::ERROR()))
                                     .text_color(rgb(0xffffff))
                                     .cursor_pointer()
                                     .text_xs()
@@ -5996,8 +6239,8 @@ impl ClientApp {
                 .mx_auto()
                 .rounded_lg()
                 .border_1()
-                .border_color(rgb(colors::BORDER))
-                .bg(rgb(colors::BG_SECONDARY))
+                .border_color(rgb(colors::BORDER()))
+                .bg(rgb(colors::BG_SECONDARY()))
                 .px_3()
                 .py_2()
                 .flex()
@@ -6012,7 +6255,7 @@ impl ClientApp {
                         .child(
                             div()
                                 .text_xs()
-                                .text_color(rgb(colors::TEXT_SECONDARY))
+                                .text_color(rgb(colors::TEXT_SECONDARY()))
                                 .child(format!(
                                     "待办 {} · 目标 {}",
                                     self.todos.len(),
@@ -6026,7 +6269,7 @@ impl ClientApp {
                                 .px_1()
                                 .cursor_pointer()
                                 .text_xs()
-                                .text_color(rgb(colors::TEXT_TERTIARY))
+                                .text_color(rgb(colors::TEXT_TERTIARY()))
                                 .child(if collapsed { "▾" } else { "▴" })
                                 .on_click(cx.listener(|this, _, _window, cx| {
                                     this.todo_bar_collapsed = !this.todo_bar_collapsed;
@@ -6040,9 +6283,9 @@ impl ClientApp {
         }
         for g in &self.goals {
             let (glyph, color) = match g.status.as_str() {
-                "completed" => ("✓", colors::SUCCESS),
-                "archived" => ("·", colors::TEXT_TERTIARY),
-                _ => ("🎯", colors::ACCENT),
+                "completed" => ("✓", colors::SUCCESS()),
+                "archived" => ("·", colors::TEXT_TERTIARY()),
+                _ => ("🎯", colors::ACCENT()),
             };
             // 进度文案与 Tauri 版一致：有子待办才显示百分比，否则「进行中」
             //（`todo_total == 0` 时后端给的 progress 是 0，直接显示 0% 会误导）
@@ -6061,26 +6304,26 @@ impl ClientApp {
                     .child(div().text_color(rgb(color)).child(glyph))
                     .child(
                         div()
-                            .text_color(rgb(colors::TEXT_PRIMARY))
+                            .text_color(rgb(colors::TEXT_PRIMARY()))
                             .child(ellipsis(&g.title, 40)),
                     )
                     .child(
                         div()
-                            .text_color(rgb(colors::TEXT_TERTIARY))
+                            .text_color(rgb(colors::TEXT_TERTIARY()))
                             .child(progress_text),
                     ),
             );
         }
         for (status, title) in &self.todos {
             let (glyph, color) = match status.as_str() {
-                "completed" => ("[x]", colors::SUCCESS),
-                "in_progress" => ("[•]", colors::ACCENT),
-                _ => ("[ ]", colors::TEXT_TERTIARY),
+                "completed" => ("[x]", colors::SUCCESS()),
+                "in_progress" => ("[•]", colors::ACCENT()),
+                _ => ("[ ]", colors::TEXT_TERTIARY()),
             };
             let text_color = if status == "completed" {
-                colors::TEXT_TERTIARY
+                colors::TEXT_TERTIARY()
             } else {
-                colors::TEXT_PRIMARY
+                colors::TEXT_PRIMARY()
             };
             bar = bar.child(
                 div()
@@ -6353,12 +6596,12 @@ impl ClientApp {
                     .items_center()
                     .gap_2()
                     .text_size(px(12.))
-                    .text_color(rgb(colors::TEXT_SECONDARY))
+                    .text_color(rgb(colors::TEXT_SECONDARY()))
                     .child(
                         svg()
                             .path(IconName::CornerLeftUp.path())
                             .size(px(12.))
-                            .text_color(rgb(colors::TEXT_TERTIARY)),
+                            .text_color(rgb(colors::TEXT_TERTIARY())),
                     )
                     .child("上级目录")
                     .on_click(cx.listener(move |this, _, _, cx| {
@@ -6392,7 +6635,7 @@ impl ClientApp {
                                 IconName::FileText.path()
                             })
                             .size(px(12.))
-                            .text_color(rgb(colors::TEXT_TERTIARY)),
+                            .text_color(rgb(colors::TEXT_TERTIARY())),
                     )
                     .child(
                         div()
@@ -6402,9 +6645,9 @@ impl ClientApp {
                             .text_ellipsis()
                             .overflow_hidden()
                             .text_color(rgb(if is_dir {
-                                colors::TEXT_PRIMARY
+                                colors::TEXT_PRIMARY()
                             } else {
-                                colors::TEXT_SECONDARY
+                                colors::TEXT_SECONDARY()
                             }))
                             .child(name),
                     )
@@ -6415,7 +6658,7 @@ impl ClientApp {
                             div()
                                 .flex_shrink_0()
                                 .text_size(px(10.))
-                                .text_color(rgb(colors::TEXT_TERTIARY))
+                                .text_color(rgb(colors::TEXT_TERTIARY()))
                                 .child(format_size(size)),
                         )
                     })
@@ -6441,12 +6684,12 @@ impl ClientApp {
                     svg()
                         .path(IconName::FileText.path())
                         .size(px(36.))
-                        .text_color(rgb(colors::TEXT_TERTIARY)),
+                        .text_color(rgb(colors::TEXT_TERTIARY())),
                 )
                 .child(
                     div()
                         .text_size(px(13.))
-                        .text_color(rgb(colors::TEXT_TERTIARY))
+                        .text_color(rgb(colors::TEXT_TERTIARY()))
                         .child("从左侧选择一个文件查看内容"),
                 )
                 .into_any_element(),
@@ -6461,9 +6704,9 @@ impl ClientApp {
                         .px_4()
                         .py_2()
                         .border_b_1()
-                        .border_color(rgb(colors::BORDER))
+                        .border_color(rgb(colors::BORDER()))
                         .text_size(px(11.))
-                        .text_color(rgb(colors::TEXT_TERTIARY))
+                        .text_color(rgb(colors::TEXT_TERTIARY()))
                         .whitespace_nowrap()
                         .text_ellipsis()
                         .overflow_hidden()
@@ -6475,7 +6718,7 @@ impl ClientApp {
                         .min_h_0()
                         .p_4()
                         .text_size(px(12.))
-                        .text_color(rgb(colors::TEXT_SECONDARY))
+                        .text_color(rgb(colors::TEXT_SECONDARY()))
                         .child(text.clone())
                         .overflow_y_scrollbar(),
                 )
@@ -6491,7 +6734,7 @@ impl ClientApp {
                     .px_6()
                     .py_4()
                     .border_b_1()
-                    .border_color(rgb(colors::BORDER))
+                    .border_color(rgb(colors::BORDER()))
                     .flex()
                     .flex_row()
                     .items_center()
@@ -6500,13 +6743,13 @@ impl ClientApp {
                         svg()
                             .path(IconName::FolderTree.path())
                             .size(px(16.))
-                            .text_color(rgb(colors::TEXT_SECONDARY)),
+                            .text_color(rgb(colors::TEXT_SECONDARY())),
                     )
                     .child(
                         div()
                             .flex_shrink_0()
                             .text_size(px(15.))
-                            .text_color(rgb(colors::TEXT_PRIMARY))
+                            .text_color(rgb(colors::TEXT_PRIMARY()))
                             .child("文件"),
                     )
                     .child(
@@ -6517,14 +6760,14 @@ impl ClientApp {
                             .text_ellipsis()
                             .overflow_hidden()
                             .text_size(px(11.))
-                            .text_color(rgb(colors::TEXT_TERTIARY))
+                            .text_color(rgb(colors::TEXT_TERTIARY()))
                             .child(crumb),
                     )
                     .child(
                         div()
                             .flex_shrink_0()
                             .text_size(px(11.))
-                            .text_color(rgb(colors::TEXT_TERTIARY))
+                            .text_color(rgb(colors::TEXT_TERTIARY()))
                             .child(self.ws_status.clone()),
                     )
                     // 选择工作目录：逐级浏览后绑定到当前会话
@@ -6536,19 +6779,19 @@ impl ClientApp {
                             .py_1()
                             .rounded_md()
                             .border_1()
-                            .border_color(rgb(colors::BORDER))
+                            .border_color(rgb(colors::BORDER()))
                             .flex()
                             .flex_row()
                             .items_center()
                             .gap_1()
                             .text_size(px(11.))
-                            .text_color(rgb(colors::TEXT_SECONDARY))
+                            .text_color(rgb(colors::TEXT_SECONDARY()))
                             .cursor_pointer()
                             .child(
                                 svg()
                                     .path(IconName::FolderOpen.path())
                                     .size(px(12.))
-                                    .text_color(rgb(colors::TEXT_SECONDARY)),
+                                    .text_color(rgb(colors::TEXT_SECONDARY())),
                             )
                             .child("选择目录")
                             .on_click(cx.listener(|this, _, _, cx| {
@@ -6565,15 +6808,15 @@ impl ClientApp {
                             .rounded_md()
                             .border_1()
                             .border_color(rgb(if self.ws_diff_open {
-                                colors::ACCENT
+                                colors::ACCENT()
                             } else {
-                                colors::BORDER
+                                colors::BORDER()
                             }))
                             .text_size(px(11.))
                             .text_color(rgb(if self.ws_diff_open {
-                                colors::ACCENT
+                                colors::ACCENT()
                             } else {
-                                colors::TEXT_SECONDARY
+                                colors::TEXT_SECONDARY()
                             }))
                             .cursor_pointer()
                             .child("Diff")
@@ -6599,16 +6842,16 @@ impl ClientApp {
                             .flex()
                             .flex_col()
                             .border_r_1()
-                            .border_color(rgb(colors::BORDER))
-                            .bg(rgb(colors::BG_SECONDARY))
+                            .border_color(rgb(colors::BORDER()))
+                            .bg(rgb(colors::BG_SECONDARY()))
                             .child(
                                 div()
                                     .px_3()
                                     .py_2()
                                     .border_b_1()
-                                    .border_color(rgb(colors::BORDER))
+                                    .border_color(rgb(colors::BORDER()))
                                     .text_size(px(11.))
-                                    .text_color(rgb(colors::TEXT_SECONDARY))
+                                    .text_color(rgb(colors::TEXT_SECONDARY()))
                                     .child(if self.ws_path.is_empty() {
                                         "工作区根目录".to_string()
                                     } else {
@@ -6630,7 +6873,7 @@ impl ClientApp {
                             .h_full()
                             .flex()
                             .flex_col()
-                            .bg(rgb(colors::BG_PRIMARY))
+                            .bg(rgb(colors::BG_PRIMARY()))
                             .child(content),
                     )
                     // diff 面板（右侧，可开关）：AI 改了什么，一眼看到
@@ -6648,7 +6891,7 @@ impl ClientApp {
             files = files.child(
                 div()
                     .text_size(px(11.))
-                    .text_color(rgb(colors::TEXT_TERTIARY))
+                    .text_color(rgb(colors::TEXT_TERTIARY()))
                     .child(self.ws_diff_status.clone()),
             );
         }
@@ -6659,10 +6902,10 @@ impl ClientApp {
                 .map(|(p, _)| p == &f.path)
                 .unwrap_or(false);
             let (color, label) = match f.status.as_str() {
-                "added" => (colors::SUCCESS, "A"),
-                "removed" => (colors::ERROR, "D"),
-                "binary" => (colors::WARNING, "B"),
-                _ => (colors::ACCENT, "M"),
+                "added" => (colors::SUCCESS(), "A"),
+                "removed" => (colors::ERROR(), "D"),
+                "binary" => (colors::WARNING(), "B"),
+                _ => (colors::ACCENT(), "M"),
             };
             let path = f.path.clone();
             files = files.child(
@@ -6678,9 +6921,9 @@ impl ClientApp {
                     .items_center()
                     .gap_2()
                     .bg(rgb(if selected {
-                        colors::BG_TERTIARY
+                        colors::BG_TERTIARY()
                     } else {
-                        colors::BG_SECONDARY
+                        colors::BG_SECONDARY()
                     }))
                     .child(
                         div()
@@ -6697,14 +6940,14 @@ impl ClientApp {
                             .text_ellipsis()
                             .overflow_hidden()
                             .text_size(px(11.))
-                            .text_color(rgb(colors::TEXT_SECONDARY))
+                            .text_color(rgb(colors::TEXT_SECONDARY()))
                             .child(f.path.clone()),
                     )
                     .child(
                         div()
                             .flex_shrink_0()
                             .text_size(px(10.))
-                            .text_color(rgb(colors::TEXT_TERTIARY))
+                            .text_color(rgb(colors::TEXT_TERTIARY()))
                             .child(format!("+{} −{}", f.new_lines, f.old_lines)),
                     )
                     .on_click(cx.listener(move |this, _, _, cx| {
@@ -6722,7 +6965,7 @@ impl ClientApp {
                 .child(
                     div()
                         .text_size(px(11.))
-                        .text_color(rgb(colors::TEXT_TERTIARY))
+                        .text_color(rgb(colors::TEXT_TERTIARY()))
                         .child("选一个文件查看 diff"),
                 )
                 .into_any_element(),
@@ -6730,15 +6973,15 @@ impl ClientApp {
                 let mut lines = div().flex().flex_col().w_full();
                 for line in unified.lines().take(3000) {
                     let color = if line.starts_with("+++") || line.starts_with("---") {
-                        colors::TEXT_TERTIARY
+                        colors::TEXT_TERTIARY()
                     } else if line.starts_with('+') {
-                        colors::SUCCESS
+                        colors::SUCCESS()
                     } else if line.starts_with('-') {
-                        colors::ERROR
+                        colors::ERROR()
                     } else if line.starts_with("@@") {
-                        colors::ACCENT
+                        colors::ACCENT()
                     } else {
-                        colors::TEXT_SECONDARY
+                        colors::TEXT_SECONDARY()
                     };
                     lines = lines.child(
                         div()
@@ -6763,16 +7006,16 @@ impl ClientApp {
             .flex()
             .flex_col()
             .border_l_1()
-            .border_color(rgb(colors::BORDER))
-            .bg(rgb(colors::BG_SECONDARY))
+            .border_color(rgb(colors::BORDER()))
+            .bg(rgb(colors::BG_SECONDARY()))
             .child(
                 div()
                     .px_3()
                     .py_2()
                     .border_b_1()
-                    .border_color(rgb(colors::BORDER))
+                    .border_color(rgb(colors::BORDER()))
                     .text_size(px(11.))
-                    .text_color(rgb(colors::TEXT_SECONDARY))
+                    .text_color(rgb(colors::TEXT_SECONDARY()))
                     .child("工作区改动（相对会话起点快照）"),
             )
             // 列表必须自己可滚动：改动文件可能几十个，`max_h` 只限高不裁剪，
@@ -6807,21 +7050,21 @@ impl ClientApp {
                     .rounded_md()
                     .border_1()
                     .border_color(rgb(if is_cur {
-                        colors::ACCENT
+                        colors::ACCENT()
                     } else {
-                        colors::BORDER
+                        colors::BORDER()
                     }))
                     .bg(rgb(if is_cur {
-                        colors::BG_TERTIARY
+                        colors::BG_TERTIARY()
                     } else {
-                        colors::BG_SECONDARY
+                        colors::BG_SECONDARY()
                     }))
                     .cursor_pointer()
                     .text_size(px(11.))
                     .text_color(rgb(if is_cur {
-                        colors::ACCENT
+                        colors::ACCENT()
                     } else {
-                        colors::TEXT_SECONDARY
+                        colors::TEXT_SECONDARY()
                     }))
                     .child(*label)
                     .on_click(cx.listener(move |this, _, _, cx| {
@@ -6850,7 +7093,7 @@ impl ClientApp {
                     .px_4()
                     .py_3()
                     .border_b_1()
-                    .border_color(rgb(colors::BORDER))
+                    .border_color(rgb(colors::BORDER()))
                     .flex()
                     .flex_row()
                     .items_center()
@@ -6871,12 +7114,12 @@ impl ClientApp {
                                         svg()
                                             .path(IconName::BookOpen.path())
                                             .size(px(16.))
-                                            .text_color(rgb(colors::TEXT_SECONDARY)),
+                                            .text_color(rgb(colors::TEXT_SECONDARY())),
                                     )
                                     .child(
                                         div()
                                             .text_size(px(15.))
-                                            .text_color(rgb(colors::TEXT_PRIMARY))
+                                            .text_color(rgb(colors::TEXT_PRIMARY()))
                                             .child("知识库"),
                                     ),
                             )
@@ -6885,7 +7128,7 @@ impl ClientApp {
                     .child(
                         div()
                             .text_size(px(10.))
-                            .text_color(rgb(colors::TEXT_TERTIARY))
+                            .text_color(rgb(colors::TEXT_TERTIARY()))
                             .child(self.kb_status.clone()),
                     ),
             )
@@ -6902,7 +7145,7 @@ impl ClientApp {
                 .rounded_md()
                 .cursor_pointer()
                 .text_size(px(10.))
-                .text_color(rgb(colors::TEXT_SECONDARY))
+                .text_color(rgb(colors::TEXT_SECONDARY()))
                 .child("知识库根")
                 .on_click(cx.listener(|this, _, _, cx| this.load_kb_entries(String::new(), cx))),
         );
@@ -6916,7 +7159,7 @@ impl ClientApp {
                 .child(
                     div()
                         .text_size(px(10.))
-                        .text_color(rgb(colors::TEXT_TERTIARY))
+                        .text_color(rgb(colors::TEXT_TERTIARY()))
                         .child(format!("/ {}", self.kb_path)),
                 )
                 .child(
@@ -6927,7 +7170,7 @@ impl ClientApp {
                         .rounded_md()
                         .cursor_pointer()
                         .text_size(px(10.))
-                        .text_color(rgb(colors::ACCENT))
+                        .text_color(rgb(colors::ACCENT()))
                         .child("↑ 上级")
                         .on_click(cx.listener(move |this, _, _, cx| {
                             this.load_kb_entries(parent.clone(), cx)
@@ -6941,7 +7184,7 @@ impl ClientApp {
                 div()
                     .py_6()
                     .text_size(px(11.))
-                    .text_color(rgb(colors::TEXT_TERTIARY))
+                    .text_color(rgb(colors::TEXT_TERTIARY()))
                     .child("这个目录是空的（或尚未导入任何文档）"),
             );
         }
@@ -6963,9 +7206,9 @@ impl ClientApp {
                     .py_2()
                     .rounded_lg()
                     .bg(rgb(if is_sel {
-                        colors::BG_TERTIARY
+                        colors::BG_TERTIARY()
                     } else {
-                        colors::BG_SECONDARY
+                        colors::BG_SECONDARY()
                     }))
                     .cursor_pointer()
                     .flex()
@@ -6983,9 +7226,9 @@ impl ClientApp {
                                     .min_w_0()
                                     .text_size(px(12.))
                                     .text_color(rgb(if is_sel {
-                                        colors::ACCENT
+                                        colors::ACCENT()
                                     } else {
-                                        colors::TEXT_PRIMARY
+                                        colors::TEXT_PRIMARY()
                                     }))
                                     .whitespace_nowrap()
                                     .text_ellipsis()
@@ -6999,7 +7242,7 @@ impl ClientApp {
                             .child(
                                 div()
                                     .text_size(px(9.))
-                                    .text_color(rgb(colors::TEXT_TERTIARY))
+                                    .text_color(rgb(colors::TEXT_TERTIARY()))
                                     .child(layers),
                             ),
                     )
@@ -7036,16 +7279,16 @@ impl ClientApp {
                             .rounded_md()
                             .border_1()
                             .border_color(rgb(if is_cur {
-                                colors::ACCENT
+                                colors::ACCENT()
                             } else {
-                                colors::BORDER
+                                colors::BORDER()
                             }))
                             .cursor_pointer()
                             .text_size(px(10.))
                             .text_color(rgb(if is_cur {
-                                colors::ACCENT
+                                colors::ACCENT()
                             } else {
-                                colors::TEXT_SECONDARY
+                                colors::TEXT_SECONDARY()
                             }))
                             .child(lv.to_string())
                             .on_click(cx.listener(move |this, _, _, cx| {
@@ -7062,7 +7305,7 @@ impl ClientApp {
                             .px_4()
                             .py_3()
                             .border_b_1()
-                            .border_color(rgb(colors::BORDER))
+                            .border_color(rgb(colors::BORDER()))
                             .flex()
                             .flex_col()
                             .gap_2()
@@ -7077,7 +7320,7 @@ impl ClientApp {
                                             .flex_1()
                                             .min_w_0()
                                             .text_size(px(11.))
-                                            .text_color(rgb(colors::TEXT_SECONDARY))
+                                            .text_color(rgb(colors::TEXT_SECONDARY()))
                                             .whitespace_nowrap()
                                             .text_ellipsis()
                                             .overflow_hidden()
@@ -7089,10 +7332,10 @@ impl ClientApp {
                                             .px_2()
                                             .py_1()
                                             .rounded_md()
-                                            .bg(rgb(colors::ERROR))
+                                            .bg(rgb(colors::ERROR()))
                                             .cursor_pointer()
                                             .text_size(px(10.))
-                                            .text_color(rgb(colors::TEXT_PRIMARY))
+                                            .text_color(rgb(colors::TEXT_PRIMARY()))
                                             .child("删除")
                                             .on_click(cx.listener(move |this, _, _, cx| {
                                                 this.delete_kb_entry(uri_del.clone(), cx)
@@ -7125,12 +7368,12 @@ impl ClientApp {
                     svg()
                         .path(IconName::BookOpen.path())
                         .size(px(40.))
-                        .text_color(rgb(colors::TEXT_TERTIARY)),
+                        .text_color(rgb(colors::TEXT_TERTIARY())),
                 )
                 .child(
                     div()
                         .text_size(px(13.))
-                        .text_color(rgb(colors::TEXT_TERTIARY))
+                        .text_color(rgb(colors::TEXT_TERTIARY()))
                         .child("选一个条目查看内容（目录点进去）"),
                 )
                 .into_any_element(),
@@ -7155,8 +7398,8 @@ impl ClientApp {
                             .flex()
                             .flex_col()
                             .border_r_1()
-                            .border_color(rgb(colors::BORDER))
-                            .bg(rgb(colors::BG_SECONDARY))
+                            .border_color(rgb(colors::BORDER()))
+                            .bg(rgb(colors::BG_SECONDARY()))
                             .child(list.overflow_y_scrollbar()),
                     )
                     .child(div().flex_1().min_w_0().h_full().child(detail)),
@@ -7204,13 +7447,13 @@ impl ClientApp {
                             .text_ellipsis()
                             .overflow_hidden()
                             .text_size(px(11.))
-                            .text_color(rgb(colors::TEXT_SECONDARY))
+                            .text_color(rgb(colors::TEXT_SECONDARY()))
                             .child(name.clone()),
                     )
                     .child(
                         div()
                             .text_size(px(10.))
-                            .text_color(rgb(colors::TEXT_TERTIARY))
+                            .text_color(rgb(colors::TEXT_TERTIARY()))
                             .child(status.clone()),
                     ),
             );
@@ -7229,8 +7472,8 @@ impl ClientApp {
                     .p_4()
                     .rounded_xl()
                     .border_1()
-                    .border_color(rgb(colors::BORDER))
-                    .bg(rgb(colors::BG_SECONDARY))
+                    .border_color(rgb(colors::BORDER()))
+                    .bg(rgb(colors::BG_SECONDARY()))
                     .flex()
                     .flex_col()
                     .gap_3()
@@ -7244,7 +7487,7 @@ impl ClientApp {
                                 svg()
                                     .path(IconName::Upload.path())
                                     .size(px(20.))
-                                    .text_color(rgb(colors::ACCENT)),
+                                    .text_color(rgb(colors::ACCENT())),
                             )
                             .child(
                                 div()
@@ -7256,13 +7499,13 @@ impl ClientApp {
                                     .child(
                                         div()
                                             .text_size(px(13.))
-                                            .text_color(rgb(colors::TEXT_PRIMARY))
+                                            .text_color(rgb(colors::TEXT_PRIMARY()))
                                             .child("选择文件导入"),
                                     )
                                     .child(
                                         div()
                                             .text_size(px(11.))
-                                            .text_color(rgb(colors::TEXT_TERTIARY))
+                                            .text_color(rgb(colors::TEXT_TERTIARY()))
                                             .child(
                                                 "可多选；导入是异步任务，L0/L1 摘要生成前浏览里可能还看不到",
                                             ),
@@ -7274,10 +7517,10 @@ impl ClientApp {
                                     .px_4()
                                     .py_2()
                                     .rounded_md()
-                                    .bg(rgb(colors::ACCENT))
+                                    .bg(rgb(colors::ACCENT()))
                                     .cursor_pointer()
                                     .text_size(px(11.))
-                                    .text_color(rgb(colors::TEXT_PRIMARY))
+                                    .text_color(rgb(colors::TEXT_PRIMARY()))
                                     .child("选择文件…")
                                     .on_click(cx.listener(|this, _, _, cx| this.open_kb_picker(cx))),
                             ),
@@ -7285,7 +7528,7 @@ impl ClientApp {
                     .child(
                         div()
                             .text_size(px(10.))
-                            .text_color(rgb(colors::TEXT_TERTIARY))
+                            .text_color(rgb(colors::TEXT_TERTIARY()))
                             .child(picked_line),
                     )
                     .child(field_wrap(&self.kb_ingest_category)),
@@ -7296,15 +7539,15 @@ impl ClientApp {
                     .p_4()
                     .rounded_xl()
                     .border_1()
-                    .border_color(rgb(colors::BORDER))
-                    .bg(rgb(colors::BG_SECONDARY))
+                    .border_color(rgb(colors::BORDER()))
+                    .bg(rgb(colors::BG_SECONDARY()))
                     .flex()
                     .flex_col()
                     .gap_2()
                     .child(
                         div()
                             .text_size(px(11.))
-                            .text_color(rgb(colors::TEXT_SECONDARY))
+                            .text_color(rgb(colors::TEXT_SECONDARY()))
                             .child("或按路径批量导入（文件或目录，目录递归，上限 200）"),
                     )
                     .child(field_wrap(&self.kb_ingest_path))
@@ -7315,10 +7558,10 @@ impl ClientApp {
                             .py_2()
                             .rounded_md()
                             .border_1()
-                            .border_color(rgb(colors::BORDER))
+                            .border_color(rgb(colors::BORDER()))
                             .cursor_pointer()
                             .text_size(px(11.))
-                            .text_color(rgb(colors::TEXT_SECONDARY))
+                            .text_color(rgb(colors::TEXT_SECONDARY()))
                             .child("按路径导入")
                             .on_click(cx.listener(|this, _, _, cx| this.ingest_kb(cx))),
                     ),
@@ -7335,7 +7578,7 @@ impl ClientApp {
                 div()
                     .py_6()
                     .text_size(px(11.))
-                    .text_color(rgb(colors::TEXT_TERTIARY))
+                    .text_color(rgb(colors::TEXT_TERTIARY()))
                     .child("没有结果——输入词后点搜索"),
             );
         }
@@ -7347,8 +7590,8 @@ impl ClientApp {
                     .p_2()
                     .rounded_md()
                     .border_1()
-                    .border_color(rgb(colors::BORDER))
-                    .bg(rgb(colors::BG_SECONDARY))
+                    .border_color(rgb(colors::BORDER()))
+                    .bg(rgb(colors::BG_SECONDARY()))
                     .flex()
                     .flex_col()
                     .gap_1()
@@ -7363,7 +7606,7 @@ impl ClientApp {
                                     .flex_1()
                                     .min_w_0()
                                     .text_size(px(10.))
-                                    .text_color(rgb(colors::TEXT_TERTIARY))
+                                    .text_color(rgb(colors::TEXT_TERTIARY()))
                                     .whitespace_nowrap()
                                     .text_ellipsis()
                                     .overflow_hidden()
@@ -7372,14 +7615,14 @@ impl ClientApp {
                             .child(
                                 div()
                                     .text_size(px(10.))
-                                    .text_color(rgb(colors::ACCENT))
+                                    .text_color(rgb(colors::ACCENT()))
                                     .child(format!("{:.3}", r.score)),
                             ),
                     )
                     .child(
                         div()
                             .text_size(px(11.))
-                            .text_color(rgb(colors::TEXT_SECONDARY))
+                            .text_color(rgb(colors::TEXT_SECONDARY()))
                             .child(ellipsis(&r.content.replace('\n', " "), 300)),
                     ),
             );
@@ -7404,10 +7647,10 @@ impl ClientApp {
                             .px_3()
                             .py_2()
                             .rounded_md()
-                            .bg(rgb(colors::ACCENT))
+                            .bg(rgb(colors::ACCENT()))
                             .cursor_pointer()
                             .text_size(px(11.))
-                            .text_color(rgb(colors::TEXT_PRIMARY))
+                            .text_color(rgb(colors::TEXT_PRIMARY()))
                             .child("搜索")
                             .on_click(cx.listener(|this, _, _, cx| {
                                 let q = this.kb_search.read(cx).value().to_string();
@@ -7431,8 +7674,8 @@ impl ClientApp {
             .p_3()
             .rounded_lg()
             .border_1()
-            .border_color(rgb(colors::BORDER))
-            .bg(rgb(colors::BG_SECONDARY))
+            .border_color(rgb(colors::BORDER()))
+            .bg(rgb(colors::BG_SECONDARY()))
             .flex()
             .flex_col()
             .gap_2()
@@ -7446,7 +7689,7 @@ impl ClientApp {
                     .child(
                         div()
                             .text_size(px(12.))
-                            .text_color(rgb(colors::TEXT_PRIMARY))
+                            .text_color(rgb(colors::TEXT_PRIMARY()))
                             .child("工作流配置"),
                     )
                     .child(
@@ -7455,10 +7698,10 @@ impl ClientApp {
                             .py_1()
                             .rounded_md()
                             .border_1()
-                            .border_color(rgb(colors::BORDER))
-                            .bg(rgb(colors::BG_TERTIARY))
+                            .border_color(rgb(colors::BORDER()))
+                            .bg(rgb(colors::BG_TERTIARY()))
                             .text_size(px(10.))
-                            .text_color(rgb(colors::ACCENT))
+                            .text_color(rgb(colors::ACCENT()))
                             .child(if self.approval_mode.is_empty() {
                                 "未装配".to_string()
                             } else {
@@ -7469,9 +7712,9 @@ impl ClientApp {
                         div()
                             .text_size(px(10.))
                             .text_color(rgb(if self.approval_auto {
-                                colors::SUCCESS
+                                colors::SUCCESS()
                             } else {
-                                colors::TEXT_TERTIARY
+                                colors::TEXT_TERTIARY()
                             }))
                             .child(if self.approval_auto {
                                 "自动审批已启用"
@@ -7482,7 +7725,7 @@ impl ClientApp {
                     .child(
                         div()
                             .text_size(px(10.))
-                            .text_color(rgb(colors::TEXT_TERTIARY))
+                            .text_color(rgb(colors::TEXT_TERTIARY()))
                             .child(format!(
                                 "超时 {}s · 最大挂起 {} · 已确认指纹 {}",
                                 self.approval_timeout,
@@ -7500,9 +7743,9 @@ impl ClientApp {
                         .py_1()
                         .rounded_md()
                         .border_1()
-                        .border_color(rgb(colors::WARNING))
+                        .border_color(rgb(colors::WARNING()))
                         .text_size(px(10.))
-                        .text_color(rgb(colors::WARNING))
+                        .text_color(rgb(colors::WARNING()))
                         .child(c.clone()),
                 );
             }
@@ -7514,7 +7757,7 @@ impl ClientApp {
                     .child(
                         div()
                             .text_size(px(10.))
-                            .text_color(rgb(colors::TEXT_TERTIARY))
+                            .text_color(rgb(colors::TEXT_TERTIARY()))
                             .child("总是询问的命令（不被自动规则与任何模式放行）"),
                     )
                     .child(chips),
@@ -7535,7 +7778,7 @@ impl ClientApp {
                                 .flex_1()
                                 .min_w_0()
                                 .text_size(px(10.))
-                                .text_color(rgb(colors::TEXT_SECONDARY))
+                                .text_color(rgb(colors::TEXT_SECONDARY()))
                                 .whitespace_nowrap()
                                 .text_ellipsis()
                                 .overflow_hidden()
@@ -7545,16 +7788,16 @@ impl ClientApp {
                             div()
                                 .text_size(px(10.))
                                 .text_color(rgb(if r.decision.eq_ignore_ascii_case("deny") {
-                                    colors::ERROR
+                                    colors::ERROR()
                                 } else {
-                                    colors::SUCCESS
+                                    colors::SUCCESS()
                                 }))
                                 .child(r.decision.clone()),
                         )
                         .child(
                             div()
                                 .text_size(px(10.))
-                                .text_color(rgb(colors::TEXT_TERTIARY))
+                                .text_color(rgb(colors::TEXT_TERTIARY()))
                                 .child(if r.enabled { "启用" } else { "停用" }),
                         ),
                 );
@@ -7567,7 +7810,7 @@ impl ClientApp {
                     .child(
                         div()
                             .text_size(px(10.))
-                            .text_color(rgb(colors::TEXT_TERTIARY))
+                            .text_color(rgb(colors::TEXT_TERTIARY()))
                             .child(format!(
                                 "自动审批规则（{} 条，Deny 优先）",
                                 self.approval_rules.len()
@@ -7584,25 +7827,25 @@ impl ClientApp {
             .rounded_lg()
             .border_1()
             .border_color(rgb(if self.pending_approvals.is_empty() {
-                colors::BORDER
+                colors::BORDER()
             } else {
-                colors::WARNING
+                colors::WARNING()
             }))
-            .bg(rgb(colors::BG_SECONDARY))
+            .bg(rgb(colors::BG_SECONDARY()))
             .flex()
             .flex_col()
             .gap_2()
             .child(
                 div()
                     .text_size(px(12.))
-                    .text_color(rgb(colors::TEXT_PRIMARY))
+                    .text_color(rgb(colors::TEXT_PRIMARY()))
                     .child(format!("待审批（{}）", self.pending_approvals.len())),
             );
         if self.pending_approvals.is_empty() {
             pending = pending.child(
                 div()
                     .text_size(px(11.))
-                    .text_color(rgb(colors::TEXT_TERTIARY))
+                    .text_color(rgb(colors::TEXT_TERTIARY()))
                     .child("没有挂起的审批请求"),
             );
         }
@@ -7615,8 +7858,8 @@ impl ClientApp {
                     .p_2()
                     .rounded_md()
                     .border_1()
-                    .border_color(rgb(colors::BORDER))
-                    .bg(rgb(colors::BG_PRIMARY))
+                    .border_color(rgb(colors::BORDER()))
+                    .bg(rgb(colors::BG_PRIMARY()))
                     .flex()
                     .flex_row()
                     .items_start()
@@ -7631,7 +7874,7 @@ impl ClientApp {
                             .child(
                                 div()
                                     .text_size(px(11.))
-                                    .text_color(rgb(colors::TEXT_PRIMARY))
+                                    .text_color(rgb(colors::TEXT_PRIMARY()))
                                     .child(a.description.clone()),
                             )
                             .child(
@@ -7647,10 +7890,10 @@ impl ClientApp {
                             .px_2()
                             .py_1()
                             .rounded_md()
-                            .bg(rgb(colors::SUCCESS))
+                            .bg(rgb(colors::SUCCESS()))
                             .cursor_pointer()
                             .text_size(px(10.))
-                            .text_color(rgb(colors::TEXT_PRIMARY))
+                            .text_color(rgb(colors::TEXT_PRIMARY()))
                             .child("允许")
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.respond_approval(rid_a.clone(), "approve", cx)
@@ -7662,10 +7905,10 @@ impl ClientApp {
                             .px_2()
                             .py_1()
                             .rounded_md()
-                            .bg(rgb(colors::ERROR))
+                            .bg(rgb(colors::ERROR()))
                             .cursor_pointer()
                             .text_size(px(10.))
-                            .text_color(rgb(colors::TEXT_PRIMARY))
+                            .text_color(rgb(colors::TEXT_PRIMARY()))
                             .child("拒绝")
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.respond_approval(rid_d.clone(), "deny", cx)
@@ -7684,7 +7927,7 @@ impl ClientApp {
                         .id(("ap-fp", ix))
                         .w_full()
                         .text_size(px(10.))
-                        .text_color(rgb(colors::TEXT_SECONDARY))
+                        .text_color(rgb(colors::TEXT_SECONDARY()))
                         .child(fp.clone()),
                 );
             }
@@ -7693,15 +7936,15 @@ impl ClientApp {
                     .p_3()
                     .rounded_lg()
                     .border_1()
-                    .border_color(rgb(colors::BORDER))
-                    .bg(rgb(colors::BG_SECONDARY))
+                    .border_color(rgb(colors::BORDER()))
+                    .bg(rgb(colors::BG_SECONDARY()))
                     .flex()
                     .flex_col()
                     .gap_2()
                     .child(
                         div()
                             .text_size(px(12.))
-                            .text_color(rgb(colors::TEXT_PRIMARY))
+                            .text_color(rgb(colors::TEXT_PRIMARY()))
                             .child(format!(
                                 "待确认操作指纹（{}）",
                                 self.pending_confirmations.len()
@@ -7716,22 +7959,22 @@ impl ClientApp {
             .p_3()
             .rounded_lg()
             .border_1()
-            .border_color(rgb(colors::BORDER))
-            .bg(rgb(colors::BG_SECONDARY))
+            .border_color(rgb(colors::BORDER()))
+            .bg(rgb(colors::BG_SECONDARY()))
             .flex()
             .flex_col()
             .gap_2()
             .child(
                 div()
                     .text_size(px(12.))
-                    .text_color(rgb(colors::TEXT_PRIMARY))
+                    .text_color(rgb(colors::TEXT_PRIMARY()))
                     .child(format!("审计记录（{}）", self.approval_history.len())),
             );
         if self.approval_history.is_empty() {
             hist = hist.child(
                 div()
                     .text_size(px(11.))
-                    .text_color(rgb(colors::TEXT_TERTIARY))
+                    .text_color(rgb(colors::TEXT_TERTIARY()))
                     .child("暂无审批记录"),
             );
         }
@@ -7754,7 +7997,7 @@ impl ClientApp {
                             .flex_1()
                             .min_w_0()
                             .text_size(px(10.))
-                            .text_color(rgb(colors::TEXT_SECONDARY))
+                            .text_color(rgb(colors::TEXT_SECONDARY()))
                             .whitespace_nowrap()
                             .text_ellipsis()
                             .overflow_hidden()
@@ -7764,11 +8007,11 @@ impl ClientApp {
                         div()
                             .text_size(px(10.))
                             .text_color(rgb(if h.decision.eq_ignore_ascii_case("deny") {
-                                colors::ERROR
+                                colors::ERROR()
                             } else if h.decision.eq_ignore_ascii_case("approve") {
-                                colors::SUCCESS
+                                colors::SUCCESS()
                             } else {
-                                colors::TEXT_TERTIARY
+                                colors::TEXT_TERTIARY()
                             }))
                             .child(h.decision.clone()),
                     )
@@ -7776,9 +8019,9 @@ impl ClientApp {
                         div()
                             .text_size(px(10.))
                             .text_color(rgb(match h.result {
-                                Some(true) => colors::SUCCESS,
-                                Some(false) => colors::ERROR,
-                                None => colors::TEXT_TERTIARY,
+                                Some(true) => colors::SUCCESS(),
+                                Some(false) => colors::ERROR(),
+                                None => colors::TEXT_TERTIARY(),
                             }))
                             .child(match h.result {
                                 Some(true) => "执行成功".to_string(),
@@ -7799,7 +8042,7 @@ impl ClientApp {
                     .px_4()
                     .py_3()
                     .border_b_1()
-                    .border_color(rgb(colors::BORDER))
+                    .border_color(rgb(colors::BORDER()))
                     .flex()
                     .flex_row()
                     .items_center()
@@ -7819,19 +8062,19 @@ impl ClientApp {
                                         svg()
                                             .path(IconName::Shield.path())
                                             .size(px(16.))
-                                            .text_color(rgb(colors::TEXT_SECONDARY)),
+                                            .text_color(rgb(colors::TEXT_SECONDARY())),
                                     )
                                     .child(
                                         div()
                                             .text_size(px(15.))
-                                            .text_color(rgb(colors::TEXT_PRIMARY))
+                                            .text_color(rgb(colors::TEXT_PRIMARY()))
                                             .child("审批"),
                                     ),
                             )
                             .child(
                                 div()
                                     .text_size(px(11.))
-                                    .text_color(rgb(colors::TEXT_TERTIARY))
+                                    .text_color(rgb(colors::TEXT_TERTIARY()))
                                     .child(self.approvals_page_status.clone()),
                             ),
                     )
@@ -7842,10 +8085,10 @@ impl ClientApp {
                             .py_1()
                             .rounded_md()
                             .border_1()
-                            .border_color(rgb(colors::BORDER))
+                            .border_color(rgb(colors::BORDER()))
                             .cursor_pointer()
                             .text_size(px(11.))
-                            .text_color(rgb(colors::TEXT_SECONDARY))
+                            .text_color(rgb(colors::TEXT_SECONDARY()))
                             .child("刷新")
                             .on_click(cx.listener(|this, _, _, cx| this.load_approval_page(cx))),
                     ),
@@ -7891,8 +8134,8 @@ impl ClientApp {
                 .p_3()
                 .rounded_lg()
                 .border_1()
-                .border_color(rgb(colors::BORDER))
-                .bg(rgb(colors::BG_SECONDARY))
+                .border_color(rgb(colors::BORDER()))
+                .bg(rgb(colors::BG_SECONDARY()))
                 .flex()
                 .flex_col()
                 .gap_2()
@@ -7906,13 +8149,13 @@ impl ClientApp {
                         .child(
                             div()
                                 .text_size(px(12.))
-                                .text_color(rgb(colors::TEXT_PRIMARY))
+                                .text_color(rgb(colors::TEXT_PRIMARY()))
                                 .child(format!("近 {} 天模型用量", self.usage_days)),
                         )
                         .child(
                             div()
                                 .text_size(px(10.))
-                                .text_color(rgb(colors::TEXT_TERTIARY))
+                                .text_color(rgb(colors::TEXT_TERTIARY()))
                                 .child(format!(
                                     "{} 次调用 · 总 token {} · 缓存命中 {:.1}%",
                                     group_thousands(t.calls),
@@ -7929,7 +8172,7 @@ impl ClientApp {
                         .gap_3()
                         .flex_wrap()
                         .text_size(px(10.))
-                        .text_color(rgb(colors::TEXT_TERTIARY))
+                        .text_color(rgb(colors::TEXT_TERTIARY()))
                         .child(format!("未命中输入 {}", group_thousands(t.uncached_input)))
                         .child(format!("缓存命中输入 {}", group_thousands(t.cached_input)))
                         .child(format!("输出 {}", group_thousands(t.completion_tokens))),
@@ -7949,7 +8192,7 @@ impl ClientApp {
                                     .flex_1()
                                     .min_w_0()
                                     .text_size(px(11.))
-                                    .text_color(rgb(colors::TEXT_SECONDARY))
+                                    .text_color(rgb(colors::TEXT_SECONDARY()))
                                     .whitespace_nowrap()
                                     .text_ellipsis()
                                     .overflow_hidden()
@@ -7958,7 +8201,7 @@ impl ClientApp {
                             .child(
                                 div()
                                     .text_size(px(10.))
-                                    .text_color(rgb(colors::TEXT_TERTIARY))
+                                    .text_color(rgb(colors::TEXT_TERTIARY()))
                                     .child(format!(
                                         "{} 次 · {} tok · 命中 {:.0}%",
                                         group_thousands(g.calls),
@@ -7977,8 +8220,8 @@ impl ClientApp {
             .p_3()
             .rounded_lg()
             .border_1()
-            .border_color(rgb(colors::BORDER))
-            .bg(rgb(colors::BG_SECONDARY))
+            .border_color(rgb(colors::BORDER()))
+            .bg(rgb(colors::BG_SECONDARY()))
             .flex()
             .flex_col()
             .gap_2()
@@ -7991,16 +8234,16 @@ impl ClientApp {
                     .child(
                         div()
                             .text_size(px(12.))
-                            .text_color(rgb(colors::TEXT_PRIMARY))
+                            .text_color(rgb(colors::TEXT_PRIMARY()))
                             .child("调度器"),
                     )
                     .child(
                         div()
                             .text_size(px(10.))
                             .text_color(rgb(if self.scheduler_running {
-                                colors::SUCCESS
+                                colors::SUCCESS()
                             } else {
-                                colors::TEXT_TERTIARY
+                                colors::TEXT_TERTIARY()
                             }))
                             .child(if self.scheduler_running {
                                 "运行中"
@@ -8013,7 +8256,7 @@ impl ClientApp {
             sched = sched.child(
                 div()
                     .text_size(px(10.))
-                    .text_color(rgb(colors::ACCENT))
+                    .text_color(rgb(colors::ACCENT()))
                     .child(format!("正在执行 {id}")),
             );
         }
@@ -8021,7 +8264,7 @@ impl ClientApp {
             sched = sched.child(
                 div()
                     .text_size(px(11.))
-                    .text_color(rgb(colors::TEXT_TERTIARY))
+                    .text_color(rgb(colors::TEXT_TERTIARY()))
                     .child("没有已注册的定时任务"),
             );
         }
@@ -8038,7 +8281,7 @@ impl ClientApp {
                             .flex_1()
                             .min_w_0()
                             .text_size(px(11.))
-                            .text_color(rgb(colors::TEXT_SECONDARY))
+                            .text_color(rgb(colors::TEXT_SECONDARY()))
                             .whitespace_nowrap()
                             .text_ellipsis()
                             .overflow_hidden()
@@ -8047,7 +8290,7 @@ impl ClientApp {
                     .child(
                         div()
                             .text_size(px(10.))
-                            .text_color(rgb(colors::TEXT_TERTIARY))
+                            .text_color(rgb(colors::TEXT_TERTIARY()))
                             .child(format!(
                                 "{} · 跑 {} 次 · 上次 {}前",
                                 format_interval(t.interval_secs),
@@ -8058,7 +8301,7 @@ impl ClientApp {
                     .child(
                         div()
                             .text_size(px(10.))
-                            .text_color(rgb(colors::TEXT_TERTIARY))
+                            .text_color(rgb(colors::TEXT_TERTIARY()))
                             .child(format!("下次 {}后", format_secs_short(t.next_due_in_secs))),
                     ),
             );
@@ -8077,21 +8320,21 @@ impl ClientApp {
                     .rounded_md()
                     .border_1()
                     .border_color(rgb(if is_cur {
-                        colors::ACCENT
+                        colors::ACCENT()
                     } else {
-                        colors::BORDER
+                        colors::BORDER()
                     }))
                     .bg(rgb(if is_cur {
-                        colors::BG_TERTIARY
+                        colors::BG_TERTIARY()
                     } else {
-                        colors::BG_SECONDARY
+                        colors::BG_SECONDARY()
                     }))
                     .cursor_pointer()
                     .text_size(px(10.))
                     .text_color(rgb(if is_cur {
-                        colors::ACCENT
+                        colors::ACCENT()
                     } else {
-                        colors::TEXT_SECONDARY
+                        colors::TEXT_SECONDARY()
                     }))
                     .child(format!("{d} 天"))
                     .on_click(cx.listener(move |this, _, _, cx| {
@@ -8110,7 +8353,7 @@ impl ClientApp {
                     .px_4()
                     .py_3()
                     .border_b_1()
-                    .border_color(rgb(colors::BORDER))
+                    .border_color(rgb(colors::BORDER()))
                     .flex()
                     .flex_row()
                     .items_center()
@@ -8130,19 +8373,19 @@ impl ClientApp {
                                         svg()
                                             .path(IconName::ChartLine.path())
                                             .size(px(16.))
-                                            .text_color(rgb(colors::TEXT_SECONDARY)),
+                                            .text_color(rgb(colors::TEXT_SECONDARY())),
                                     )
                                     .child(
                                         div()
                                             .text_size(px(15.))
-                                            .text_color(rgb(colors::TEXT_PRIMARY))
+                                            .text_color(rgb(colors::TEXT_PRIMARY()))
                                             .child("洞察"),
                                     ),
                             )
                             .child(
                                 div()
                                     .text_size(px(11.))
-                                    .text_color(rgb(colors::TEXT_TERTIARY))
+                                    .text_color(rgb(colors::TEXT_TERTIARY()))
                                     .child(self.insights_status.clone()),
                             ),
                     )
@@ -8160,10 +8403,10 @@ impl ClientApp {
                                     .py_1()
                                     .rounded_md()
                                     .border_1()
-                                    .border_color(rgb(colors::BORDER))
+                                    .border_color(rgb(colors::BORDER()))
                                     .cursor_pointer()
                                     .text_size(px(10.))
-                                    .text_color(rgb(colors::TEXT_SECONDARY))
+                                    .text_color(rgb(colors::TEXT_SECONDARY()))
                                     .child("刷新")
                                     .on_click(cx.listener(|this, _, _, cx| this.load_insights(cx))),
                             ),
@@ -8206,12 +8449,12 @@ impl ClientApp {
                         svg()
                             .path(IconName::Brain.path())
                             .size(px(32.))
-                            .text_color(rgb(colors::TEXT_TERTIARY)),
+                            .text_color(rgb(colors::TEXT_TERTIARY())),
                     )
                     .child(
                         div()
                             .text_size(px(13.))
-                            .text_color(rgb(colors::TEXT_TERTIARY))
+                            .text_color(rgb(colors::TEXT_TERTIARY()))
                             .child("暂无记忆——自演化综述任务会在会话结束后写入"),
                     ),
             );
@@ -8227,13 +8470,13 @@ impl ClientApp {
                     .child(
                         div()
                             .text_size(px(10.))
-                            .text_color(rgb(colors::TEXT_TERTIARY))
+                            .text_color(rgb(colors::TEXT_TERTIARY()))
                             .child(dir.clone()),
                     )
                     .child(
                         div()
                             .text_size(px(10.))
-                            .text_color(rgb(colors::TEXT_TERTIARY))
+                            .text_color(rgb(colors::TEXT_TERTIARY()))
                             .child(format!("· {}", items.len())),
                     ),
             );
@@ -8242,11 +8485,11 @@ impl ClientApp {
                 let uri = m.uri.clone();
                 // 重要度三档配色：≥0.7 绿（稳固）/ ≥0.4 次级 / 其余红（待巩固）
                 let imp_color = if m.importance >= 0.7 {
-                    colors::SUCCESS
+                    colors::SUCCESS()
                 } else if m.importance >= 0.4 {
-                    colors::TEXT_SECONDARY
+                    colors::TEXT_SECONDARY()
                 } else {
-                    colors::ERROR
+                    colors::ERROR()
                 };
                 section = section.child(
                     div()
@@ -8256,9 +8499,9 @@ impl ClientApp {
                         .py_2()
                         .rounded_lg()
                         .bg(rgb(if is_sel {
-                            colors::BG_TERTIARY
+                            colors::BG_TERTIARY()
                         } else {
-                            colors::BG_SECONDARY
+                            colors::BG_SECONDARY()
                         }))
                         .cursor_pointer()
                         .flex()
@@ -8276,9 +8519,9 @@ impl ClientApp {
                                         .min_w_0()
                                         .text_size(px(12.))
                                         .text_color(rgb(if is_sel {
-                                            colors::ACCENT
+                                            colors::ACCENT()
                                         } else {
-                                            colors::TEXT_PRIMARY
+                                            colors::TEXT_PRIMARY()
                                         }))
                                         .whitespace_nowrap()
                                         .text_ellipsis()
@@ -8295,7 +8538,7 @@ impl ClientApp {
                         .child(
                             div()
                                 .text_size(px(10.))
-                                .text_color(rgb(colors::TEXT_TERTIARY))
+                                .text_color(rgb(colors::TEXT_TERTIARY()))
                                 .whitespace_nowrap()
                                 .text_ellipsis()
                                 .overflow_hidden()
@@ -8329,12 +8572,12 @@ impl ClientApp {
                     svg()
                         .path(IconName::Brain.path())
                         .size(px(40.))
-                        .text_color(rgb(colors::TEXT_TERTIARY)),
+                        .text_color(rgb(colors::TEXT_TERTIARY())),
                 )
                 .child(
                     div()
                         .text_size(px(13.))
-                        .text_color(rgb(colors::TEXT_TERTIARY))
+                        .text_color(rgb(colors::TEXT_TERTIARY()))
                         .child("选择一条记忆查看三层内容"),
                 )
                 .into_any_element(),
@@ -8343,20 +8586,20 @@ impl ClientApp {
                     .px_4()
                     .py_3()
                     .border_b_1()
-                    .border_color(rgb(colors::BORDER))
+                    .border_color(rgb(colors::BORDER()))
                     .flex()
                     .flex_col()
                     .gap_1()
                     .child(
                         div()
                             .text_size(px(14.))
-                            .text_color(rgb(colors::TEXT_PRIMARY))
+                            .text_color(rgb(colors::TEXT_PRIMARY()))
                             .child(m.name.clone()),
                     )
                     .child(
                         div()
                             .text_size(px(10.))
-                            .text_color(rgb(colors::TEXT_TERTIARY))
+                            .text_color(rgb(colors::TEXT_TERTIARY()))
                             .child(m.relative_path.clone()),
                     )
                     .child(
@@ -8367,7 +8610,7 @@ impl ClientApp {
                             .gap_2()
                             .flex_wrap()
                             .text_size(px(10.))
-                            .text_color(rgb(colors::TEXT_TERTIARY))
+                            .text_color(rgb(colors::TEXT_TERTIARY()))
                             .child(format!("重要度 {:.2}", m.importance))
                             .child(if m.updated_at.is_empty() {
                                 String::new()
@@ -8399,7 +8642,7 @@ impl ClientApp {
                             .id("mem-detail-toggle")
                             .cursor_pointer()
                             .text_size(px(10.))
-                            .text_color(rgb(colors::ACCENT))
+                            .text_color(rgb(colors::ACCENT()))
                             .child(label)
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.memory_detail_open = !this.memory_detail_open;
@@ -8410,7 +8653,7 @@ impl ClientApp {
                         body = body.child(
                             div()
                                 .text_size(px(11.))
-                                .text_color(rgb(colors::TEXT_SECONDARY))
+                                .text_color(rgb(colors::TEXT_SECONDARY()))
                                 .child(t.clone()),
                         );
                     }
@@ -8418,7 +8661,7 @@ impl ClientApp {
                 head = head.child(
                     div()
                         .text_size(px(10.))
-                        .text_color(rgb(colors::TEXT_TERTIARY))
+                        .text_color(rgb(colors::TEXT_TERTIARY()))
                         .child(m.uri.clone()),
                 );
                 div()
@@ -8440,7 +8683,7 @@ impl ClientApp {
                     .px_4()
                     .py_3()
                     .border_b_1()
-                    .border_color(rgb(colors::BORDER))
+                    .border_color(rgb(colors::BORDER()))
                     .flex()
                     .flex_row()
                     .items_center()
@@ -8460,19 +8703,19 @@ impl ClientApp {
                                         svg()
                                             .path(IconName::Brain.path())
                                             .size(px(16.))
-                                            .text_color(rgb(colors::TEXT_SECONDARY)),
+                                            .text_color(rgb(colors::TEXT_SECONDARY())),
                                     )
                                     .child(
                                         div()
                                             .text_size(px(15.))
-                                            .text_color(rgb(colors::TEXT_PRIMARY))
+                                            .text_color(rgb(colors::TEXT_PRIMARY()))
                                             .child("记忆"),
                                     ),
                             )
                             .child(
                                 div()
                                     .text_size(px(11.))
-                                    .text_color(rgb(colors::TEXT_TERTIARY))
+                                    .text_color(rgb(colors::TEXT_TERTIARY()))
                                     .child(self.memories_status.clone()),
                             ),
                     )
@@ -8483,10 +8726,10 @@ impl ClientApp {
                             .py_1()
                             .rounded_md()
                             .border_1()
-                            .border_color(rgb(colors::BORDER))
+                            .border_color(rgb(colors::BORDER()))
                             .cursor_pointer()
                             .text_size(px(11.))
-                            .text_color(rgb(colors::TEXT_SECONDARY))
+                            .text_color(rgb(colors::TEXT_SECONDARY()))
                             .child("刷新")
                             .on_click(cx.listener(|this, _, _, cx| this.load_memories(cx))),
                     ),
@@ -8504,8 +8747,8 @@ impl ClientApp {
                             .flex()
                             .flex_col()
                             .border_r_1()
-                            .border_color(rgb(colors::BORDER))
-                            .bg(rgb(colors::BG_SECONDARY))
+                            .border_color(rgb(colors::BORDER()))
+                            .bg(rgb(colors::BG_SECONDARY()))
                             .child(list.overflow_y_scrollbar()),
                     )
                     .child(div().flex_1().min_w_0().h_full().child(detail)),
@@ -8521,7 +8764,7 @@ impl ClientApp {
             .px_4()
             .py_3()
             .border_b_1()
-            .border_color(rgb(colors::BORDER))
+            .border_color(rgb(colors::BORDER()))
             .flex()
             .flex_row()
             .items_center()
@@ -8541,19 +8784,19 @@ impl ClientApp {
                                 svg()
                                     .path(IconName::CalendarClock.path())
                                     .size(px(16.))
-                                    .text_color(rgb(colors::TEXT_SECONDARY)),
+                                    .text_color(rgb(colors::TEXT_SECONDARY())),
                             )
                             .child(
                                 div()
                                     .text_size(px(15.))
-                                    .text_color(rgb(colors::TEXT_PRIMARY))
+                                    .text_color(rgb(colors::TEXT_PRIMARY()))
                                     .child("定时任务"),
                             ),
                     )
                     .child(
                         div()
                             .text_size(px(11.))
-                            .text_color(rgb(colors::TEXT_TERTIARY))
+                            .text_color(rgb(colors::TEXT_TERTIARY()))
                             .child(
                                 "按执行间隔调用智能体在指定工作区工作；\
                                  服务停机期间超期的任务重启后补跑一次",
@@ -8567,10 +8810,10 @@ impl ClientApp {
                     .py_1()
                     .rounded_md()
                     .border_1()
-                    .border_color(rgb(colors::BORDER))
+                    .border_color(rgb(colors::BORDER()))
                     .cursor_pointer()
                     .text_size(px(11.))
-                    .text_color(rgb(colors::TEXT_SECONDARY))
+                    .text_color(rgb(colors::TEXT_SECONDARY()))
                     .child(if self.sched_form_open {
                         "取消"
                     } else {
@@ -8589,7 +8832,7 @@ impl ClientApp {
             body = body.child(
                 div()
                     .text_size(px(11.))
-                    .text_color(rgb(colors::TEXT_TERTIARY))
+                    .text_color(rgb(colors::TEXT_TERTIARY()))
                     .child(self.sched_status.clone()),
             );
         }
@@ -8607,21 +8850,21 @@ impl ClientApp {
                         .rounded_md()
                         .border_1()
                         .border_color(rgb(if is_cur {
-                            colors::ACCENT
+                            colors::ACCENT()
                         } else {
-                            colors::BORDER
+                            colors::BORDER()
                         }))
                         .bg(rgb(if is_cur {
-                            colors::BG_TERTIARY
+                            colors::BG_TERTIARY()
                         } else {
-                            colors::BG_SECONDARY
+                            colors::BG_SECONDARY()
                         }))
                         .cursor_pointer()
                         .text_size(px(11.))
                         .text_color(rgb(if is_cur {
-                            colors::ACCENT
+                            colors::ACCENT()
                         } else {
-                            colors::TEXT_SECONDARY
+                            colors::TEXT_SECONDARY()
                         }))
                         .child(label)
                         .on_click(cx.listener(move |this, _, _, cx| {
@@ -8634,8 +8877,8 @@ impl ClientApp {
                 .p_3()
                 .rounded_lg()
                 .border_1()
-                .border_color(rgb(colors::BORDER))
-                .bg(rgb(colors::BG_SECONDARY))
+                .border_color(rgb(colors::BORDER()))
+                .bg(rgb(colors::BG_SECONDARY()))
                 .flex()
                 .flex_col()
                 .gap_2()
@@ -8653,10 +8896,10 @@ impl ClientApp {
                         .px_3()
                         .py_2()
                         .rounded_md()
-                        .bg(rgb(colors::ACCENT))
+                        .bg(rgb(colors::ACCENT()))
                         .cursor_pointer()
                         .text_size(px(11.))
-                        .text_color(rgb(colors::TEXT_PRIMARY))
+                        .text_color(rgb(colors::TEXT_PRIMARY()))
                         .child("创建")
                         .on_click(cx.listener(|this, _, _, cx| this.create_sched_task(cx))),
                 );
@@ -8676,12 +8919,12 @@ impl ClientApp {
                         svg()
                             .path(IconName::CalendarClock.path())
                             .size(px(32.))
-                            .text_color(rgb(colors::TEXT_TERTIARY)),
+                            .text_color(rgb(colors::TEXT_TERTIARY())),
                     )
                     .child(
                         div()
                             .text_size(px(13.))
-                            .text_color(rgb(colors::TEXT_TERTIARY))
+                            .text_color(rgb(colors::TEXT_TERTIARY()))
                             .child(
                                 "暂无定时任务——可让智能体用 schedule_task 工具创建，或在此手动创建",
                             ),
@@ -8695,8 +8938,8 @@ impl ClientApp {
                     .p_3()
                     .rounded_lg()
                     .border_1()
-                    .border_color(rgb(colors::BORDER))
-                    .bg(rgb(colors::BG_SECONDARY))
+                    .border_color(rgb(colors::BORDER()))
+                    .bg(rgb(colors::BG_SECONDARY()))
                     .flex()
                     .flex_row()
                     .items_start()
@@ -8717,7 +8960,7 @@ impl ClientApp {
                                     .child(
                                         div()
                                             .text_size(px(13.))
-                                            .text_color(rgb(colors::TEXT_PRIMARY))
+                                            .text_color(rgb(colors::TEXT_PRIMARY()))
                                             .child(t.name.clone()),
                                     )
                                     .child(
@@ -8726,17 +8969,17 @@ impl ClientApp {
                                             .py_1()
                                             .rounded_md()
                                             .border_1()
-                                            .border_color(rgb(colors::BORDER))
-                                            .bg(rgb(colors::BG_TERTIARY))
+                                            .border_color(rgb(colors::BORDER()))
+                                            .bg(rgb(colors::BG_TERTIARY()))
                                             .text_size(px(10.))
-                                            .text_color(rgb(colors::ACCENT))
+                                            .text_color(rgb(colors::ACCENT()))
                                             .child(format_interval(t.interval_secs)),
                                     ),
                             )
                             .child(
                                 div()
                                     .text_size(px(11.))
-                                    .text_color(rgb(colors::TEXT_TERTIARY))
+                                    .text_color(rgb(colors::TEXT_TERTIARY()))
                                     .child(format!(
                                         "工作区: {}",
                                         if t.workspace.is_empty() {
@@ -8749,7 +8992,7 @@ impl ClientApp {
                             .child(
                                 div()
                                     .text_size(px(11.))
-                                    .text_color(rgb(colors::TEXT_SECONDARY))
+                                    .text_color(rgb(colors::TEXT_SECONDARY()))
                                     .child(ellipsis(&t.prompt, 140)),
                             )
                             .child(
@@ -8759,7 +9002,7 @@ impl ClientApp {
                                     .items_center()
                                     .gap_2()
                                     .text_size(px(10.))
-                                    .text_color(rgb(colors::TEXT_TERTIARY))
+                                    .text_color(rgb(colors::TEXT_TERTIARY()))
                                     .child(format!(
                                         "下次(约): {}",
                                         t.next_run_at
@@ -8785,7 +9028,7 @@ impl ClientApp {
                             .rounded_md()
                             .cursor_pointer()
                             .text_size(px(11.))
-                            .text_color(rgb(colors::TEXT_TERTIARY))
+                            .text_color(rgb(colors::TEXT_TERTIARY()))
                             .child("删除")
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.delete_sched_task(id.clone(), cx)
@@ -8795,7 +9038,7 @@ impl ClientApp {
                     card = card.child(
                         div()
                             .text_size(px(10.))
-                            .text_color(rgb(colors::TEXT_TERTIARY))
+                            .text_color(rgb(colors::TEXT_TERTIARY()))
                             .child(format!("结果: {}", ellipsis(res, 120))),
                     );
                 }
@@ -8839,7 +9082,7 @@ impl ClientApp {
             .px_4()
             .py_3()
             .border_b_1()
-            .border_color(rgb(colors::BORDER))
+            .border_color(rgb(colors::BORDER()))
             .flex()
             .flex_row()
             .items_center()
@@ -8849,7 +9092,7 @@ impl ClientApp {
             stats_bar = stats_bar.child(
                 div()
                     .text_size(px(12.))
-                    .text_color(rgb(colors::TEXT_SECONDARY))
+                    .text_color(rgb(colors::TEXT_SECONDARY()))
                     .child(format!(
                         "技能累计调用 {} 次",
                         group_thousands(self.skills_total_calls)
@@ -8863,10 +9106,10 @@ impl ClientApp {
                         .py_1()
                         .rounded_md()
                         .border_1()
-                        .border_color(rgb(colors::BORDER))
-                        .bg(rgb(colors::BG_SECONDARY))
+                        .border_color(rgb(colors::BORDER()))
+                        .bg(rgb(colors::BG_SECONDARY()))
                         .text_size(px(10.))
-                        .text_color(rgb(colors::TEXT_SECONDARY))
+                        .text_color(rgb(colors::TEXT_SECONDARY()))
                         .child(format!("{} {} 次", st.skill_id, st.total_calls)),
                 );
             }
@@ -8875,7 +9118,7 @@ impl ClientApp {
             stats_bar = stats_bar.child(
                 div()
                     .text_size(px(12.))
-                    .text_color(rgb(colors::TEXT_TERTIARY))
+                    .text_color(rgb(colors::TEXT_TERTIARY()))
                     .child("暂无技能调用统计——智能体调用技能后，这里会展示采纳排行与平均耗时"),
             );
         }
@@ -8894,12 +9137,12 @@ impl ClientApp {
                         svg()
                             .path(IconName::Lightbulb.path())
                             .size(px(32.))
-                            .text_color(rgb(colors::TEXT_TERTIARY)),
+                            .text_color(rgb(colors::TEXT_TERTIARY())),
                     )
                     .child(
                         div()
                             .text_size(px(13.))
-                            .text_color(rgb(colors::TEXT_TERTIARY))
+                            .text_color(rgb(colors::TEXT_TERTIARY()))
                             .child(if self.skills.is_empty() {
                                 "暂无学习方法论技能"
                             } else {
@@ -8919,9 +9162,9 @@ impl ClientApp {
                 .py_2()
                 .rounded_lg()
                 .bg(rgb(if is_sel {
-                    colors::BG_TERTIARY
+                    colors::BG_TERTIARY()
                 } else {
-                    colors::BG_SECONDARY
+                    colors::BG_SECONDARY()
                 }))
                 .cursor_pointer()
                 .flex()
@@ -8931,16 +9174,16 @@ impl ClientApp {
                     div()
                         .text_size(px(13.))
                         .text_color(rgb(if is_sel {
-                            colors::ACCENT
+                            colors::ACCENT()
                         } else {
-                            colors::TEXT_PRIMARY
+                            colors::TEXT_PRIMARY()
                         }))
                         .child(skill.name.clone()),
                 )
                 .child(
                     div()
                         .text_size(px(11.))
-                        .text_color(rgb(colors::TEXT_TERTIARY))
+                        .text_color(rgb(colors::TEXT_TERTIARY()))
                         .whitespace_nowrap()
                         .text_ellipsis()
                         .overflow_hidden()
@@ -8961,7 +9204,7 @@ impl ClientApp {
                 row = row.child(
                     div()
                         .text_size(px(10.))
-                        .text_color(rgb(colors::TEXT_TERTIARY))
+                        .text_color(rgb(colors::TEXT_TERTIARY()))
                         .child(line),
                 );
             }
@@ -8969,7 +9212,7 @@ impl ClientApp {
                 row = row.child(
                     div()
                         .text_size(px(10.))
-                        .text_color(rgb(colors::TEXT_TERTIARY))
+                        .text_color(rgb(colors::TEXT_TERTIARY()))
                         .child(format!("更新于 {}", short_stamp(t))),
                 );
             }
@@ -8996,12 +9239,12 @@ impl ClientApp {
                     svg()
                         .path(IconName::Lightbulb.path())
                         .size(px(40.))
-                        .text_color(rgb(colors::TEXT_TERTIARY)),
+                        .text_color(rgb(colors::TEXT_TERTIARY())),
                 )
                 .child(
                     div()
                         .text_size(px(13.))
-                        .text_color(rgb(colors::TEXT_TERTIARY))
+                        .text_color(rgb(colors::TEXT_TERTIARY()))
                         .child("选择一个技能查看详情"),
                 )
                 .into_any_element(),
@@ -9019,17 +9262,17 @@ impl ClientApp {
                             .py_1()
                             .rounded_md()
                             .border_1()
-                            .border_color(rgb(colors::BORDER))
-                            .bg(rgb(colors::BG_SECONDARY))
+                            .border_color(rgb(colors::BORDER()))
+                            .bg(rgb(colors::BG_SECONDARY()))
                             .text_size(px(10.))
-                            .text_color(rgb(colors::TEXT_TERTIARY))
+                            .text_color(rgb(colors::TEXT_TERTIARY()))
                             .child(format!("v{}", skill.version)),
                     );
                 if let Some(t) = &skill.updated_at {
                     chips = chips.child(
                         div()
                             .text_size(px(10.))
-                            .text_color(rgb(colors::TEXT_TERTIARY))
+                            .text_color(rgb(colors::TEXT_TERTIARY()))
                             .child(format!("更新于 {}", short_stamp(t))),
                     );
                 }
@@ -9042,20 +9285,20 @@ impl ClientApp {
                             .px_4()
                             .py_3()
                             .border_b_1()
-                            .border_color(rgb(colors::BORDER))
+                            .border_color(rgb(colors::BORDER()))
                             .flex()
                             .flex_col()
                             .gap_1()
                             .child(
                                 div()
                                     .text_size(px(15.))
-                                    .text_color(rgb(colors::TEXT_PRIMARY))
+                                    .text_color(rgb(colors::TEXT_PRIMARY()))
                                     .child(skill.name.clone()),
                             )
                             .child(
                                 div()
                                     .text_size(px(12.))
-                                    .text_color(rgb(colors::TEXT_SECONDARY))
+                                    .text_color(rgb(colors::TEXT_SECONDARY()))
                                     .child(skill.description.clone()),
                             )
                             .child(chips),
@@ -9063,7 +9306,7 @@ impl ClientApp {
                     .child(div().flex_1().min_h_0().p_4().child(if content.is_empty() {
                         div()
                             .text_size(px(12.))
-                            .text_color(rgb(colors::TEXT_TERTIARY))
+                            .text_color(rgb(colors::TEXT_TERTIARY()))
                             .child(
                                 if self.skills_status.starts_with("加载技能详情失败")
                                     || self.skills_status.starts_with("正在加载")
@@ -9101,14 +9344,14 @@ impl ClientApp {
                         .flex()
                         .flex_col()
                         .border_r_1()
-                        .border_color(rgb(colors::BORDER))
-                        .bg(rgb(colors::BG_SECONDARY))
+                        .border_color(rgb(colors::BORDER()))
+                        .bg(rgb(colors::BG_SECONDARY()))
                         .child(
                             div()
                                 .px_4()
                                 .py_3()
                                 .border_b_1()
-                                .border_color(rgb(colors::BORDER))
+                                .border_color(rgb(colors::BORDER()))
                                 .flex()
                                 .flex_col()
                                 .gap_1()
@@ -9122,19 +9365,19 @@ impl ClientApp {
                                             svg()
                                                 .path(IconName::Lightbulb.path())
                                                 .size(px(16.))
-                                                .text_color(rgb(colors::TEXT_SECONDARY)),
+                                                .text_color(rgb(colors::TEXT_SECONDARY())),
                                         )
                                         .child(
                                             div()
                                                 .text_size(px(15.))
-                                                .text_color(rgb(colors::TEXT_PRIMARY))
+                                                .text_color(rgb(colors::TEXT_PRIMARY()))
                                                 .child("技能"),
                                         ),
                                 )
                                 .child(
                                     div()
                                         .text_size(px(11.))
-                                        .text_color(rgb(colors::TEXT_TERTIARY))
+                                        .text_color(rgb(colors::TEXT_TERTIARY()))
                                         .child("自动学习方法论（GEPA 总结），只读查看"),
                                 )
                                 .child(
@@ -9142,8 +9385,8 @@ impl ClientApp {
                                         .w_full()
                                         .rounded_md()
                                         .border_1()
-                                        .border_color(rgb(colors::BORDER))
-                                        .bg(rgb(colors::BG_PRIMARY))
+                                        .border_color(rgb(colors::BORDER()))
+                                        .bg(rgb(colors::BG_PRIMARY()))
                                         .px_2()
                                         .py_1()
                                         .child(Input::new(&self.skills_search).appearance(false)),
@@ -9198,12 +9441,12 @@ impl ClientApp {
                         svg()
                             .path(IconName::Wrench.path())
                             .size(px(32.))
-                            .text_color(rgb(colors::TEXT_TERTIARY)),
+                            .text_color(rgb(colors::TEXT_TERTIARY())),
                     )
                     .child(
                         div()
                             .text_size(px(13.))
-                            .text_color(rgb(colors::TEXT_TERTIARY))
+                            .text_color(rgb(colors::TEXT_TERTIARY()))
                             .child(if self.tools.is_empty() {
                                 "暂无可用工具"
                             } else {
@@ -9223,9 +9466,9 @@ impl ClientApp {
                     .py_2()
                     .rounded_lg()
                     .bg(rgb(if is_sel {
-                        colors::BG_TERTIARY
+                        colors::BG_TERTIARY()
                     } else {
-                        colors::BG_SECONDARY
+                        colors::BG_SECONDARY()
                     }))
                     .cursor_pointer()
                     .flex()
@@ -9235,16 +9478,16 @@ impl ClientApp {
                         div()
                             .text_size(px(13.))
                             .text_color(rgb(if is_sel {
-                                colors::ACCENT
+                                colors::ACCENT()
                             } else {
-                                colors::TEXT_PRIMARY
+                                colors::TEXT_PRIMARY()
                             }))
                             .child(tool.name.clone()),
                     )
                     .child(
                         div()
                             .text_size(px(11.))
-                            .text_color(rgb(colors::TEXT_TERTIARY))
+                            .text_color(rgb(colors::TEXT_TERTIARY()))
                             .whitespace_nowrap()
                             .text_ellipsis()
                             .overflow_hidden()
@@ -9270,12 +9513,12 @@ impl ClientApp {
                     svg()
                         .path(IconName::Wrench.path())
                         .size(px(40.))
-                        .text_color(rgb(colors::TEXT_TERTIARY)),
+                        .text_color(rgb(colors::TEXT_TERTIARY())),
                 )
                 .child(
                     div()
                         .text_size(px(13.))
-                        .text_color(rgb(colors::TEXT_TERTIARY))
+                        .text_color(rgb(colors::TEXT_TERTIARY()))
                         .child("选择一个工具查看详情"),
                 )
                 .into_any_element(),
@@ -9291,20 +9534,20 @@ impl ClientApp {
                             .px_4()
                             .py_3()
                             .border_b_1()
-                            .border_color(rgb(colors::BORDER))
+                            .border_color(rgb(colors::BORDER()))
                             .flex()
                             .flex_col()
                             .gap_1()
                             .child(
                                 div()
                                     .text_size(px(15.))
-                                    .text_color(rgb(colors::TEXT_PRIMARY))
+                                    .text_color(rgb(colors::TEXT_PRIMARY()))
                                     .child(tool.name.clone()),
                             )
                             .child(
                                 div()
                                     .text_size(px(12.))
-                                    .text_color(rgb(colors::TEXT_SECONDARY))
+                                    .text_color(rgb(colors::TEXT_SECONDARY()))
                                     .child(tool.description.clone()),
                             ),
                     )
@@ -9319,7 +9562,7 @@ impl ClientApp {
                             .child(
                                 div()
                                     .text_size(px(12.))
-                                    .text_color(rgb(colors::TEXT_SECONDARY))
+                                    .text_color(rgb(colors::TEXT_SECONDARY()))
                                     .child("参数 Schema"),
                             )
                             .child(
@@ -9328,13 +9571,13 @@ impl ClientApp {
                                     .min_h_0()
                                     .rounded_md()
                                     .border_1()
-                                    .border_color(rgb(colors::BORDER))
-                                    .bg(rgb(colors::BG_SECONDARY))
+                                    .border_color(rgb(colors::BORDER()))
+                                    .bg(rgb(colors::BG_SECONDARY()))
                                     .p_3()
                                     .child(
                                         div()
                                             .text_size(px(11.))
-                                            .text_color(rgb(colors::TEXT_SECONDARY))
+                                            .text_color(rgb(colors::TEXT_SECONDARY()))
                                             .child(schema)
                                             .overflow_y_scrollbar(),
                                     ),
@@ -9355,14 +9598,14 @@ impl ClientApp {
                     .flex()
                     .flex_col()
                     .border_r_1()
-                    .border_color(rgb(colors::BORDER))
-                    .bg(rgb(colors::BG_SECONDARY))
+                    .border_color(rgb(colors::BORDER()))
+                    .bg(rgb(colors::BG_SECONDARY()))
                     .child(
                         div()
                             .px_4()
                             .py_3()
                             .border_b_1()
-                            .border_color(rgb(colors::BORDER))
+                            .border_color(rgb(colors::BORDER()))
                             .flex()
                             .flex_col()
                             .gap_1()
@@ -9376,19 +9619,19 @@ impl ClientApp {
                                         svg()
                                             .path(IconName::Wrench.path())
                                             .size(px(16.))
-                                            .text_color(rgb(colors::TEXT_SECONDARY)),
+                                            .text_color(rgb(colors::TEXT_SECONDARY())),
                                     )
                                     .child(
                                         div()
                                             .text_size(px(15.))
-                                            .text_color(rgb(colors::TEXT_PRIMARY))
+                                            .text_color(rgb(colors::TEXT_PRIMARY()))
                                             .child("工具"),
                                     ),
                             )
                             .child(
                                 div()
                                     .text_size(px(11.))
-                                    .text_color(rgb(colors::TEXT_TERTIARY))
+                                    .text_color(rgb(colors::TEXT_TERTIARY()))
                                     .child(format!(
                                         "系统内置原子操作（{} 个），LLM 通过 tool call 调用",
                                         self.tools.len()
@@ -9399,8 +9642,8 @@ impl ClientApp {
                                     .w_full()
                                     .rounded_md()
                                     .border_1()
-                                    .border_color(rgb(colors::BORDER))
-                                    .bg(rgb(colors::BG_PRIMARY))
+                                    .border_color(rgb(colors::BORDER()))
+                                    .bg(rgb(colors::BG_PRIMARY()))
                                     .px_2()
                                     .py_1()
                                     .child(Input::new(&self.tools_search).appearance(false)),
@@ -9446,12 +9689,12 @@ impl ClientApp {
                         svg()
                             .path(IconName::Bot.path())
                             .size(px(32.))
-                            .text_color(rgb(colors::TEXT_TERTIARY)),
+                            .text_color(rgb(colors::TEXT_TERTIARY())),
                     )
                     .child(
                         div()
                             .text_size(px(13.))
-                            .text_color(rgb(colors::TEXT_TERTIARY))
+                            .text_color(rgb(colors::TEXT_TERTIARY()))
                             .child(if self.roles.is_empty() {
                                 "暂无角色"
                             } else {
@@ -9470,7 +9713,7 @@ impl ClientApp {
             .px_4()
             .py_3()
             .border_b_1()
-            .border_color(rgb(colors::BORDER))
+            .border_color(rgb(colors::BORDER()))
             .flex()
             .flex_row()
             .items_center()
@@ -9485,12 +9728,12 @@ impl ClientApp {
                     .text_size(px(12.))
                     .child(
                         div()
-                            .text_color(rgb(colors::TEXT_SECONDARY))
+                            .text_color(rgb(colors::TEXT_SECONDARY()))
                             .child("累计委托"),
                     )
                     .child(
                         div()
-                            .text_color(rgb(colors::TEXT_PRIMARY))
+                            .text_color(rgb(colors::TEXT_PRIMARY()))
                             .child(format!("{}", self.roles_stats.total_calls)),
                     ),
             )
@@ -9503,15 +9746,15 @@ impl ClientApp {
                     .text_size(px(12.))
                     .child(
                         div()
-                            .text_color(rgb(colors::TEXT_SECONDARY))
+                            .text_color(rgb(colors::TEXT_SECONDARY()))
                             .child("成功率"),
                     )
                     .child(
                         div()
                             .text_color(rgb(if self.roles_stats.success_rate < 0.5 {
-                                colors::ERROR
+                                colors::ERROR()
                             } else {
-                                colors::SUCCESS
+                                colors::SUCCESS()
                             }))
                             .child(format!(
                                 "{}%",
@@ -9529,7 +9772,7 @@ impl ClientApp {
                 .child(
                     div()
                         .text_size(px(11.))
-                        .text_color(rgb(colors::TEXT_TERTIARY))
+                        .text_color(rgb(colors::TEXT_TERTIARY()))
                         .child("任务类型："),
                 );
             for (kind, count) in &self.roles_stats.by_task_type {
@@ -9538,10 +9781,10 @@ impl ClientApp {
                         .px_1()
                         .rounded_md()
                         .border_1()
-                        .border_color(rgb(colors::BORDER))
-                        .bg(rgb(colors::BG_SECONDARY))
+                        .border_color(rgb(colors::BORDER()))
+                        .bg(rgb(colors::BG_SECONDARY()))
                         .text_size(px(10.))
-                        .text_color(rgb(colors::TEXT_SECONDARY))
+                        .text_color(rgb(colors::TEXT_SECONDARY()))
                         .child(format!("{kind} {count}")),
                 );
             }
@@ -9557,7 +9800,7 @@ impl ClientApp {
                 .child(
                     div()
                         .text_size(px(11.))
-                        .text_color(rgb(colors::TEXT_TERTIARY))
+                        .text_color(rgb(colors::TEXT_TERTIARY()))
                         .child("按角色："),
                 );
             for (name, calls) in &self.roles_stats.by_role {
@@ -9566,10 +9809,10 @@ impl ClientApp {
                         .px_1()
                         .rounded_md()
                         .border_1()
-                        .border_color(rgb(colors::BORDER))
-                        .bg(rgb(colors::BG_SECONDARY))
+                        .border_color(rgb(colors::BORDER()))
+                        .bg(rgb(colors::BG_SECONDARY()))
                         .text_size(px(10.))
-                        .text_color(rgb(colors::TEXT_SECONDARY))
+                        .text_color(rgb(colors::TEXT_SECONDARY()))
                         .child(format!("{name} {calls}")),
                 );
             }
@@ -9592,12 +9835,12 @@ impl ClientApp {
                     svg()
                         .path(IconName::Bot.path())
                         .size(px(40.))
-                        .text_color(rgb(colors::TEXT_TERTIARY)),
+                        .text_color(rgb(colors::TEXT_TERTIARY())),
                 )
                 .child(
                     div()
                         .text_size(px(13.))
-                        .text_color(rgb(colors::TEXT_TERTIARY))
+                        .text_color(rgb(colors::TEXT_TERTIARY()))
                         .child("选择一个子智能体查看详情"),
                 )
                 .into_any_element(),
@@ -9613,7 +9856,7 @@ impl ClientApp {
                             .px_6()
                             .py_4()
                             .border_b_1()
-                            .border_color(rgb(colors::BORDER))
+                            .border_color(rgb(colors::BORDER()))
                             .flex()
                             .flex_col()
                             .gap_2()
@@ -9626,7 +9869,7 @@ impl ClientApp {
                                     .child(
                                         div()
                                             .text_size(px(16.))
-                                            .text_color(rgb(colors::TEXT_PRIMARY))
+                                            .text_color(rgb(colors::TEXT_PRIMARY()))
                                             .child(role.name.clone()),
                                     )
                                     .child(
@@ -9643,13 +9886,13 @@ impl ClientApp {
                                     .child(
                                         div()
                                             .text_size(px(11.))
-                                            .text_color(rgb(colors::TEXT_TERTIARY))
+                                            .text_color(rgb(colors::TEXT_TERTIARY()))
                                             .child(format!("v{}", role.version)),
                                     )
                                     .child(
                                         div()
                                             .text_size(px(11.))
-                                            .text_color(rgb(colors::TEXT_TERTIARY))
+                                            .text_color(rgb(colors::TEXT_TERTIARY()))
                                             .child(match role.tool_count {
                                                 Some(n) => format!("{n} 工具"),
                                                 None => "工具不限".to_string(),
@@ -9658,7 +9901,7 @@ impl ClientApp {
                                     .child(
                                         div()
                                             .text_size(px(11.))
-                                            .text_color(rgb(colors::TEXT_TERTIARY))
+                                            .text_color(rgb(colors::TEXT_TERTIARY()))
                                             .child(format!(
                                                 "模型：{}",
                                                 role.model
@@ -9670,7 +9913,7 @@ impl ClientApp {
                             .child(
                                 div()
                                     .text_size(px(12.))
-                                    .text_color(rgb(colors::TEXT_SECONDARY))
+                                    .text_color(rgb(colors::TEXT_SECONDARY()))
                                     .child(role.purpose.clone()),
                             ),
                     )
@@ -9687,18 +9930,18 @@ impl ClientApp {
                             .child(
                                 div()
                                     .text_size(px(12.))
-                                    .text_color(rgb(colors::TEXT_TERTIARY))
+                                    .text_color(rgb(colors::TEXT_TERTIARY()))
                                     .child("系统提示"),
                             )
                             .child(
                                 div()
                                     .rounded_md()
                                     .border_1()
-                                    .border_color(rgb(colors::BORDER))
-                                    .bg(rgb(colors::BG_SECONDARY))
+                                    .border_color(rgb(colors::BORDER()))
+                                    .bg(rgb(colors::BG_SECONDARY()))
                                     .p_3()
                                     .text_size(px(12.))
-                                    .text_color(rgb(colors::TEXT_SECONDARY))
+                                    .text_color(rgb(colors::TEXT_SECONDARY()))
                                     .child(match &self.role_detail {
                                         Some(d) if !d.system_prompt.is_empty() => {
                                             d.system_prompt.clone()
@@ -9720,7 +9963,7 @@ impl ClientApp {
                                         .child(
                                             div()
                                                 .text_size(px(12.))
-                                                .text_color(rgb(colors::TEXT_TERTIARY))
+                                                .text_color(rgb(colors::TEXT_TERTIARY()))
                                                 .child("工具白名单"),
                                         );
                                     for tool in &d.tools {
@@ -9729,9 +9972,9 @@ impl ClientApp {
                                                 .px_1()
                                                 .rounded_md()
                                                 .border_1()
-                                                .border_color(rgb(colors::BORDER))
+                                                .border_color(rgb(colors::BORDER()))
                                                 .text_size(px(11.))
-                                                .text_color(rgb(colors::TEXT_SECONDARY))
+                                                .text_color(rgb(colors::TEXT_SECONDARY()))
                                                 .child(tool.clone()),
                                         );
                                     }
@@ -9755,14 +9998,14 @@ impl ClientApp {
                     .flex()
                     .flex_col()
                     .border_r_1()
-                    .border_color(rgb(colors::BORDER))
-                    .bg(rgb(colors::BG_SECONDARY))
+                    .border_color(rgb(colors::BORDER()))
+                    .bg(rgb(colors::BG_SECONDARY()))
                     .child(
                         div()
                             .px_4()
                             .py_3()
                             .border_b_1()
-                            .border_color(rgb(colors::BORDER))
+                            .border_color(rgb(colors::BORDER()))
                             .flex()
                             .flex_col()
                             .gap_2()
@@ -9776,19 +10019,19 @@ impl ClientApp {
                                         svg()
                                             .path(IconName::Users.path())
                                             .size(px(18.))
-                                            .text_color(rgb(colors::TEXT_SECONDARY)),
+                                            .text_color(rgb(colors::TEXT_SECONDARY())),
                                     )
                                     .child(
                                         div()
                                             .text_size(px(15.))
-                                            .text_color(rgb(colors::TEXT_PRIMARY))
+                                            .text_color(rgb(colors::TEXT_PRIMARY()))
                                             .child("子智能体"),
                                     ),
                             )
                             .child(
                                 div()
                                     .text_size(px(11.))
-                                    .text_color(rgb(colors::TEXT_TERTIARY))
+                                    .text_color(rgb(colors::TEXT_TERTIARY()))
                                     .child("角色化分工（内置 / 配置 / 学习三源平级），自演化更新"),
                             )
                             .child(
@@ -9796,8 +10039,8 @@ impl ClientApp {
                                     .w_full()
                                     .rounded_md()
                                     .border_1()
-                                    .border_color(rgb(colors::BORDER))
-                                    .bg(rgb(colors::BG_PRIMARY))
+                                    .border_color(rgb(colors::BORDER()))
+                                    .bg(rgb(colors::BG_PRIMARY()))
                                     .px_2()
                                     .py_1()
                                     .child(Input::new(&self.roles_search).appearance(false)),
@@ -9850,12 +10093,12 @@ impl ClientApp {
                     .items_center()
                     .gap_2()
                     .text_size(px(12.))
-                    .text_color(rgb(colors::TEXT_SECONDARY))
+                    .text_color(rgb(colors::TEXT_SECONDARY()))
                     .child(
                         svg()
                             .path(IconName::CornerLeftUp.path())
                             .size(px(12.))
-                            .text_color(rgb(colors::TEXT_TERTIARY)),
+                            .text_color(rgb(colors::TEXT_TERTIARY())),
                     )
                     .child("上级目录")
                     .on_click(cx.listener(move |this, _, _, cx| {
@@ -9869,7 +10112,7 @@ impl ClientApp {
                     .py_6()
                     .w_full()
                     .text_size(px(12.))
-                    .text_color(rgb(colors::TEXT_TERTIARY))
+                    .text_color(rgb(colors::TEXT_TERTIARY()))
                     .child(if self.kb_browse_status.is_empty() {
                         "（空目录）"
                     } else {
@@ -9899,7 +10142,7 @@ impl ClientApp {
                         .pt_2()
                         .pb_1()
                         .text_size(px(10.))
-                        .text_color(rgb(colors::TEXT_TERTIARY))
+                        .text_color(rgb(colors::TEXT_TERTIARY()))
                         .child("文件"),
                 );
             }
@@ -9922,9 +10165,9 @@ impl ClientApp {
                         .py_1()
                         .rounded_md()
                         .bg(rgb(if is_picked {
-                            colors::BG_TERTIARY
+                            colors::BG_TERTIARY()
                         } else {
-                            colors::BG_SECONDARY
+                            colors::BG_SECONDARY()
                         }))
                         .cursor_pointer()
                         .flex()
@@ -9933,9 +10176,9 @@ impl ClientApp {
                         .gap_2()
                         .child(svg().path(icon.path()).size(px(12.)).text_color(rgb(
                             if is_picked {
-                                colors::ACCENT
+                                colors::ACCENT()
                             } else {
-                                colors::TEXT_TERTIARY
+                                colors::TEXT_TERTIARY()
                             },
                         )))
                         .child(
@@ -9947,16 +10190,16 @@ impl ClientApp {
                                 .overflow_hidden()
                                 .text_size(px(12.))
                                 .text_color(rgb(if is_picked {
-                                    colors::ACCENT
+                                    colors::ACCENT()
                                 } else {
-                                    colors::TEXT_SECONDARY
+                                    colors::TEXT_SECONDARY()
                                 }))
                                 .child(e.name.clone()),
                         )
                         .child(
                             div()
                                 .text_size(px(10.))
-                                .text_color(rgb(colors::TEXT_TERTIARY))
+                                .text_color(rgb(colors::TEXT_TERTIARY()))
                                 .child(size_text),
                         )
                         .child(
@@ -9967,9 +10210,9 @@ impl ClientApp {
                                 .justify_center()
                                 .text_size(px(11.))
                                 .text_color(rgb(if is_picked {
-                                    colors::SUCCESS
+                                    colors::SUCCESS()
                                 } else {
-                                    colors::TEXT_TERTIARY
+                                    colors::TEXT_TERTIARY()
                                 }))
                                 .child(if is_dir {
                                     ""
@@ -9996,8 +10239,8 @@ impl ClientApp {
                 .max_h(px(620.))
                 .rounded_xl()
                 .border_1()
-                .border_color(rgb(colors::BORDER))
-                .bg(rgb(colors::BG_SECONDARY))
+                .border_color(rgb(colors::BORDER()))
+                .bg(rgb(colors::BG_SECONDARY()))
                 .flex()
                 .flex_col()
                 // 标题行
@@ -10006,7 +10249,7 @@ impl ClientApp {
                         .px_4()
                         .py_3()
                         .border_b_1()
-                        .border_color(rgb(colors::BORDER))
+                        .border_color(rgb(colors::BORDER()))
                         .flex()
                         .flex_row()
                         .items_center()
@@ -10015,13 +10258,13 @@ impl ClientApp {
                             svg()
                                 .path(IconName::FolderOpen.path())
                                 .size(px(16.))
-                                .text_color(rgb(colors::TEXT_SECONDARY)),
+                                .text_color(rgb(colors::TEXT_SECONDARY())),
                         )
                         .child(
                             div()
                                 .flex_1()
                                 .text_size(px(14.))
-                                .text_color(rgb(colors::TEXT_PRIMARY))
+                                .text_color(rgb(colors::TEXT_PRIMARY()))
                                 .child("选择要导入知识库的文件"),
                         )
                         .child(
@@ -10032,7 +10275,7 @@ impl ClientApp {
                                 .rounded_md()
                                 .cursor_pointer()
                                 .text_size(px(11.))
-                                .text_color(rgb(colors::TEXT_TERTIARY))
+                                .text_color(rgb(colors::TEXT_TERTIARY()))
                                 .child("✕")
                                 .on_click(cx.listener(|this, _, _, cx| {
                                     this.dialog = None;
@@ -10046,7 +10289,7 @@ impl ClientApp {
                         .px_4()
                         .py_2()
                         .border_b_1()
-                        .border_color(rgb(colors::BORDER))
+                        .border_color(rgb(colors::BORDER()))
                         .flex()
                         .flex_row()
                         .items_center()
@@ -10059,7 +10302,7 @@ impl ClientApp {
                                 .text_ellipsis()
                                 .overflow_hidden()
                                 .text_size(px(11.))
-                                .text_color(rgb(colors::TEXT_TERTIARY))
+                                .text_color(rgb(colors::TEXT_TERTIARY()))
                                 .child(if self.kb_browse_dir.is_empty() {
                                     "浏览根".to_string()
                                 } else {
@@ -10074,7 +10317,7 @@ impl ClientApp {
                                 .rounded_md()
                                 .cursor_pointer()
                                 .text_size(px(11.))
-                                .text_color(rgb(colors::ACCENT))
+                                .text_color(rgb(colors::ACCENT()))
                                 .child("回到根")
                                 .on_click(cx.listener(|this, _, _, cx| {
                                     this.load_kb_browse(String::new(), cx)
@@ -10096,8 +10339,8 @@ impl ClientApp {
                                 .min_w_0()
                                 .rounded_md()
                                 .border_1()
-                                .border_color(rgb(colors::BORDER))
-                                .bg(rgb(colors::BG_PRIMARY))
+                                .border_color(rgb(colors::BORDER()))
+                                .bg(rgb(colors::BG_PRIMARY()))
                                 .px_2()
                                 .py_1()
                                 .child(Input::new(&self.kb_pick_search).appearance(false)),
@@ -10110,16 +10353,16 @@ impl ClientApp {
                                 .rounded_md()
                                 .border_1()
                                 .border_color(rgb(if self.kb_show_hidden {
-                                    colors::ACCENT
+                                    colors::ACCENT()
                                 } else {
-                                    colors::BORDER
+                                    colors::BORDER()
                                 }))
                                 .cursor_pointer()
                                 .text_size(px(10.))
                                 .text_color(rgb(if self.kb_show_hidden {
-                                    colors::ACCENT
+                                    colors::ACCENT()
                                 } else {
-                                    colors::TEXT_TERTIARY
+                                    colors::TEXT_TERTIARY()
                                 }))
                                 .child(if self.kb_show_hidden {
                                     "隐藏项：显示"
@@ -10134,7 +10377,7 @@ impl ClientApp {
                         .child(
                             div()
                                 .text_size(px(10.))
-                                .text_color(rgb(colors::TEXT_TERTIARY))
+                                .text_color(rgb(colors::TEXT_TERTIARY()))
                                 .child(if self.kb_browse_status.is_empty() {
                                     String::new()
                                 } else {
@@ -10157,7 +10400,7 @@ impl ClientApp {
                         .px_4()
                         .py_3()
                         .border_t_1()
-                        .border_color(rgb(colors::BORDER))
+                        .border_color(rgb(colors::BORDER()))
                         .flex()
                         .flex_row()
                         .items_center()
@@ -10170,7 +10413,7 @@ impl ClientApp {
                                 .text_ellipsis()
                                 .overflow_hidden()
                                 .text_size(px(11.))
-                                .text_color(rgb(colors::TEXT_TERTIARY))
+                                .text_color(rgb(colors::TEXT_TERTIARY()))
                                 .child(if self.kb_picked.is_empty() {
                                     "点目录进入，点文件勾选".to_string()
                                 } else {
@@ -10184,10 +10427,10 @@ impl ClientApp {
                                 .py_2()
                                 .rounded_md()
                                 .border_1()
-                                .border_color(rgb(colors::BORDER))
+                                .border_color(rgb(colors::BORDER()))
                                 .cursor_pointer()
                                 .text_size(px(11.))
-                                .text_color(rgb(colors::TEXT_SECONDARY))
+                                .text_color(rgb(colors::TEXT_SECONDARY()))
                                 .child("清空")
                                 .on_click(cx.listener(|this, _, _, cx| {
                                     this.kb_picked.clear();
@@ -10201,10 +10444,10 @@ impl ClientApp {
                                 .py_2()
                                 .rounded_md()
                                 .border_1()
-                                .border_color(rgb(colors::BORDER))
+                                .border_color(rgb(colors::BORDER()))
                                 .cursor_pointer()
                                 .text_size(px(11.))
-                                .text_color(rgb(colors::TEXT_SECONDARY))
+                                .text_color(rgb(colors::TEXT_SECONDARY()))
                                 .child("取消")
                                 .on_click(cx.listener(|this, _, _, cx| {
                                     this.dialog = None;
@@ -10217,10 +10460,10 @@ impl ClientApp {
                                 .px_4()
                                 .py_2()
                                 .rounded_md()
-                                .bg(rgb(colors::ACCENT))
+                                .bg(rgb(colors::ACCENT()))
                                 .cursor_pointer()
                                 .text_size(px(11.))
-                                .text_color(rgb(colors::TEXT_PRIMARY))
+                                .text_color(rgb(colors::TEXT_PRIMARY()))
                                 .child("导入选中")
                                 .on_click(cx.listener(|this, _, _, cx| {
                                     this.import_kb_picked(cx);
@@ -10263,12 +10506,12 @@ impl ClientApp {
                     .items_center()
                     .gap_2()
                     .text_size(px(12.))
-                    .text_color(rgb(colors::TEXT_SECONDARY))
+                    .text_color(rgb(colors::TEXT_SECONDARY()))
                     .child(
                         svg()
                             .path(IconName::CornerLeftUp.path())
                             .size(px(12.))
-                            .text_color(rgb(colors::TEXT_TERTIARY)),
+                            .text_color(rgb(colors::TEXT_TERTIARY())),
                     )
                     .child("上级目录")
                     .on_click(cx.listener(move |this, _, _, cx| {
@@ -10291,12 +10534,12 @@ impl ClientApp {
                     .items_center()
                     .gap_2()
                     .text_size(px(12.))
-                    .text_color(rgb(colors::TEXT_SECONDARY))
+                    .text_color(rgb(colors::TEXT_SECONDARY()))
                     .child(
                         svg()
                             .path(IconName::Folder.path())
                             .size(px(12.))
-                            .text_color(rgb(colors::TEXT_TERTIARY)),
+                            .text_color(rgb(colors::TEXT_TERTIARY())),
                     )
                     .child(
                         div()
@@ -10318,7 +10561,7 @@ impl ClientApp {
                     .px_2()
                     .py_2()
                     .text_size(px(11.))
-                    .text_color(rgb(colors::TEXT_TERTIARY))
+                    .text_color(rgb(colors::TEXT_TERTIARY()))
                     .child(self.picker_status.clone()),
             );
         }
@@ -10343,8 +10586,8 @@ impl ClientApp {
                     .w(px(560.))
                     .rounded_xl()
                     .border_1()
-                    .border_color(rgb(colors::BORDER))
-                    .bg(rgb(colors::BG_SECONDARY))
+                    .border_color(rgb(colors::BORDER()))
+                    .bg(rgb(colors::BG_SECONDARY()))
                     .p_4()
                     .flex()
                     .flex_col()
@@ -10352,7 +10595,7 @@ impl ClientApp {
                     .child(
                         div()
                             .text_size(px(15.))
-                            .text_color(rgb(colors::TEXT_PRIMARY))
+                            .text_color(rgb(colors::TEXT_PRIMARY()))
                             .child("选择工作目录"),
                     )
                     .child(
@@ -10369,14 +10612,14 @@ impl ClientApp {
                                     .text_ellipsis()
                                     .overflow_hidden()
                                     .text_size(px(11.))
-                                    .text_color(rgb(colors::TEXT_SECONDARY))
+                                    .text_color(rgb(colors::TEXT_SECONDARY()))
                                     .child(self.picker_current.clone()),
                             )
                             .child(
                                 div()
                                     .flex_shrink_0()
                                     .text_size(px(10.))
-                                    .text_color(rgb(colors::TEXT_TERTIARY))
+                                    .text_color(rgb(colors::TEXT_TERTIARY()))
                                     .child(self.picker_status.clone()),
                             ),
                     )
@@ -10388,8 +10631,8 @@ impl ClientApp {
                             .min_h_0()
                             .rounded_lg()
                             .border_1()
-                            .border_color(rgb(colors::BORDER))
-                            .bg(rgb(colors::BG_PRIMARY))
+                            .border_color(rgb(colors::BORDER()))
+                            .bg(rgb(colors::BG_PRIMARY()))
                             .p_2()
                             .child(list.overflow_y_scrollbar()),
                     )
@@ -10408,7 +10651,7 @@ impl ClientApp {
                                     .rounded_lg()
                                     .cursor_pointer()
                                     .text_sm()
-                                    .text_color(rgb(colors::TEXT_SECONDARY))
+                                    .text_color(rgb(colors::TEXT_SECONDARY()))
                                     .child("取消")
                                     .on_click(cx.listener(|this, _, _, cx| {
                                         this.dialog = None;
@@ -10424,14 +10667,14 @@ impl ClientApp {
                                     .cursor_pointer()
                                     .text_sm()
                                     .bg(rgb(if can_pick {
-                                        colors::ACCENT
+                                        colors::ACCENT()
                                     } else {
-                                        colors::BG_TERTIARY
+                                        colors::BG_TERTIARY()
                                     }))
                                     .text_color(rgb(if can_pick {
                                         0xffffff
                                     } else {
-                                        colors::TEXT_TERTIARY
+                                        colors::TEXT_TERTIARY()
                                     }))
                                     .child(pick_label)
                                     .on_click(cx.listener(move |this, _, _, cx| {
@@ -10450,15 +10693,15 @@ impl ClientApp {
         let delete_name = role.name.clone();
         let reset_disabled = role.source == "builtin" && role.version <= 1;
         let reset_color = if reset_disabled {
-            colors::TEXT_TERTIARY
+            colors::TEXT_TERTIARY()
         } else {
-            colors::TEXT_SECONDARY
+            colors::TEXT_SECONDARY()
         };
         div()
             .px_6()
             .py_2()
             .border_b_1()
-            .border_color(rgb(colors::BORDER))
+            .border_color(rgb(colors::BORDER()))
             .flex()
             .flex_row()
             .items_center()
@@ -10470,7 +10713,7 @@ impl ClientApp {
                     .py_1()
                     .rounded_lg()
                     .border_1()
-                    .border_color(rgb(colors::BORDER))
+                    .border_color(rgb(colors::BORDER()))
                     .flex()
                     .flex_row()
                     .items_center()
@@ -10502,19 +10745,19 @@ impl ClientApp {
                     .py_1()
                     .rounded_lg()
                     .border_1()
-                    .border_color(rgb(colors::ERROR))
+                    .border_color(rgb(colors::ERROR()))
                     .flex()
                     .flex_row()
                     .items_center()
                     .gap_1()
                     .text_size(px(12.))
-                    .text_color(rgb(colors::ERROR))
+                    .text_color(rgb(colors::ERROR()))
                     .cursor_pointer()
                     .child(
                         svg()
                             .path(IconName::Trash.path())
                             .size(px(12.))
-                            .text_color(rgb(colors::ERROR)),
+                            .text_color(rgb(colors::ERROR())),
                     )
                     .child("退役删除")
                     .on_click(cx.listener(move |this, _, _, cx| {
@@ -10527,7 +10770,7 @@ impl ClientApp {
             .children(self.roles_action_msg.clone().map(|m| {
                 div()
                     .text_size(px(11.))
-                    .text_color(rgb(colors::TEXT_TERTIARY))
+                    .text_color(rgb(colors::TEXT_TERTIARY()))
                     .child(m)
             }))
             .into_any_element()
@@ -10555,9 +10798,9 @@ impl ClientApp {
             .py_2()
             .rounded_lg()
             .bg(rgb(if selected {
-                colors::BG_TERTIARY
+                colors::BG_TERTIARY()
             } else {
-                colors::BG_SECONDARY
+                colors::BG_SECONDARY()
             }))
             .cursor_pointer()
             .flex()
@@ -10578,9 +10821,9 @@ impl ClientApp {
                             .overflow_hidden()
                             .text_size(px(13.))
                             .text_color(rgb(if selected {
-                                colors::ACCENT
+                                colors::ACCENT()
                             } else {
-                                colors::TEXT_PRIMARY
+                                colors::TEXT_PRIMARY()
                             }))
                             .child(role.name.clone()),
                     )
@@ -10601,9 +10844,9 @@ impl ClientApp {
                             .px_1()
                             .rounded_full()
                             .border_1()
-                            .border_color(rgb(colors::WARNING))
+                            .border_color(rgb(colors::WARNING()))
                             .text_size(px(10.))
-                            .text_color(rgb(colors::WARNING))
+                            .text_color(rgb(colors::WARNING()))
                             .child("试验性")
                             .into_any_element()
                     } else {
@@ -10613,7 +10856,7 @@ impl ClientApp {
             .child(
                 div()
                     .text_size(px(11.))
-                    .text_color(rgb(colors::TEXT_TERTIARY))
+                    .text_color(rgb(colors::TEXT_TERTIARY()))
                     .whitespace_nowrap()
                     .text_ellipsis()
                     .overflow_hidden()
@@ -10626,7 +10869,7 @@ impl ClientApp {
                     .items_center()
                     .gap_2()
                     .text_size(px(10.))
-                    .text_color(rgb(colors::TEXT_TERTIARY))
+                    .text_color(rgb(colors::TEXT_TERTIARY()))
                     .child(format!("v{}", role.version))
                     .child(match role.tool_count {
                         Some(n) => format!("{n} 工具"),
@@ -10635,9 +10878,9 @@ impl ClientApp {
                     .children(usage_text.map(|(text, low, calls)| {
                         div()
                             .text_color(rgb(if low {
-                                colors::ERROR
+                                colors::ERROR()
                             } else {
-                                colors::TEXT_TERTIARY
+                                colors::TEXT_TERTIARY()
                             }))
                             .child(format!("{text}（{calls} 次）"))
                     })),
@@ -10652,11 +10895,91 @@ impl ClientApp {
     }
 
     fn render_settings(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        // 外观：三套色板（石墨灰 / 羊皮纸 / 午夜蓝）。切换只改全局色板 + 组件库
+        // 的 ThemeMode，随后 `cx.notify()` 全量重绘 —— 所有颜色都是**渲染时**读的，
+        // 没有任何缓存，所以切完立刻生效。
+        let mut theme_block = div().flex().flex_col().gap_2().px_4().pt_3().child(
+            div()
+                .text_xs()
+                .text_color(rgb(colors::TEXT_SECONDARY()))
+                .child("外观"),
+        );
+        let mut theme_cards = div().flex().flex_row().gap_2().flex_wrap();
+        for kind in ThemeKind::ALL {
+            let is_cur = current_theme() == kind;
+            let p = kind.palette();
+            theme_cards = theme_cards.child(
+                div()
+                    .id(("theme", kind as usize))
+                    .w(px(208.))
+                    .rounded_lg()
+                    .border_1()
+                    .border_color(rgb(if is_cur {
+                        colors::ACCENT()
+                    } else {
+                        colors::BORDER()
+                    }))
+                    .bg(rgb(p.bg_secondary))
+                    .cursor_pointer()
+                    .p_3()
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    // 三块色预览：页面底 / 强调块 / 强调色
+                    .child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .gap_1()
+                            .child(div().flex_1().h(px(20.)).rounded_md().bg(rgb(p.bg_primary)))
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .h(px(20.))
+                                    .rounded_md()
+                                    .bg(rgb(p.bg_tertiary)),
+                            )
+                            .child(div().flex_1().h(px(20.)).rounded_md().bg(rgb(p.accent))),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .gap_2()
+                            .child(
+                                div()
+                                    .text_size(px(12.))
+                                    .text_color(rgb(p.text_primary))
+                                    .child(kind.label()),
+                            )
+                            .child(if is_cur {
+                                div()
+                                    .text_size(px(10.))
+                                    .text_color(rgb(p.accent))
+                                    .child("✓ 当前")
+                                    .into_any_element()
+                            } else {
+                                div().into_any_element()
+                            }),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(10.))
+                            .text_color(rgb(p.text_tertiary))
+                            .child(kind.hint()),
+                    )
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.apply_theme_with(kind, Some(window), cx);
+                    })),
+            );
+        }
+        theme_block = theme_block.child(theme_cards);
         // 提供商区：endpoint / 密钥可编辑（保存时先重读配置再写，见 `save_provider`）
         let mut providers_block = div().flex().flex_col().gap_1().px_4().pt_3().child(
             div()
                 .text_xs()
-                .text_color(rgb(colors::TEXT_SECONDARY))
+                .text_color(rgb(colors::TEXT_SECONDARY()))
                 .child("提供商（端点 / 密钥）"),
         );
         for (ix, p) in self.providers.iter().enumerate() {
@@ -10676,13 +10999,13 @@ impl ClientApp {
                         div()
                             .flex_1()
                             .text_xs()
-                            .text_color(rgb(colors::TEXT_TERTIARY))
+                            .text_color(rgb(colors::TEXT_TERTIARY()))
                             .child(ellipsis(&p.endpoint, 44)),
                     )
                     .child(
                         div()
                             .text_xs()
-                            .text_color(rgb(colors::TEXT_TERTIARY))
+                            .text_color(rgb(colors::TEXT_TERTIARY()))
                             .child(format!("{} 模型", p.model_count)),
                     )
                     .child(
@@ -10691,7 +11014,7 @@ impl ClientApp {
                             .px_2()
                             .py_1()
                             .rounded_md()
-                            .bg(rgb(colors::BG_TERTIARY))
+                            .bg(rgb(colors::BG_TERTIARY()))
                             .cursor_pointer()
                             .text_xs()
                             .child("编辑")
@@ -10707,8 +11030,8 @@ impl ClientApp {
                     .mt_2()
                     .rounded_lg()
                     .border_1()
-                    .border_color(rgb(colors::BORDER))
-                    .bg(rgb(colors::BG_SECONDARY))
+                    .border_color(rgb(colors::BORDER()))
+                    .bg(rgb(colors::BG_SECONDARY()))
                     .p_3()
                     .flex()
                     .flex_col()
@@ -10716,7 +11039,7 @@ impl ClientApp {
                     .child(
                         div()
                             .text_xs()
-                            .text_color(rgb(colors::TEXT_SECONDARY))
+                            .text_color(rgb(colors::TEXT_SECONDARY()))
                             .child(format!("编辑 {name}")),
                     )
                     .child(Textarea::new(&self.edit_endpoint).h(px(40.)))
@@ -10732,8 +11055,8 @@ impl ClientApp {
                                     .px_3()
                                     .py_1()
                                     .rounded_md()
-                                    .bg(rgb(colors::BG_TERTIARY))
-                                    .text_color(rgb(colors::TEXT_PRIMARY))
+                                    .bg(rgb(colors::BG_TERTIARY()))
+                                    .text_color(rgb(colors::TEXT_PRIMARY()))
                                     .cursor_pointer()
                                     .text_xs()
                                     .child("测试连接")
@@ -10747,7 +11070,7 @@ impl ClientApp {
                                     .px_3()
                                     .py_1()
                                     .rounded_md()
-                                    .bg(rgb(colors::ACCENT))
+                                    .bg(rgb(colors::ACCENT()))
                                     .text_color(rgb(0xffffff))
                                     .cursor_pointer()
                                     .text_xs()
@@ -10764,7 +11087,7 @@ impl ClientApp {
                                     .rounded_md()
                                     .cursor_pointer()
                                     .text_xs()
-                                    .text_color(rgb(colors::TEXT_TERTIARY))
+                                    .text_color(rgb(colors::TEXT_TERTIARY()))
                                     .child("取消")
                                     .on_click(cx.listener(|this, _, _w, cx| {
                                         this.editing_provider = None;
@@ -10779,7 +11102,7 @@ impl ClientApp {
             list = list.child(
                 div()
                     .text_sm()
-                    .text_color(rgb(colors::TEXT_TERTIARY))
+                    .text_color(rgb(colors::TEXT_TERTIARY()))
                     .child("暂无模型：请先在配置里添加 provider 与模型"),
             );
         }
@@ -10805,12 +11128,12 @@ impl ClientApp {
                 .py_2()
                 .rounded_md();
             if m.is_chat {
-                row = row.bg(rgb(colors::BG_HOVER));
+                row = row.bg(rgb(colors::BG_HOVER()));
             }
             let action = if m.is_chat {
                 div()
                     .text_xs()
-                    .text_color(rgb(colors::SUCCESS))
+                    .text_color(rgb(colors::SUCCESS()))
                     .child("当前聊天模型")
                     .into_any_element()
             } else {
@@ -10819,8 +11142,8 @@ impl ClientApp {
                     .px_2()
                     .py_1()
                     .rounded_md()
-                    .bg(rgb(colors::BG_TERTIARY))
-                    .text_color(rgb(colors::TEXT_PRIMARY))
+                    .bg(rgb(colors::BG_TERTIARY()))
+                    .text_color(rgb(colors::TEXT_PRIMARY()))
                     .cursor_pointer()
                     .child("设为聊天模型")
                     .on_click(cx.listener(move |this, _, _window, cx| {
@@ -10834,7 +11157,7 @@ impl ClientApp {
                     .child(
                         div()
                             .text_xs()
-                            .text_color(rgb(colors::TEXT_TERTIARY))
+                            .text_color(rgb(colors::TEXT_TERTIARY()))
                             .child(meta),
                     )
                     .child(action),
@@ -10853,20 +11176,21 @@ impl ClientApp {
                     .px_4()
                     .py_2()
                     .border_b_1()
-                    .border_color(rgb(colors::BORDER))
+                    .border_color(rgb(colors::BORDER()))
                     .child(div().text_sm().child("设置 · 模型"))
                     .child(div().flex_1())
                     .child(
                         div()
                             .text_xs()
                             .text_color(if self.settings_error {
-                                rgb(colors::ERROR)
+                                rgb(colors::ERROR())
                             } else {
-                                rgb(colors::TEXT_SECONDARY)
+                                rgb(colors::TEXT_SECONDARY())
                             })
                             .child(self.settings_status.clone()),
                     ),
             )
+            .child(theme_block)
             .child(providers_block)
             .child(div().flex_1().min_h_0().child(list))
     }
@@ -11246,8 +11570,8 @@ impl ClientApp {
             .w(px(256.))
             .rounded_lg()
             .border_1()
-            .border_color(rgb(colors::BORDER))
-            .bg(rgb(colors::BG_PRIMARY))
+            .border_color(rgb(colors::BORDER()))
+            .bg(rgb(colors::BG_PRIMARY()))
             .py_1()
             .flex()
             .flex_col();
@@ -11270,15 +11594,19 @@ impl ClientApp {
                 .cursor_pointer()
                 .text_xs();
             if is_current {
-                row = row.text_color(rgb(colors::ACCENT));
+                row = row.text_color(rgb(colors::ACCENT()));
             } else {
-                row = row.text_color(rgb(colors::TEXT_PRIMARY));
+                row = row.text_color(rgb(colors::TEXT_PRIMARY()));
             }
             let label = name.clone();
             let prov = provider.clone();
             menu = menu.child(
                 row.child(div().flex_1().child(name))
-                    .child(div().text_color(rgb(colors::TEXT_TERTIARY)).child(provider))
+                    .child(
+                        div()
+                            .text_color(rgb(colors::TEXT_TERTIARY()))
+                            .child(provider),
+                    )
                     .on_click(cx.listener(move |this, _, _window, cx| {
                         this.select_chat_model(prov.clone(), label.clone(), cx);
                     })),
@@ -11295,9 +11623,9 @@ impl ClientApp {
                     .h_full()
                     .flex()
                     .flex_col()
-                    .bg(rgb(colors::BG_SECONDARY))
+                    .bg(rgb(colors::BG_SECONDARY()))
                     .border_r_1()
-                    .border_color(rgb(colors::BORDER))
+                    .border_color(rgb(colors::BORDER()))
                     // 头部：状态行 + 新建会话（对齐 Tauri 版 `SessionList` 头部；
                     // 「＋ 新目录」要目录选择器弹窗，留到 workspace 页一起做）
                     .child(
@@ -11309,13 +11637,13 @@ impl ClientApp {
                             .items_center()
                             .gap_2()
                             .border_b_1()
-                            .border_color(rgb(colors::BORDER))
+                            .border_color(rgb(colors::BORDER()))
                             .child(
                                 div()
                                     .flex_1()
                                     .min_w_0()
                                     .text_xs()
-                                    .text_color(rgb(colors::TEXT_SECONDARY))
+                                    .text_color(rgb(colors::TEXT_SECONDARY()))
                                     .whitespace_nowrap()
                                     .text_ellipsis()
                                     .overflow_hidden()
@@ -11334,7 +11662,7 @@ impl ClientApp {
                                         svg()
                                             .path(IconName::Plus.path())
                                             .size(px(14.))
-                                            .text_color(rgb(colors::TEXT_SECONDARY)),
+                                            .text_color(rgb(colors::TEXT_SECONDARY())),
                                     )
                                     .on_click(cx.listener(|this, _, _, cx| {
                                         this.start_new_session(cx);
@@ -11355,7 +11683,7 @@ impl ClientApp {
                                         svg()
                                             .path(IconName::FolderPlus.path())
                                             .size(px(14.))
-                                            .text_color(rgb(colors::TEXT_SECONDARY)),
+                                            .text_color(rgb(colors::TEXT_SECONDARY())),
                                     )
                                     .on_click(cx.listener(|this, _, window, cx| {
                                         let _ = window;
@@ -11384,7 +11712,7 @@ impl ClientApp {
                     .child(
                         div()
                             .border_t_1()
-                            .border_color(rgb(colors::BORDER))
+                            .border_color(rgb(colors::BORDER()))
                             .px_2()
                             .py_2()
                             .child(
@@ -11400,12 +11728,12 @@ impl ClientApp {
                                     .rounded_md()
                                     .cursor_pointer()
                                     .text_xs()
-                                    .text_color(rgb(colors::TEXT_SECONDARY))
+                                    .text_color(rgb(colors::TEXT_SECONDARY()))
                                     .child(
                                         svg()
                                             .path(IconName::FileText.path())
                                             .size(px(14.))
-                                            .text_color(rgb(colors::TEXT_SECONDARY)),
+                                            .text_color(rgb(colors::TEXT_SECONDARY())),
                                     )
                                     .child("文件视图")
                                     .on_click(cx.listener(|this, _, _, cx| {
@@ -11508,8 +11836,8 @@ impl ClientApp {
                             .child(
                                 div()
                                     .border_t_1()
-                                    .border_color(rgb(colors::BORDER))
-                                    .bg(rgb(colors::BG_PRIMARY))
+                                    .border_color(rgb(colors::BORDER()))
+                                    .bg(rgb(colors::BG_PRIMARY()))
                                     .px_4()
                                     .pt_3()
                                     .pb_3()
@@ -11520,8 +11848,8 @@ impl ClientApp {
                                             .mx_auto()
                                             .rounded_2xl()
                                             .border_1()
-                                            .border_color(rgb(colors::BORDER))
-                                            .bg(rgb(colors::BG_SECONDARY))
+                                            .border_color(rgb(colors::BORDER()))
+                                            .bg(rgb(colors::BG_SECONDARY()))
                                             .p_2()
                                             .flex()
                                             .flex_col()
@@ -11557,9 +11885,9 @@ impl ClientApp {
                                                                     )
                                                                     .color(Hsla::from(rgb(
                                                                         if ctx_high {
-                                                                            colors::WARNING
+                                                                            colors::WARNING()
                                                                         } else {
-                                                                            colors::ACCENT
+                                                                            colors::ACCENT()
                                                                         },
                                                                     ))),
                                                             )
@@ -11567,9 +11895,9 @@ impl ClientApp {
                                                                 div()
                                                                     .text_xs()
                                                                     .text_color(if ctx_high {
-                                                                        rgb(colors::WARNING)
+                                                                        rgb(colors::WARNING())
                                                                     } else {
-                                                                        rgb(colors::TEXT_TERTIARY)
+                                                                        rgb(colors::TEXT_TERTIARY())
                                                                     })
                                                                     .child(ctx_label),
                                                             ),
@@ -11582,7 +11910,7 @@ impl ClientApp {
                                                             .rounded_lg()
                                                             .cursor_pointer()
                                                             .text_xs()
-                                                            .text_color(rgb(colors::TEXT_PRIMARY))
+                                                            .text_color(rgb(colors::TEXT_PRIMARY()))
                                                             .child(self.current_model_label())
                                                             .on_click(cx.listener(
                                                                 |this, _, _window, cx| {
@@ -11604,9 +11932,9 @@ impl ClientApp {
                                                             .items_center()
                                                             .gap_1()
                                                             .bg(if stopping {
-                                                                rgb(colors::ERROR)
+                                                                rgb(colors::ERROR())
                                                             } else {
-                                                                rgb(colors::ACCENT)
+                                                                rgb(colors::ACCENT())
                                                             })
                                                             .text_color(rgb(0xffffff))
                                                             .cursor_pointer()
@@ -11666,9 +11994,10 @@ impl ClientApp {
                                                 .justify_center()
                                                 .gap_2()
                                                 .text_size(px(11.))
-                                                .text_color(rgb(colors::TEXT_TERTIARY));
-                                            let dot =
-                                                || div().text_color(rgb(colors::BORDER)).child("·");
+                                                .text_color(rgb(colors::TEXT_TERTIARY()));
+                                            let dot = || {
+                                                div().text_color(rgb(colors::BORDER())).child("·")
+                                            };
                                             if let Some((uncached, cached, completion)) =
                                                 self.session_usage
                                             {
@@ -11741,8 +12070,8 @@ impl Render for ClientApp {
             .flex_row()
             // 相对定位：模态对话框覆盖层用 `absolute` 相对这里铺满整窗
             .relative()
-            .bg(rgb(colors::BG_PRIMARY))
-            .text_color(rgb(colors::TEXT_PRIMARY))
+            .bg(rgb(colors::BG_PRIMARY()))
+            .text_color(rgb(colors::TEXT_PRIMARY()))
             .child(self.render_rail(cx))
             .child(div().flex_1().min_w_0().h_full().child(match self.view {
                 View::Chat => self.render_chat(cx).into_any_element(),
@@ -11788,7 +12117,7 @@ impl ClientApp {
                 .px_1()
                 .py_1()
                 .text_size(px(11.))
-                .text_color(rgb(colors::TEXT_TERTIARY))
+                .text_color(rgb(colors::TEXT_TERTIARY()))
                 .child(if live {
                     "子智能体工作中…"
                 } else {
@@ -11847,7 +12176,7 @@ impl ClientApp {
                 .px_1()
                 .py_1()
                 .text_size(px(11.))
-                .text_color(rgb(colors::TEXT_TERTIARY))
+                .text_color(rgb(colors::TEXT_TERTIARY()))
                 .child(if live {
                     "子智能体工作中…"
                 } else {
@@ -11908,19 +12237,19 @@ impl ClientApp {
                         svg()
                             .path(IconName::CircleX.path())
                             .size(px(11.))
-                            .text_color(rgb(colors::ERROR))
+                            .text_color(rgb(colors::ERROR()))
                             .into_any_element()
                     } else {
                         svg()
                             .path(icon.path())
                             .size(px(11.))
-                            .text_color(rgb(colors::TEXT_TERTIARY))
+                            .text_color(rgb(colors::TEXT_TERTIARY()))
                             .into_any_element()
                     })
                     .child(
                         div()
                             .flex_shrink_0()
-                            .text_color(rgb(colors::TEXT_SECONDARY))
+                            .text_color(rgb(colors::TEXT_SECONDARY()))
                             .child(label),
                     )
                     .child(
@@ -11930,7 +12259,7 @@ impl ClientApp {
                             .whitespace_nowrap()
                             .text_ellipsis()
                             .overflow_hidden()
-                            .text_color(rgb(colors::TEXT_TERTIARY))
+                            .text_color(rgb(colors::TEXT_TERTIARY()))
                             .child(target),
                     );
                 if let Some(ms) = call.duration_ms {
@@ -11938,7 +12267,7 @@ impl ClientApp {
                         div()
                             .flex_shrink_0()
                             .text_size(px(10.))
-                            .text_color(rgb(colors::TEXT_TERTIARY))
+                            .text_color(rgb(colors::TEXT_TERTIARY()))
                             .child(format_duration(ms)),
                     );
                 } else if !settled {
@@ -11946,7 +12275,7 @@ impl ClientApp {
                         div()
                             .flex_shrink_0()
                             .text_size(px(10.))
-                            .text_color(rgb(colors::TEXT_TERTIARY))
+                            .text_color(rgb(colors::TEXT_TERTIARY()))
                             .child("…"),
                     );
                 }
@@ -11955,7 +12284,7 @@ impl ClientApp {
                         .px_2()
                         .py_1()
                         .text_size(px(11.))
-                        .text_color(rgb(colors::TEXT_SECONDARY))
+                        .text_color(rgb(colors::TEXT_SECONDARY()))
                         .child(format_arguments(&call.arguments))
                         .into_any_element(),
                 );
@@ -11965,7 +12294,7 @@ impl ClientApp {
                             .px_2()
                             .py_1()
                             .text_size(px(11.))
-                            .text_color(rgb(colors::ERROR))
+                            .text_color(rgb(colors::ERROR()))
                             .child(err)
                             .into_any_element(),
                     );
@@ -11978,7 +12307,7 @@ impl ClientApp {
                             .max_h(px(220.))
                             .overflow_hidden()
                             .text_size(px(11.))
-                            .text_color(rgb(colors::TEXT_SECONDARY))
+                            .text_color(rgb(colors::TEXT_SECONDARY()))
                             .child(result)
                             .into_any_element(),
                     );
@@ -11998,12 +12327,12 @@ impl ClientApp {
                         svg()
                             .path(IconName::Brain.path())
                             .size(px(11.))
-                            .text_color(rgb(colors::TEXT_TERTIARY)),
+                            .text_color(rgb(colors::TEXT_TERTIARY())),
                     )
                     .child(
                         div()
                             .flex_shrink_0()
-                            .text_color(rgb(colors::TEXT_SECONDARY))
+                            .text_color(rgb(colors::TEXT_SECONDARY()))
                             .child("思考"),
                     )
                     .child(
@@ -12013,14 +12342,14 @@ impl ClientApp {
                             .whitespace_nowrap()
                             .text_ellipsis()
                             .overflow_hidden()
-                            .text_color(rgb(colors::TEXT_TERTIARY))
+                            .text_color(rgb(colors::TEXT_TERTIARY()))
                             .child(banner),
                     )
                     .child(
                         div()
                             .flex_shrink_0()
                             .text_size(px(10.))
-                            .text_color(rgb(colors::TEXT_TERTIARY))
+                            .text_color(rgb(colors::TEXT_TERTIARY()))
                             .child(format!("{} 字", text.chars().count())),
                     );
                 details.push(
@@ -12028,7 +12357,7 @@ impl ClientApp {
                         .px_2()
                         .py_1()
                         .text_size(px(11.))
-                        .text_color(rgb(colors::TEXT_SECONDARY))
+                        .text_color(rgb(colors::TEXT_SECONDARY()))
                         .child(text)
                         .into_any_element(),
                 );
@@ -12045,12 +12374,12 @@ impl ClientApp {
                         svg()
                             .path(IconName::TextAlignStart.path())
                             .size(px(11.))
-                            .text_color(rgb(colors::TEXT_TERTIARY)),
+                            .text_color(rgb(colors::TEXT_TERTIARY())),
                     )
                     .child(
                         div()
                             .flex_shrink_0()
-                            .text_color(rgb(colors::TEXT_SECONDARY))
+                            .text_color(rgb(colors::TEXT_SECONDARY()))
                             .child("输出"),
                     )
                     .child(
@@ -12060,14 +12389,14 @@ impl ClientApp {
                             .whitespace_nowrap()
                             .text_ellipsis()
                             .overflow_hidden()
-                            .text_color(rgb(colors::TEXT_TERTIARY))
+                            .text_color(rgb(colors::TEXT_TERTIARY()))
                             .child(banner),
                     )
                     .child(
                         div()
                             .flex_shrink_0()
                             .text_size(px(10.))
-                            .text_color(rgb(colors::TEXT_TERTIARY))
+                            .text_color(rgb(colors::TEXT_TERTIARY()))
                             .child(format!("{} 字", text.chars().count())),
                     );
                 details.push(
@@ -12075,7 +12404,7 @@ impl ClientApp {
                         .px_2()
                         .py_1()
                         .text_size(px(11.))
-                        .text_color(rgb(colors::TEXT_SECONDARY))
+                        .text_color(rgb(colors::TEXT_SECONDARY()))
                         .child(text)
                         .into_any_element(),
                 );
@@ -12085,7 +12414,7 @@ impl ClientApp {
             svg()
                 .path(chevron.path())
                 .size(px(10.))
-                .text_color(rgb(colors::TEXT_TERTIARY)),
+                .text_color(rgb(colors::TEXT_TERTIARY())),
         );
         let _ = is_tool;
         let head = head.on_click(cx.listener(move |this, _, _, cx| {
@@ -12144,7 +12473,18 @@ fn main() {
     let app = gpui_kit::application().with_assets(gpui_kit::assets::AllAssets::new(""));
     app.run(move |cx| {
         gpui_kit::init(cx);
-        Theme::change(ThemeMode::Dark, None, cx);
+        // 应用上次选的外观。组件库内部控件（Input / Textarea / 按钮）走它自己的
+        // `ThemeMode`，不一起切就会出现「天演是羊皮纸、输入框还是深灰」。
+        let theme = load_theme_pref();
+        set_theme(theme);
+        Theme::change(
+            match theme {
+                ThemeKind::Parchment => ThemeMode::Light,
+                _ => ThemeMode::Dark,
+            },
+            None,
+            cx,
+        );
         let bounds = Bounds::centered(None, size(px(1280.), px(820.)), cx);
         // 自动化端口（ADR-052）：服务在 tokio 线程、动作用 UI 线程执行，所以先把
         // `AsyncApp` 取出来带进窗口构建闭包——窗口建好才有状态可读。

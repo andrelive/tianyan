@@ -261,6 +261,9 @@ impl ClientApp {
         serde_json::json!({
             "view": self.view.key(),
             "views": View::ALL.iter().map(|v| v.key()).collect::<Vec<_>>(),
+            // 当前外观（graphite / parchment / midnight）
+            "theme": crate::current_theme().key(),
+            "themes": crate::ThemeKind::ALL.iter().map(|t| t.key()).collect::<Vec<_>>(),
             "status": &self.status,
             "port": self.port,
             "streaming": self.streaming,
@@ -822,6 +825,16 @@ impl ClientApp {
                 self.create_sched_task_direct(name, secs, workspace, prompt, cx);
             }
             "sched_delete" => self.delete_sched_task(arg_str(cmd, "id")?, cx),
+            // ---- 外观 ----
+            "set_theme" => {
+                let key = arg_str(cmd, "theme")?;
+                let kind = crate::ThemeKind::from_key(&key).ok_or_else(|| {
+                    format!("未知主题：{key}（可选 graphite / parchment / midnight）")
+                })?;
+                // 与设置页点击共用同一份（要同步组件库 ThemeMode + 持久化）；
+                // 自动化上下文没有 `&mut Window`，传 None 只改全局主题
+                self.apply_theme_with(kind, None, cx);
+            }
             "reload_scheduled" => self.load_sched_tasks(cx),
             // ---- 记忆 ----
             "select_memory" => {
