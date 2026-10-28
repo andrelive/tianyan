@@ -57,6 +57,8 @@ windows = { version = "0.62", features = [
     "Win32_UI_WindowsAndMessaging",
     # 全局快捷键：RegisterHotKey 在 Input::KeyboardAndMouse
     "Win32_UI_Input_KeyboardAndMouse",
+    # 隐藏自带的控制台窗口（GetConsoleWindow / GetConsoleProcessList）
+    "Win32_System_Console",
 ] }
 # 内建截图：`Window::render_to_image` 返回 `image::RgbaImage`，存盘要 image。
 # 可选依赖 —— 只有 `--features screenshot` 构建才编进来。

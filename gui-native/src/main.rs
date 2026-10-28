@@ -14,6 +14,16 @@
 //! 未完成：updater 编排 / MSI 代码签名。
 
 #![recursion_limit = "512"]
+// 发布构建**不要**控制台窗口。
+//
+// 不加这行时 exe 的 PE subsystem 是 Console（实测 Subsystem=3），于是：
+// - MSI 装的发布版双击 → 先弹一个黑窗口，再出主窗口（用户看到的就是「图标出现又消失」）；
+// - debug 版从终端启动更明显：控制台窗口比主窗口早约 0.9 秒出现
+//   （实测时间线：1.71s 可见控制台 → 2.56s 主窗口）。
+//
+// debug 特意保留 console subsystem：`println!` 是启动路径最快的观测手段，
+// 而 GUI subsystem 下 stdout 无处可去。所以只在 release 切。
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use futures::StreamExt as _;
 use gpui_kit::component::input::{InputState, TextareaState};
@@ -417,7 +427,45 @@ enum ActivityRow {
 }
 
 
+/// 隐藏**本进程独占的**控制台窗口。
+///
+/// 为什么需要：debug 构建是 console subsystem（PE `Subsystem=3`，为了让 `println!`
+/// 进终端），从资源管理器/`Start-Process` 启动时会新开一个控制台窗口——它比主窗口
+/// 早约 0.9 秒出现（实测时间线：1.71s 可见控制台 → 2.56s 主窗口），在任务栏上看着
+/// 就像「图标反复出现又消失」。
+///
+/// 为什么不能无脑 `ShowWindow(SW_HIDE)`：从已有终端（pwsh/cmd）启动时，进程**继承**
+/// 那个控制台，`GetConsoleWindow()` 返回的是**用户的终端窗口**——隐藏它会把用户自己
+/// 的终端藏掉。所以先用 `GetConsoleProcessList` 判断：只有本进程附着（count ≤ 1）
+/// 才是「自己独占的控制台」，这时隐藏是安全的；继承了别人的终端（count ≥ 2）就什么
+/// 都不做，日志照常进那个终端。
+///
+/// release 构建走 `windows_subsystem = "windows"`，压根没有控制台，本函数是空操作。
+#[cfg(windows)]
+fn hide_owned_console() {
+    use windows::Win32::System::Console::{GetConsoleProcessList, GetConsoleWindow};
+    use windows::Win32::UI::WindowsAndMessaging::{ShowWindow, SW_HIDE};
+
+    // SAFETY: 两个调用都只读进程/控制台信息；`pids` 是栈上缓冲区，长度由 API 接收。
+    // `ShowWindow` 只改窗口可见状态，不涉及内存所有权。句柄无效时跳过。
+    unsafe {
+        let mut pids = [0u32; 4];
+        let attached = GetConsoleProcessList(&mut pids);
+        if attached > 1 {
+            return;
+        }
+        let hwnd = GetConsoleWindow();
+        if !hwnd.is_invalid() {
+            let _ = ShowWindow(hwnd, SW_HIDE);
+        }
+    }
+}
+
+#[cfg(not(windows))]
+fn hide_owned_console() {}
+
 fn main() {
+    hide_owned_console();
     let config = tianyan_service_config::load_and_install();
     if let Err(e) = tianyan::common::logging::init_logging(&config.logging) {
         eprintln!("日志初始化失败：{e}");
