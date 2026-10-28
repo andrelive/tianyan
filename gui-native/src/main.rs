@@ -1918,6 +1918,9 @@ struct ClientApp {
     collapsed_groups: std::collections::HashSet<String>,
     /// 组内额外展开条数（key = `working_directory`；点「查看更多」累加）
     expanded_groups: std::collections::HashMap<String, usize>,
+    /// 左栏当前鼠标悬停的会话 id —— 行内的「重命名 / 删除」只在悬停时出现
+    /// （对齐 Web 版 `hoveredSession === session.id` 的口径）
+    hovered_session: Option<String>,
     /// 全量后台任务（会话角标聚合用；面板展示的是按当前会话过滤后的 `tasks`）
     all_tasks: Vec<TaskRow>,
     /// 任务面板里展开的任务 id（同时只展开一个，与 Tauri 版 `openId` 同口径）
@@ -2243,6 +2246,7 @@ impl ClientApp {
             sessions_data: Vec::new(),
             collapsed_groups: std::collections::HashSet::new(),
             expanded_groups: std::collections::HashMap::new(),
+            hovered_session: None,
             all_tasks: Vec::new(),
             expanded_task: None,
             task_messages: std::collections::HashMap::new(),
@@ -2922,7 +2926,11 @@ impl ClientApp {
                 // 行内操作按钮要带走 id / 标题（`title` 随后会被 move 进标题节点）
                 let rename_id = id.clone();
                 let delete_id = id.clone();
+                let hover_id = id.clone();
                 let delete_title = title.clone();
+                // 悬停才显示行内操作（对齐 Web 版）；容器宽度固定，
+                // 避免鼠标进出时标题区反复变宽变窄
+                let is_hovered = self.hovered_session.as_deref() == Some(id.as_str());
                 let mut head = div().flex().flex_row().items_center().gap_2().child(
                     div()
                         .flex_1()
@@ -2957,59 +2965,73 @@ impl ClientApp {
                             }),
                     );
                 }
-                // 行内操作：重命名 / 删除。两个回调都 `stop_propagation()`——
-                // 整行的 on_click 是「打开会话」，不拦住会把弹窗和切会话一起触发。
+                // 行内操作：重命名 / 删除。**只在悬停这一行时渲染**（对齐 Web 版
+                // `hoveredSession === session.id`）；容器宽度固定，避免鼠标进出时标题区
+                // 反复变宽变窄。两个回调都 `stop_propagation()`——整行的 on_click 是
+                // 「打开会话」，不拦住会把弹窗和切会话一起触发。
                 head = head.child(
                     div()
+                        .w(px(50.))
                         .flex_shrink_0()
                         .flex()
                         .flex_row()
                         .items_center()
+                        .justify_end()
                         .gap_1()
-                        .child(
+                        .child(if is_hovered {
                             div()
-                                .id(("rename", ix))
-                                .size(px(22.))
                                 .flex()
+                                .flex_row()
                                 .items_center()
-                                .justify_center()
-                                .rounded_md()
-                                .cursor_pointer()
+                                .gap_1()
                                 .child(
-                                    svg()
-                                        .path(IconName::Pencil.path())
-                                        .size(px(12.))
-                                        .text_color(rgb(colors::TEXT_TERTIARY)),
+                                    div()
+                                        .id(("rename", ix))
+                                        .size(px(22.))
+                                        .flex()
+                                        .items_center()
+                                        .justify_center()
+                                        .rounded_md()
+                                        .cursor_pointer()
+                                        .child(
+                                            svg()
+                                                .path(IconName::Pencil.path())
+                                                .size(px(12.))
+                                                .text_color(rgb(colors::TEXT_TERTIARY)),
+                                        )
+                                        .on_click(cx.listener(move |this, _, window, cx| {
+                                            cx.stop_propagation();
+                                            this.open_rename(rename_id.clone(), window, cx);
+                                        })),
                                 )
-                                .on_click(cx.listener(move |this, _, window, cx| {
-                                    cx.stop_propagation();
-                                    this.open_rename(rename_id.clone(), window, cx);
-                                })),
-                        )
-                        .child(
-                            div()
-                                .id(("delete", ix))
-                                .size(px(22.))
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .rounded_md()
-                                .cursor_pointer()
                                 .child(
-                                    svg()
-                                        .path(IconName::Trash.path())
-                                        .size(px(12.))
-                                        .text_color(rgb(colors::TEXT_TERTIARY)),
+                                    div()
+                                        .id(("delete", ix))
+                                        .size(px(22.))
+                                        .flex()
+                                        .items_center()
+                                        .justify_center()
+                                        .rounded_md()
+                                        .cursor_pointer()
+                                        .child(
+                                            svg()
+                                                .path(IconName::Trash.path())
+                                                .size(px(12.))
+                                                .text_color(rgb(colors::TEXT_TERTIARY)),
+                                        )
+                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                            cx.stop_propagation();
+                                            this.dialog = Some(Dialog::DeleteSession {
+                                                id: delete_id.clone(),
+                                                title: delete_title.clone(),
+                                            });
+                                            cx.notify();
+                                        })),
                                 )
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    cx.stop_propagation();
-                                    this.dialog = Some(Dialog::DeleteSession {
-                                        id: delete_id.clone(),
-                                        title: delete_title.clone(),
-                                    });
-                                    cx.notify();
-                                })),
-                        ),
+                                .into_any_element()
+                        } else {
+                            div().into_any_element()
+                        }),
                 );
                 div()
                     .id(("ws-session", ix))
@@ -3037,6 +3059,18 @@ impl ClientApp {
                     )
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.open_session(id.clone(), cx);
+                    }))
+                    .on_hover(cx.listener(move |this, hovered: &bool, _window, cx| {
+                        // 行内操作按钮只在悬停这一行时渲染（对齐 Web 版口径）
+                        let next = if *hovered {
+                            Some(hover_id.clone())
+                        } else {
+                            None
+                        };
+                        if this.hovered_session != next {
+                            this.hovered_session = next;
+                            cx.notify();
+                        }
                     }))
                     .into_any_element()
             }

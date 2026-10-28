@@ -4,6 +4,9 @@
 #   pwsh -NoProfile -File gui-native/scripts/ui-click.ps1 -X 260 -Y 120
 #   pwsh -NoProfile -File gui-native/scripts/ui-click.ps1 -X 260 -Y 120 -DoubleClick
 #
+# 只移动不点击（验证 hover 效果：行内操作按钮只在悬停时出现）：
+#   pwsh -NoProfile -File gui-native/scripts/ui-click.ps1 -X 300 -Y 320 -MoveOnly
+#
 # 坐标怎么定：用 ui-shot.ps1 截一张图，图内像素坐标就是这里要传的值
 # （两者都走 DPI-aware 物理口径，不需要换算缩放比）。
 #
@@ -12,7 +15,9 @@ param(
     [int]$X = 0,
     [int]$Y = 0,
     [string]$ProcessName = "tianyan-gui-native",
-    [switch]$DoubleClick
+    [switch]$DoubleClick,
+    # 只把鼠标移到目标位置、不点击：hover 类效果（如行内按钮）只能这样验
+    [switch]$MoveOnly
 )
 
 $dpi = @"
@@ -86,6 +91,10 @@ $ax = $best.Left + $X
 $ay = $best.Top + $Y
 [void][TyClick]::SetCursorPos($ax, $ay)
 Start-Sleep -Milliseconds 150
+if ($MoveOnly) {
+    Write-Output ("移动 窗口内({0},{1}) -> 屏幕({2},{3})" -f $X, $Y, $ax, $ay)
+    exit 0
+}
 # LEFTDOWN = 0x0002, LEFTUP = 0x0004
 [TyClick]::mouse_event(0x0002, 0, 0, 0, [UIntPtr]::Zero)
 Start-Sleep -Milliseconds 60
