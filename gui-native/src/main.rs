@@ -913,6 +913,10 @@ struct SessionRow {
     working_directory: String,
     /// RFC3339 时间戳（列表展示相对时间）
     updated_at: String,
+    /// 会话**首条请求**的输入 token（= 系统前缀基线）。
+    /// 压缩摘要消息的 `prompt_tokens` 是压缩请求的输入（≈ 压缩前上下文），
+    /// 压缩后占用只能估：基线 + 摘要输出。见 `ClientApp::ctx_usage()`。
+    first_request_tokens: Option<u64>,
 }
 
 /// 左栏的一行 —— **分组行 / 会话行 / 「查看更多」行混排**。
@@ -1373,6 +1377,36 @@ struct MsgRow {
     tool_calls: Vec<ToolCall>,
     /// 压缩点（`compression_marker`）：显示徽章，**不**渲染成用户气泡
     compression: bool,
+    /// 本轮请求的 token 用量（`GET /messages` 每条都带）：上下文占用按会话恢复的取数点
+    usage: Option<MsgUsage>,
+}
+
+/// 一条消息携带的 token 用量（`/messages` 的 `usage` 与流式 `usage` 块同形）。
+///
+/// 上下文占用 = 最近一轮请求的 `prompt_tokens`——**不是** `total_tokens`
+/// （后者含输出，语义是「本轮计费」，会把占用算高）。
+#[derive(Clone, Copy, Debug)]
+struct MsgUsage {
+    prompt_tokens: u64,
+    completion_tokens: u64,
+    cache_read: u64,
+}
+
+/// 从消息 JSON 取 `usage`；`prompt_tokens == 0` 视为没有（老消息 / 提供商未上报）。
+fn parse_msg_usage(msg: &serde_json::Value) -> Option<MsgUsage> {
+    let u = msg.get("usage")?;
+    let prompt_tokens = u.get("prompt_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
+    if prompt_tokens == 0 {
+        return None;
+    }
+    Some(MsgUsage {
+        prompt_tokens,
+        completion_tokens: u
+            .get("completion_tokens")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0),
+        cache_read: u.get("cache_read").and_then(|v| v.as_u64()).unwrap_or(0),
+    })
 }
 
 /// 从消息 JSON 的 segments 里拼接正文（ADR-002：正文单一事实源是 segments，
@@ -2329,10 +2363,17 @@ struct ClientApp {
     session_model: Option<(String, String)>,
     /// 模型下拉是否展开
     model_menu_open: bool,
-    /// 最近一次 usage 上报的已用 token（上下文环分子）
-    ctx_used: u64,
-    /// 最近一次 usage 上报的上下文窗口（分母）
-    ctx_window: u64,
+    /// 最近一轮请求的**实时**用量（流式 `usage` 上报写入，切会话即清）。
+    /// 上下文占用优先取它，其次回落到消息链自带的 `usage`（见 `ctx_usage`）
+    ctx_live: Option<MsgUsage>,
+    /// 流式上报的上下文窗口：模型没声明 `context_length` 时的兜底分母
+    ctx_window_live: u64,
+    /// 上下文详情面板是否展开（点圆环打开：占用 / 缓存命中 / 输出 + 压缩入口）
+    ctx_panel_open: bool,
+    /// 压缩进行中（按钮禁点 + 文案「压缩中…」）
+    ctx_compressing: bool,
+    /// 压缩结果提示：`(是否成功, 文案)`
+    ctx_compress: Option<(bool, String)>,
     /// 会话 token 汇总（`GET /usage/stats?days=0&session_id=`）：
     /// `(未命中输入, 缓存命中输入, 输出)`；全零时 `None`（不显示统计行）
     session_usage: Option<(u64, u64, u64)>,
@@ -2572,8 +2613,11 @@ impl ClientApp {
             settings_error: false,
             session_model: None,
             model_menu_open: false,
-            ctx_used: 0,
-            ctx_window: 0,
+            ctx_live: None,
+            ctx_window_live: 0,
+            ctx_panel_open: false,
+            ctx_compressing: false,
+            ctx_compress: None,
             session_usage: None,
             request_perf: None,
             tasks: Vec::new(),
@@ -2668,6 +2712,9 @@ impl ClientApp {
                                 .and_then(|v| v.as_str())
                                 .unwrap_or_default()
                                 .to_string(),
+                            first_request_tokens: s
+                                .get("first_request_tokens")
+                                .and_then(|v| v.as_u64()),
                         })
                         .collect();
                     let n = rows.len();
@@ -4983,8 +5030,10 @@ impl ClientApp {
         self.streaming = false;
         self.session_model = None;
         self.model_menu_open = false;
-        self.ctx_used = 0;
-        self.ctx_window = 0;
+        self.ctx_live = None;
+        self.ctx_window_live = 0;
+        self.ctx_panel_open = false;
+        self.ctx_compress = None;
         self.messages = Rc::new(Vec::new());
         self.msg_list_state = GpuiListState::new(0, ListAlignment::Bottom, px(120.));
         self.message_total = 0;
@@ -5793,6 +5842,7 @@ impl ClientApp {
                             segs,
                             tool_calls,
                             compression: false,
+                            usage: parse_msg_usage(m),
                         }
                     })
                     .collect();
@@ -6397,25 +6447,161 @@ impl ClientApp {
             .into_any_element()
     }
 
-    /// 上下文占用百分比（0 = 还没收到 usage 上报）
-    fn ctx_pct(&self) -> u64 {
-        if self.ctx_window == 0 {
-            0
-        } else {
-            self.ctx_used.saturating_mul(100) / self.ctx_window
+    /// 最近一轮请求的用量 → 上下文占用的分子。
+    ///
+    /// 两条来源（与 gui-vite `lib/token-usage.lastMessageUsage` 同口径）：
+    /// ① 流式 `usage` 上报（`ctx_live`，最新一轮；切会话即清）；
+    /// ② 消息链里每条消息自带的 `usage`——从末尾向前找第一条，让**切会话 /
+    ///    重开应用**也能立刻显示占用，而不必等下一轮对话才开始有数。
+    ///
+    /// 压缩摘要消息特殊处理：它的 `prompt_tokens` 是压缩请求的输入（≈ 压缩前
+    /// 上下文），不能当占用；改用「系统前缀基线（会话首条请求 input）+ 摘要输出」
+    /// 估算压缩后占用。
+    fn ctx_usage(&self) -> Option<MsgUsage> {
+        // 流式实时值优先：它比库里最后一条更「当轮」（本轮 tool 循环的最后一跳）
+        if let Some(u) = self.ctx_live {
+            return Some(u);
         }
+        for m in self.messages.iter().rev() {
+            let Some(u) = m.usage else { continue };
+            if !m.compression {
+                return Some(u);
+            }
+            let baseline = self
+                .sessions_data
+                .iter()
+                .find(|s| Some(&s.id) == self.current_session.as_ref())
+                .and_then(|s| s.first_request_tokens)
+                .or_else(|| {
+                    // 后端没给基线（旧接口）时退回「窗口内第一条 assistant 的
+                    // prompt_tokens」——仅当窗口包含会话开头才近似成立
+                    self.messages
+                        .iter()
+                        .find(|x| x.role == "assistant" && x.usage.is_some())
+                        .and_then(|x| x.usage)
+                        .map(|x| x.prompt_tokens)
+                })
+                .unwrap_or(0);
+            return Some(MsgUsage {
+                prompt_tokens: baseline + u.completion_tokens,
+                completion_tokens: u.completion_tokens,
+                cache_read: u.cache_read,
+            });
+        }
+        None
     }
 
-    /// 上下文占用文案。
+    /// 上下文窗口（分母）：优先当前 chat 模型声明的 `context_length`（vite 同口径
+    /// `chatModels.context_length`），否则用流式上报的窗口兜底。
+    fn ctx_window(&self) -> u64 {
+        self.current_model_context().unwrap_or(self.ctx_window_live)
+    }
+
+    /// 当前 chat 模型的声明上下文窗口：会话级模型优先，回退 `preferences.chat`
+    /// （`load_models` 已把默认 chat 模型标成 `is_chat`）。
+    fn current_model_context(&self) -> Option<u64> {
+        if let Some((provider, model)) = &self.session_model {
+            if let Some(row) = self
+                .models
+                .iter()
+                .find(|m| &m.provider == provider && &m.name == model)
+            {
+                return row.context;
+            }
+        }
+        self.models
+            .iter()
+            .find(|m| m.is_chat)
+            .and_then(|m| m.context)
+    }
+
+    /// 上下文占用百分比（0-100；无用量时也是 0，用 `ctx_usage()` 区分「没有数据」）。
     ///
-    /// Tauri 版这块是一个环形进度（`ContextRing` + 库里的 `ProgressCircle`），
-    /// 先落成同色的文本百分比；环状绘制随后替换（数值口径已就绪）。
+    /// 超过窗口时夹到 100、并按四舍五入取整（与 vite `ContextRing` 的
+    /// `Math.round(Math.min(100, …))` 同口径）——截断会把 0.9% 显示成 0%，
+    /// 看着像「还没有数据」。
+    fn ctx_pct(&self) -> u64 {
+        let window = self.ctx_window();
+        let Some(used) = self.ctx_usage() else {
+            return 0;
+        };
+        if window == 0 {
+            return 0;
+        }
+        let capped = used
+            .prompt_tokens
+            .saturating_mul(100)
+            .min(window.saturating_mul(100));
+        (capped + window / 2) / window
+    }
+
+    /// 上下文占用文案（无用量 / 无窗口时 `--`，对齐 vite 环中心的 `–`）
     fn ctx_label(&self) -> String {
-        if self.ctx_window == 0 {
+        if self.ctx_usage().is_none() || self.ctx_window() == 0 {
             "上下文 --".to_string()
         } else {
             format!("上下文 {}%", self.ctx_pct())
         }
+    }
+
+    /// 上下文占用配色（对齐 DSH ContextMeter / vite `ContextRing`）：
+    /// 临界 80% → error，高 50% → warning，正常 → success。
+    fn ctx_color(&self) -> u32 {
+        let pct = self.ctx_pct();
+        if pct >= 80 {
+            colors::ERROR()
+        } else if pct >= 50 {
+            colors::WARNING()
+        } else {
+            colors::SUCCESS()
+        }
+    }
+
+    /// 手动压缩当前会话（`POST /sessions/{id}/compress`）。
+    ///
+    /// 与 vite `ChatPanel.handleCompress` 同语义：流式中 / 已压缩中不重入；
+    /// 完成后刷新消息链（压缩点消息 + 上下文变短）与会话 token 汇总。
+    fn compress_session(&mut self, cx: &mut Context<Self>) {
+        let Some(sid) = self.current_session.clone() else {
+            return;
+        };
+        if self.ctx_compressing || self.streaming {
+            return;
+        }
+        self.ctx_compressing = true;
+        self.ctx_compress = None;
+        cx.notify();
+        let port = self.port;
+        cx.spawn(async move |this, cx| {
+            let url = format!("http://{SERVER_HOST}:{port}/api/v1/sessions/{sid}/compress");
+            let res = post_json(url, serde_json::json!({})).await;
+            let _ = this.update(cx, |this, cx| {
+                this.ctx_compressing = false;
+                match res {
+                    Ok(body) => {
+                        let compressed = body
+                            .get("compressed")
+                            .and_then(|v| v.as_bool())
+                            .unwrap_or(false);
+                        this.ctx_compress = Some((
+                            true,
+                            if compressed {
+                                "已压缩".to_string()
+                            } else {
+                                "无需压缩（消息太少）".to_string()
+                            },
+                        ));
+                        // 压缩改的是消息链：重拉消息 / 汇总 / 会话列表（首条基线）
+                        this.load_messages(sid.clone(), cx);
+                        this.load_session_usage(cx);
+                        this.load_sessions(cx);
+                    }
+                    Err(e) => this.ctx_compress = Some((false, format!("压缩失败：{e}"))),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     /// 选择模型：写**当前会话**的模型（`PUT /sessions/{id}/model`）。
@@ -11283,8 +11469,11 @@ impl ClientApp {
         // 会话级模型 / 上下文进度都是**按会话**的：切走即回落（模型回到 preferences.chat）
         self.session_model = None;
         self.model_menu_open = false;
-        self.ctx_used = 0;
-        self.ctx_window = 0;
+        // 实时用量与面板状态按会话重置；占用本身由新会话的消息 usage 恢复
+        self.ctx_live = None;
+        self.ctx_window_live = 0;
+        self.ctx_panel_open = false;
+        self.ctx_compress = None;
         // 统计行是按会话的：切走即清空，由新会话的两次 GET 重新填
         self.session_usage = None;
         self.request_perf = None;
@@ -11331,13 +11520,23 @@ impl ClientApp {
             "answer" => {
                 let delta = ev.get("delta").and_then(|v| v.as_str()).unwrap_or_default();
                 self.append_delta(delta);
-                // 上下文占用（Tauri 版 `ContextRing` 的数据源）：usage 随 answer 块下发
+                // 上下文占用（`ContextRing` 的数据源）：usage 随 answer 块下发。
+                // 分子取 `prompt_tokens`（本轮上下文）——`total_tokens` 含输出，
+                // 当占用会偏高；分母优先用模型声明的窗口，这里只记流式兜底值。
                 if let Some(u) = ev.get("usage") {
-                    if let Some(used) = u.get("total_tokens").and_then(|v| v.as_u64()) {
-                        self.ctx_used = used;
+                    let prompt = u.get("prompt_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
+                    if prompt > 0 {
+                        self.ctx_live = Some(MsgUsage {
+                            prompt_tokens: prompt,
+                            completion_tokens: u
+                                .get("completion_tokens")
+                                .and_then(|v| v.as_u64())
+                                .unwrap_or(0),
+                            cache_read: u.get("cache_read").and_then(|v| v.as_u64()).unwrap_or(0),
+                        });
                     }
                     if let Some(win) = u.get("context_window").and_then(|v| v.as_u64()) {
-                        self.ctx_window = win;
+                        self.ctx_window_live = win;
                     }
                 }
             }
@@ -11467,6 +11666,7 @@ impl ClientApp {
             segs: Vec::new(),
             tool_calls: Vec::new(),
             compression: false,
+            usage: None,
         });
         next.push(MsgRow {
             role: "assistant".to_string(),
@@ -11474,6 +11674,7 @@ impl ClientApp {
             segs: Vec::new(),
             tool_calls: Vec::new(),
             compression: false,
+            usage: None,
         });
         if next.len() > RENDER_LIMIT {
             let drop_n = next.len() - RENDER_LIMIT;
@@ -11558,6 +11759,7 @@ impl ClientApp {
                                     .get("compression_marker")
                                     .and_then(|v| v.as_bool())
                                     .unwrap_or(false),
+                                usage: parse_msg_usage(m),
                             }
                         })
                         .collect();
@@ -11621,6 +11823,136 @@ impl ClientApp {
         let menu_open = self.model_menu_open;
         let ctx_label = self.ctx_label();
         let ctx_high = self.ctx_pct() >= 80;
+        let ctx_pct = self.ctx_pct();
+        let ctx_color = self.ctx_color();
+        let ctx_usage = self.ctx_usage();
+        let ctx_window = self.ctx_window();
+        let ctx_panel_open = self.ctx_panel_open;
+        // 「左标签 / 右值」一行（详情面板三行共用）
+        let kv_row = |label: &'static str, value: String| {
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap_2()
+                .child(div().text_color(rgb(colors::TEXT_TERTIARY())).child(label))
+                .child(div().flex_1())
+                .child(div().text_color(rgb(colors::TEXT_PRIMARY())).child(value))
+        };
+        // 上下文详情面板（对齐 vite `ContextRing` 的浮层）：占用 / 缓存命中 / 输出
+        // +「压缩会话」。环本身只是缩略，口径（最近一轮 vs 会话累计）写在面板里。
+        let mut ctx_panel = div()
+            .absolute()
+            .bottom(px(40.))
+            .right(px(0.))
+            .w(px(300.))
+            .rounded_lg()
+            .border_1()
+            .border_color(rgb(colors::BORDER()))
+            .bg(rgb(colors::BG_PRIMARY()))
+            .p_3()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .text_xs()
+            .child(kv_row(
+                "上下文占用",
+                match ctx_usage {
+                    Some(u) if ctx_window > 0 => format!(
+                        "{} / {}（{ctx_pct}%）",
+                        group_thousands(u.prompt_tokens),
+                        group_thousands(ctx_window)
+                    ),
+                    Some(u) => format!("{} token（窗口未知）", group_thousands(u.prompt_tokens)),
+                    None => "还没有用量数据".to_string(),
+                },
+            ))
+            .child(kv_row(
+                "缓存命中",
+                match ctx_usage {
+                    Some(u) if u.cache_read > 0 => format!(
+                        "{} token（{}%）",
+                        group_thousands(u.cache_read),
+                        (u.cache_read as f64 / u.prompt_tokens.max(1) as f64 * 100.0).round()
+                            as u64
+                    ),
+                    Some(_) => "0（提供商未返回明细）".to_string(),
+                    None => "—".to_string(),
+                },
+            ))
+            .child(kv_row(
+                "输出",
+                match ctx_usage {
+                    Some(u) => format!("{} token", group_thousands(u.completion_tokens)),
+                    None => "—".to_string(),
+                },
+            ))
+            .child(
+                div()
+                    .pt_1()
+                    .border_t_1()
+                    .border_color(rgb(colors::BORDER()))
+                    .text_color(rgb(colors::TEXT_TERTIARY()))
+                    .child("以上为最近一轮请求 · 输入框下方小字为会话累计"),
+            );
+        // 压缩按钮：流式中 / 压缩中不可点（同 vite 的 disabled 口径）
+        let compressing = self.ctx_compressing;
+        let can_compress = self.current_session.is_some()
+            && ctx_usage.is_some()
+            && !compressing
+            && !self.streaming;
+        let btn_color = if can_compress {
+            colors::TEXT_SECONDARY()
+        } else {
+            colors::TEXT_TERTIARY()
+        };
+        let mut compress_btn = div()
+            .id("ctx-compress")
+            .w_full()
+            .py(px(5.))
+            .rounded_lg()
+            .border_1()
+            .border_color(rgb(colors::BORDER()))
+            .flex()
+            .flex_row()
+            .items_center()
+            .justify_center()
+            .gap_1()
+            .text_color(rgb(btn_color))
+            .child(
+                svg()
+                    .path(if compressing {
+                        IconName::LoaderCircle.path()
+                    } else {
+                        IconName::Minimize2.path()
+                    })
+                    .size(px(12.))
+                    .text_color(rgb(btn_color)),
+            )
+            .child(if compressing {
+                "压缩中…".to_string()
+            } else if ctx_usage.is_some() {
+                format!("压缩会话（当前占用 {ctx_pct}%）")
+            } else {
+                "压缩会话".to_string()
+            });
+        if can_compress {
+            compress_btn = compress_btn
+                .cursor_pointer()
+                .on_click(cx.listener(|this, _, _window, cx| this.compress_session(cx)));
+        }
+        ctx_panel = ctx_panel.child(compress_btn);
+        if let Some((ok, msg)) = &self.ctx_compress {
+            ctx_panel = ctx_panel.child(
+                div()
+                    .text_color(rgb(if *ok {
+                        colors::SUCCESS()
+                    } else {
+                        colors::ERROR()
+                    }))
+                    .child(msg.clone()),
+            );
+        }
         let mut menu = div()
             .absolute()
             .bottom(px(40.))
@@ -11936,28 +12268,48 @@ impl ClientApp {
                                                             .items_center()
                                                             .gap_1()
                                                             .child(
-                                                                ProgressCircle::new("ctx-ring")
-                                                                    .value(
-                                                                        self.ctx_pct() as f32
-                                                                            / 100.0,
-                                                                    )
-                                                                    .color(Hsla::from(rgb(
-                                                                        if ctx_high {
-                                                                            colors::WARNING()
-                                                                        } else {
-                                                                            colors::ACCENT()
-                                                                        },
-                                                                    ))),
-                                                            )
-                                                            .child(
+                                                                // 环 + 文字是同一个可点区域：点开上下文详情
+                                                                // （占用 / 缓存 / 输出 + 压缩会话）。
+                                                                // ⚠️ 环值口径是 **0-100**（库约定），不是 0-1
+                                                                // ——写 0-1 时环永远是空的。
                                                                 div()
-                                                                    .text_xs()
-                                                                    .text_color(if ctx_high {
-                                                                        rgb(colors::WARNING())
-                                                                    } else {
-                                                                        rgb(colors::TEXT_TERTIARY())
-                                                                    })
-                                                                    .child(ctx_label),
+                                                                    .id("ctx-ring-btn")
+                                                                    .flex()
+                                                                    .flex_row()
+                                                                    .items_center()
+                                                                    .gap_1()
+                                                                    .px_1()
+                                                                    .rounded_md()
+                                                                    .cursor_pointer()
+                                                                    .child(
+                                                                        ProgressCircle::new("ctx-ring")
+                                                                            .value(ctx_pct as f32)
+                                                                            .color(Hsla::from(rgb(
+                                                                                ctx_color,
+                                                                            ))),
+                                                                    )
+                                                                    .child(
+                                                                        div()
+                                                                            .text_xs()
+                                                                            .text_color(if ctx_high {
+                                                                                rgb(colors::ERROR())
+                                                                            } else {
+                                                                                rgb(colors::TEXT_TERTIARY())
+                                                                            })
+                                                                            .child(ctx_label),
+                                                                    )
+                                                                    .on_click(cx.listener(
+                                                                        |this, _, _window, cx| {
+                                                                            this.ctx_panel_open =
+                                                                                !this.ctx_panel_open;
+                                                                            // 两个浮层同一位置：开一个就收另一个
+                                                                            this.model_menu_open = false;
+                                                                            if !this.ctx_panel_open {
+                                                                                this.ctx_compress = None;
+                                                                            }
+                                                                            cx.notify();
+                                                                        },
+                                                                    )),
                                                             ),
                                                     )
                                                     .child(
@@ -12027,6 +12379,13 @@ impl ClientApp {
                                                     })
                                                     .children(if menu_open {
                                                         Some(menu)
+                                                    } else {
+                                                        None
+                                                    })
+                                                    // 上下文详情浮层：与模型下拉同一挂载点
+                                                    // （控件行才是 `.relative()`，absolute 才落在按钮上方）
+                                                    .children(if ctx_panel_open {
+                                                        Some(ctx_panel)
                                                     } else {
                                                         None
                                                     }),

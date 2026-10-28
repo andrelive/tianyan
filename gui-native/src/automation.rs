@@ -566,9 +566,18 @@ impl ClientApp {
                 })).collect::<Vec<_>>(),
             },
             "usage": {
-                "ctx_used": self.ctx_used,
-                "ctx_window": self.ctx_window,
+                // 上下文环口径：分子 = 最近一轮请求的 `prompt_tokens`（不是
+                // `total_tokens`），分母 = 模型声明的窗口（缺失时才用流式上报值）
+                "ctx_used": self.ctx_usage().map(|u| u.prompt_tokens),
+                "ctx_window": self.ctx_window(),
                 "ctx_pct": self.ctx_pct(),
+                "ctx_cache_read": self.ctx_usage().map(|u| u.cache_read),
+                "ctx_completion": self.ctx_usage().map(|u| u.completion_tokens),
+                "ctx_panel_open": self.ctx_panel_open,
+                "ctx_compressing": self.ctx_compressing,
+                "ctx_compress": self.ctx_compress.as_ref().map(|(ok, m)| serde_json::json!({
+                    "ok": ok, "message": m,
+                })),
                 "session": self.session_usage.map(|(i, c, o)| serde_json::json!({
                     "input_uncached": i, "input_cached": c, "output": o,
                 })),
@@ -718,6 +727,21 @@ impl ClientApp {
                     .unwrap_or(!self.todo_bar_collapsed);
                 cx.notify();
             }
+            // 上下文详情面板：`open` 显式指定，不带才取反（同上面两处的口径）
+            "ctx_panel" => {
+                self.ctx_panel_open = cmd
+                    .get("open")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(!self.ctx_panel_open);
+                if !self.ctx_panel_open {
+                    self.ctx_compress = None;
+                }
+                // 两个浮层同一位置：开一收一
+                self.model_menu_open = false;
+                cx.notify();
+            }
+            // 压缩当前会话：只转既有方法（D8：动作不新造逻辑）
+            "compress_session" => self.compress_session(cx),
             "respond_approval" => {
                 let decision = arg_str(cmd, "decision")?;
                 let request_id = match arg_opt(cmd, "request_id") {
