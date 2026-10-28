@@ -513,6 +513,7 @@ impl ClientApp {
                 "browse": {
                     "dir": &self.kb_browse_dir,
                     "status": &self.kb_browse_status,
+                    "show_hidden": self.kb_show_hidden,
                     "entries": self.kb_browse_entries.iter().map(|e| serde_json::json!({
                         "name": &e.name, "path": &e.path,
                         "is_dir": e.is_dir, "size": e.size,
@@ -882,6 +883,21 @@ impl ClientApp {
             "kb_browse" => {
                 let path = arg_opt(cmd, "path").unwrap_or_default();
                 self.load_kb_browse(path, cx);
+                cx.notify();
+            }
+            "kb_open_picker" => {
+                // 打开文件选择弹窗（GPUI 自绘、非 OS 对话框）：默认定位到会话工作目录
+                self.open_kb_picker(cx);
+            }
+            "kb_close_picker" => {
+                self.dialog = None;
+                cx.notify();
+            }
+            "kb_toggle_hidden" => {
+                self.kb_show_hidden = cmd
+                    .get("show")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(!self.kb_show_hidden);
                 cx.notify();
             }
             "kb_pick" => {

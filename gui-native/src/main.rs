@@ -756,6 +756,8 @@ enum Dialog {
     ResetRole { name: String },
     /// 退役删除角色（`DELETE /roles/{name}`）
     DeleteRole { name: String },
+    /// 知识导入的文件选择弹窗（**GPUI 自绘**，不是 OS 对话框 —— 所以自动化点得到）
+    KbFilePicker,
 }
 
 impl Dialog {
@@ -767,6 +769,7 @@ impl Dialog {
             Dialog::WorkspacePicker { .. } => "workspace_picker",
             Dialog::ResetRole { .. } => "reset_role",
             Dialog::DeleteRole { .. } => "delete_role",
+            Dialog::KbFilePicker => "kb_file_picker",
         }
     }
 }
@@ -1328,12 +1331,16 @@ fn strip_hashline(content: &str) -> String {
         .join("\n")
 }
 
-/// 文件大小 → 人类可读（`1.2 KB`），树里做次要信息。
+/// 文件大小 → 人类可读（`1.2 KB` / `23.4 MB` / `25.3 GB`），列表里做次要信息。
 fn format_size(bytes: u64) -> String {
-    if bytes >= 1024 * 1024 {
-        format!("{:.1} MB", bytes as f64 / (1024.0 * 1024.0))
-    } else if bytes >= 1024 {
-        format!("{:.1} KB", bytes as f64 / 1024.0)
+    const KB: f64 = 1024.0;
+    let b = bytes as f64;
+    if b >= KB * KB * KB {
+        format!("{:.1} GB", b / (KB * KB * KB))
+    } else if b >= KB * KB {
+        format!("{:.1} MB", b / (KB * KB))
+    } else if b >= KB {
+        format!("{:.1} KB", b / KB)
     } else {
         format!("{bytes} B")
     }
@@ -2022,6 +2029,12 @@ struct ClientApp {
     kb_browse_dir: String,
     kb_browse_entries: Vec<KbBrowseEntry>,
     kb_browse_status: String,
+    /// 是否显示点开头的隐藏条目（默认关：项目根目录十几个 `.git`/`.cargo`/`.vscode`
+    /// 会把第一屏占满，真正想选的文件要滚几屏 —— 选文件的场景下这是纯噪音）
+    kb_show_hidden: bool,
+    /// 文件选择弹窗里的过滤词（名字包含即匹配；空 = 不过滤）
+    kb_pick_query: String,
+    kb_pick_search: Entity<InputState>,
     /// 已勾选待导入的文件（完整路径，保持勾选顺序）
     kb_picked: Vec<String>,
     /// 知识页·搜索：查询输入框与结果
@@ -2178,6 +2191,19 @@ impl ClientApp {
             },
         )
         .detach();
+        // 文件选择弹窗的过滤框：改动即过滤（同 roles/tools 搜索框的口径）
+        let kb_pick_search = cx.new(|cx| InputState::new(window, cx).placeholder("按名字过滤…"));
+        cx.subscribe_in(
+            &kb_pick_search,
+            window,
+            |this, _input, event: &InputEvent, _window, cx| {
+                if let InputEvent::Change = event {
+                    this.kb_pick_query = this.kb_pick_search.read(cx).value().to_string();
+                    cx.notify();
+                }
+            },
+        )
+        .detach();
         // 知识页的三个输入框（导入路径 / 导入分类 / 搜索词）
         let kb_ingest_path =
             cx.new(|cx| InputState::new(window, cx).placeholder("文件或目录的绝对路径"));
@@ -2284,6 +2310,9 @@ impl ClientApp {
             kb_browse_dir: String::new(),
             kb_browse_entries: Vec::new(),
             kb_browse_status: String::new(),
+            kb_show_hidden: false,
+            kb_pick_query: String::new(),
+            kb_pick_search,
             kb_picked: Vec::new(),
             kb_search,
             kb_results: Vec::new(),
@@ -2677,6 +2706,10 @@ impl ClientApp {
         if let Dialog::WorkspacePicker { target } = dialog {
             return self.render_workspace_picker_dialog(target, cx);
         }
+        // 知识导入的文件选择弹窗同理：列表 + 勾选 + 导航，独立形态
+        if let Dialog::KbFilePicker = dialog {
+            return self.render_kb_picker_dialog(cx);
+        }
         let (heading, message, confirm_label, danger) = match &dialog {
             Dialog::DeleteSession { title, .. } => (
                 "删除会话".to_string(),
@@ -2692,6 +2725,7 @@ impl ClientApp {
             Dialog::WorkspacePicker { .. } => {
                 ("选择目录".to_string(), None, "选择".to_string(), false)
             }
+            Dialog::KbFilePicker => ("选择文件".to_string(), None, "导入".to_string(), false),
             Dialog::ResetRole { name } => (
                 "回退内置种子".to_string(),
                 Some(format!(
@@ -2788,6 +2822,8 @@ impl ClientApp {
                                 Some(Dialog::DeleteSession { .. }) => this.confirm_delete(cx),
                                 Some(Dialog::RenameSession { .. }) => this.submit_rename(cx),
                                 Some(Dialog::WorkspacePicker { .. }) => {}
+                                // 文件选择弹窗同样是独立形态（不走这条骨架）
+                                Some(Dialog::KbFilePicker) => {}
                                 Some(Dialog::ResetRole { name }) => {
                                     this.confirm_reset_role(name, cx)
                                 }
@@ -3103,7 +3139,31 @@ impl ClientApp {
     ///
     /// 同时刷一次待审批列表（`load_approvals`）—— 那个走的是同一份
     /// `pending_approvals`，两个入口（对话横幅 / 审批页）必须看到同一批数据。
-    /// 内嵌文件浏览器：列某一级（目录 + 文件，`include_files=true`）。
+    /// 打开文件选择弹窗：默认定位到「当前会话的工作目录」→「用户主目录」。
+    ///
+    /// 直接落在盘符根是很糟的默认值 —— 一屏全是 `hiberfil.sys` / `pagefile.sys`
+    /// 这类系统文件，既找不到东西也说明不了从哪开始找。
+    fn open_kb_picker(&mut self, cx: &mut Context<Self>) {
+        self.dialog = Some(Dialog::KbFilePicker);
+        self.kb_picked.clear();
+        let start = self.kb_picker_start_dir();
+        self.load_kb_browse(start, cx);
+        cx.notify();
+    }
+
+    /// 文件选择弹窗的起始目录。
+    fn kb_picker_start_dir(&self) -> String {
+        if let Some(sid) = &self.current_session {
+            if let Some(s) = self.sessions_data.iter().find(|s| &s.id == sid) {
+                if !s.working_directory.is_empty() {
+                    return s.working_directory.clone();
+                }
+            }
+        }
+        std::env::var("USERPROFILE").unwrap_or_default()
+    }
+
+    /// 文件选择弹窗的数据源：列某一级（目录 + 文件，`include_files=true`）。
     ///
     /// 走 `/workspace/dirs` 而不是新接口：同一个目录遍历，只是多一个开关
     /// （目录选择器仍只要目录）。空路径 = 浏览根（盘符列表）。
@@ -7056,9 +7116,30 @@ impl ClientApp {
                     .child(div().flex_1().min_w_0().h_full().child(detail)),
             )
     }
-
-    /// 知识页·导入：路径 + 分类 → 读本地文件 → multipart 上传。
+    /// 知识页·导入：选文件（弹窗）或按路径批量，读本地文件 → multipart 上传。
+    ///
+    /// 文件选择走**弹窗**（`Dialog::KbFilePicker`）而不是常驻列表：导入页的主任务只有
+    /// 「选文件 + 导入」，把一张文件列表铺在页面上会把主次关系拉平、也挤掉结果区。
     fn render_kb_ingest(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        // 已选摘要：弹窗关掉后仍要看得到「将要导入什么」
+        let picked_line = if self.kb_picked.is_empty() {
+            "还没有选中文件".to_string()
+        } else {
+            format!(
+                "已选 {} 个：{}",
+                self.kb_picked.len(),
+                self.kb_picked
+                    .iter()
+                    .take(4)
+                    .map(|p| std::path::Path::new(p)
+                        .file_name()
+                        .map(|n| n.to_string_lossy().to_string())
+                        .unwrap_or_else(|| p.clone()))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        };
+
         let mut results = div().flex().flex_col().gap_1().w_full();
         for (i, (name, status)) in self.kb_ingest_results.iter().enumerate() {
             results = results.child(
@@ -7073,10 +7154,10 @@ impl ClientApp {
                         div()
                             .flex_1()
                             .min_w_0()
-                            .text_size(px(11.))
-                            .text_color(rgb(colors::TEXT_SECONDARY))
                             .whitespace_nowrap()
                             .overflow_hidden()
+                            .text_size(px(11.))
+                            .text_color(rgb(colors::TEXT_SECONDARY))
                             .child(name.clone()),
                     )
                     .child(
@@ -7087,6 +7168,7 @@ impl ClientApp {
                     ),
             );
         }
+
         div()
             .flex_1()
             .min_h_0()
@@ -7094,10 +7176,78 @@ impl ClientApp {
             .flex()
             .flex_col()
             .gap_3()
+            // ① 主路径：选文件（弹窗）
             .child(
                 div()
-                    .p_3()
-                    .rounded_lg()
+                    .p_4()
+                    .rounded_xl()
+                    .border_1()
+                    .border_color(rgb(colors::BORDER))
+                    .bg(rgb(colors::BG_SECONDARY))
+                    .flex()
+                    .flex_col()
+                    .gap_3()
+                    .child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .gap_3()
+                            .child(
+                                svg()
+                                    .path(IconName::Upload.path())
+                                    .size(px(20.))
+                                    .text_color(rgb(colors::ACCENT)),
+                            )
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .flex()
+                                    .flex_col()
+                                    .gap_1()
+                                    .child(
+                                        div()
+                                            .text_size(px(13.))
+                                            .text_color(rgb(colors::TEXT_PRIMARY))
+                                            .child("选择文件导入"),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_size(px(11.))
+                                            .text_color(rgb(colors::TEXT_TERTIARY))
+                                            .child(
+                                                "可多选；导入是异步任务，L0/L1 摘要生成前浏览里可能还看不到",
+                                            ),
+                                    ),
+                            )
+                            .child(
+                                div()
+                                    .id("kb-open-picker")
+                                    .px_4()
+                                    .py_2()
+                                    .rounded_md()
+                                    .bg(rgb(colors::ACCENT))
+                                    .cursor_pointer()
+                                    .text_size(px(11.))
+                                    .text_color(rgb(colors::TEXT_PRIMARY))
+                                    .child("选择文件…")
+                                    .on_click(cx.listener(|this, _, _, cx| this.open_kb_picker(cx))),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(10.))
+                            .text_color(rgb(colors::TEXT_TERTIARY))
+                            .child(picked_line),
+                    )
+                    .child(field_wrap(&self.kb_ingest_category)),
+            )
+            // ② 次路径：按路径批量（目录递归）
+            .child(
+                div()
+                    .p_4()
+                    .rounded_xl()
                     .border_1()
                     .border_color(rgb(colors::BORDER))
                     .bg(rgb(colors::BG_SECONDARY))
@@ -7107,284 +7257,30 @@ impl ClientApp {
                     .child(
                         div()
                             .text_size(px(11.))
-                            .text_color(rgb(colors::TEXT_TERTIARY))
-                            .child(
-                                "**推荐**：在下面的文件浏览器里点目录进入、点文件勾选，再「导入选中的文件」。\
-                                 「浏览文件…」是系统对话框（深层路径一次选完更快）；「按路径导入」适合批量。\
-                                 目录会递归收集（上限 200 个文件）。导入是异步任务，L0/L1 摘要生成前\
-                                 浏览里可能还看不到。",
-                            ),
+                            .text_color(rgb(colors::TEXT_SECONDARY))
+                            .child("或按路径批量导入（文件或目录，目录递归，上限 200）"),
                     )
                     .child(field_wrap(&self.kb_ingest_path))
-                    .child(field_wrap(&self.kb_ingest_category))
                     .child(
                         div()
-                            .flex()
-                            .flex_row()
-                            .items_center()
-                            .gap_2()
-                            .child(
-                                div()
-                                    .id("kb-pick")
-                                    .px_3()
-                                    .py_2()
-                                    .rounded_md()
-                                    .border_1()
-                                    .border_color(rgb(colors::ACCENT))
-                                    .bg(rgb(colors::BG_TERTIARY))
-                                    .cursor_pointer()
-                                    .text_size(px(11.))
-                                    .text_color(rgb(colors::ACCENT))
-                                    .child("浏览文件…")
-                                    .on_click(cx.listener(|_this, _, _window, cx| {
-                                        // 原生文件/目录选择器：选完**直接导入**。
-                                        // 不回填输入框是因为 `InputState` 没有 `set_value`
-                                        // （它要 `&mut Window`，而这里是异步回调上下文）。
-                                        let rx = cx.prompt_for_paths(PathPromptOptions {
-                                            files: true,
-                                            directories: true,
-                                            multiple: true,
-                                            prompt: Some("选择要导入知识库的文件或目录".into()),
-                                        });
-                                        cx.spawn(async move |this, cx| {
-                                            let Ok(Ok(Some(paths))) = rx.await else {
-                                                return;
-                                            };
-                                            if paths.is_empty() {
-                                                return;
-                                            }
-                                            let _ = this.update(cx, |this, cx| {
-                                                this.kb_status =
-                                                    format!("已选 {} 项，开始导入…", paths.len());
-                                                this.kb_ingest_paths(paths, String::new(), cx);
-                                                cx.notify();
-                                            });
-                                        })
-                                        .detach();
-                                    })),
-                            )
-                            .child(
-                                div()
-                                    .id("kb-ingest")
-                                    .px_3()
-                                    .py_2()
-                                    .rounded_md()
-                                    .bg(rgb(colors::ACCENT))
-                                    .cursor_pointer()
-                                    .text_size(px(11.))
-                                    .text_color(rgb(colors::TEXT_PRIMARY))
-                                    .child("按路径导入")
-                                    .on_click(cx.listener(|this, _, _, cx| this.ingest_kb(cx))),
-                            ),
+                            .id("kb-ingest")
+                            .px_3()
+                            .py_2()
+                            .rounded_md()
+                            .border_1()
+                            .border_color(rgb(colors::BORDER))
+                            .cursor_pointer()
+                            .text_size(px(11.))
+                            .text_color(rgb(colors::TEXT_SECONDARY))
+                            .child("按路径导入")
+                            .on_click(cx.listener(|this, _, _, cx| this.ingest_kb(cx))),
                     ),
             )
-            .child(
-                div()
-                    .p_3()
-                    .rounded_lg()
-                    .border_1()
-                    .border_color(rgb(colors::BORDER))
-                    .bg(rgb(colors::BG_SECONDARY))
-                    .flex()
-                    .flex_col()
-                    .gap_2()
-                    .child(
-                        div()
-                            .flex()
-                            .flex_row()
-                            .items_center()
-                            .gap_2()
-                            .flex_wrap()
-                            .child(
-                                div()
-                                    .text_size(px(11.))
-                                    .text_color(rgb(colors::TEXT_SECONDARY))
-                                    .child("文件浏览器"),
-                            )
-                            .child(
-                                div()
-                                    .text_size(px(10.))
-                                    .text_color(rgb(colors::TEXT_TERTIARY))
-                                    .child(if self.kb_browse_dir.is_empty() {
-                                        "（浏览根）".to_string()
-                                    } else {
-                                        self.kb_browse_dir.clone()
-                                    }),
-                            )
-                            .child(
-                                div()
-                                    .id("kb-br-root")
-                                    .px_2()
-                                    .py_1()
-                                    .rounded_md()
-                                    .cursor_pointer()
-                                    .text_size(px(10.))
-                                    .text_color(rgb(colors::ACCENT))
-                                    .child("回到根")
-                                    .on_click(
-                                        cx.listener(|this, _, _, cx| this
-                                            .load_kb_browse(String::new(), cx)),
-                                    ),
-                            )
-                            .child(
-                                div()
-                                    .text_size(px(10.))
-                                    .text_color(rgb(colors::TEXT_TERTIARY))
-                                    .child(self.kb_browse_status.clone()),
-                            ),
-                    )
-                    .child(
-                        // 列表必须落在确定高度里：`max_h` 会让滚动容器塔成 0（实测过的坑）
-                        div().h(px(220.)).min_h_0().child({
-                            let mut list = div().flex().flex_col().gap_1().w_full();
-                            if self.kb_browse_entries.is_empty() {
-                                list = list.child(
-                                    div()
-                                        .py_4()
-                                        .text_size(px(10.))
-                                        .text_color(rgb(colors::TEXT_TERTIARY))
-                                        .child("（空目录）"),
-                                );
-                            }
-                            for (i, e) in self.kb_browse_entries.iter().enumerate() {
-                                let is_picked = self.kb_picked.iter().any(|p| p == &e.path);
-                                let dir = e.path.clone();
-                                let is_dir = e.is_dir;
-                                let picked_path = e.path.clone();
-                                let size_text = e
-                                    .size
-                                    .map(|s| format!("{:.1} KB", s as f64 / 1024.0))
-                                    .unwrap_or_default();
-                                list = list.child(
-                                    div()
-                                        .id(("kb-br", i))
-                                        .w_full()
-                                        .px_2()
-                                        .py_1()
-                                        .rounded_md()
-                                        .bg(rgb(if is_picked {
-                                            colors::BG_TERTIARY
-                                        } else {
-                                            colors::BG_PRIMARY
-                                        }))
-                                        .cursor_pointer()
-                                        .flex()
-                                        .flex_row()
-                                        .items_center()
-                                        .gap_2()
-                                        .child(
-                                            div()
-                                                .text_size(px(10.))
-                                                .text_color(rgb(if is_picked {
-                                                    colors::ACCENT
-                                                } else {
-                                                    colors::TEXT_TERTIARY
-                                                }))
-                                                .child(if is_dir {
-                                                    "[D]"
-                                                } else if is_picked {
-                                                    "[x]"
-                                                } else {
-                                                    "[ ]"
-                                                }),
-                                        )
-                                        .child(
-                                            div()
-                                                .flex_1()
-                                                .min_w_0()
-                                                .text_size(px(11.))
-                                                .text_color(rgb(colors::TEXT_SECONDARY))
-                                                .whitespace_nowrap()
-                                                .overflow_hidden()
-                                                .child(e.name.clone()),
-                                        )
-                                        .child(
-                                            div()
-                                                .text_size(px(9.))
-                                                .text_color(rgb(colors::TEXT_TERTIARY))
-                                                .child(size_text),
-                                        )
-                                        .on_click(cx.listener(move |this, _, _, cx| {
-                                            if is_dir {
-                                                this.load_kb_browse(dir.clone(), cx);
-                                            } else {
-                                                this.toggle_kb_pick(picked_path.clone());
-                                                cx.notify();
-                                            }
-                                        })),
-                                );
-                            }
-                            list.overflow_y_scrollbar()
-                        }),
-                    )
-                    .child(
-                        div()
-                            .flex()
-                            .flex_row()
-                            .items_center()
-                            .gap_2()
-                            .flex_wrap()
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .min_w_0()
-                                    .text_size(px(10.))
-                                    .text_color(rgb(colors::TEXT_TERTIARY))
-                                    .child(if self.kb_picked.is_empty() {
-                                        "还没勾选文件（点文件行勾选，点目录进入）".to_string()
-                                    } else {
-                                        format!(
-                                            "已选 {} 个：{}",
-                                            self.kb_picked.len(),
-                                            self.kb_picked
-                                                .iter()
-                                                .take(3)
-                                                .map(|p| std::path::Path::new(p)
-                                                    .file_name()
-                                                    .map(|n| n.to_string_lossy().to_string())
-                                                    .unwrap_or_else(|| p.clone()))
-                                                .collect::<Vec<_>>()
-                                                .join(", ")
-                                        )
-                                    }),
-                            )
-                            .child(
-                                div()
-                                    .id("kb-pick-clear")
-                                    .px_2()
-                                    .py_1()
-                                    .rounded_md()
-                                    .cursor_pointer()
-                                    .text_size(px(10.))
-                                    .text_color(rgb(colors::TEXT_TERTIARY))
-                                    .child("清空")
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.kb_picked.clear();
-                                        cx.notify();
-                                    })),
-                            )
-                            .child(
-                                div()
-                                    .id("kb-import-picked")
-                                    .px_3()
-                                    .py_2()
-                                    .rounded_md()
-                                    .bg(rgb(colors::ACCENT))
-                                    .cursor_pointer()
-                                    .text_size(px(11.))
-                                    .text_color(rgb(colors::TEXT_PRIMARY))
-                                    .child("导入选中的文件")
-                                    .on_click(
-                                        cx.listener(|this, _, _, cx| this.import_kb_picked(cx)),
-                                    ),
-                            ),
-                    ),
-            )
+            // ③ 结果
             .child(results)
             .overflow_y_scrollbar()
     }
 
-    /// 知识页·搜索：语义检索结果（分数 + 来源 + 内容片段）。
     fn render_kb_search_tab(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let mut results = div().flex().flex_col().gap_2().w_full();
         if self.kb_results.is_empty() {
@@ -9872,6 +9768,422 @@ impl ClientApp {
     /// 目录选择器弹窗：当前路径 + 逐级浏览 + 「选择此目录」。
     ///
     /// 浏览根（盘符列表）不允许直接选中 —— 后端要求的是具体目录。
+    /// 文件选择弹窗（**GPUI 自绘**，不是 OS 对话框）：点目录进入、点文件勾选。
+    ///
+    /// 形态与 workspace 目录选择器一致（遮罩 + 居中卡片 + 列表），因为它们是同一类
+    /// 任务（在文件系统里定位）。弹窗而不是平铺：导入 tab 的主任务只有「选文件 +
+    /// 导入」，把一张常驻的文件列表铺在页面上会把主次关系拉平。
+    fn render_kb_picker_dialog(&self, cx: &mut Context<Self>) -> AnyElement {
+        // 列表：上级目录 → 子目录 → 文件
+        let mut list = div().flex().flex_col().gap_1().w_full();
+        if !self.kb_browse_dir.is_empty() && self.kb_browse_dir != "浏览根" {
+            let parent = std::path::Path::new(&self.kb_browse_dir)
+                .parent()
+                .map(|p| p.to_string_lossy().to_string())
+                .unwrap_or_default();
+            list = list.child(
+                div()
+                    .id("kbp-up")
+                    .w_full()
+                    .px_2()
+                    .py_1()
+                    .rounded_md()
+                    .cursor_pointer()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_2()
+                    .text_size(px(12.))
+                    .text_color(rgb(colors::TEXT_SECONDARY))
+                    .child(
+                        svg()
+                            .path(IconName::CornerLeftUp.path())
+                            .size(px(12.))
+                            .text_color(rgb(colors::TEXT_TERTIARY)),
+                    )
+                    .child("上级目录")
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.load_kb_browse(parent.clone(), cx);
+                    })),
+            );
+        }
+        if self.kb_browse_entries.is_empty() {
+            list = list.child(
+                div()
+                    .py_6()
+                    .w_full()
+                    .text_size(px(12.))
+                    .text_color(rgb(colors::TEXT_TERTIARY))
+                    .child(if self.kb_browse_status.is_empty() {
+                        "（空目录）"
+                    } else {
+                        "（空目录或读取中）"
+                    }),
+            );
+        }
+        // 遇到第一个文件时插一个「文件」分隔标题：目录总在前，没有分隔时
+        // 用户看不出「下面还有文件」（截图里第一屏全是目录就是这个感受）。
+        let q = self.kb_pick_query.trim().to_lowercase();
+        let mut files_label_drawn = false;
+        for (ix, e) in self.kb_browse_entries.iter().enumerate() {
+            // 默认隐藏点开头的条目：项目根目录动辄十几个 `.git`/`.cargo`/`.vscode`，
+            // 第一屏全被它们占满，真正要选的文件得滚好几屏（截图实测过）。
+            if !self.kb_show_hidden && e.name.starts_with('.') {
+                continue;
+            }
+            // 过滤词：只在「按名字」上匹配（选文件的场景里，路径信息没用）
+            if !q.is_empty() && !e.name.to_lowercase().contains(&q) {
+                continue;
+            }
+            if !e.is_dir && !files_label_drawn {
+                files_label_drawn = true;
+                list = list.child(
+                    div()
+                        .px_2()
+                        .pt_2()
+                        .pb_1()
+                        .text_size(px(10.))
+                        .text_color(rgb(colors::TEXT_TERTIARY))
+                        .child("文件"),
+                );
+            }
+            let is_picked = self.kb_picked.iter().any(|p| p == &e.path);
+            let dir = e.path.clone();
+            let is_dir = e.is_dir;
+            let picked_path = e.path.clone();
+            let icon = if is_dir {
+                IconName::Folder
+            } else {
+                IconName::File
+            };
+            let size_text = e.size.map(format_size).unwrap_or_default();
+            list =
+                list.child(
+                    div()
+                        .id(("kbp-item", ix))
+                        .w_full()
+                        .px_2()
+                        .py_1()
+                        .rounded_md()
+                        .bg(rgb(if is_picked {
+                            colors::BG_TERTIARY
+                        } else {
+                            colors::BG_SECONDARY
+                        }))
+                        .cursor_pointer()
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap_2()
+                        .child(svg().path(icon.path()).size(px(12.)).text_color(rgb(
+                            if is_picked {
+                                colors::ACCENT
+                            } else {
+                                colors::TEXT_TERTIARY
+                            },
+                        )))
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .whitespace_nowrap()
+                                .overflow_hidden()
+                                .text_size(px(12.))
+                                .text_color(rgb(if is_picked {
+                                    colors::ACCENT
+                                } else {
+                                    colors::TEXT_SECONDARY
+                                }))
+                                .child(e.name.clone()),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(10.))
+                                .text_color(rgb(colors::TEXT_TERTIARY))
+                                .child(size_text),
+                        )
+                        .child(
+                            // 目录不给勾选位（点它就是进入），文件给一个明确的勾选标记
+                            div()
+                                .w(px(16.))
+                                .flex()
+                                .justify_center()
+                                .text_size(px(11.))
+                                .text_color(rgb(if is_picked {
+                                    colors::SUCCESS
+                                } else {
+                                    colors::TEXT_TERTIARY
+                                }))
+                                .child(if is_dir {
+                                    ""
+                                } else if is_picked {
+                                    "✓"
+                                } else {
+                                    "○"
+                                }),
+                        )
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            if is_dir {
+                                this.load_kb_browse(dir.clone(), cx);
+                            } else {
+                                this.toggle_kb_pick(picked_path.clone());
+                                cx.notify();
+                            }
+                        })),
+                );
+        }
+
+        let card =
+            div()
+                .w(px(680.))
+                .max_h(px(620.))
+                .rounded_xl()
+                .border_1()
+                .border_color(rgb(colors::BORDER))
+                .bg(rgb(colors::BG_SECONDARY))
+                .flex()
+                .flex_col()
+                // 标题行
+                .child(
+                    div()
+                        .px_4()
+                        .py_3()
+                        .border_b_1()
+                        .border_color(rgb(colors::BORDER))
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap_2()
+                        .child(
+                            svg()
+                                .path(IconName::FolderOpen.path())
+                                .size(px(16.))
+                                .text_color(rgb(colors::TEXT_SECONDARY)),
+                        )
+                        .child(
+                            div()
+                                .flex_1()
+                                .text_size(px(14.))
+                                .text_color(rgb(colors::TEXT_PRIMARY))
+                                .child("选择要导入知识库的文件"),
+                        )
+                        .child(
+                            div()
+                                .id("kbp-close")
+                                .px_2()
+                                .py_1()
+                                .rounded_md()
+                                .cursor_pointer()
+                                .text_size(px(11.))
+                                .text_color(rgb(colors::TEXT_TERTIARY))
+                                .child("✕")
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.dialog = None;
+                                    cx.notify();
+                                })),
+                        ),
+                )
+                // 路径行
+                .child(
+                    div()
+                        .px_4()
+                        .py_2()
+                        .border_b_1()
+                        .border_color(rgb(colors::BORDER))
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap_2()
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .whitespace_nowrap()
+                                .overflow_hidden()
+                                .text_size(px(11.))
+                                .text_color(rgb(colors::TEXT_TERTIARY))
+                                .child(if self.kb_browse_dir.is_empty() {
+                                    "浏览根".to_string()
+                                } else {
+                                    self.kb_browse_dir.clone()
+                                }),
+                        )
+                        .child(
+                            div()
+                                .id("kbp-root")
+                                .px_2()
+                                .py_1()
+                                .rounded_md()
+                                .cursor_pointer()
+                                .text_size(px(11.))
+                                .text_color(rgb(colors::ACCENT))
+                                .child("回到根")
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.load_kb_browse(String::new(), cx)
+                                })),
+                        ),
+                )
+                // 隐藏项开关（默认隐藏，见列表循环里的过滤）
+                .child(
+                    div()
+                        .px_4()
+                        .pb_2()
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap_2()
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .rounded_md()
+                                .border_1()
+                                .border_color(rgb(colors::BORDER))
+                                .bg(rgb(colors::BG_PRIMARY))
+                                .px_2()
+                                .py_1()
+                                .child(Input::new(&self.kb_pick_search).appearance(false)),
+                        )
+                        .child(
+                            div()
+                                .id("kbp-hidden")
+                                .px_2()
+                                .py_1()
+                                .rounded_md()
+                                .border_1()
+                                .border_color(rgb(if self.kb_show_hidden {
+                                    colors::ACCENT
+                                } else {
+                                    colors::BORDER
+                                }))
+                                .cursor_pointer()
+                                .text_size(px(10.))
+                                .text_color(rgb(if self.kb_show_hidden {
+                                    colors::ACCENT
+                                } else {
+                                    colors::TEXT_TERTIARY
+                                }))
+                                .child(if self.kb_show_hidden {
+                                    "隐藏项：显示"
+                                } else {
+                                    "隐藏项：隐藏"
+                                })
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.kb_show_hidden = !this.kb_show_hidden;
+                                    cx.notify();
+                                })),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(10.))
+                                .text_color(rgb(colors::TEXT_TERTIARY))
+                                .child(if self.kb_browse_status.is_empty() {
+                                    String::new()
+                                } else {
+                                    self.kb_browse_status.clone()
+                                }),
+                        ),
+                )
+                // 列表（确定高度 + 自己滚动）
+                .child(
+                    div()
+                        .h(px(400.))
+                        .min_h_0()
+                        .px_3()
+                        .py_2()
+                        .child(list.overflow_y_scrollbar()),
+                )
+                // 底部：已选 + 清空 / 取消 / 导入
+                .child(
+                    div()
+                        .px_4()
+                        .py_3()
+                        .border_t_1()
+                        .border_color(rgb(colors::BORDER))
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap_2()
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .whitespace_nowrap()
+                                .overflow_hidden()
+                                .text_size(px(11.))
+                                .text_color(rgb(colors::TEXT_TERTIARY))
+                                .child(if self.kb_picked.is_empty() {
+                                    "点目录进入，点文件勾选".to_string()
+                                } else {
+                                    format!("已选 {} 个文件", self.kb_picked.len())
+                                }),
+                        )
+                        .child(
+                            div()
+                                .id("kbp-clear")
+                                .px_3()
+                                .py_2()
+                                .rounded_md()
+                                .border_1()
+                                .border_color(rgb(colors::BORDER))
+                                .cursor_pointer()
+                                .text_size(px(11.))
+                                .text_color(rgb(colors::TEXT_SECONDARY))
+                                .child("清空")
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.kb_picked.clear();
+                                    cx.notify();
+                                })),
+                        )
+                        .child(
+                            div()
+                                .id("kbp-cancel")
+                                .px_3()
+                                .py_2()
+                                .rounded_md()
+                                .border_1()
+                                .border_color(rgb(colors::BORDER))
+                                .cursor_pointer()
+                                .text_size(px(11.))
+                                .text_color(rgb(colors::TEXT_SECONDARY))
+                                .child("取消")
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.dialog = None;
+                                    cx.notify();
+                                })),
+                        )
+                        .child(
+                            div()
+                                .id("kbp-confirm")
+                                .px_4()
+                                .py_2()
+                                .rounded_md()
+                                .bg(rgb(colors::ACCENT))
+                                .cursor_pointer()
+                                .text_size(px(11.))
+                                .text_color(rgb(colors::TEXT_PRIMARY))
+                                .child("导入选中")
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.import_kb_picked(cx);
+                                    this.dialog = None;
+                                    cx.notify();
+                                })),
+                        ),
+                );
+
+        div()
+            .absolute()
+            .top(px(0.))
+            .left(px(0.))
+            .size_full()
+            .flex()
+            .items_center()
+            .justify_center()
+            .bg(rgba(0x000000a0))
+            .child(card)
+            .into_any_element()
+    }
+
     fn render_workspace_picker_dialog(
         &self,
         target: PickerTarget,
