@@ -2,13 +2,20 @@
 //!
 
 use crate::*;
+
+pub(crate) mod fields;
+pub(crate) mod mcp;
+pub(crate) mod soul;
+pub(crate) mod storage;
+pub(crate) mod usage;
+
 // 滚动扩展方法（.overflow_y_scrollbar()）来自这个 trait，必须 in scope
 use gpui_kit::component::scroll::ScrollableElement as _;
 // 显式导入：gpui 也导出 `View`（trait）与 `AppRef`，glob 会与我们的同名枚举/别名歧义
-use crate::theme::colors;
-use gpui_kit::component::input::Textarea;
-use crate::types::*;
 use crate::format::*;
+use crate::theme::colors;
+use crate::types::*;
+use gpui_kit::component::input::Textarea;
 
 impl ClientApp {
     /// 设置页（对齐 `gui-vite` 的 `SettingsPanel`）：左侧 14 个二级栏目 + 右侧内容。
@@ -29,11 +36,16 @@ impl ClientApp {
                     .flex()
                     .flex_col()
                     // 顶部：栏目名 + 全局状态行（状态是整页共用的，切栏目不丢）
-                    .child(self.render_settings_header())
+                    .child(self.render_settings_header(cx))
                     .child(
                         div()
                             .flex_1()
                             .min_h_0()
+                            // 必须自己是 flex 容器：每个栏目的根元素用 `flex_1` 撑满，
+                            // 而 `flex_1` 只在 flex 父容器里生效（否则高度 = 内容高度，
+                            // 表现为「人设编辑器被压成一行」「长栏目滚不动」）。
+                            .flex()
+                            .flex_col()
                             .child(self.render_settings_panel(cx)),
                     ),
             )
@@ -98,6 +110,14 @@ impl ClientApp {
                         if tab.config_key().is_some() && this.raw_config.is_none() {
                             this.load_config_summary(cx);
                         }
+                        // 各栏目的数据源不同：用量/人设/MCP 各有自己的接口，同样懒加载
+                        match tab {
+                            SettingsTab::Usage => this.load_settings_usage(cx),
+                            SettingsTab::Soul => this.load_soul(cx),
+                            SettingsTab::Mcp => this.load_mcp_servers(cx),
+                            SettingsTab::Connection | SettingsTab::About => this.load_health(cx),
+                            _ => {}
+                        }
                         cx.notify();
                     })),
             );
@@ -105,9 +125,36 @@ impl ClientApp {
         nav.into_any_element()
     }
 
-    /// 右上角状态行（`settings_status` 整页共用）。
-    fn render_settings_header(&self) -> AnyElement {
-        div()
+    /// 右上角状态行 + 字段引擎的「保存 / 放弃」。
+    ///
+    /// 栏目分三类：① 字段引擎（存储 / Agent / 安全 / 日志 / 记忆 / 检索 / Web）——
+    /// 顶部给保存条，脏计数实时算；② 自带保存（模型服务 / 人设 / MCP）——各自按钮；
+    /// ③ 纯展示（外观 / 连接 / 用量 / 关于）。
+    fn render_settings_header(&self, cx: &mut Context<Self>) -> AnyElement {
+        let editable = matches!(
+            self.settings_tab,
+            SettingsTab::Storage
+                | SettingsTab::Agent
+                | SettingsTab::Security
+                | SettingsTab::Logging
+                | SettingsTab::Memory
+                | SettingsTab::Retrieval
+                | SettingsTab::Web
+        );
+        let dirty = if editable {
+            self.settings_dirty_count(cx)
+        } else {
+            0
+        };
+        // 状态文本：字段引擎的保存结果优先（它是最新动作），其次模型服务的加载结果
+        let (text, is_err) = if !self.settings_msg.is_empty() {
+            (self.settings_msg.clone(), self.settings_msg_err)
+        } else if self.settings_tab == SettingsTab::Models {
+            (self.settings_status.clone(), self.settings_error)
+        } else {
+            (String::new(), false)
+        };
+        let mut bar = div()
             .flex()
             .flex_row()
             .items_center()
@@ -121,24 +168,85 @@ impl ClientApp {
                     .text_sm()
                     .child(format!("设置 · {}", self.settings_tab.label())),
             )
-            .child(div().flex_1())
-            // 状态行是「模型服务」栏目的加载/切换结果（如「模型 8 个」），
-            // 挂在其他栏目上会让人以为那是本栏目的状态——只在模型服务显示。
-            .children(if self.settings_tab == SettingsTab::Models {
-                Some(
+            .child(div().flex_1());
+        if !text.is_empty() {
+            bar = bar.child(
+                div()
+                    .max_w(px(560.))
+                    .min_w_0()
+                    .whitespace_nowrap()
+                    .text_ellipsis()
+                    .overflow_hidden()
+                    .text_xs()
+                    .text_color(rgb(if is_err {
+                        colors::ERROR()
+                    } else {
+                        colors::TEXT_SECONDARY()
+                    }))
+                    .child(text),
+            );
+        }
+        if editable {
+            if dirty > 0 {
+                bar = bar.child(
                     div()
-                        .text_xs()
-                        .text_color(if self.settings_error {
-                            rgb(colors::ERROR())
-                        } else {
-                            rgb(colors::TEXT_SECONDARY())
-                        })
-                        .child(self.settings_status.clone()),
-                )
-            } else {
-                None
-            })
-            .into_any_element()
+                        .px_2()
+                        .py_1()
+                        .rounded_md()
+                        .bg(rgba(0xffffff14))
+                        .text_size(px(10.))
+                        .text_color(rgb(colors::WARNING()))
+                        .child(format!("已修改 {dirty} 项")),
+                );
+            }
+            bar = bar.child(
+                div()
+                    .id("set-discard")
+                    .px_3()
+                    .py_1()
+                    .rounded_md()
+                    .cursor_pointer()
+                    .bg(rgb(colors::BG_TERTIARY()))
+                    .text_size(px(11.))
+                    .text_color(rgb(if dirty > 0 {
+                        colors::TEXT_PRIMARY()
+                    } else {
+                        colors::TEXT_TERTIARY()
+                    }))
+                    .child("放弃")
+                    .on_click(cx.listener(|this, _, _window, cx| {
+                        this.discard_settings_changes(cx);
+                    })),
+            );
+            bar = bar.child(
+                div()
+                    .id("set-save")
+                    .px_3()
+                    .py_1()
+                    .rounded_md()
+                    .cursor_pointer()
+                    .bg(rgb(if dirty > 0 {
+                        colors::ACCENT()
+                    } else {
+                        colors::BG_TERTIARY()
+                    }))
+                    .text_size(px(11.))
+                    .text_color(rgb(if dirty > 0 {
+                        0xffffff
+                    } else {
+                        colors::TEXT_TERTIARY()
+                    }))
+                    .child(if dirty > 0 {
+                        format!("保存 {dirty} 项")
+                    } else {
+                        "保存".to_string()
+                    })
+                    .on_click(cx.listener(|this, _, _w, cx| {
+                        this.save_settings_fields(cx);
+                    })),
+            );
+        }
+        bar.into_any_element()
     }
 
     /// 右侧内容区：按栏目分派。
@@ -146,58 +254,22 @@ impl ClientApp {
         match self.settings_tab {
             SettingsTab::Models => self.render_settings_models(cx),
             SettingsTab::Appearance => self.render_settings_appearance(cx),
-            SettingsTab::Connection => self.render_settings_connection(),
+            SettingsTab::Connection => self.render_settings_connection(cx),
             SettingsTab::About => self.render_settings_about(),
-            tab => self.render_settings_config_readonly(tab),
+            SettingsTab::Soul => self.render_settings_soul(cx),
+            SettingsTab::Mcp => self.render_settings_mcp(cx),
+            SettingsTab::Usage => self.render_settings_usage(cx),
+            SettingsTab::Storage => self.render_settings_storage(cx),
+            tab => self.render_settings_fields(tab, None, cx),
         }
     }
 
-    /// 只在 `config` 段里的栏目：**只读**渲染该段当前生效值。
+    /// 「连接」栏目：探活 `/health` 并展示服务的**真实**信息（版本 / 数据目录 / pid）。
     ///
-    /// 为什么先只读：`PUT /config` 是**整份替换**，每个字段的写都要先确认语义
-    /// （枚举值域 / 联动约束 / 是否需重启）。一次把八个段都做成可编辑，回归面比
-    /// 收益大；而「把配置里到底有什么如实摆出来」本身就有用，也不假装支持编辑。
-    /// 真正要改的用户可以编辑 `~/.tianyan/tianyan.toml` 后重启，或去 Web 版。
-    fn render_settings_config_readonly(&self, tab: SettingsTab) -> AnyElement {
-        let Some(key) = tab.config_key() else {
-            return div()
-                .p_4()
-                .text_sm()
-                .text_color(rgb(colors::TEXT_TERTIARY()))
-                .child("该栏目暂未在原生端实现")
-                .into_any_element();
-        };
-        let mut body = div()
-            .flex()
-            .flex_col()
-            .gap_3()
-            .p_4()
-            .overflow_y_scrollbar()
-            .child(
-                div()
-                    .text_xs()
-                    .text_color(rgb(colors::TEXT_TERTIARY()))
-                    .child(
-                        "以下为该段当前生效的配置（只读）。修改请编辑 ~/.tianyan/tianyan.toml \
-                         后重启，或到 Web 版设置页。",
-                    ),
-            );
-        match self.raw_config.as_ref().and_then(|c| c.get(key)) {
-            Some(seg) => body = body.child(config_rows(key, seg)),
-            None => {
-                body = body.child(
-                    div()
-                        .text_sm()
-                        .text_color(rgb(colors::TEXT_TERTIARY()))
-                        .child("配置尚未加载…"),
-                )
-            }
-        }
-        body.into_any_element()
-    }
-
-    /// 「连接」栏目：探活 `/health`（vite `ConnectionTab` 同口径，3 秒超时）。
-    fn render_settings_connection(&self) -> AnyElement {
+    /// 比 vite 的 `ConnectionTab` 多一层：它只显示「服务地址 / 健康检查 / 上次交互」，
+    /// 而 `/health` 的 `data_dir` 能一眼看出「我连的是不是我以为的那个服务」——
+    /// 单 server 复用（ADR-051）下，连到另一个数据目录的实例是最隐蔽的坑。
+    fn render_settings_connection(&self, cx: &mut Context<Self>) -> AnyElement {
         let port = self.port;
         let mut col = div().flex().flex_col().gap_3().p_4().child(
             div()
@@ -206,29 +278,109 @@ impl ClientApp {
                 .child("内嵌服务连通性"),
         );
         col = col.child(kv_line("服务地址", format!("http://{SERVER_HOST}:{port}")));
-        col = col.child(kv_line("健康检查", format!("/health · 端口 {port}")));
-        col = col.child(kv_line(
-            "实测",
-            if self.status.contains("空闲") {
-                "上次交互正常（状态行显示空闲）".to_string()
-            } else {
-                self.status.clone()
-            },
-        ));
+        match &self.health_info {
+            Some(h) => {
+                col = col.child(kv_line(
+                    "健康状态",
+                    format!("{} · {} · pid {}", h.status, h.service, h.pid),
+                ));
+                col = col.child(kv_line("服务版本", h.version.clone()));
+                col = col.child(kv_line("服务数据目录", h.data_dir.clone()));
+                let cfg_dir = self
+                    .raw_config
+                    .as_ref()
+                    .and_then(|c| fields::json_get(c, "storage.data_dir"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default();
+                if !cfg_dir.is_empty() && !h.data_dir.is_empty() && !same_dir(cfg_dir, &h.data_dir)
+                {
+                    col = col.child(div().text_xs().text_color(rgb(colors::WARNING())).child(
+                        format!(
+                            "⚠ 配置里的数据目录（{cfg_dir}）与服务实际使用的不一致——
+                                 通常表示改了配置还没重启。"
+                        ),
+                    ));
+                }
+            }
+            None => {
+                col = col.child(kv_line(
+                    "健康检查",
+                    if self.health_msg.is_empty() {
+                        format!("/health · 端口 {port}（未探活）")
+                    } else {
+                        self.health_msg.clone()
+                    },
+                ));
+            }
+        }
+        col = col.child(
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap_2()
+                .child(
+                    div()
+                        .id("health-refresh")
+                        .px_3()
+                        .py_1()
+                        .rounded_md()
+                        .bg(rgb(colors::BG_TERTIARY()))
+                        .cursor_pointer()
+                        .text_size(px(11.))
+                        .text_color(rgb(colors::TEXT_PRIMARY()))
+                        .child("重新探活")
+                        .on_click(cx.listener(|this, _, _w, cx| {
+                            this.load_health(cx);
+                        })),
+                )
+                .child(
+                    div()
+                        .text_size(px(10.))
+                        .text_color(rgb(colors::TEXT_TERTIARY()))
+                        .child(if self.status.contains("空闲") {
+                            "上次交互正常（状态行显示空闲）".to_string()
+                        } else {
+                            self.status.clone()
+                        }),
+                ),
+        );
         col.into_any_element()
     }
 
-    /// 「关于」栏目：版本 + 运行时信息（后端不提供版本接口时用编译期常量兜底）。
+    /// 「关于」栏目：客户端/服务版本、构建形态、数据目录与协议关系。
     fn render_settings_about(&self) -> AnyElement {
         let mut col = div().flex().flex_col().gap_2().p_4();
         col = col.child(kv_line("客户端", "天演 · GPUI 原生端".to_string()));
         col = col.child(kv_line(
-            "版本",
-            option_env!("CARGO_PKG_VERSION").unwrap_or("0.1.0").to_string(),
+            "客户端版本",
+            option_env!("CARGO_PKG_VERSION")
+                .unwrap_or("unknown")
+                .to_string(),
         ));
         col = col.child(kv_line(
-            "服务端口",
-            self.port.to_string(),
+            "构建形态",
+            if cfg!(debug_assertions) {
+                "debug（保留终端日志）"
+            } else {
+                "release（无控制台窗口）"
+            }
+            .to_string(),
+        ));
+        col = col.child(kv_line(
+            "服务版本",
+            match &self.health_info {
+                Some(h) if !h.version.is_empty() => h.version.clone(),
+                _ => "（未探活：去「连接」点重新探活）".to_string(),
+            },
+        ));
+        col = col.child(kv_line("服务端口", self.port.to_string()));
+        col = col.child(kv_line(
+            "服务数据目录",
+            match &self.health_info {
+                Some(h) if !h.data_dir.is_empty() => h.data_dir.clone(),
+                _ => "-".to_string(),
+            },
         ));
         col = col.child(kv_line(
             "与 Web 版关系",
@@ -518,7 +670,34 @@ impl ClientApp {
             .into_any_element()
     }
 
-    /// 拉 `GET /api/v1/config`，只留 `config` 段（设置页只读栏目用）。
+    /// 探活 `/health`（连接/关于栏目用）：拿服务真实版本、数据目录与 pid。
+    ///
+    /// 失败不谎报：保留错误文案并清掉上一次的 `health_info`——让「未探活」与
+    /// 「探活成功但连不上」在 UI 上是两种可见状态。
+    pub(crate) fn load_health(&mut self, cx: &mut Context<Self>) {
+        let port = self.port;
+        self.health_msg = "正在探活…".to_string();
+        cx.spawn(async move |this, cx| {
+            let url = format!("http://{SERVER_HOST}:{port}/health");
+            let res = fetch_json(url).await;
+            let _ = this.update(cx, |this, cx| {
+                match res {
+                    Ok(v) => {
+                        this.health_info = Some(HealthInfo::from_json(&v));
+                        this.health_msg = String::new();
+                    }
+                    Err(e) => {
+                        this.health_info = None;
+                        this.health_msg = format!("探活失败：{e}");
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// 拉 `GET /api/v1/config`，只留 `config` 段（字段引擎与连接栏目的数据源）。
     ///
     /// 懒加载：切到第一个需要配置的栏目时才拉（`render_settings_nav` 的点击回调
     /// 里判断 `raw_config.is_none()`）。失败时**不清空**已加载的数据——配置页显示
@@ -531,7 +710,12 @@ impl ClientApp {
                 let cfg = body.get("config").cloned();
                 if cfg.is_some() {
                     let _ = this.update(cx, |this, cx| {
+                        // 首次加载才回填：已有编辑器内容时回填会覆盖用户正在输入的值
+                        let first = this.raw_config.is_none();
                         this.raw_config = cfg;
+                        if first {
+                            this.backfill_settings_fields(cx);
+                        }
                         cx.notify();
                     });
                 }
@@ -539,7 +723,6 @@ impl ClientApp {
         })
         .detach();
     }
-
 
     /// 加载模型服务列表（`GET /api/v1/config/models`）。
     ///
@@ -671,7 +854,12 @@ impl ClientApp {
     }
 
     /// 切换默认聊天模型（`POST /api/v1/config/models/switch`，持久化 preferences.chat）。
-    pub(crate) fn switch_chat_model(&mut self, provider: String, model: String, cx: &mut Context<Self>) {
+    pub(crate) fn switch_chat_model(
+        &mut self,
+        provider: String,
+        model: String,
+        cx: &mut Context<Self>,
+    ) {
         let port = self.port;
         self.settings_status = format!("正在切换到 {model}…");
         cx.spawn(async move |this, cx| {
@@ -707,7 +895,12 @@ impl ClientApp {
     ///
     /// 必须**同步**做（`set_value` 要 `&mut Window`），所以值取自随列表缓存的那份
     /// （见 [`ProviderRow`] 的注释：缓存只用于回填，不用于写）。
-    pub(crate) fn open_provider_editor(&mut self, name: String, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn open_provider_editor(
+        &mut self,
+        name: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let Some(row) = self.providers.iter().find(|p| p.name == name).cloned() else {
             return;
         };
@@ -858,86 +1051,6 @@ impl ClientApp {
         })
         .detach();
     }
-}
-
-/// 把一个配置段渲染成「键 → 值」行（值过长截断）。
-///
-/// 不做多层递归：配置段嵌套最多两层（如 `storage` 下的路径），嵌套值用紧凑 JSON
-/// 展示并截断即可——目标是「能看清当前生效的是什么」，不是一个配置编辑器。
-fn config_rows(key: &str, seg: &serde_json::Value) -> AnyElement {
-    let mut col = div()
-        .flex()
-        .flex_col()
-        .rounded_lg()
-        .border_1()
-        .border_color(rgb(colors::BORDER()))
-        .bg(rgb(colors::BG_SECONDARY()))
-        .p_3()
-        .child(
-            div()
-                .pb_2()
-                .text_size(px(11.))
-                .text_color(rgb(colors::TEXT_TERTIARY()))
-                .child(format!("config.{key}")),
-        );
-    if let Some(map) = seg.as_object() {
-        for (k, v) in map {
-            let text = match v {
-                serde_json::Value::String(s) => s.clone(),
-                serde_json::Value::Null => "（空）".to_string(),
-                serde_json::Value::Bool(b) => b.to_string(),
-                serde_json::Value::Number(n) => n.to_string(),
-                other => {
-                    let s = serde_json::to_string(other).unwrap_or_default();
-                    if s.chars().count() > 110 {
-                        format!("{}…", s.chars().take(110).collect::<String>())
-                    } else {
-                        s
-                    }
-                }
-            };
-            let dim = v.is_null()
-                || matches!(v, serde_json::Value::String(s) if s.trim().is_empty());
-            col = col.child(
-                div()
-                    .flex()
-                    .flex_row()
-                    .items_start()
-                    .gap_3()
-                    .py_1()
-                    .border_t_1()
-                    .border_color(rgb(colors::BORDER()))
-                    .child(
-                        div()
-                            .w(px(190.))
-                            .min_w_0()
-                            .text_size(px(11.))
-                            .text_color(rgb(colors::TEXT_SECONDARY()))
-                            .child(k.clone()),
-                    )
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .text_size(px(11.))
-                            .text_color(rgb(if dim {
-                                colors::TEXT_TERTIARY()
-                            } else {
-                                colors::TEXT_PRIMARY()
-                            }))
-                            .child(text),
-                    ),
-            );
-        }
-    } else {
-        col = col.child(
-            div()
-                .text_size(px(11.))
-                .text_color(rgb(colors::TEXT_TERTIARY()))
-                .child(serde_json::to_string(seg).unwrap_or_default()),
-        );
-    }
-    col.into_any_element()
 }
 
 /// 「左标签 / 右值」一行（连接栏目与关于栏目共用）。

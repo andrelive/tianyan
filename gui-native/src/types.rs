@@ -556,13 +556,130 @@ pub(crate) struct UsageTotal {
     pub(crate) cache_hit_rate: f64,
 }
 
-/// 模型用量分组（`grouped[]`：按 model 或 provider）。
-#[derive(Clone, Debug)]
+impl UsageTotal {
+    /// 从 `/usage/stats` 的 `total` 字段解析（`null` / 缺段 → `None`）。
+    ///
+    /// 单一实现：洞察页与设置页的用量统计共用这一份口径，不各写一份 6 字段解构。
+    pub(crate) fn from_json(v: Option<&serde_json::Value>) -> Option<Self> {
+        let t = v.filter(|v| !v.is_null())?;
+        Some(Self {
+            calls: t.get("calls").and_then(|v| v.as_u64()).unwrap_or(0),
+            uncached_input: t.get("uncached_input").and_then(|v| v.as_u64()).unwrap_or(0),
+            cached_input: t.get("cached_input").and_then(|v| v.as_u64()).unwrap_or(0),
+            completion_tokens: t
+                .get("completion_tokens")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0),
+            total_tokens: t.get("total_tokens").and_then(|v| v.as_u64()).unwrap_or(0),
+            cache_hit_rate: t
+                .get("cache_hit_rate")
+                .and_then(|v| v.as_f64())
+                .unwrap_or(0.0),
+        })
+    }
+}
+
+/// 模型用量分组（`grouped[]`：按 model 或 provider）。#[derive(Clone, Debug)]
 pub(crate) struct UsageGroup {
     pub(crate) group: String,
     pub(crate) calls: u64,
     pub(crate) total_tokens: u64,
     pub(crate) cache_hit_rate: f64,
+    /// 未命中缓存的输入 token（设置页统计表用）
+    pub(crate) uncached_input: u64,
+    /// 命中缓存的输入 token
+    pub(crate) cached_input: u64,
+    /// 输出 token
+    pub(crate) completion_tokens: u64,
+}
+
+impl UsageGroup {
+    /// 从 `/usage/stats` 的 `grouped[]` 解析（缺段 → 空表；group 为空的项丢弃）。
+    pub(crate) fn from_json_array(v: Option<&serde_json::Value>) -> Vec<Self> {
+        v.and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|g| {
+                        Some(Self {
+                            group: g.get("group")?.as_str()?.to_string(),
+                            calls: g.get("calls").and_then(|v| v.as_u64()).unwrap_or(0),
+                            total_tokens: g
+                                .get("total_tokens")
+                                .and_then(|v| v.as_u64())
+                                .unwrap_or(0),
+                            cache_hit_rate: g
+                                .get("cache_hit_rate")
+                                .and_then(|v| v.as_f64())
+                                .unwrap_or(0.0),
+                            uncached_input: g
+                                .get("uncached_input")
+                                .and_then(|v| v.as_u64())
+                                .unwrap_or(0),
+                            cached_input: g
+                                .get("cached_input")
+                                .and_then(|v| v.as_u64())
+                                .unwrap_or(0),
+                            completion_tokens: g
+                                .get("completion_tokens")
+                                .and_then(|v| v.as_u64())
+                                .unwrap_or(0),
+                        })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+}
+
+/// MCP 服务器行（`GET /config/mcp/servers` 的展示子集）。#[derive(Clone, Debug)]
+pub(crate) struct McpServerRow {
+    pub(crate) name: String,
+    pub(crate) command: String,
+    pub(crate) args: Vec<String>,
+    pub(crate) enabled: bool,
+    pub(crate) description: String,
+}
+
+/// 服务健康信息（`GET /health`）。
+///
+/// `data_dir` 是**服务进程实际在用**的数据目录（比配置里的值更可信：两者不一致
+/// 说明连到了另一个实例或配置刚改还没重启）。
+#[derive(Clone, Debug, Default)]
+pub(crate) struct HealthInfo {
+    pub(crate) status: String,
+    pub(crate) version: String,
+    pub(crate) service: String,
+    pub(crate) data_dir: String,
+    pub(crate) pid: u32,
+}
+
+impl HealthInfo {
+    /// 从 `/health` 响应解析。
+    pub(crate) fn from_json(v: &serde_json::Value) -> Self {
+        Self {
+            status: v
+                .get("status")
+                .and_then(|x| x.as_str())
+                .unwrap_or_default()
+                .to_string(),
+            version: v
+                .get("version")
+                .and_then(|x| x.as_str())
+                .unwrap_or_default()
+                .to_string(),
+            service: v
+                .get("service")
+                .and_then(|x| x.as_str())
+                .unwrap_or_default()
+                .to_string(),
+            data_dir: v
+                .get("data_dir")
+                .and_then(|x| x.as_str())
+                .unwrap_or_default()
+                .to_string(),
+            pid: v.get("pid").and_then(|x| x.as_u64()).unwrap_or(0) as u32,
+        }
+    }
 }
 
 /// 调度器任务状态（`GET /scheduler/status` 的 `tasks[]`）。

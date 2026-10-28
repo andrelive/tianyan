@@ -93,6 +93,9 @@ GPUI 侧分档：
 | 11 | **SSE 不能按 `String` 攒缓冲** | 中文被 chunk 切断 → 半截 UTF-8 → 替换字符乱码 | 用 `Vec<u8>` 攒、按 `\n\n` **字节**分帧，每帧再 `from_utf8_lossy` |
 | 12 | **GPUI 内置 `list()` 不自带尺寸** | `gpui::list` 的 `ListSizingBehavior` 默认 `Auto`：`request_layout` 只把空 style 交给内核，宽高都取「内容尺寸」。放进 `flex_1` 容器里**高度不会被拉伸**（实测 `bounds w=636 h=0`），消息区一片空白但标题/条数正常 | 显式 `.size_full()`（或 `.flex_1()`）；排查用 `on_children_prepainted` 打印真实 bounds，别靠眼睛猜 |
 | 13 | **图标要注册资产源** | `IconName::X` 是完整 Lucide 目录（`gpui-kit-assets` 内嵌 1800+ SVG，与 Tauri 版 `lucide-react` 同一套），但没注册就**静默空白、不报错** | `gpui_kit::application().with_assets(gpui_kit::assets::AllAssets::new(""))`；`assets` 是 gpui-kit 的默认 feature |
+| 14 | **`flex_1` 只在 flex 父容器里生效** | 设置页某栏目的根用 `flex_1().min_h_0()` 想撑满，但父容器只是普通 `div` → 高度退化成内容高度：人设编辑器被压成一行、长栏目**滚不动**（内容被裁切） | 父容器同时给 `.flex().flex_col()`；子栏目的根再给 `.flex_1().min_h_0()`。判据：`flex_1` 的父元素 `display` 必须是 flex |
+| 15 | **PowerShell 5.1 会把 JSON 里的中文写坏**（本次事故：把人设写坏两次） | ① `Invoke-RestMethod -Body`（字符串）按 ANSI 处理非 ASCII → 服务端 400 `invalid unicode code point`；② 更隐蔽：**响应头没有 `charset` 时按 ISO-8859-1 解码**，读到的中文本身已是乱码，再写回就把数据彻底写坏 | 脚本必须跑在 `pwsh`（7+，默认 UTF-8），并在文件头写 `#requires -Version 7`；发送中文一定「落 UTF-8 无 BOM 文件 → `-InFile`」，不要塞 `-Body`。已被写坏时可用 `latin1.GetBytes → UTF8.GetString` 反向解（每次解掉一层） |
+| 16 | **`render_to_image` 取的是「最近一次绘制的帧」** | 窗口被遮挡 → GPUI 跳过重绘 → 截到旧帧（连切 3 个栏目 sha256 全同）；`show=false` 创建的窗口 → 1×1 | 截图前提前台（`tray::show_main_window()`，`screenshot` 动作内已调）；**视觉核对用可见窗口跑，断言用隐藏窗口跑** |
 
 ## API 备忘（实测签名，省一次翻源码）
 
@@ -182,10 +185,31 @@ client handler、工具列表在 1.x 保持兼容），`cargo test -p tianyan-mc
 | 审批 | `/approval/status` · `/approval/respond` |
 | 定时任务 | `/scheduled-tasks` GET / POST / DELETE |
 | 洞察 | `/stats` · `/usage/stats?days=` · `/scheduler/status` |
-| 设置 | `/config` · `/config/models` · provider 编辑 / 测试连接 |
+| 设置 | 14 个二级栏目（见下节）；`/config`(GET/PUT 整份) · `/config/models` · `/config/soul` · `/config/mcp/servers` · `/usage/stats` · `/health` · `/config/migrate-data-dir` |
 
 验证：`pwsh -NoProfile -File .\scripts\automation-pages.ps1`（只读冒烟，含「11 个入口
 全部可达」；做法见上文「自动验证」——全程不截图、不点坐标）。
+
+## 设置页：14 个二级栏目，全部可用（无「暂未实现」）
+
+栏目 id / 顺序 / 文案 / 图标与 `gui-vite` 的 `TABS` 逐项一致，但**内容实现方式不同**：
+vite 是 14 份手写受控表单，这里是「字段声明成数据 + 一套渲染/保存」。
+
+| 类别 | 栏目 | 实现 |
+|---|---|---|
+| 字段引擎（7） | 数据存储 · Agent 行为 · 安全 · 日志 · 记忆 · 检索 · Web 搜索 | `settings/fields.rs` 的 `FIELDS` 表（**52 个字段**）：开关 / 分段枚举 / 数字 / 单行 / 多行 / 只读六种控件，逐字段带说明与「需重启」徽标 |
+| 自带接口（3） | 模型服务 · 人设编辑 · MCP | provider 编辑+测连、模型切换 / soul 全文编辑+填入默认 / 服务器列表+启停+测试连接+增删 |
+| 只读展示（4） | 用量统计 · 连接 · 关于 · 外观 | 用量（时段×分组×占比条）/ `/health` 实测（版本·数据目录·pid·一致性告警）/ 版本与构建形态 / 三套色板 |
+
+**保存语义（比 vite 更保守）**：`PUT /config` 是整份替换，所以保存时先 `GET` 最新配置、
+只覆盖**真正改动过**的字段、再整份提交——把「读-改-写」窗口压到一次往返，不会冲掉
+期间被别处改过的东西（例如 agent 刚切换的模型）。顶部状态行给「已修改 N 项」与
+「保存 N 项 / 放弃」，保存后汇总「其中 M 项需重启客户端生效」。
+
+**数据目录搬迁的闭环**：`POST /config/migrate-data-dir` 只写请求文件并触发服务关停；
+真正「复制 → 校验 → 改配置 → 删源」在服务停掉之后做（SQLite/LanceDB 的文件锁才释放）。
+Tauri 版由监督循环在进程内完成；原生端在上一次进程退出后，由**下一次启动**在起 server
+之前执行（`main.rs` 的 `run_pending_migration`），所以 UI 明说「需关闭并重新打开客户端」。
 
 ## 已知限制与行为
 
@@ -266,6 +290,25 @@ cargo run            # 首次约 3 分钟，之后增量 2-6 秒
 
 ## 自动验证
 
+### 一条命令跑完（推荐）：`scripts/verify-gui-native.ps1`
+
+```powershell
+.\scripts\verify-gui-native.ps1              # 复用或隐藏启动，跑 66 项断言
+.\scripts\verify-gui-native.ps1 -Restart     # 改过 Rust 代码后：先关旧实例再起
+.\scripts\verify-gui-native.ps1 -KeepAlive   # 跑完不关，下次复用（零启动等待）
+```
+
+它做三件事，都是为了**不在用户桌面上折腾**：
+
+1. **复用**：3010 上已有实例就直接用，不重启；
+2. **隐藏**：需要新起时带 `TIANYAN_GUI_START_HIDDEN=1`——窗口建好但不显示（任务栏
+   不闪、不抢焦点），而 `/state`、`/act` 全部照常；
+3. **一次跑完**：14 个栏目切换 + 字段引擎（改→脏→保存→后端落库→恢复）+ 用量 +
+   人设 + MCP + 存储 + 连接，**跑完自动把改动恢复原值**（配置与人设都校验回基线）。
+
+> 反复启动客户端验证是这次被用户点名的干扰源（「任务栏图标反复出现又消失」）。
+> 现在验证只起一个进程，且默认不显示窗口。
+
 ### 首选：内建自动化端口（ADR-052）—— 不截图、不点坐标
 
 界面自己提供 `GET /state`（状态快照）与 `POST /act`（语义动作），agent 直接读断言、
@@ -311,9 +354,19 @@ Invoke-RestMethod http://127.0.0.1:3010/act -Method Post -ContentType applicatio
   -Body '{"action":"screenshot","path":"C:\\tmp\\shot.png"}'
 ```
 
-它拿的是**渲染输出**而不是屏幕像素，所以三件事都不受：DPI 缩放、窗口被遮挡、
-**窗口是否可见**（藏在托盘里也能截——实测隐藏态与可见态字节数完全一致）。
-尺寸是纯客户区物理像素（本机 1920×1230），不含窗口边框。
+它拿的是**渲染输出**而不是屏幕像素，所以不受 DPI 缩放影响；尺寸是纯客户区物理像素
+（本机 1920×1230），不含窗口边框。
+
+> ⚠️ **但它取的是「最近一次绘制的帧」，不是「现在的界面」**（这次实测更正了原先
+> 「窗口是否可见都不受影响」的说法）：
+> - **窗口被完全遮挡**时 GPUI 跳过重绘 → 截到旧帧。症状极其隐蔽：连切 3 个栏目截图，
+>   三张 sha256 完全相同，很容易误判成「切 tab 没生效」。做法：截图前先
+>   `SetForegroundWindow` 把它提到前台（`screenshot` 动作内部已自动调用
+>   `tray::show_main_window()`）。
+> - **从未显示过的窗口**（`TIANYAN_GUI_START_HIDDEN=1`，即 `WindowOptions.show=false`）
+>   没有可用帧 → 截出 1×1。所以「隐藏启动跑断言」与「截图核对视觉」必须分开跑：
+>   前者用隐藏窗口，后者用可见窗口。
+> - 「先显示过、再 `SW_HIDE` 藏到托盘」仍能截（帧还在）——与「从未显示」是两种情形。
 
 **兜底：进程外抓屏**（生产构建没有 `screenshot` feature 时）：
 

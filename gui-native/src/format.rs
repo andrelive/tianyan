@@ -219,3 +219,30 @@ pub(crate) fn risk_color(risk: &str) -> u32 {
         _ => colors::ERROR(),
     }
 }
+
+/// 两个数据目录字符串是否指向同一处（忽略大小写、斜杠方向、尾部斜杠与 `\\?\` 前缀）。
+///
+/// 用途：设置页「连接」栏目的「配置 vs 服务实际」一致性提示，以及自动化的
+/// `health.dir_matches_config` 断言。
+///
+/// **必须剥掉 `\\?\`（verbatim）前缀**：`/health` 的 `data_dir` 走
+/// `common::path::normalize_dir`，Windows 上带 `\\?\`；而配置里用户写的是
+/// `D:\tianyan`。不剥前缀就会误报「改了配置还没重启」（实测踩到）。
+///
+/// 不做完整路径语义（`..` / 符号链接不展开）——规范化口径的权威实现在
+/// `core::common::path`，客户端不重复实现它，这里只服务于「看起来是不是同一个」。
+pub(crate) fn same_dir(a: &str, b: &str) -> bool {
+    let norm = |s: &str| {
+        let raw = s.trim();
+        // UNC 的 verbatim 形态 `\\?\UNC\server\share` 对应普通形态 `\\server\share`
+        let unc = raw
+            .strip_prefix(r"\\?\UNC\")
+            .map(|rest| format!(r"\\{rest}"));
+        let plain = match unc {
+            Some(p) => p,
+            None => raw.strip_prefix(r"\\?\").unwrap_or(raw).to_string(),
+        };
+        plain.replace('/', "\\").trim_end_matches('\\').to_lowercase()
+    };
+    norm(a) == norm(b)
+}

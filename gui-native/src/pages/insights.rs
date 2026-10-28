@@ -376,48 +376,10 @@ impl ClientApp {
             });
 
             let (usage_total, usage_grouped) = match usage_res {
-                Ok(b) => {
-                    let total = b.get("total").filter(|v| !v.is_null()).map(|t| UsageTotal {
-                        calls: t.get("calls").and_then(|v| v.as_u64()).unwrap_or(0),
-                        uncached_input: t
-                            .get("uncached_input")
-                            .and_then(|v| v.as_u64())
-                            .unwrap_or(0),
-                        cached_input: t.get("cached_input").and_then(|v| v.as_u64()).unwrap_or(0),
-                        completion_tokens: t
-                            .get("completion_tokens")
-                            .and_then(|v| v.as_u64())
-                            .unwrap_or(0),
-                        total_tokens: t.get("total_tokens").and_then(|v| v.as_u64()).unwrap_or(0),
-                        cache_hit_rate: t
-                            .get("cache_hit_rate")
-                            .and_then(|v| v.as_f64())
-                            .unwrap_or(0.0),
-                    });
-                    let grouped: Vec<UsageGroup> = b
-                        .get("grouped")
-                        .and_then(|v| v.as_array())
-                        .map(|arr| {
-                            arr.iter()
-                                .filter_map(|g| {
-                                    Some(UsageGroup {
-                                        group: g.get("group")?.as_str()?.to_string(),
-                                        calls: g.get("calls").and_then(|v| v.as_u64()).unwrap_or(0),
-                                        total_tokens: g
-                                            .get("total_tokens")
-                                            .and_then(|v| v.as_u64())
-                                            .unwrap_or(0),
-                                        cache_hit_rate: g
-                                            .get("cache_hit_rate")
-                                            .and_then(|v| v.as_f64())
-                                            .unwrap_or(0.0),
-                                    })
-                                })
-                                .collect()
-                        })
-                        .unwrap_or_default();
-                    (total, grouped)
-                }
+                Ok(b) => (
+                    UsageTotal::from_json(b.get("total")),
+                    UsageGroup::from_json_array(b.get("grouped")),
+                ),
                 Err(_) => (None, Vec::new()),
             };
 

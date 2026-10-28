@@ -349,6 +349,65 @@ struct ClientApp {
     pub(crate) edit_endpoint: Entity<TextareaState>,
     /// 编辑框：api_key
     pub(crate) edit_api_key: Entity<TextareaState>,
+    /// 设置页字段引擎：各文本类字段的编辑态（key = 字段表的点路径）。
+    ///
+    /// GPUI 的编辑态是**实体**，而 render 是 `&self`（不能就地 `cx.new`），
+    /// 所以按静态字段表在启动时一次建好（见 `settings::fields::FIELDS`）。
+    pub(crate) settings_editors:
+        std::collections::HashMap<&'static str, Entity<TextareaState>>,
+    /// 设置页字段引擎：Bool/Enum 的改动（文本/数字直接读编辑器，不入表）。
+    pub(crate) settings_dirty: std::collections::HashMap<&'static str, serde_json::Value>,
+    /// 设置页字段引擎：保存 / 校验结果（顶部状态行优先显示它）。
+    pub(crate) settings_msg: String,
+    /// 设置页字段引擎：上面那条是否为错误。
+    pub(crate) settings_msg_err: bool,
+    // ── 设置页「人设」 ──
+    /// 人设正文编辑器（`PUT /config/soul` 的内容源）
+    pub(crate) soul_editor: Entity<TextareaState>,
+    /// 内置默认人设（`GET /config/soul/default`：给「填入默认」与差异提示用）
+    pub(crate) soul_default: String,
+    /// 是否已加载过人设（成功一次就不再重复拉——重复拉会覆盖用户正在编辑的正文）
+    pub(crate) soul_loaded: bool,
+    /// 人设栏目的状态行
+    pub(crate) soul_msg: String,
+    /// 上面那条是否为错误
+    pub(crate) soul_msg_err: bool,
+    // ── 设置页「MCP」 ──
+    /// MCP 服务器列表
+    pub(crate) mcp_servers: Vec<McpServerRow>,
+    /// 每台服务器的最近一次测试结果（name → 文案；结果在窗口内保留，不落库）
+    pub(crate) mcp_test: std::collections::HashMap<String, String>,
+    /// MCP 栏目状态行
+    pub(crate) mcp_msg: String,
+    /// 上面那条是否为错误
+    pub(crate) mcp_msg_err: bool,
+    /// 新增表单是否展开
+    pub(crate) mcp_form_open: bool,
+    /// 新增表单：名称
+    pub(crate) mcp_name: Entity<InputState>,
+    /// 新增表单：命令
+    pub(crate) mcp_command: Entity<InputState>,
+    /// 新增表单：参数（空格分隔）
+    pub(crate) mcp_args: Entity<InputState>,
+    /// 新增表单：说明
+    pub(crate) mcp_desc: Entity<InputState>,
+    // ── 设置页「数据存储」搬迁 ──
+    /// 搬迁目标目录输入
+    pub(crate) storage_move_target: Entity<InputState>,
+    /// 搬迁状态行
+    pub(crate) storage_msg: String,
+    /// 上面那条是否为错误
+    pub(crate) storage_msg_err: bool,
+    // ── 设置页「用量统计」 ──
+    /// 分组维度：`model` / `provider`
+    pub(crate) usage_group_by: &'static str,
+    /// 用量栏目的加载/错误状态
+    pub(crate) usage_msg: String,
+    // ── 设置页「连接 / 关于」 ──
+    /// `/health` 的服务真实信息（版本 / 数据目录 / pid）；`None` = 未探活或探活失败
+    pub(crate) health_info: Option<HealthInfo>,
+    /// 探活状态行（失败文案）
+    pub(crate) health_msg: String,
     /// 本窗口句柄。
     ///
     /// 自动化端口在 `Context` 里执行动作时**没有 `&mut Window`**，而往输入框插文本
@@ -365,7 +424,11 @@ struct ClientApp {
 
 
 impl Render for ClientApp {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // 说明：设置页/人设的编辑器回填**不在这里做**——窗口隐藏时不会触发渲染，
+        // 而自动化验收正是隐藏窗口跑的。回填统一走 `window_handle.update` 现取窗口
+        // （见 `backfill_settings_fields` / `set_soul_text`）。
+        let _ = window;
         // 整体骨架与 `gui-vite/src/components/layout/AppLayout.tsx` 一致：
         //   一级 rail(64px) + main(flex-1, bg-primary)
         let mut root = div()
@@ -473,6 +536,20 @@ fn hide_owned_console() {
 #[cfg(not(windows))]
 fn hide_owned_console() {}
 
+/// 是否以「隐藏窗口」启动（`TIANYAN_GUI_START_HIDDEN=1`）。
+///
+/// 只给回归/自动化用：反复启动客户端验证时，窗口一出现就会在任务栏闪动并抢焦点，
+/// 而自动化要读的东西（`/state`、`/act`、内建截图）全都不需要窗口可见。
+fn start_hidden() -> bool {
+    matches!(
+        std::env::var("TIANYAN_GUI_START_HIDDEN")
+            .unwrap_or_default()
+            .to_ascii_lowercase()
+            .as_str(),
+        "1" | "true" | "yes"
+    )
+}
+
 fn main() {
     hide_owned_console();
     let config = tianyan_service_config::load_and_install();
@@ -480,6 +557,30 @@ fn main() {
         eprintln!("日志初始化失败：{e}");
     }
     tianyan::common::panic_hook::install(tianyan::common::panic_hook::default_log_dir());
+
+    // 数据目录搬迁的**执行侧**：`POST /config/migrate-data-dir` 只写请求文件并触发服务
+    // 优雅关停，真正的「复制 → 校验 → 改配置 → 删源」必须在服务停掉之后做（SQLite /
+    // LanceDB 的文件锁那时才释放）。桌面版（Tauri）由监督循环在进程内完成；原生端
+    // 上一次进程已退出，所以在这里——**起 server 之前**——补上这一步。失败自动回滚
+    // （数据留在旧目录、配置未动、请求已清除），此时继续用旧配置启动，应用照常可用。
+    let config = match tianyan_service_config::run_pending_migration(&config.storage.data_dir) {
+        Ok(outcome) if outcome.migrated => {
+            for leftover in &outcome.leftovers {
+                eprintln!("[搬迁] 残留（被占用未能删除）：{}", leftover.display());
+            }
+            let fresh = tianyan_service_config::load_and_install();
+            println!(
+                "[搬迁] 已完成，数据目录：{}",
+                fresh.storage.data_dir.display()
+            );
+            fresh
+        }
+        Ok(_) => config,
+        Err(e) => {
+            eprintln!("[搬迁] 失败（已回滚）：{e}");
+            config
+        }
+    };
 
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
     // 单 server 复用（与桌面版共用同一份启动编排）：本机若已有**服务同一数据目录**的
@@ -550,6 +651,10 @@ fn main() {
                         title: Some("天演".into()),
                         ..Default::default()
                     }),
+                    // 回归/自动化用：`TIANYAN_GUI_START_HIDDEN=1` 时窗口建好但不显示。
+                    // 目的 = 测试对用户桌面零打扰（不闪任务栏图标、不抢焦点），而
+                    // `/state`、`/act` 与内建截图（`render_to_image` 不依赖可见性）照常。
+                    show: !start_hidden(),
                     ..Default::default()
                 },
                 move |window, cx| {

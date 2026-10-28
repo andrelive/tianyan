@@ -255,6 +255,40 @@ impl ClientApp {
             editing_provider: None,
             edit_endpoint: endpoint_input,
             edit_api_key: key_input,
+            settings_editors: ClientApp::create_settings_editors(window, cx),
+            settings_dirty: std::collections::HashMap::new(),
+            settings_msg: String::new(),
+            settings_msg_err: false,
+            soul_editor: cx
+                .new(|cx| TextareaState::new(window, cx).placeholder("智能体核心人设（Markdown）")),
+            soul_default: String::new(),
+            soul_loaded: false,
+            soul_msg: String::new(),
+            soul_msg_err: false,
+            mcp_servers: Vec::new(),
+            mcp_test: std::collections::HashMap::new(),
+            mcp_msg: String::new(),
+            mcp_msg_err: false,
+            mcp_form_open: false,
+            mcp_name: cx.new(|cx| {
+                InputState::new(window, cx).placeholder("名称（唯一，如 filesystem）")
+            }),
+            mcp_command: cx
+                .new(|cx| InputState::new(window, cx).placeholder("命令（如 npx / uvx / python）")),
+            mcp_args: cx.new(|cx| {
+                InputState::new(window, cx)
+                    .placeholder("参数（空格分隔，如 -y @modelcontextprotocol/server-filesystem）")
+            }),
+            mcp_desc: cx.new(|cx| InputState::new(window, cx).placeholder("说明（可选）")),
+            storage_move_target: cx.new(|cx| {
+                InputState::new(window, cx).placeholder("目标数据目录（绝对路径，须为空或不存在）")
+            }),
+            storage_msg: String::new(),
+            storage_msg_err: false,
+            usage_group_by: "model",
+            usage_msg: String::new(),
+            health_info: None,
+            health_msg: String::new(),
             window_handle: window.window_handle(),
             last_screenshot: None,
         };

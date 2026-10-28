@@ -40,8 +40,8 @@ use gpui_kit::{App, AsyncApp, WeakEntity};
 use tokio::sync::{mpsc, oneshot};
 
 use crate::{
-    decode_data_url, tokens_per_sec, ClientApp, Dialog, FilePickPurpose, PickerTarget, Seg,
-    SessionListRow, SettingsTab, View, SERVER_HOST,
+    decode_data_url, pages::settings::fields::FIELDS, tokens_per_sec, ClientApp, Dialog,
+    FilePickPurpose, PickerTarget, Seg, SessionListRow, SettingsTab, View, SERVER_HOST,
 };
 
 /// 自动化端口的环境变量名：存在且能解析成端口才监听。
@@ -217,6 +217,11 @@ impl ClientApp {
     /// 字段名即对外契约。刻意**不含** `api_key`（`settings.providers` 只给名字与
     /// 端点）：自动化端口是把界面摊开给外部读，密钥没有出现在这里的理由。
     fn automation_state(&self, cx: &App) -> serde_json::Value {
+        // 人设「是否等于默认」需要读编辑器（返回守卫，不能直接在 `json!` 里比较）
+        let soul_same_as_default = {
+            let cur = self.soul_editor.read(cx).value().to_string();
+            !self.soul_default.is_empty() && cur == self.soul_default
+        };
         // 左栏混排行按 `kind` 摊平：断言「某组有几条可见」「查看更多还剩几个」
         // 靠它，不必去解析渲染结果。
         let session_rows: Vec<serde_json::Value> = self
@@ -301,6 +306,9 @@ impl ClientApp {
 
         serde_json::json!({
             "view": self.view.key(),
+            // 内嵌 server 的端口：自动化脚本直接拿它去调后端接口做交叉验证
+            // （断言「界面显示的值」确实落到了服务端配置里）。
+            "server_port": self.port,
             "views": View::ALL.iter().map(|v| v.key()).collect::<Vec<_>>(),
             // 当前外观（graphite / parchment / midnight）
             "theme": crate::current_theme().key(),
@@ -522,6 +530,85 @@ impl ClientApp {
                     "total_tokens": g.total_tokens, "cache_hit_rate": g.cache_hit_rate,
                 })).collect::<Vec<_>>(),
             },
+            // 设置页：字段引擎（脏计数 + 每个字段的编辑态/配置态）+ 各栏目独立状态。
+            // 断言直接看这里：值是否真变了、脏不脏、哪些字段需重启——都不靠截图。
+            "settings_fields": {
+                "tab": self.settings_tab.key(),
+                "config_loaded": self.raw_config.is_some(),
+                "dirty_count": self.settings_dirty_count(cx),
+                "msg": &self.settings_msg,
+                "msg_err": self.settings_msg_err,
+                "field_count": FIELDS.len(),
+                "editable_tabs": FIELDS
+                    .iter()
+                    .map(|f| f.tab.key())
+                    .collect::<std::collections::BTreeSet<_>>()
+                    .into_iter()
+                    .collect::<Vec<_>>(),
+                "fields": self.settings_field_snapshot(cx).into_iter().map(
+                    |(path, label, edit, cfg, dirty, restart)| serde_json::json!({
+                        "path": path, "label": label, "value": edit,
+                        "config": cfg, "dirty": dirty, "restart": restart,
+                    })
+                ).collect::<Vec<_>>(),
+            },
+            "settings_extras": {
+                "soul": {
+                    "loaded": self.soul_loaded,
+                    "chars": self.soul_editor.read(cx).value().chars().count(),
+                    "default_chars": self.soul_default.chars().count(),
+                    "same_as_default": soul_same_as_default,
+                    "msg": &self.soul_msg,
+                    "msg_err": self.soul_msg_err,
+                },
+                "mcp": {
+                    "count": self.mcp_servers.len(),
+                    "form_open": self.mcp_form_open,
+                    "msg": &self.mcp_msg,
+                    "msg_err": self.mcp_msg_err,
+                    "servers": self.mcp_servers.iter().map(|s| serde_json::json!({
+                        "name": &s.name, "command": &s.command, "args": &s.args,
+                        "enabled": s.enabled, "test": self.mcp_test.get(&s.name),
+                    })).collect::<Vec<_>>(),
+                },
+                "usage_page": {
+                    "days": self.usage_days,
+                    "group_by": self.usage_group_by,
+                    "msg": &self.usage_msg,
+                },
+                "storage_move": {
+                    "msg": &self.storage_msg,
+                    "msg_err": self.storage_msg_err,
+                },
+                "health": {
+                    "status": self.health_info.as_ref().map(|h| h.status.clone()),
+                    "version": self.health_info.as_ref().map(|h| h.version.clone()),
+                    "data_dir": self.health_info.as_ref().map(|h| h.data_dir.clone()),
+                    "pid": self.health_info.as_ref().map(|h| h.pid),
+                    // 配置里的数据目录与服务实际是否同一处（`\\?\` 前缀不误报）
+                    "config_data_dir": self
+                        .raw_config
+                        .as_ref()
+                        .and_then(|c| crate::pages::settings::fields::json_get(c, "storage.data_dir"))
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string()),
+                    "dir_matches_config": match (
+                        self.health_info.as_ref().map(|h| h.data_dir.as_str()),
+                        self.raw_config
+                            .as_ref()
+                            .and_then(|c| {
+                                crate::pages::settings::fields::json_get(c, "storage.data_dir")
+                            })
+                            .and_then(|v| v.as_str()),
+                    ) {
+                        (Some(a), Some(b)) if !a.is_empty() && !b.is_empty() => {
+                            Some(crate::same_dir(a, b))
+                        }
+                        _ => None,
+                    },
+                    "msg": &self.health_msg,
+                },
+            },
             "approvals_page": {
                 "mode": &self.approval_mode,
                 "auto": self.approval_auto,
@@ -593,7 +680,7 @@ impl ClientApp {
                     "tool_count": r.tool_count, "model": &r.model, "usage": r.usage,
                 })).collect::<Vec<_>>(),
             },
-            "settings": {
+            "models_page": {
                 "status": &self.settings_status,
                 "error": self.settings_error,
                 // 设置页二级栏目（14 个，与 vite `SettingsPanel` 的 TABS 同序）
@@ -1040,8 +1127,133 @@ impl ClientApp {
                 if tab.config_key().is_some() && self.raw_config.is_none() {
                     self.load_config_summary(cx);
                 }
+                // 与界面点击同一套懒加载（自动化路径不得分叉）
+                match tab {
+                    SettingsTab::Usage => self.load_settings_usage(cx),
+                    SettingsTab::Soul => self.load_soul(cx),
+                    SettingsTab::Mcp => self.load_mcp_servers(cx),
+                    SettingsTab::Connection | SettingsTab::About => self.load_health(cx),
+                    _ => {}
+                }
                 cx.notify();
             }
+            // ---- 设置页字段引擎（写操作与界面共用同一条保存管线）----
+            "settings_save" => self.save_settings_fields(cx),
+            "settings_discard" => {
+                // 与界面「放弃」按钮同一条路径
+                self.discard_settings_changes(cx);
+            }
+            "settings_set" => {
+                let path = arg_str(cmd, "path")?;
+                let value = cmd
+                    .get("value")
+                    .cloned()
+                    .ok_or("缺少参数 value（布尔 / 枚举字符串）")?;
+                self.set_settings_direct_value(&path, value, cx)?;
+            }
+            "settings_text" => {
+                let path = arg_str(cmd, "path")?;
+                let text = arg_str(cmd, "value")?;
+                self.set_settings_text(&path, text, cx)?;
+            }
+            // ---- 设置页「用量统计」----
+            "usage_range" => {
+                let d = cmd
+                    .get("days")
+                    .and_then(|v| v.as_i64())
+                    .ok_or("缺少参数 days（0 = 全部）")?;
+                if !matches!(d, 0 | 1 | 3 | 7 | 30) {
+                    return Err(format!("days 只能是 0 / 1 / 3 / 7 / 30：{d}"));
+                }
+                self.usage_days = d;
+                self.load_settings_usage(cx);
+            }
+            "usage_group" => {
+                let g = arg_str(cmd, "group_by")?;
+                self.usage_group_by = match g.as_str() {
+                    "model" => "model",
+                    "provider" => "provider",
+                    other => return Err(format!("group_by 只能是 model / provider：{other}")),
+                };
+                self.load_settings_usage(cx);
+            }
+            // ---- 设置页「人设」----
+            "soul_load" => {
+                self.soul_loaded = false;
+                self.load_soul(cx);
+            }
+            "soul_set" => {
+                let content = arg_str(cmd, "content")?;
+                // 走与「加载人设」同一条写编辑器路径（经窗口句柄，不依赖渲染）
+                self.set_soul_content(content, cx);
+            }
+            "soul_fill_default" => {
+                if self.soul_default.is_empty() {
+                    return Err("默认人设尚未加载（先 soul_load）".to_string());
+                }
+                self.fill_soul_default(cx);
+            }
+            "soul_save" => self.save_soul(cx),
+            // ---- 设置页「MCP」----
+            "mcp_load" => self.load_mcp_servers(cx),
+            "mcp_form" => {
+                self.mcp_form_open = cmd
+                    .get("open")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(!self.mcp_form_open);
+                cx.notify();
+            }
+            "mcp_form_set" => {
+                let field = arg_str(cmd, "field")?;
+                let text = arg_str(cmd, "value")?;
+                let entity = match field.as_str() {
+                    "name" => self.mcp_name.clone(),
+                    "command" => self.mcp_command.clone(),
+                    "args" => self.mcp_args.clone(),
+                    "desc" => self.mcp_desc.clone(),
+                    other => {
+                        return Err(format!("field 只能是 name / command / args / desc：{other}"))
+                    }
+                };
+                let handle = self.window_handle;
+                handle
+                    .update(cx, move |_, window, cx| {
+                        entity.update(cx, |state, cx| state.set_value(text, window, cx));
+                    })
+                    .map_err(|e| format!("窗口已关闭：{e}"))?;
+                cx.notify();
+            }
+            "mcp_add" => self.add_mcp_server(cx),
+            "mcp_toggle" => {
+                let name = arg_str(cmd, "name")?;
+                let enabled = cmd
+                    .get("enabled")
+                    .and_then(|v| v.as_bool())
+                    .ok_or("缺少参数 enabled（布尔）")?;
+                self.toggle_mcp_server(name, enabled, cx);
+            }
+            "mcp_test" => {
+                let name = arg_str(cmd, "name")?;
+                self.test_mcp_server(name, cx);
+            }
+            "mcp_remove" => {
+                let name = arg_str(cmd, "name")?;
+                self.remove_mcp_server(name, cx);
+            }
+            // ---- 设置页「数据存储」/「连接」----
+            "storage_migrate" => self.migrate_data_dir(cx),
+            "storage_set_target" => {
+                let text = arg_str(cmd, "value")?;
+                let entity = self.storage_move_target.clone();
+                let handle = self.window_handle;
+                handle
+                    .update(cx, move |_, window, cx| {
+                        entity.update(cx, |state, cx| state.set_value(text, window, cx));
+                    })
+                    .map_err(|e| format!("窗口已关闭：{e}"))?;
+                cx.notify();
+            }
+            "health_refresh" => self.load_health(cx),
             "reload_scheduled" => self.load_sched_tasks(cx),
             // ---- 记忆 ----
             "select_memory" => {
@@ -1150,6 +1362,12 @@ impl ClientApp {
             // 生产构建里这个动作返回明确错误，而不是静默什么都不做）
             "screenshot" => {
                 let path = arg_str(cmd, "path")?;
+                // 先把窗口提到前台：`render_to_image` 取的是**最近一次绘制的帧**，
+                // 而窗口被完全遮挡时 GPUI 会跳过重绘 —— 表现为「切了栏目但截图没变」
+                // （实测：连续截 3 个栏目拿到同一张图，sha256 完全相同）。提前台后
+                // 才会产生新帧。隐藏窗口（START_HIDDEN=1）拿不到可用帧（1×1），
+                // 所以截图核对必须用可见窗口跑。
+                crate::tray::show_main_window();
                 #[cfg(feature = "screenshot")]
                 self.screenshot_to(path, cx)?;
                 #[cfg(not(feature = "screenshot"))]
