@@ -40,6 +40,8 @@ const SESSIONS_LOAD_STEP: usize = 10;
 /// 「最近活跃」段的时间窗口（24h）与组数上限
 const ACTIVE_GROUP_WINDOW_SECS: i64 = 24 * 3_600;
 const ACTIVE_GROUP_LIMIT: usize = 3;
+/// 顶部会话 Tab 上限（超出丢弃最早打开的；当前会话永不被丢）
+const MAX_SESSION_TABS: usize = 8;
 
 /// 本地生成会话 id：服务端 `resolve_or_create_session` 接受前端传入的 id
 /// 并在不存在时按它新建（`server/src/api/chat/services.rs`），因此新会话
@@ -2641,6 +2643,8 @@ struct ClientApp {
     zoomed_image: Option<std::sync::Arc<gpui_kit::Image>>,
     /// 待发送的图片（data URL 列表）：控件行「图片」按钮选入，发送后清空
     composer_images: Vec<String>,
+    /// 打开的会话 Tab（浏览器式；按打开顺序，最多 [`MAX_SESSION_TABS`] 个）
+    open_tabs: Vec<String>,
     /// 新会话待绑定的工作目录（「＋新目录」设置）：随首条消息以
     /// `working_directory` 下发，服务端建会话时固化（目录不存在则不绑定）
     new_session_workspace: Option<String>,
@@ -2916,6 +2920,7 @@ impl ClientApp {
             dialog: None,
             zoomed_image: None,
             composer_images: Vec::new(),
+            open_tabs: Vec::new(),
             new_session_workspace: None,
             dialog_input: None,
             messages,
@@ -12073,6 +12078,19 @@ impl ClientApp {
     /// 选中会话：切换路由键并拉消息
     fn open_session(&mut self, id: String, cx: &mut Context<Self>) {
         self.current_session = Some(id.clone());
+        // 浏览器式会话 Tab：打开过的会话留在顶部（去重；超上限丢最早且非当前的）
+        if !self.open_tabs.iter().any(|t| t == &id) {
+            self.open_tabs.push(id.clone());
+            while self.open_tabs.len() > MAX_SESSION_TABS {
+                let victim = self
+                    .open_tabs
+                    .iter()
+                    .find(|t| **t != id)
+                    .cloned()
+                    .unwrap_or_else(|| self.open_tabs[0].clone());
+                self.open_tabs.retain(|t| t != &victim);
+            }
+        }
         // 切会话即放弃上一会话的流式状态（本客户端只渲染当前会话的增量）
         self.streaming = false;
         // 会话级模型 / 上下文进度都是**按会话**的：切走即回落（模型回到 preferences.chat）
@@ -12107,6 +12125,107 @@ impl ClientApp {
         self.load_approvals(cx);
         // 选中态与「当前会话始终可见」都体现在左栏行上
         self.rebuild_session_rows(cx);
+    }
+
+    /// 关闭一个会话 Tab：若是当前会话则切到剩余 tab 的最后一个（没有则回空态）。
+    fn close_tab(&mut self, id: String, cx: &mut Context<Self>) {
+        self.open_tabs.retain(|t| t != &id);
+        if self.current_session.as_deref() == Some(id.as_str()) {
+            match self.open_tabs.last().cloned() {
+                Some(next) => self.open_session(next, cx),
+                None => self.start_new_session(cx),
+            }
+        } else {
+            cx.notify();
+        }
+    }
+
+    /// 顶部会话 Tab 条（对齐 vite `SessionTabBar`）：打开的会话横向排列、当前项高亮、
+    /// 每项带关闭按钮；没有任何 tab 时退回原来的单行标题（不占额外高度）。
+    ///
+    /// 单独成方法：`render_chat` 的栈帧已经很紧（GPUI 递归 prepaint，
+    /// 单帧过大会 `has overflowed its stack`），这里不再往它体内塞嵌套。
+    fn render_session_tabs(&self, cx: &mut Context<Self>) -> AnyElement {
+        if self.open_tabs.is_empty() {
+            return div()
+                .px_3()
+                .py_2()
+                .text_sm()
+                .border_b_1()
+                .border_color(rgb(colors::BORDER()))
+                .child(self.current_title.clone())
+                .into_any_element();
+        }
+        let mut row = div()
+            .w_full()
+            .min_w_0()
+            .px_2()
+            .py_1()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_1()
+            .border_b_1()
+            .border_color(rgb(colors::BORDER()))
+            .overflow_hidden();
+        for id in &self.open_tabs {
+            let is_cur = self.current_session.as_deref() == Some(id.as_str());
+            let title = self
+                .sessions_data
+                .iter()
+                .find(|s| &s.id == id)
+                .map(|s| ellipsis(&s.title, 12))
+                .unwrap_or_else(|| "会话".to_string());
+            let id_open = id.clone();
+            let id_close = id.clone();
+            row = row.child(
+                div()
+                    .id(format!("session-tab-{id}"))
+                    .px_2()
+                    .py_1()
+                    .rounded_md()
+                    .cursor_pointer()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_1()
+                    .whitespace_nowrap()
+                    .bg(rgb(if is_cur {
+                        colors::BG_TERTIARY()
+                    } else {
+                        colors::BG_SECONDARY()
+                    }))
+                    .text_size(px(12.))
+                    .text_color(rgb(if is_cur {
+                        colors::TEXT_PRIMARY()
+                    } else {
+                        colors::TEXT_SECONDARY()
+                    }))
+                    .child(title)
+                    .child(
+                        div()
+                            .id(format!("session-tab-x-{id}"))
+                            .px_1()
+                            .rounded_md()
+                            .cursor_pointer()
+                            .child(
+                                svg()
+                                    .path(IconName::X.path())
+                                    .size(px(10.))
+                                    .text_color(rgb(colors::TEXT_TERTIARY())),
+                            )
+                            .on_click(cx.listener(move |this, _, _w, cx| {
+                                this.close_tab(id_close.clone(), cx);
+                            })),
+                    )
+                    .on_click(cx.listener(move |this, _, _w, cx| {
+                        if this.current_session.as_deref() != Some(id_open.as_str()) {
+                            this.open_session(id_open.clone(), cx);
+                        }
+                    })),
+            );
+        }
+        row.into_any_element()
     }
 
     /// 处理一条统一事件。
@@ -12891,14 +13010,8 @@ impl ClientApp {
                             .h_full()
                             .flex()
                             .flex_col()
-                            .child(
-                                div()
-                                    .px_3()
-                                    .py_2()
-                                    .text_sm()
-                                    .border_b_1()
-                                    .child(self.current_title.clone()),
-                            )
+                            // 顶部：打开的会话 Tab 条（浏览器式；无 tab 时退回单行标题）
+                            .child(self.render_session_tabs(cx))
                             // 消息列：限宽 896 居中（与输入卡片同宽、同左边界）。
                             // 父级用 `flex_col + items_center` 让限宽块水平居中；
                             // 限宽块自身 `w_full + max_w` 才会在宽窗口下取 896。
