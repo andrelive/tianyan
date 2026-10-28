@@ -578,6 +578,11 @@ impl ClientApp {
                 "ctx_compress": self.ctx_compress.as_ref().map(|(ok, m)| serde_json::json!({
                     "ok": ok, "message": m,
                 })),
+                // 思考强度：档位集来自当前模型声明；`options` 为 None = 该模型不支持思考
+                "thinking": self.thinking.clone(),
+                "thinking_label": self.thinking_label(),
+                "thinking_options": self.thinking_options(),
+                "thinking_menu_open": self.thinking_menu_open,
                 "session": self.session_usage.map(|(i, c, o)| serde_json::json!({
                     "input_uncached": i, "input_cached": c, "output": o,
                 })),
@@ -742,6 +747,32 @@ impl ClientApp {
             }
             // 压缩当前会话：只转既有方法（D8：动作不新造逻辑）
             "compress_session" => self.compress_session(cx),
+            // 思考强度下拉：`open` 显式指定，不带才取反（同其余浮层口径）
+            "thinking_menu" => {
+                self.thinking_menu_open = cmd
+                    .get("open")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(!self.thinking_menu_open);
+                // 三个浮层互斥：开一收二
+                self.model_menu_open = false;
+                self.ctx_panel_open = false;
+                cx.notify();
+            }
+            // 选择思考强度：`effort` 缺省/`off` = default（不附加思考参数）
+            "select_thinking" => {
+                let effort = arg_opt(cmd, "effort").filter(|v| v != "off");
+                self.select_thinking(effort, cx);
+            }
+            // 模型下拉：`open` 显式指定，不带才取反（三个浮层同口径、互斥）
+            "model_menu" => {
+                self.model_menu_open = cmd
+                    .get("open")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(!self.model_menu_open);
+                self.thinking_menu_open = false;
+                self.ctx_panel_open = false;
+                cx.notify();
+            }
             "respond_approval" => {
                 let decision = arg_str(cmd, "decision")?;
                 let request_id = match arg_opt(cmd, "request_id") {

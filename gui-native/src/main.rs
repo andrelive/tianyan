@@ -694,6 +694,9 @@ struct ModelRow {
     /// 能力标签（kebab-case，逗号拼接；`chat` / `vision` / `text-embedding` …）
     capabilities: String,
     context: Option<u64>,
+    /// 该模型自己声明的思考强度档位（`/config/models` 的 `reasoning_efforts`）。
+    /// 空 = 不支持思考 → 输入区的「思考」选择器整体隐藏（对齐 vite `ThinkingSelect`）
+    reasoning_efforts: Vec<String>,
     /// 是否为当前 chat 首选模型（`preferences.chat` 命中）
     is_chat: bool,
 }
@@ -2363,6 +2366,12 @@ struct ClientApp {
     session_model: Option<(String, String)>,
     /// 模型下拉是否展开
     model_menu_open: bool,
+    /// 会话级思考强度：`None` = default（不附加思考参数，是否思考由模型决定）。
+    /// 档位值来自当前模型声明的 `reasoning_efforts`，**原样展示不翻译**
+    /// （厂商可能给 low / high / max 等任意值）
+    thinking: Option<String>,
+    /// 思考强度下拉是否展开
+    thinking_menu_open: bool,
     /// 最近一轮请求的**实时**用量（流式 `usage` 上报写入，切会话即清）。
     /// 上下文占用优先取它，其次回落到消息链自带的 `usage`（见 `ctx_usage`）
     ctx_live: Option<MsgUsage>,
@@ -2613,6 +2622,8 @@ impl ClientApp {
             settings_error: false,
             session_model: None,
             model_menu_open: false,
+            thinking: None,
+            thinking_menu_open: false,
             ctx_live: None,
             ctx_window_live: 0,
             ctx_panel_open: false,
@@ -5030,6 +5041,8 @@ impl ClientApp {
         self.streaming = false;
         self.session_model = None;
         self.model_menu_open = false;
+        self.thinking = None;
+        self.thinking_menu_open = false;
         self.ctx_live = None;
         self.ctx_window_live = 0;
         self.ctx_panel_open = false;
@@ -5181,6 +5194,17 @@ impl ClientApp {
                                 })
                                 .unwrap_or_default();
                             let context = m.get("context_length").and_then(|v| v.as_u64());
+                            // 该模型声明的思考档位（空 = 不支持思考 → 选择器隐藏）
+                            let reasoning_efforts = m
+                                .get("reasoning_efforts")
+                                .and_then(|v| v.as_array())
+                                .map(|a| {
+                                    a.iter()
+                                        .filter_map(|x| x.as_str())
+                                        .map(|x| x.to_string())
+                                        .collect::<Vec<_>>()
+                                })
+                                .unwrap_or_default();
                             let is_chat = name == chat_model
                                 && (chat_provider.is_empty() || provider == chat_provider);
                             rows.push(ModelRow {
@@ -5188,6 +5212,7 @@ impl ClientApp {
                                 name,
                                 capabilities,
                                 context,
+                                reasoning_efforts,
                                 is_chat,
                             });
                         }
@@ -5443,13 +5468,135 @@ impl ClientApp {
     /// 口径与 Tauri 版 `ModelSelector` 一致：未选中时回退到 `preferences.chat`
     /// （`load_models` 已把它标成 `is_chat`），再没有就显示占位。
     fn current_model_label(&self) -> String {
-        if let Some((provider, model)) = &self.session_model {
-            return format!("{model} · {provider}");
-        }
-        match self.models.iter().find(|m| m.is_chat) {
-            Some(m) => format!("{} · {}", m.name, m.provider),
+        match self.current_model_pair() {
+            Some((provider, model)) => format!("{model} · {provider}"),
             None => "未选择模型".to_string(),
         }
+    }
+
+    /// 当前会话生效的 `(provider, model)`：会话选择优先，回退默认 chat 模型。
+    fn current_model_pair(&self) -> Option<(String, String)> {
+        if let Some(pair) = &self.session_model {
+            return Some(pair.clone());
+        }
+        let m = self.models.iter().find(|m| m.is_chat)?;
+        Some((m.provider.clone(), m.name.clone()))
+    }
+
+    /// 当前 chat 模型行（思考档位 / 上下文窗口都从这里取）。
+    fn current_chat_model(&self) -> Option<&ModelRow> {
+        if let Some((provider, model)) = &self.session_model {
+            if let Some(row) = self
+                .models
+                .iter()
+                .find(|m| &m.provider == provider && &m.name == model)
+            {
+                return Some(row);
+            }
+        }
+        self.models.iter().find(|m| m.is_chat)
+    }
+
+    /// 思考强度候选档位；`None` = 当前模型不支持思考 → 选择器整体隐藏。
+    ///
+    /// 顺序 = 「default」（值 `off`）+ 模型声明的档位（去掉重复的 `off`）。
+    /// 档位值**原样展示不翻译**——厂商可能给 low / high / max / think 等任意值。
+    fn thinking_options(&self) -> Option<Vec<String>> {
+        let declared: Vec<String> = self
+            .current_chat_model()?
+            .reasoning_efforts
+            .iter()
+            .filter(|v| v.as_str() != "off")
+            .cloned()
+            .collect();
+        if declared.is_empty() {
+            return None;
+        }
+        let mut out = vec!["off".to_string()];
+        out.extend(declared);
+        Some(out)
+    }
+
+    /// 思考强度展示名：`off` 如实显示为「default」
+    /// （不附加思考参数，是否思考由模型决定——思考模型缺省仍会输出推理）。
+    fn thinking_label(&self) -> String {
+        self.thinking
+            .clone()
+            .unwrap_or_else(|| "default".to_string())
+    }
+
+    /// 选择思考强度：写**当前会话**的模型选择（与模型选择同一个对象，
+    /// `PUT /sessions/{id}/model` 带 `thinking`）。未创建会话时只记本地，
+    /// 首条消息的 `ChatRequest` 会带上并固化。
+    fn select_thinking(&mut self, effort: Option<String>, cx: &mut Context<Self>) {
+        self.thinking_menu_open = false;
+        self.model_menu_open = false;
+        self.thinking = effort.clone();
+        let Some(sid) = self.current_session.clone() else {
+            cx.notify();
+            return;
+        };
+        let Some((provider, model)) = self.current_model_pair() else {
+            cx.notify();
+            return;
+        };
+        let port = self.port;
+        cx.spawn(async move |this, cx| {
+            let url = format!("http://{SERVER_HOST}:{port}/api/v1/sessions/{sid}/model");
+            let mut body = serde_json::json!({ "provider": provider, "model": model });
+            // 缺省 = off（不附加思考参数）
+            if let Some(e) = effort {
+                body["thinking"] = serde_json::Value::String(e);
+            }
+            let res = put_json(url, body).await;
+            let _ = this.update(cx, |this, cx| {
+                this.status = match res {
+                    Ok(_) => format!("思考强度已设置：{}", this.thinking_label()),
+                    Err(e) => format!("设置思考强度失败：{e}"),
+                };
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// 拉会话级模型选择（`GET /sessions/{id}/model`）→ 恢复模型与思考强度。
+    ///
+    /// 不恢复的话，切到「设过 high」的会话会显示 default——用户一改就把会话里
+    /// 的档位覆盖掉（显示与实际不符，比不显示更糟）。
+    fn load_session_model(&self, session_id: String, cx: &mut Context<Self>) {
+        let port = self.port;
+        cx.spawn(async move |this, cx| {
+            let url = format!("http://{SERVER_HOST}:{port}/api/v1/sessions/{session_id}/model");
+            let Ok(body) = fetch_json(url).await else {
+                return;
+            };
+            let sel = body.get("selection");
+            let provider = sel
+                .and_then(|s| s.get("provider"))
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+            let model = sel
+                .and_then(|s| s.get("model"))
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+            let thinking = sel
+                .and_then(|s| s.get("thinking"))
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+            let _ = this.update(cx, |this, cx| {
+                // 迟到响应不覆盖：请求在飞时会话可能已切走
+                if this.current_session.as_deref() != Some(session_id.as_str()) {
+                    return;
+                }
+                if let (Some(p), Some(m)) = (provider, model) {
+                    this.session_model = Some((p, m));
+                }
+                this.thinking = thinking;
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     /// 拉取本会话的后台任务（`GET /api/v1/tasks`，按 `parent_session_id` 归属过滤）。
@@ -6535,15 +6682,6 @@ impl ClientApp {
         (capped + window / 2) / window
     }
 
-    /// 上下文占用文案（无用量 / 无窗口时 `--`，对齐 vite 环中心的 `–`）
-    fn ctx_label(&self) -> String {
-        if self.ctx_usage().is_none() || self.ctx_window() == 0 {
-            "上下文 --".to_string()
-        } else {
-            format!("上下文 {}%", self.ctx_pct())
-        }
-    }
-
     /// 上下文占用配色（对齐 DSH ContextMeter / vite `ContextRing`）：
     /// 临界 80% → error，高 50% → warning，正常 → success。
     fn ctx_color(&self) -> u32 {
@@ -6612,17 +6750,36 @@ impl ClientApp {
     /// 服务端建会话时即固化，不必等会话 id 生成后再补一次 PUT。
     fn select_chat_model(&mut self, provider: String, model: String, cx: &mut Context<Self>) {
         self.model_menu_open = false;
+        self.thinking_menu_open = false;
+        self.ctx_panel_open = false;
         self.session_model = Some((provider.clone(), model.clone()));
+        // 新模型没声明当前档位 → 复位 default（与 vite `ThinkingSelect` 的
+        // useEffect 兜底同逻辑；否则会把一个该模型不认识的档位发给后端）
+        if let Some(cur) = &self.thinking {
+            let supported = self
+                .models
+                .iter()
+                .find(|m| m.provider == provider && m.name == model)
+                .map(|m| m.reasoning_efforts.iter().any(|v| v == cur))
+                .unwrap_or(false);
+            if !supported {
+                self.thinking = None;
+            }
+        }
         let Some(sid) = self.current_session.clone() else {
             self.status = format!("新会话将使用 {model} · {provider}");
             cx.notify();
             return;
         };
+        let thinking = self.thinking.clone();
         let port = self.port;
         self.status = format!("正在为会话切换模型到 {model}…");
         cx.spawn(async move |this, cx| {
             let url = format!("http://{SERVER_HOST}:{port}/api/v1/sessions/{sid}/model");
-            let body = serde_json::json!({ "provider": provider, "model": model });
+            let mut body = serde_json::json!({ "provider": provider, "model": model });
+            if let Some(e) = thinking {
+                body["thinking"] = serde_json::Value::String(e);
+            }
             let res = put_json(url, body).await;
             let _ = this.update(cx, |this, cx| {
                 this.status = match res {
@@ -11469,6 +11626,8 @@ impl ClientApp {
         // 会话级模型 / 上下文进度都是**按会话**的：切走即回落（模型回到 preferences.chat）
         self.session_model = None;
         self.model_menu_open = false;
+        self.thinking = None;
+        self.thinking_menu_open = false;
         // 实时用量与面板状态按会话重置；占用本身由新会话的消息 usage 恢复
         self.ctx_live = None;
         self.ctx_window_live = 0;
@@ -11488,6 +11647,8 @@ impl ClientApp {
         self.ws_entries.clear();
         self.ws_file = None;
         self.ws_path.clear();
+        // 会话级模型 / 思考强度的权威值在会话头里：拉回来覆盖上面对默认值的回落
+        self.load_session_model(id.clone(), cx);
         self.load_messages(id, cx);
         self.load_session_usage(cx);
         self.load_todos_goals(cx);
@@ -11821,12 +11982,17 @@ impl ClientApp {
             .map(|m| (m.provider.clone(), m.name.clone()))
             .collect();
         let menu_open = self.model_menu_open;
-        let ctx_label = self.ctx_label();
-        let ctx_high = self.ctx_pct() >= 80;
         let ctx_pct = self.ctx_pct();
         let ctx_color = self.ctx_color();
         let ctx_usage = self.ctx_usage();
         let ctx_window = self.ctx_window();
+        let ctx_has_usage = ctx_usage.is_some() && ctx_window > 0;
+        // 环内文字：有数据显百分比、没有显 `–`（对齐 vite 环中心的口径）
+        let ctx_center_text = if ctx_has_usage {
+            format!("{ctx_pct}%")
+        } else {
+            "–".to_string()
+        };
         let ctx_panel_open = self.ctx_panel_open;
         // 「左标签 / 右值」一行（详情面板三行共用）
         let kv_row = |label: &'static str, value: String| {
@@ -11843,7 +12009,8 @@ impl ClientApp {
         // +「压缩会话」。环本身只是缩略，口径（最近一轮 vs 会话累计）写在面板里。
         let mut ctx_panel = div()
             .absolute()
-            .bottom(px(40.))
+            // 相对**环本身**定位（环容器是 `.relative()`）：浮层贴环的正上方
+            .bottom(px(34.))
             .right(px(0.))
             .w(px(300.))
             .rounded_lg()
@@ -11953,9 +12120,109 @@ impl ClientApp {
                     .child(msg.clone()),
             );
         }
+        // 思考强度选择器（vite `ThinkingSelect` 同口径）：档位来自当前模型声明，
+        // 模型不支持思考时**整块不渲染**（不占位）；`off` 档如实显示为「default」。
+        let thinking_open = self.thinking_menu_open;
+        let thinking_label = self.thinking_label();
+        let mut thinking_select: Option<AnyElement> = None;
+        if let Some(opts) = self.thinking_options() {
+            let mut dd = div()
+                .absolute()
+                .bottom(px(26.))
+                .right(px(0.))
+                .w(px(160.))
+                .rounded_lg()
+                .border_1()
+                .border_color(rgb(colors::BORDER()))
+                .bg(rgb(colors::BG_PRIMARY()))
+                .py_1()
+                .flex()
+                .flex_col();
+            for (ix, opt) in opts.iter().enumerate() {
+                // `off` = 不附加思考参数（None）；其余档位值原样发后端
+                let value: Option<String> = if opt == "off" {
+                    None
+                } else {
+                    Some(opt.clone())
+                };
+                let label = if opt == "off" {
+                    "default".to_string()
+                } else {
+                    opt.clone()
+                };
+                let is_current = value == self.thinking;
+                let mut row = div()
+                    .id(("thinking-opt", ix))
+                    .px_3()
+                    .py_2()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_2()
+                    .cursor_pointer()
+                    .text_xs();
+                row = if is_current {
+                    row.text_color(rgb(colors::ACCENT()))
+                } else {
+                    row.text_color(rgb(colors::TEXT_PRIMARY()))
+                };
+                dd = dd.child(
+                    row.child(div().flex_1().child(label))
+                        .children(if is_current {
+                            Some(
+                                svg()
+                                    .path(IconName::Check.path())
+                                    .size(px(12.))
+                                    .text_color(rgb(colors::ACCENT())),
+                            )
+                        } else {
+                            None
+                        })
+                        .on_click(cx.listener(move |this, _, _window, cx| {
+                            this.select_thinking(value.clone(), cx);
+                        })),
+                );
+            }
+            thinking_select = Some(
+                div()
+                    .id("thinking-select")
+                    .relative()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_1()
+                    .px_2()
+                    .py_1()
+                    .rounded_lg()
+                    .cursor_pointer()
+                    .text_xs()
+                    .text_color(rgb(colors::TEXT_TERTIARY()))
+                    .child(format!("思考 {thinking_label}"))
+                    .child(
+                        svg()
+                            .path(IconName::ChevronDown.path())
+                            .size(px(12.))
+                            .text_color(rgb(colors::TEXT_TERTIARY())),
+                    )
+                    .on_click(cx.listener(|this, _, _window, cx| {
+                        this.thinking_menu_open = !this.thinking_menu_open;
+                        // 三个浮层互斥：开一个收另外两个
+                        this.model_menu_open = false;
+                        this.ctx_panel_open = false;
+                        cx.notify();
+                    }))
+                    .children(if thinking_open {
+                        Some(deferred(dd))
+                    } else {
+                        None
+                    })
+                    .into_any_element(),
+            );
+        }
         let mut menu = div()
             .absolute()
-            .bottom(px(40.))
+            // 相对**模型按钮**定位：浮层贴在它正上方（不再统一吊在控件行右端）
+            .bottom(px(30.))
             .right(px(0.))
             .w(px(256.))
             .rounded_lg()
@@ -12267,69 +12534,91 @@ impl ClientApp {
                                                             .flex_row()
                                                             .items_center()
                                                             .gap_1()
+                                                            // 控件顺序对齐 vite `ChatInput`：模型 → 思考 → 上下文环 → 发送
                                                             .child(
-                                                                // 环 + 文字是同一个可点区域：点开上下文详情
-                                                                // （占用 / 缓存 / 输出 + 压缩会话）。
+                                                                // 模型选择：浮层挂在自己身上（`relative` 定位 +
+                                                                // `deferred` 延迟绘制）——这样它出现在**按钮正上方**，
+                                                                // 且画在卡片边框之后（不会透出下面的线）
+                                                                div()
+                                                                    .id("model-select")
+                                                                    .relative()
+                                                                    .px_1()
+                                                                    .py_1()
+                                                                    .rounded_lg()
+                                                                    .cursor_pointer()
+                                                                    .text_xs()
+                                                                    .text_color(rgb(colors::TEXT_PRIMARY()))
+                                                                    .child(self.current_model_label())
+                                                                    .on_click(cx.listener(
+                                                                        |this, _, _window, cx| {
+                                                                            this.model_menu_open =
+                                                                                !this.model_menu_open;
+                                                                            this.thinking_menu_open = false;
+                                                                            this.ctx_panel_open = false;
+                                                                            cx.notify();
+                                                                        },
+                                                                    ))
+                                                                    .children(if menu_open {
+                                                                        Some(deferred(menu))
+                                                                    } else {
+                                                                        None
+                                                                    }),
+                                                            )
+                                                            // 思考强度（当前模型没声明档位时这里是空）
+                                                            .children(thinking_select)
+                                                            .child(
+                                                                // 上下文环：百分比在**圈内**（vite 同形态）。
                                                                 // ⚠️ 环值口径是 **0-100**（库约定），不是 0-1
                                                                 // ——写 0-1 时环永远是空的。
                                                                 div()
                                                                     .id("ctx-ring-btn")
+                                                                    .relative()
                                                                     .flex()
-                                                                    .flex_row()
                                                                     .items_center()
-                                                                    .gap_1()
                                                                     .px_1()
                                                                     .rounded_md()
                                                                     .cursor_pointer()
                                                                     .child(
                                                                         ProgressCircle::new("ctx-ring")
                                                                             .value(ctx_pct as f32)
+                                                                            .size(px(30.))
                                                                             .color(Hsla::from(rgb(
                                                                                 ctx_color,
-                                                                            ))),
-                                                                    )
-                                                                    .child(
-                                                                        div()
-                                                                            .text_xs()
-                                                                            .text_color(if ctx_high {
-                                                                                rgb(colors::ERROR())
-                                                                            } else {
-                                                                                rgb(colors::TEXT_TERTIARY())
-                                                                            })
-                                                                            .child(ctx_label),
+                                                                            )))
+                                                                            .child(
+                                                                                div()
+                                                                                    .text_size(px(9.))
+                                                                                    .text_color(rgb(
+                                                                                        if ctx_has_usage {
+                                                                                            colors::TEXT_SECONDARY()
+                                                                                        } else {
+                                                                                            colors::TEXT_TERTIARY()
+                                                                                        },
+                                                                                    ))
+                                                                                    .child(
+                                                                                        ctx_center_text,
+                                                                                    ),
+                                                                            ),
                                                                     )
                                                                     .on_click(cx.listener(
                                                                         |this, _, _window, cx| {
                                                                             this.ctx_panel_open =
                                                                                 !this.ctx_panel_open;
-                                                                            // 两个浮层同一位置：开一个就收另一个
+                                                                            // 三个浮层互斥：开一个收另外两个
                                                                             this.model_menu_open = false;
+                                                                            this.thinking_menu_open = false;
                                                                             if !this.ctx_panel_open {
                                                                                 this.ctx_compress = None;
                                                                             }
                                                                             cx.notify();
                                                                         },
-                                                                    )),
-                                                            ),
-                                                    )
-                                                    .child(
-                                                        div()
-                                                            .id("model-select")
-                                                            .px_2()
-                                                            .py_1()
-                                                            .rounded_lg()
-                                                            .cursor_pointer()
-                                                            .text_xs()
-                                                            .text_color(rgb(colors::TEXT_PRIMARY()))
-                                                            .child(self.current_model_label())
-                                                            .on_click(cx.listener(
-                                                                |this, _, _window, cx| {
-                                                                    this.model_menu_open =
-                                                                        !this.model_menu_open;
-                                                                    cx.notify();
-                                                                },
-                                                            )),
-                                                    )
+                                                                    ))
+                                                                    .children(if ctx_panel_open {
+                                                                        Some(deferred(ctx_panel))
+                                                                    } else {
+                                                                        None
+                                                                    }),
+                                                            )
                                                     .child({
                                                         let stopping = self.streaming;
                                                         div()
@@ -12377,18 +12666,6 @@ impl ClientApp {
                                                                 },
                                                             ))
                                                     })
-                                                    .children(if menu_open {
-                                                        Some(menu)
-                                                    } else {
-                                                        None
-                                                    })
-                                                    // 上下文详情浮层：与模型下拉同一挂载点
-                                                    // （控件行才是 `.relative()`，absolute 才落在按钮上方）
-                                                    .children(if ctx_panel_open {
-                                                        Some(ctx_panel)
-                                                    } else {
-                                                        None
-                                                    }),
                                             ),
                                     )
                                     // 底部统计行（对齐 Tauri 版 `ChatInput`）：未命中输入 /
@@ -12472,7 +12749,7 @@ impl ClientApp {
                             ),
                     )
                     .child(self.render_tasks_panel(cx)),
-            )
+            ))
             .into_any_element()
     }
 }
