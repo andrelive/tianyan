@@ -39,7 +39,10 @@ use axum::{
 use gpui_kit::{App, AsyncApp, WeakEntity};
 use tokio::sync::{mpsc, oneshot};
 
-use crate::{tokens_per_sec, ClientApp, Dialog, PickerTarget, SessionListRow, View, SERVER_HOST};
+use crate::{
+    decode_data_url, tokens_per_sec, ClientApp, Dialog, PickerTarget, SessionListRow, View,
+    SERVER_HOST,
+};
 
 /// 自动化端口的环境变量名：存在且能解析成端口才监听。
 const PORT_ENV: &str = "TIANYAN_GUI_AUTOMATION_PORT";
@@ -575,6 +578,8 @@ impl ClientApp {
                 "ctx_completion": self.ctx_usage().map(|u| u.completion_tokens),
                 "ctx_panel_open": self.ctx_panel_open,
                 "ctx_compressing": self.ctx_compressing,
+                // 图片放大遮罩是否打开（点击用户消息图片）
+                "zoomed_image": self.zoomed_image.is_some(),
                 "ctx_compress": self.ctx_compress.as_ref().map(|(ok, m)| serde_json::json!({
                     "ok": ok, "message": m,
                 })),
@@ -789,6 +794,32 @@ impl ClientApp {
                 cx.notify();
             }
             // 模型下拉：`open` 显式指定，不带才取反（三个浮层同口径、互斥）
+            // 图片放大（对齐 vite `ZoomableImage`）：不带 `open` 时取反；
+            // 打开时取当前消息里**最近一条含图消息的第一张**（验证用）
+            "zoom_image" => {
+                let open = cmd
+                    .get("open")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(self.zoomed_image.is_none());
+                if open {
+                    let src = self
+                        .messages
+                        .iter()
+                        .rev()
+                        .flat_map(|m| m.images.iter())
+                        .next()
+                        .cloned();
+                    self.zoomed_image =
+                        src.as_deref()
+                            .and_then(decode_data_url)
+                            .map(|(format, bytes)| {
+                                Arc::new(gpui_kit::Image::from_bytes(format, bytes))
+                            });
+                } else {
+                    self.zoomed_image = None;
+                }
+                cx.notify();
+            }
             "model_menu" => {
                 self.model_menu_open = cmd
                     .get("open")

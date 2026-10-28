@@ -2148,21 +2148,44 @@ fn render_msg_body(msg: &MsgRow, mi: usize, expand: &ExpandRef, app: &AppRef) ->
                 // GPUI `Image` 直接渲染，**不落盘**（`Image::from_bytes` 吃字节）
                 if !msg.images.is_empty() {
                     let mut imgs = div().flex().flex_row().flex_wrap().gap_2();
-                    for src in &msg.images {
+                    for (k, src) in msg.images.iter().enumerate() {
                         let Some((format, bytes)) = decode_data_url(src) else {
                             continue;
                         };
-                        let image = gpui_kit::Image::from_bytes(format, bytes);
+                        let arc = std::sync::Arc::new(gpui_kit::Image::from_bytes(format, bytes));
+                        // 点击放大（对齐 vite `ZoomableImage`）：把 Arc 交给
+                        // ClientApp，根层渲染全屏遮罩 + 大图
+                        let app_for_img = app.clone();
+                        let arc_for_click = arc.clone();
                         imgs = imgs.child(
-                            gpui_kit::img(gpui_kit::ImageSource::Image(std::sync::Arc::new(image)))
-                                .max_w(px(240.))
-                                .max_h(px(240.))
-                                .rounded_lg(),
+                            div()
+                                .id(("msg-img", mi * 100 + k))
+                                .cursor_pointer()
+                                .child(
+                                    gpui_kit::img(gpui_kit::ImageSource::Image(arc))
+                                        .max_w(px(240.))
+                                        .max_h(px(240.))
+                                        .rounded_lg(),
+                                )
+                                .on_click(move |_, _, cx| {
+                                    if let Some(w) = app_for_img.lock().ok().and_then(|g| g.clone())
+                                    {
+                                        let _ = w.update(cx, |this: &mut ClientApp, cx| {
+                                            this.zoomed_image = Some(arc_for_click.clone());
+                                            cx.notify();
+                                        });
+                                    }
+                                }),
                         );
                     }
                     bubble = bubble.child(imgs);
                 }
-                bubble = bubble.child(div().child(msg.text.clone()));
+                // 正文：`trim_end()` 去掉 `segments_text` 拼接时补的尾部换行——
+                // 否则气泡内文字与时间之间会凭空多一个空行（用户截图指出的那条）
+                let body_text = msg.text.trim_end().to_string();
+                if !body_text.is_empty() {
+                    bubble = bubble.child(div().child(body_text));
+                }
                 if let Some(ts) = &msg.ts {
                     // 气泡内右对齐（靠一层 row + justify_end，GPUI 的 div 没有
                     // text-align）；白字降透明度，与 vite `text-blue-100 opacity-60` 同观感
@@ -2491,6 +2514,8 @@ struct ClientApp {
     app_ref: AppRef,
     /// 当前打开的模态对话框（删除确认 / 重命名）
     dialog: Option<Dialog>,
+    /// 放大查看的用户消息图片（点击图片打开全屏遮罩；None = 未打开）
+    zoomed_image: Option<std::sync::Arc<gpui_kit::Image>>,
     /// 新会话待绑定的工作目录（「＋新目录」设置）：随首条消息以
     /// `working_directory` 下发，服务端建会话时固化（目录不存在则不绑定）
     new_session_workspace: Option<String>,
@@ -2764,6 +2789,7 @@ impl ClientApp {
             ws_diff: None,
             ws_diff_status: String::new(),
             dialog: None,
+            zoomed_image: None,
             new_session_workspace: None,
             dialog_input: None,
             messages,
@@ -12929,7 +12955,7 @@ impl Render for ClientApp {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         // 整体骨架与 `gui-vite/src/components/layout/AppLayout.tsx` 一致：
         //   一级 rail(64px) + main(flex-1, bg-primary)
-        div()
+        let mut root = div()
             .size_full()
             .flex()
             .flex_row()
@@ -12955,7 +12981,37 @@ impl Render for ClientApp {
                 self.render_dialog(cx)
             } else {
                 div().into_any_element()
-            })
+            });
+        // 图片放大遮罩（对齐 vite `ZoomableImage`）：铺满整窗、点击任意处关闭
+        if let Some(img) = self.zoomed_image.clone() {
+            root = root.child(
+                div()
+                    .id("image-zoom")
+                    .absolute()
+                    .top(px(0.))
+                    .left(px(0.))
+                    .right(px(0.))
+                    .bottom(px(0.))
+                    // 半透明黑（0xRRGGBBAA）
+                    .bg(rgba(0x000000cc))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .cursor_pointer()
+                    .on_click(cx.listener(|this, _, _window, cx| {
+                        this.zoomed_image = None;
+                        cx.notify();
+                    }))
+                    .child(
+                        gpui_kit::img(gpui_kit::ImageSource::Image(img))
+                            // 相对父容器 90%（`relative` 走父宽，不是绝对像素）
+                            .max_w(relative(0.9))
+                            .max_h(relative(0.9))
+                            .rounded_lg(),
+                    ),
+            );
+        }
+        root
     }
 }
 
