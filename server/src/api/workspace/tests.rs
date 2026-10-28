@@ -912,7 +912,7 @@ async fn dirs_lists_subdirectories_only() {
     let service = service_with_workdir(workdir.clone());
 
     let resp = service
-        .list_dirs(Some(workdir.to_string_lossy().as_ref()))
+        .list_dirs(Some(workdir.to_string_lossy().as_ref()), false)
         .await
         .unwrap();
     // 只列目录：sub-a、sub-b；file.txt 不出现
@@ -930,13 +930,38 @@ async fn dirs_lists_subdirectories_only() {
 async fn dirs_missing_dir_returns_404() {
     let service = service_with_workdir(tempdir().unwrap().path().join("work"));
     let err = service
-        .list_dirs(Some("Z:/definitely-not-exists-tianyan-test"))
+        .list_dirs(Some("Z:/definitely-not-exists-tianyan-test"), false)
         .await
         .unwrap_err();
     assert!(
         matches!(err, ApiError::NotFound(_)),
         "应返回 NotFound: {err:?}"
     );
+}
+
+/// 服务层：`include_files=true` 时同时列文件，且**目录排在文件之前**、同类按名字。
+///
+/// 知识导入的文件浏览器依赖这条：目录可进、文件可勾选；排序错了用户会以为文件
+/// 和目录是混着的。
+#[tokio::test]
+async fn dirs_include_files_lists_files_after_dirs() {
+    let dir = tempdir().unwrap();
+    let workdir = dir.path().join("work");
+    std::fs::create_dir_all(&workdir).unwrap();
+    std::fs::create_dir_all(workdir.join("sub-a")).unwrap();
+    std::fs::write(workdir.join("b.txt"), "xx").unwrap();
+    std::fs::write(workdir.join("a.txt"), "x").unwrap();
+    let service = service_with_workdir(workdir.clone());
+
+    let resp = service
+        .list_dirs(Some(workdir.to_string_lossy().as_ref()), true)
+        .await
+        .unwrap();
+    let names: Vec<&str> = resp.entries.iter().map(|e| e.name.as_str()).collect();
+    assert_eq!(names, vec!["sub-a", "a.txt", "b.txt"], "目录在前、文件在后");
+    assert_eq!(resp.entries[0].is_dir, Some(true));
+    assert_eq!(resp.entries[1].is_dir, Some(false));
+    assert_eq!(resp.entries[1].size, Some(1), "文件大小应可读");
 }
 
 /// 端点层：GET /workspace/dirs 返回子目录；缺省 path 时（浏览根）不报错。

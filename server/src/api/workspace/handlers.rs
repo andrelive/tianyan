@@ -48,7 +48,11 @@ pub async fn dirs_handler(
     Query(query): Query<DirsQuery>,
 ) -> Result<Json<DirsResponse>, ApiError> {
     let service = build_service(state).await;
-    Ok(Json(service.list_dirs(query.path.as_deref()).await?))
+    Ok(Json(
+        service
+            .list_dirs(query.path.as_deref(), query.include_files.unwrap_or(false))
+            .await?,
+    ))
 }
 
 /// 处理文件读取请求（委托 core executor）。

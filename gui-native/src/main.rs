@@ -1010,6 +1010,15 @@ struct KbSearchRow {
     score: f32,
 }
 
+/// 内嵌文件浏览器的一行（`GET /workspace/dirs?include_files=true`）。
+#[derive(Clone, Debug)]
+struct KbBrowseEntry {
+    name: String,
+    path: String,
+    is_dir: bool,
+    size: Option<u64>,
+}
+
 /// 设置页的 provider 行。
 ///
 /// **含 api_key**：编辑时要把它回填进输入框，而 `set_value` 需要 `&mut Window`
@@ -2006,6 +2015,15 @@ struct ClientApp {
     kb_ingest_path: Entity<InputState>,
     kb_ingest_category: Entity<InputState>,
     kb_ingest_results: Vec<(String, String)>,
+    /// 知识页·导入：**内嵌文件浏览器**的当前目录、条目与状态
+    ///
+    /// 不用系统文件对话框：那是 OS 级模态框，自动化端口既点不到也看不到
+    /// （`/state` 里没有它的位置）。内嵌浏览器由 GPUI 自绘，可点、可断言。
+    kb_browse_dir: String,
+    kb_browse_entries: Vec<KbBrowseEntry>,
+    kb_browse_status: String,
+    /// 已勾选待导入的文件（完整路径，保持勾选顺序）
+    kb_picked: Vec<String>,
     /// 知识页·搜索：查询输入框与结果
     kb_search: Entity<InputState>,
     kb_results: Vec<KbSearchRow>,
@@ -2263,6 +2281,10 @@ impl ClientApp {
             kb_ingest_path,
             kb_ingest_category,
             kb_ingest_results: Vec::new(),
+            kb_browse_dir: String::new(),
+            kb_browse_entries: Vec::new(),
+            kb_browse_status: String::new(),
+            kb_picked: Vec::new(),
             kb_search,
             kb_results: Vec::new(),
             picker_current: String::new(),
@@ -3081,6 +3103,88 @@ impl ClientApp {
     ///
     /// 同时刷一次待审批列表（`load_approvals`）—— 那个走的是同一份
     /// `pending_approvals`，两个入口（对话横幅 / 审批页）必须看到同一批数据。
+    /// 内嵌文件浏览器：列某一级（目录 + 文件，`include_files=true`）。
+    ///
+    /// 走 `/workspace/dirs` 而不是新接口：同一个目录遍历，只是多一个开关
+    /// （目录选择器仍只要目录）。空路径 = 浏览根（盘符列表）。
+    fn load_kb_browse(&self, path: String, cx: &mut Context<Self>) {
+        let port = self.port;
+        cx.spawn(async move |this, cx| {
+            let mut url =
+                format!("http://{SERVER_HOST}:{port}/api/v1/workspace/dirs?include_files=true");
+            if !path.is_empty() {
+                url.push_str(&format!("&path={}", url_encode(&path)));
+            }
+            match fetch_json(url).await {
+                Ok(body) => {
+                    let current = body
+                        .get("current")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or_default()
+                        .to_string();
+                    let rows: Vec<KbBrowseEntry> = body
+                        .get("entries")
+                        .and_then(|v| v.as_array())
+                        .map(|arr| {
+                            arr.iter()
+                                .filter_map(|e| {
+                                    Some(KbBrowseEntry {
+                                        name: e.get("name")?.as_str()?.to_string(),
+                                        path: e.get("path")?.as_str()?.to_string(),
+                                        is_dir: e
+                                            .get("is_dir")
+                                            .and_then(|v| v.as_bool())
+                                            .unwrap_or(false),
+                                        size: e.get("size").and_then(|v| v.as_u64()),
+                                    })
+                                })
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    let n = rows.len();
+                    let _ = this.update(cx, |this, cx| {
+                        this.kb_browse_dir = current;
+                        this.kb_browse_entries = rows;
+                        this.kb_browse_status = format!("{n} 项");
+                        cx.notify();
+                    });
+                }
+                Err(e) => {
+                    let _ = this.update(cx, |this, cx| {
+                        this.kb_browse_status = format!("读取目录失败：{e}");
+                        cx.notify();
+                    });
+                }
+            }
+        })
+        .detach();
+    }
+
+    /// 勾选 / 取消勾选一个文件（目录不参与勾选，点它只是进入）。
+    fn toggle_kb_pick(&mut self, path: String) {
+        if let Some(pos) = self.kb_picked.iter().position(|p| p == &path) {
+            self.kb_picked.remove(pos);
+        } else {
+            self.kb_picked.push(path);
+        }
+    }
+
+    /// 导入已勾选的文件（浏览器路径与「按路径导入」共用 [`ClientApp::kb_ingest_paths`]）。
+    fn import_kb_picked(&mut self, cx: &mut Context<Self>) {
+        if self.kb_picked.is_empty() {
+            self.kb_status = "还没勾选文件".to_string();
+            cx.notify();
+            return;
+        }
+        let paths: Vec<std::path::PathBuf> = self
+            .kb_picked
+            .iter()
+            .map(std::path::PathBuf::from)
+            .collect();
+        let category = self.kb_ingest_category.read(cx).value().trim().to_string();
+        self.kb_ingest_paths(paths, category, cx);
+    }
+
     /// 知识页·浏览：拉某一级条目（`GET /knowledge/entries?path=`）。
     fn load_kb_entries(&self, path: String, cx: &mut Context<Self>) {
         let port = self.port;
@@ -6618,6 +6722,10 @@ impl ClientApp {
                     .child(*label)
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.kb_tab = idx;
+                        // 首次进导入 tab 才拉一次浏览目录（避免每次切都发请求）
+                        if idx == 1 && this.kb_browse_entries.is_empty() {
+                            this.load_kb_browse(String::new(), cx);
+                        }
                         cx.notify();
                     })),
             );
@@ -7001,9 +7109,10 @@ impl ClientApp {
                             .text_size(px(11.))
                             .text_color(rgb(colors::TEXT_TERTIARY))
                             .child(
-                                "「浏览文件…」可多选文件与目录；也可在下方填绝对路径走批量导入。\
-                                 目录会递归收集（上限 200 个文件）。导入是异步任务，L0/L1 摘要\
-                                 生成前浏览里可能还看不到。",
+                                "**推荐**：在下面的文件浏览器里点目录进入、点文件勾选，再「导入选中的文件」。\
+                                 「浏览文件…」是系统对话框（深层路径一次选完更快）；「按路径导入」适合批量。\
+                                 目录会递归收集（上限 200 个文件）。导入是异步任务，L0/L1 摘要生成前\
+                                 浏览里可能还看不到。",
                             ),
                     )
                     .child(field_wrap(&self.kb_ingest_path))
@@ -7066,6 +7175,208 @@ impl ClientApp {
                                     .text_color(rgb(colors::TEXT_PRIMARY))
                                     .child("按路径导入")
                                     .on_click(cx.listener(|this, _, _, cx| this.ingest_kb(cx))),
+                            ),
+                    ),
+            )
+            .child(
+                div()
+                    .p_3()
+                    .rounded_lg()
+                    .border_1()
+                    .border_color(rgb(colors::BORDER))
+                    .bg(rgb(colors::BG_SECONDARY))
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .gap_2()
+                            .flex_wrap()
+                            .child(
+                                div()
+                                    .text_size(px(11.))
+                                    .text_color(rgb(colors::TEXT_SECONDARY))
+                                    .child("文件浏览器"),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(10.))
+                                    .text_color(rgb(colors::TEXT_TERTIARY))
+                                    .child(if self.kb_browse_dir.is_empty() {
+                                        "（浏览根）".to_string()
+                                    } else {
+                                        self.kb_browse_dir.clone()
+                                    }),
+                            )
+                            .child(
+                                div()
+                                    .id("kb-br-root")
+                                    .px_2()
+                                    .py_1()
+                                    .rounded_md()
+                                    .cursor_pointer()
+                                    .text_size(px(10.))
+                                    .text_color(rgb(colors::ACCENT))
+                                    .child("回到根")
+                                    .on_click(
+                                        cx.listener(|this, _, _, cx| this
+                                            .load_kb_browse(String::new(), cx)),
+                                    ),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(10.))
+                                    .text_color(rgb(colors::TEXT_TERTIARY))
+                                    .child(self.kb_browse_status.clone()),
+                            ),
+                    )
+                    .child(
+                        // 列表必须落在确定高度里：`max_h` 会让滚动容器塔成 0（实测过的坑）
+                        div().h(px(220.)).min_h_0().child({
+                            let mut list = div().flex().flex_col().gap_1().w_full();
+                            if self.kb_browse_entries.is_empty() {
+                                list = list.child(
+                                    div()
+                                        .py_4()
+                                        .text_size(px(10.))
+                                        .text_color(rgb(colors::TEXT_TERTIARY))
+                                        .child("（空目录）"),
+                                );
+                            }
+                            for (i, e) in self.kb_browse_entries.iter().enumerate() {
+                                let is_picked = self.kb_picked.iter().any(|p| p == &e.path);
+                                let dir = e.path.clone();
+                                let is_dir = e.is_dir;
+                                let picked_path = e.path.clone();
+                                let size_text = e
+                                    .size
+                                    .map(|s| format!("{:.1} KB", s as f64 / 1024.0))
+                                    .unwrap_or_default();
+                                list = list.child(
+                                    div()
+                                        .id(("kb-br", i))
+                                        .w_full()
+                                        .px_2()
+                                        .py_1()
+                                        .rounded_md()
+                                        .bg(rgb(if is_picked {
+                                            colors::BG_TERTIARY
+                                        } else {
+                                            colors::BG_PRIMARY
+                                        }))
+                                        .cursor_pointer()
+                                        .flex()
+                                        .flex_row()
+                                        .items_center()
+                                        .gap_2()
+                                        .child(
+                                            div()
+                                                .text_size(px(10.))
+                                                .text_color(rgb(if is_picked {
+                                                    colors::ACCENT
+                                                } else {
+                                                    colors::TEXT_TERTIARY
+                                                }))
+                                                .child(if is_dir {
+                                                    "[D]"
+                                                } else if is_picked {
+                                                    "[x]"
+                                                } else {
+                                                    "[ ]"
+                                                }),
+                                        )
+                                        .child(
+                                            div()
+                                                .flex_1()
+                                                .min_w_0()
+                                                .text_size(px(11.))
+                                                .text_color(rgb(colors::TEXT_SECONDARY))
+                                                .whitespace_nowrap()
+                                                .overflow_hidden()
+                                                .child(e.name.clone()),
+                                        )
+                                        .child(
+                                            div()
+                                                .text_size(px(9.))
+                                                .text_color(rgb(colors::TEXT_TERTIARY))
+                                                .child(size_text),
+                                        )
+                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                            if is_dir {
+                                                this.load_kb_browse(dir.clone(), cx);
+                                            } else {
+                                                this.toggle_kb_pick(picked_path.clone());
+                                                cx.notify();
+                                            }
+                                        })),
+                                );
+                            }
+                            list.overflow_y_scrollbar()
+                        }),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .gap_2()
+                            .flex_wrap()
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .text_size(px(10.))
+                                    .text_color(rgb(colors::TEXT_TERTIARY))
+                                    .child(if self.kb_picked.is_empty() {
+                                        "还没勾选文件（点文件行勾选，点目录进入）".to_string()
+                                    } else {
+                                        format!(
+                                            "已选 {} 个：{}",
+                                            self.kb_picked.len(),
+                                            self.kb_picked
+                                                .iter()
+                                                .take(3)
+                                                .map(|p| std::path::Path::new(p)
+                                                    .file_name()
+                                                    .map(|n| n.to_string_lossy().to_string())
+                                                    .unwrap_or_else(|| p.clone()))
+                                                .collect::<Vec<_>>()
+                                                .join(", ")
+                                        )
+                                    }),
+                            )
+                            .child(
+                                div()
+                                    .id("kb-pick-clear")
+                                    .px_2()
+                                    .py_1()
+                                    .rounded_md()
+                                    .cursor_pointer()
+                                    .text_size(px(10.))
+                                    .text_color(rgb(colors::TEXT_TERTIARY))
+                                    .child("清空")
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.kb_picked.clear();
+                                        cx.notify();
+                                    })),
+                            )
+                            .child(
+                                div()
+                                    .id("kb-import-picked")
+                                    .px_3()
+                                    .py_2()
+                                    .rounded_md()
+                                    .bg(rgb(colors::ACCENT))
+                                    .cursor_pointer()
+                                    .text_size(px(11.))
+                                    .text_color(rgb(colors::TEXT_PRIMARY))
+                                    .child("导入选中的文件")
+                                    .on_click(
+                                        cx.listener(|this, _, _, cx| this.import_kb_picked(cx)),
+                                    ),
                             ),
                     ),
             )

@@ -162,6 +162,11 @@ pub struct ApplyEditResponse {
 pub struct DirsQuery {
     /// 要浏览的目录绝对路径（缺省/空 = 浏览根：Windows 盘符列表，其余平台家目录）。
     pub path: Option<String>,
+    /// 是否同时列出**文件**（缺省 false = 只列目录）。
+    ///
+    /// 目录选择器只需要目录（多列文件只会让选择变吵）；知识导入的文件浏览器要列文件。
+    /// 一个接口两种用法，避免两份几乎相同的目录遍历代码。
+    pub include_files: Option<bool>,
 }
 
 /// 目录选择器响应。
@@ -185,4 +190,10 @@ pub struct DirEntry {
     /// 是否为浏览根（盘符列表 / 家目录哨兵）。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub is_root: Option<bool>,
+    /// 是否为目录（`include_files=true` 时有意义；只列目录时恒为 true）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub is_dir: Option<bool>,
+    /// 文件大小（字节；目录为 None）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub size: Option<u64>,
 }

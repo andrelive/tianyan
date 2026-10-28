@@ -334,7 +334,12 @@ impl WorkspaceService {
     /// - 指定路径 → 列出该目录的子目录（parent = 上级目录，根目录时 None）。
     /// - 与 [`Self::tree`] 不同：这是**任意路径浏览**（工作区选择器用），
     ///   不限于当前 working_directory；只列目录不列文件；目录不存在 → 404。
-    pub async fn list_dirs(&self, path: Option<&str>) -> Result<DirsResponse, ApiError> {
+    /// 列某一级目录的内容（`include_files` 决定是否同时列文件）。
+    pub async fn list_dirs(
+        &self,
+        path: Option<&str>,
+        include_files: bool,
+    ) -> Result<DirsResponse, ApiError> {
         let path = path.map(str::trim).filter(|p| !p.is_empty());
         let Some(path) = path else {
             // 浏览根：Windows 返回盘符列表；其余平台返回家目录下的子目录
@@ -352,7 +357,7 @@ impl WorkspaceService {
         let parent = canonical
             .parent()
             .map(|p| strip_verbatim(&p.to_string_lossy()));
-        let entries = read_subdirs(&canonical, false)?;
+        let entries = read_subdirs(&canonical, false, include_files)?;
         Ok(DirsResponse {
             current,
             parent,
@@ -372,6 +377,8 @@ impl WorkspaceService {
                         name: drive.clone(),
                         path: drive,
                         is_root: Some(true),
+                        is_dir: Some(true),
+                        size: None,
                     });
                 }
             }
@@ -385,7 +392,7 @@ impl WorkspaceService {
         {
             let home =
                 dirs::home_dir().ok_or_else(|| ApiError::Internal("无法解析家目录".to_string()))?;
-            let entries = read_subdirs(&home, true)?;
+            let entries = read_subdirs(&home, true, false)?;
             Ok(DirsResponse {
                 current: home.to_string_lossy().into_owned(),
                 parent: None,
@@ -431,23 +438,37 @@ fn validate_rel_path(rel: &str) -> Result<(), ApiError> {
 /// 列出目录的直接子目录（只列目录，不列文件；目录名按升序）。
 ///
 /// `is_root_entries`：浏览根模式下条目本身即盘符/家目录（不再展开）。
-fn read_subdirs(dir: &Path, is_root_entries: bool) -> Result<Vec<DirEntry>, ApiError> {
+/// `include_files`：是否同时列出文件（知识导入的文件浏览器要；目录选择器不要）。
+fn read_subdirs(
+    dir: &Path,
+    is_root_entries: bool,
+    include_files: bool,
+) -> Result<Vec<DirEntry>, ApiError> {
     let mut entries = Vec::new();
     let rd = std::fs::read_dir(dir).map_err(|e| ApiError::NotFound(format!("目录不存在：{e}")))?;
     for entry in rd.flatten() {
         let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
-        if !is_dir {
+        if !is_dir && !include_files {
             continue;
         }
         let name = entry.file_name().to_string_lossy().into_owned();
         let entry_path = entry.path();
+        // 只在列文件时取大小（目录用不上，省一次 stat）
+        let size = if is_dir {
+            None
+        } else {
+            entry.metadata().ok().map(|m| m.len())
+        };
         entries.push(DirEntry {
-            name: name.clone(),
+            name,
             path: strip_verbatim(&entry_path.to_string_lossy()),
             is_root: is_root_entries.then_some(true),
+            is_dir: Some(is_dir),
+            size,
         });
     }
-    entries.sort_by(|a, b| a.name.cmp(&b.name));
+    // 目录在前、文件在后；同类按名字（只列目录时退化为纯名字序，与旧行为一致）
+    entries.sort_by(|a, b| b.is_dir.cmp(&a.is_dir).then_with(|| a.name.cmp(&b.name)));
     Ok(entries)
 }
 

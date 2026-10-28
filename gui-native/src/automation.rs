@@ -509,6 +509,16 @@ impl ClientApp {
                 "ingest_results": self.kb_ingest_results.iter().map(|(n, s)| serde_json::json!({
                     "filename": n, "status": s,
                 })).collect::<Vec<_>>(),
+                // 内嵌文件浏览器（不是 OS 对话框 → 可自动化）
+                "browse": {
+                    "dir": &self.kb_browse_dir,
+                    "status": &self.kb_browse_status,
+                    "entries": self.kb_browse_entries.iter().map(|e| serde_json::json!({
+                        "name": &e.name, "path": &e.path,
+                        "is_dir": e.is_dir, "size": e.size,
+                    })).collect::<Vec<_>>(),
+                    "picked": &self.kb_picked,
+                },
                 "results": self.kb_results.iter().map(|r| serde_json::json!({
                     "id": &r.id, "source": &r.source, "score": r.score,
                     "content_head": r.content.chars().take(120).collect::<String>(),
@@ -863,8 +873,31 @@ impl ClientApp {
                 if t == 0 && self.kb_entries.is_empty() {
                     self.load_kb_entries(String::new(), cx);
                 }
+                if t == 1 && self.kb_browse_entries.is_empty() {
+                    self.load_kb_browse(String::new(), cx);
+                }
                 cx.notify();
             }
+            // ---- 知识页·内嵌文件浏览器（非 OS 对话框 → 可自动化）----
+            "kb_browse" => {
+                let path = arg_opt(cmd, "path").unwrap_or_default();
+                self.load_kb_browse(path, cx);
+                cx.notify();
+            }
+            "kb_pick" => {
+                let path = arg_str(cmd, "path")?;
+                if let Some(pos) = self.kb_picked.iter().position(|p| p == &path) {
+                    self.kb_picked.remove(pos);
+                } else {
+                    self.kb_picked.push(path);
+                }
+                cx.notify();
+            }
+            "kb_pick_clear" => {
+                self.kb_picked.clear();
+                cx.notify();
+            }
+            "kb_import_picked" => self.import_kb_picked(cx),
             "kb_enter" => {
                 let path = arg_opt(cmd, "path").unwrap_or_default();
                 self.load_kb_entries(path, cx);
