@@ -6225,118 +6225,176 @@ impl ClientApp {
 
     /// 会话待办 / 目标窄条（在输入卡片**上方**，限宽 896px 居中）。
     ///
-    /// 对齐 Tauri 版 `SessionTodoPanel`：两者都空时**整条不渲染**（不占位）；
-    /// 有内容时可折叠。待办状态用 `[ ]` / `[•]` / `[x]` 图标，已完成置灰。
+    /// 对齐 gui-vite `SessionTodoPanel`：
+    /// - 两者都空时**整条不渲染**（不占位），有内容时可折叠；
+    /// - **卡片 = header + 列表同一个容器**——折叠收起的是列表，不是把列表甩到
+    ///   卡片外面（那样 header 一块、条目一块，观感上是两块分开的）；
+    /// - 状态用 Lucide 图标（`CircleCheck` / `LoaderCircle` / `CircleDotDashed` /
+    ///   `Circle`），不用 `[x]` / `[ ]` 文本——文本形态读起来像正文，且与 vite 两套观感。
+    ///
+    /// 已完成项只做置灰（vite 另有 line-through，GPUI 的 `Styled` 没有对应笔画修饰）。
     fn render_todo_bar(&self, cx: &mut Context<Self>) -> AnyElement {
         if self.todos.is_empty() && self.goals.is_empty() {
             return div().into_any_element();
         }
         let collapsed = self.todo_bar_collapsed;
-        let mut bar = div().px_4().pb(px(6.)).child(
+        let in_progress = self
+            .todos
+            .iter()
+            .filter(|(status, _)| status == "in_progress")
+            .count();
+        let done_count = self
+            .todos
+            .iter()
+            .filter(|(status, _)| status == "completed")
+            .count();
+        // header 计数文案对齐 vite：`待办 N 项（进行中 N）· 完成 N`
+        let mut count_text = format!("{} 项", self.todos.len());
+        if in_progress > 0 {
+            count_text.push_str(&format!("（进行中 {in_progress}）"));
+        }
+        if done_count > 0 {
+            count_text.push_str(&format!(" · 完成 {done_count}"));
+        }
+
+        // header 整行可点（vite 那一侧就是通栏 `<button>`，不是只有小箭头能点）
+        let mut card = div().flex().flex_col().gap_1().child(
             div()
-                .w_full()
-                .max_w(px(896.))
-                .mx_auto()
-                .rounded_lg()
-                .border_1()
-                .border_color(rgb(colors::BORDER()))
-                .bg(rgb(colors::BG_SECONDARY()))
-                .px_3()
-                .py_2()
+                .id("todo-bar-toggle")
                 .flex()
-                .flex_col()
-                .gap_1()
+                .flex_row()
+                .items_center()
+                .gap_2()
+                .cursor_pointer()
                 .child(
+                    svg()
+                        .path(IconName::ListTodo.path())
+                        .size(px(12.))
+                        .text_color(rgb(colors::TEXT_SECONDARY())),
+                )
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(rgb(colors::TEXT_SECONDARY()))
+                        .child("待办"),
+                )
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(rgb(colors::TEXT_TERTIARY()))
+                        .child(count_text),
+                )
+                .child(div().flex_1())
+                .child(
+                    svg()
+                        .path(if collapsed {
+                            IconName::ChevronDown.path()
+                        } else {
+                            IconName::ChevronUp.path()
+                        })
+                        .size(px(12.))
+                        .text_color(rgb(colors::TEXT_TERTIARY())),
+                )
+                .on_click(cx.listener(|this, _, _window, cx| {
+                    this.todo_bar_collapsed = !this.todo_bar_collapsed;
+                    cx.notify();
+                })),
+        );
+        if !collapsed {
+            // 列表落在**卡片内**（对应 vite 的 `{expanded && (...)}`）
+            let mut list = div().flex().flex_col().gap_1().pt(px(2.));
+            for g in &self.goals {
+                let (icon, color) = match g.status.as_str() {
+                    "completed" => (IconName::CircleCheck, colors::SUCCESS()),
+                    "archived" => (IconName::Circle, colors::TEXT_TERTIARY()),
+                    _ => (IconName::Target, colors::ACCENT()),
+                };
+                // 进度文案与 Tauri 版一致：有子待办才显示百分比，否则「进行中」
+                //（`todo_total == 0` 时后端给的 progress 是 0，直接显示 0% 会误导）
+                let progress_text = if g.todo_total > 0 {
+                    format!("{}%（{}/{}）", g.progress, g.todo_done, g.todo_total)
+                } else {
+                    "进行中".to_string()
+                };
+                list = list.child(
                     div()
                         .flex()
                         .flex_row()
                         .items_center()
                         .gap_2()
+                        .text_xs()
+                        .child(svg().path(icon.path()).size(px(12.)).text_color(rgb(color)))
                         .child(
                             div()
-                                .text_xs()
+                                .flex_1()
+                                .overflow_hidden()
+                                .text_ellipsis()
                                 .text_color(rgb(colors::TEXT_SECONDARY()))
-                                .child(format!(
-                                    "待办 {} · 目标 {}",
-                                    self.todos.len(),
-                                    self.goals.len()
-                                )),
+                                .child(ellipsis(&g.title, 40)),
                         )
-                        .child(div().flex_1())
                         .child(
                             div()
-                                .id("todo-bar-toggle")
-                                .px_1()
-                                .cursor_pointer()
-                                .text_xs()
                                 .text_color(rgb(colors::TEXT_TERTIARY()))
-                                .child(if collapsed { "▾" } else { "▴" })
-                                .on_click(cx.listener(|this, _, _window, cx| {
-                                    this.todo_bar_collapsed = !this.todo_bar_collapsed;
-                                    cx.notify();
-                                })),
+                                .child(progress_text),
                         ),
-                ),
-        );
-        if collapsed {
-            return bar.into_any_element();
-        }
-        for g in &self.goals {
-            let (glyph, color) = match g.status.as_str() {
-                "completed" => ("✓", colors::SUCCESS()),
-                "archived" => ("·", colors::TEXT_TERTIARY()),
-                _ => ("🎯", colors::ACCENT()),
-            };
-            // 进度文案与 Tauri 版一致：有子待办才显示百分比，否则「进行中」
-            //（`todo_total == 0` 时后端给的 progress 是 0，直接显示 0% 会误导）
-            let progress_text = if g.todo_total > 0 {
-                format!("{}%（{}/{}）", g.progress, g.todo_done, g.todo_total)
-            } else {
-                "进行中".to_string()
-            };
-            bar = bar.child(
-                div()
+                );
+            }
+            for (status, title) in &self.todos {
+                let (icon, color) = match status.as_str() {
+                    "completed" => (IconName::CircleCheck, colors::SUCCESS()),
+                    "in_progress" => (IconName::LoaderCircle, colors::ACCENT()),
+                    "pending" => (IconName::CircleDotDashed, colors::TEXT_TERTIARY()),
+                    _ => (IconName::Circle, colors::TEXT_TERTIARY()),
+                };
+                let text_color = match status.as_str() {
+                    "completed" => colors::TEXT_TERTIARY(),
+                    "in_progress" => colors::TEXT_PRIMARY(),
+                    _ => colors::TEXT_SECONDARY(),
+                };
+                let mut row = div()
                     .flex()
                     .flex_row()
                     .items_center()
                     .gap_2()
                     .text_xs()
-                    .child(div().text_color(rgb(color)).child(glyph))
+                    .child(svg().path(icon.path()).size(px(12.)).text_color(rgb(color)))
                     .child(
                         div()
-                            .text_color(rgb(colors::TEXT_PRIMARY()))
-                            .child(ellipsis(&g.title, 40)),
-                    )
-                    .child(
+                            .flex_1()
+                            .overflow_hidden()
+                            .text_ellipsis()
+                            .text_color(rgb(text_color))
+                            .child(ellipsis(title, 48)),
+                    );
+                // vite 对未开始项右侧标「待开始」，这里同口径
+                if status == "pending" {
+                    row = row.child(
                         div()
                             .text_color(rgb(colors::TEXT_TERTIARY()))
-                            .child(progress_text),
-                    ),
-            );
+                            .child("待开始"),
+                    );
+                }
+                list = list.child(row);
+            }
+            card = card.child(list);
         }
-        for (status, title) in &self.todos {
-            let (glyph, color) = match status.as_str() {
-                "completed" => ("[x]", colors::SUCCESS()),
-                "in_progress" => ("[•]", colors::ACCENT()),
-                _ => ("[ ]", colors::TEXT_TERTIARY()),
-            };
-            let text_color = if status == "completed" {
-                colors::TEXT_TERTIARY()
-            } else {
-                colors::TEXT_PRIMARY()
-            };
-            bar = bar.child(
+        div()
+            .px_4()
+            .pb(px(6.))
+            .child(
                 div()
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap_2()
-                    .text_xs()
-                    .child(div().text_color(rgb(color)).child(glyph))
-                    .child(div().text_color(rgb(text_color)).child(ellipsis(title, 48))),
-            );
-        }
-        bar.into_any_element()
+                    .w_full()
+                    .max_w(px(896.))
+                    .mx_auto()
+                    .rounded_lg()
+                    .border_1()
+                    .border_color(rgb(colors::BORDER()))
+                    .bg(rgb(colors::BG_SECONDARY()))
+                    .px_3()
+                    .py_2()
+                    .child(card),
+            )
+            .into_any_element()
     }
 
     /// 上下文占用百分比（0 = 还没收到 usage 上报）
