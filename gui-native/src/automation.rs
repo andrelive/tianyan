@@ -39,9 +39,7 @@ use axum::{
 use gpui_kit::{App, AsyncApp, WeakEntity};
 use tokio::sync::{mpsc, oneshot};
 
-use crate::{
-    tokens_per_sec, ClientApp, Dialog, PickerTarget, SessionListRow, View, SERVER_HOST,
-};
+use crate::{tokens_per_sec, ClientApp, Dialog, PickerTarget, SessionListRow, View, SERVER_HOST};
 
 /// 自动化端口的环境变量名：存在且能解析成端口才监听。
 const PORT_ENV: &str = "TIANYAN_GUI_AUTOMATION_PORT";
@@ -367,6 +365,141 @@ impl ClientApp {
                     "answer": self.clarify_answers.get(i),
                 })).collect::<Vec<_>>()
             }),
+            "tools": {
+                "count": self.tools.len(),
+                "query": &self.tools_query,
+                "selected": &self.tools_selected,
+                "names": self.tools.iter().map(|t| t.name.clone()).collect::<Vec<_>>(),
+                "items": self.tools.iter().map(|t| serde_json::json!({
+                    "name": &t.name,
+                    "description": &t.description,
+                    // 参数名清单：断言「这个工具带什么参数」不必解析整个 schema
+                    "params": t.parameters
+                        .get("properties")
+                        .and_then(|v| v.as_object())
+                        .map(|m| m.keys().cloned().collect::<Vec<_>>())
+                        .unwrap_or_default(),
+                })).collect::<Vec<_>>(),
+            },
+            "skills": {
+                "count": self.skills.len(),
+                "total_calls": self.skills_total_calls,
+                "query": &self.skills_query,
+                "selected": &self.skills_selected,
+                "status": &self.skills_status,
+                "content_chars": self.skill_content.as_ref().map(|c| c.chars().count()),
+                "content_head": self
+                    .skill_content
+                    .as_ref()
+                    .map(|c| c.chars().take(160).collect::<String>()),
+                "names": self.skills.iter().map(|s| s.name.clone()).collect::<Vec<_>>(),
+                "items": self.skills.iter().map(|s| serde_json::json!({
+                    "id": &s.id, "name": &s.name, "description": &s.description,
+                    "version": &s.version, "updated_at": &s.updated_at,
+                })).collect::<Vec<_>>(),
+                "stats": self.skill_stats.iter().map(|st| serde_json::json!({
+                    "skill_id": &st.skill_id, "total_calls": st.total_calls,
+                    "success_calls": st.success_calls, "avg_time_ms": st.avg_time_ms,
+                })).collect::<Vec<_>>(),
+            },
+            "scheduled": {
+                "count": self.sched_tasks.len(),
+                "status": &self.sched_status,
+                "form_open": self.sched_form_open,
+                "preset": self.sched_preset,
+                "items": self.sched_tasks.iter().map(|t| serde_json::json!({
+                    "id": &t.id, "name": &t.name, "interval_secs": t.interval_secs,
+                    "workspace": &t.workspace, "prompt": &t.prompt, "enabled": t.enabled,
+                    "last_run_at": t.last_run_at, "next_run_at": t.next_run_at,
+                    "last_result": &t.last_result,
+                })).collect::<Vec<_>>(),
+            },
+            "memory": {
+                "count": self.memories.len(),
+                "status": &self.memories_status,
+                "selected": &self.memory_selected,
+                "detail_open": self.memory_detail_open,
+                "items": self.memories.iter().map(|m| serde_json::json!({
+                    "uri": &m.uri, "name": &m.name, "relative_path": &m.relative_path,
+                    "importance": m.importance, "updated_at": &m.updated_at,
+                    "tags": &m.tags,
+                    // 三层各自是否有内容（断言「记忆有 L1/L2」不必拉全文）
+                    "has_l0": m.abstract_text.is_some(),
+                    "has_l1": m.overview_text.is_some(),
+                    "has_l2": m.detail_text.is_some(),
+                })).collect::<Vec<_>>(),
+            },
+            "insights": {
+                "status": &self.insights_status,
+                "usage_days": self.usage_days,
+                "scheduler": {
+                    "running": self.scheduler_running,
+                    "executing": &self.scheduler_executing,
+                    "task_count": self.sched_status_tasks.len(),
+                    "tasks": self.sched_status_tasks.iter().map(|t| serde_json::json!({
+                        "id": &t.id, "name": &t.name, "interval_secs": t.interval_secs,
+                        "run_count": t.run_count, "next_due_in_secs": t.next_due_in_secs,
+                    })).collect::<Vec<_>>(),
+                },
+                "stats": self.insight_stats.as_ref().map(|s| serde_json::json!({
+                    "skills_tracked": s.total_skills_tracked,
+                    "skill_calls": s.total_skill_calls,
+                    "tools_tracked": s.total_tools_tracked,
+                    "tool_calls": s.total_tool_calls,
+                    "docs_tracked": s.total_docs_tracked,
+                    "searches": s.total_searches,
+                })),
+                "usage": self.usage_total.as_ref().map(|t| serde_json::json!({
+                    "calls": t.calls, "total_tokens": t.total_tokens,
+                    "cache_hit_rate": t.cache_hit_rate,
+                    "uncached_input": t.uncached_input,
+                    "cached_input": t.cached_input,
+                    "completion_tokens": t.completion_tokens,
+                })),
+                "usage_groups": self.usage_grouped.iter().map(|g| serde_json::json!({
+                    "group": &g.group, "calls": g.calls,
+                    "total_tokens": g.total_tokens, "cache_hit_rate": g.cache_hit_rate,
+                })).collect::<Vec<_>>(),
+            },
+            "approvals_page": {
+                "mode": &self.approval_mode,
+                "auto": self.approval_auto,
+                "timeout_secs": self.approval_timeout,
+                "max_pending": self.approval_max_pending,
+                "prompt_commands": &self.approval_prompt_cmds,
+                "rule_count": self.approval_rules.len(),
+                "rules": self.approval_rules.iter().map(|r| serde_json::json!({
+                    "name": &r.name, "decision": &r.decision, "enabled": r.enabled,
+                })).collect::<Vec<_>>(),
+                "pending_confirmations": &self.pending_confirmations,
+                "confirmed_action_count": self.confirmed_action_count,
+                "history_count": self.approval_history.len(),
+                "history": self.approval_history.iter().take(20).map(|h| serde_json::json!({
+                    "description": &h.description, "risk": &h.risk,
+                    "decision": &h.decision, "session_id": &h.session_id,
+                    "result": h.result,
+                })).collect::<Vec<_>>(),
+                "status": &self.approvals_page_status,
+            },
+            "knowledge": {
+                "tab": self.kb_tab,
+                "status": &self.kb_status,
+                "path": &self.kb_path,
+                "entries": self.kb_entries.iter().map(|e| serde_json::json!({
+                    "uri": &e.uri, "name": &e.name, "is_dir": e.is_dir,
+                    "has_l0": e.has_abstract, "has_l1": e.has_overview, "has_l2": e.has_detail,
+                })).collect::<Vec<_>>(),
+                "selected": &self.kb_selected,
+                "content_level": self.kb_content.as_ref().map(|(l, _)| l.clone()),
+                "content_chars": self.kb_content.as_ref().map(|(_, c)| c.chars().count()),
+                "ingest_results": self.kb_ingest_results.iter().map(|(n, s)| serde_json::json!({
+                    "filename": n, "status": s,
+                })).collect::<Vec<_>>(),
+                "results": self.kb_results.iter().map(|r| serde_json::json!({
+                    "id": &r.id, "source": &r.source, "score": r.score,
+                    "content_head": r.content.chars().take(120).collect::<String>(),
+                })).collect::<Vec<_>>(),
+            },
             "roles": {
                 "count": self.roles.len(),
                 "query": &self.roles_query,
@@ -426,7 +559,10 @@ impl ClientApp {
         cmd: &serde_json::Value,
         cx: &mut gpui_kit::Context<Self>,
     ) -> serde_json::Value {
-        let action = cmd.get("action").and_then(|v| v.as_str()).unwrap_or_default();
+        let action = cmd
+            .get("action")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default();
         match self.apply_action(action, cmd, cx) {
             Ok(()) => serde_json::json!({ "ok": true, "action": action }),
             Err(e) => serde_json::json!({ "ok": false, "action": action, "error": e }),
@@ -598,6 +734,142 @@ impl ClientApp {
                 self.roles_selected = Some(name.clone());
                 self.load_role_detail(name, cx);
                 cx.notify();
+            }
+            // ---- 工具 ----
+            "select_tool" => {
+                let name = arg_str(cmd, "name")?;
+                if !self.tools.iter().any(|t| t.name == name) {
+                    return Err(format!("没有该工具：{name}"));
+                }
+                self.tools_selected = Some(name);
+                cx.notify();
+            }
+            // ---- 技能 ----
+            "select_skill" => {
+                let key = arg_str(cmd, "name")?;
+                let Some(skill) = self
+                    .skills
+                    .iter()
+                    .find(|s| s.name == key || s.id == key)
+                    .cloned()
+                else {
+                    return Err(format!("没有该技能：{key}"));
+                };
+                self.skills_selected = Some(skill.id.clone());
+                self.skill_content = None;
+                self.skills_status = "正在加载技能内容…".to_string();
+                self.load_skill_detail(skill.id, cx);
+                cx.notify();
+            }
+            "reload_skills" => self.load_skills(cx),
+            // ---- 定时任务 ----
+            "sched_form" => {
+                self.sched_form_open = cmd
+                    .get("open")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(!self.sched_form_open);
+                cx.notify();
+            }
+            "sched_preset" => {
+                let secs = cmd
+                    .get("secs")
+                    .and_then(|v| v.as_u64())
+                    .ok_or("缺少参数 secs（秒）")?;
+                if !crate::SCHED_PRESETS.iter().any(|(s, _)| *s == secs) {
+                    return Err(format!(
+                        "非法预设：{secs}（可选 1800/3600/21600/43200/86400/604800/0）"
+                    ));
+                }
+                self.sched_preset = secs;
+                cx.notify();
+            }
+            "sched_create" => {
+                let name = arg_str(cmd, "name")?;
+                let prompt = arg_str(cmd, "prompt")?;
+                let secs = cmd
+                    .get("interval_secs")
+                    .and_then(|v| v.as_u64())
+                    .ok_or("缺少参数 interval_secs（秒，最小 60）")?;
+                if secs < 60 {
+                    return Err("间隔至少 60 秒".to_string());
+                }
+                let workspace = arg_opt(cmd, "workspace").unwrap_or_default();
+                self.create_sched_task_direct(name, secs, workspace, prompt, cx);
+            }
+            "sched_delete" => self.delete_sched_task(arg_str(cmd, "id")?, cx),
+            "reload_scheduled" => self.load_sched_tasks(cx),
+            // ---- 记忆 ----
+            "select_memory" => {
+                let key = arg_str(cmd, "name")?;
+                let Some(m) = self
+                    .memories
+                    .iter()
+                    .find(|m| m.name == key || m.uri == key)
+                    .cloned()
+                else {
+                    return Err(format!("没有该记忆：{key}"));
+                };
+                self.memory_selected = Some(m.uri);
+                self.memory_detail_open = false;
+                cx.notify();
+            }
+            "memory_detail" => {
+                self.memory_detail_open = cmd
+                    .get("open")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(!self.memory_detail_open);
+                cx.notify();
+            }
+            "reload_memory" => self.load_memories(cx),
+            // ---- 洞察 ----
+            "insights_days" => {
+                let d = cmd
+                    .get("days")
+                    .and_then(|v| v.as_i64())
+                    .ok_or("缺少参数 days")?;
+                if !matches!(d, 1 | 3 | 7 | 30) {
+                    return Err(format!("days 只能是 1 / 3 / 7 / 30：{d}"));
+                }
+                self.usage_days = d;
+                self.load_insights(cx);
+            }
+            "reload_insights" => self.load_insights(cx),
+            // ---- 审批页 ----
+            "reload_approvals_page" => self.load_approval_page(cx),
+            // ---- 知识页 ----
+            "kb_tab" => {
+                let t = cmd
+                    .get("tab")
+                    .and_then(|v| v.as_u64())
+                    .ok_or("缺少参数 tab（0 浏览 / 1 导入 / 2 搜索）")?;
+                if t > 2 {
+                    return Err(format!("tab 只能是 0 / 1 / 2：{t}"));
+                }
+                self.kb_tab = t as u8;
+                if t == 0 && self.kb_entries.is_empty() {
+                    self.load_kb_entries(String::new(), cx);
+                }
+                cx.notify();
+            }
+            "kb_enter" => {
+                let path = arg_opt(cmd, "path").unwrap_or_default();
+                self.load_kb_entries(path, cx);
+                cx.notify();
+            }
+            "kb_open" => {
+                let uri = arg_str(cmd, "uri")?;
+                let level = arg_opt(cmd, "level").unwrap_or_else(|| "detail".to_string());
+                self.kb_selected = Some(uri.clone());
+                self.read_kb_entry(uri, level, cx);
+                cx.notify();
+            }
+            "kb_delete" => self.delete_kb_entry(arg_str(cmd, "uri")?, cx),
+            "kb_search" => self.search_kb(arg_str(cmd, "q")?, cx),
+            "kb_ingest" => {
+                // 自动化路径：直接给路径与分类，不经过输入框（InputState 没有 set_value）
+                let path = arg_str(cmd, "path")?;
+                let category = arg_opt(cmd, "category").unwrap_or_default();
+                self.kb_ingest_direct(path, category, cx);
             }
             "reset_role" => self.confirm_reset_role(arg_str(cmd, "name")?, cx),
             "delete_role" => self.confirm_delete_role(arg_str(cmd, "name")?, cx),

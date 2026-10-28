@@ -6,6 +6,8 @@
 //! 当前进度：装配内核 → 起内嵌 server → 拉会话列表 → 点会话看消息（Markdown 渲染）。
 //! 未完成：SSE 流式发送、设置页/workspace/审批面板、托盘/通知/快捷键/updater、单实例保护。
 
+#![recursion_limit = "512"]
+
 use futures::StreamExt as _;
 use gpui_kit::assets::IconName;
 use gpui_kit::component::input::{Input, InputEvent, InputState, Textarea, TextareaState};
@@ -484,6 +486,169 @@ fn ellipsis(s: &str, max_chars: usize) -> String {
     }
 }
 
+/// RFC3339 → `MM-DD HH:MM`（面板列表只要到分钟；不引 chrono）。
+fn short_stamp(s: &str) -> String {
+    match (s.get(5..10), s.get(11..16)) {
+        (Some(d), Some(t)) => format!("{d} {t}"),
+        _ => s.to_string(),
+    }
+}
+
+/// 秒 → 人类可读间隔（`1800` → `每 30 分钟`；对齐 Web 版 `formatInterval`）。
+fn format_interval(secs: u64) -> String {
+    if secs >= 604_800 && secs.is_multiple_of(604_800) {
+        format!("每 {} 周", secs / 604_800)
+    } else if secs >= 86_400 && secs.is_multiple_of(86_400) {
+        format!("每 {} 天", secs / 86_400)
+    } else if secs >= 3_600 && secs.is_multiple_of(3_600) {
+        format!("每 {} 小时", secs / 3_600)
+    } else if secs >= 60 && secs.is_multiple_of(60) {
+        format!("每 {} 分钟", secs / 60)
+    } else {
+        format!("每 {secs} 秒")
+    }
+}
+
+/// Unix 秒 → 相对当前时间的短描述（`-1800` → `30 分钟后` / `+1800` → `30 分钟前`）。
+///
+/// 定时任务的「上次 / 下次」用相对时间比绝对时间戳有用：间隔制下关心的是
+/// 「还有多久跑」而不是「几点几分」。精度只到分钟/小时/天，不引 chrono。
+fn relative_from_now(ts: i64) -> String {
+    let diff = ts - now_unix_secs();
+    let abs = diff.abs();
+    if abs < 60 {
+        return "刚刚".to_string();
+    }
+    let unit = if abs < 3_600 {
+        format!("{} 分钟", abs / 60)
+    } else if abs < 86_400 {
+        format!("{} 小时", abs / 3_600)
+    } else {
+        format!("{} 天", abs / 86_400)
+    };
+    if diff >= 0 {
+        format!("{unit}后")
+    } else {
+        format!("{unit}前")
+    }
+}
+
+/// 定时任务的间隔预设（秒；`0` = 自定义）。对齐 Web 版 `INTERVAL_PRESETS`。
+const SCHED_PRESETS: [(u64, &str); 7] = [
+    (1800, "每 30 分钟"),
+    (3600, "每 1 小时"),
+    (21600, "每 6 小时"),
+    (43200, "每 12 小时"),
+    (86400, "每天"),
+    (604800, "每周"),
+    (0, "自定义…"),
+];
+
+/// 表单单行输入框的外壳（去自带外观 + 统一边框底色；与设置页编辑框同一手法）。
+fn field_wrap(input: &Entity<InputState>) -> gpui_kit::AnyElement {
+    div()
+        .w_full()
+        .rounded_md()
+        .border_1()
+        .border_color(rgb(colors::BORDER))
+        .bg(rgb(colors::BG_PRIMARY))
+        .px_2()
+        .py_1()
+        .child(Input::new(input).appearance(false))
+        .into_any_element()
+}
+
+/// 洞察页的一个统计卡（标题 + 主值 + 副说明）。
+fn stat_card(label: &'static str, value: String, sub: String) -> gpui_kit::AnyElement {
+    div()
+        .flex_1()
+        .min_w(px(130.))
+        .p_3()
+        .rounded_lg()
+        .border_1()
+        .border_color(rgb(colors::BORDER))
+        .bg(rgb(colors::BG_SECONDARY))
+        .flex()
+        .flex_col()
+        .gap_1()
+        .child(
+            div()
+                .text_size(px(10.))
+                .text_color(rgb(colors::TEXT_TERTIARY))
+                .child(label),
+        )
+        .child(
+            div()
+                .text_size(px(18.))
+                .text_color(rgb(colors::TEXT_PRIMARY))
+                .child(value),
+        )
+        .child(
+            div()
+                .text_size(px(10.))
+                .text_color(rgb(colors::TEXT_TERTIARY))
+                .child(sub),
+        )
+        .into_any_element()
+}
+
+/// 秒 → 粗粒度描述（`2303` → `38 分钟`；「下次还有多久」用）。
+fn format_secs_short(secs: u64) -> String {
+    if secs < 60 {
+        format!("{secs} 秒")
+    } else if secs < 3_600 {
+        format!("{} 分钟", secs / 60)
+    } else if secs < 86_400 {
+        format!("{} 小时", secs / 3_600)
+    } else {
+        format!("{} 天", secs / 86_400)
+    }
+}
+
+/// 风险等级 → 颜色（审批页与对话横幅共用口径）。
+fn risk_color(risk: &str) -> u32 {
+    match risk.to_lowercase().as_str() {
+        "low" => colors::SUCCESS,
+        "medium" => colors::WARNING,
+        _ => colors::ERROR,
+    }
+}
+
+/// 表单多行输入框的外壳（同上）。
+fn field_wrap_area(input: &Entity<TextareaState>) -> gpui_kit::AnyElement {
+    div()
+        .w_full()
+        .rounded_md()
+        .border_1()
+        .border_color(rgb(colors::BORDER))
+        .bg(rgb(colors::BG_PRIMARY))
+        .px_2()
+        .py_1()
+        .child(Textarea::new(input).appearance(false))
+        .into_any_element()
+}
+
+/// 记忆详情里的一段（L0 摘要 / L1 概览 / L2 全文）。
+fn memory_block(label: &'static str, text: String) -> gpui_kit::AnyElement {
+    div()
+        .flex()
+        .flex_col()
+        .gap_1()
+        .child(
+            div()
+                .text_size(px(10.))
+                .text_color(rgb(colors::TEXT_TERTIARY))
+                .child(label),
+        )
+        .child(
+            div()
+                .text_size(px(12.))
+                .text_color(rgb(colors::TEXT_SECONDARY))
+                .child(text),
+        )
+        .into_any_element()
+}
+
 // ===== 会话列表 =====
 
 /// 会话（`GET /api/v1/sessions` 的子集，够左栏分组渲染）。
@@ -651,6 +816,161 @@ struct WsDiffFile {
 struct RoleDetail {
     system_prompt: String,
     tools: Vec<String>,
+}
+
+/// 工具目录的一行（`GET /api/v1/tools`）。
+///
+/// 工具 = 原子化操作原语（系统内置），与「技能」（方法论）是两套概念：
+/// 工具页展示可调用的原子操作，技能页展示 GEPA 学到的方法论。
+#[derive(Clone, Debug)]
+struct ToolRow {
+    name: String,
+    description: String,
+    /// 参数 JSON Schema（详情页原样 pretty 打印，不另做表单）
+    parameters: serde_json::Value,
+}
+
+/// 学习方法论技能（`GET /api/v1/skills` 的子集）。
+///
+/// 只列 `category == "custom"`：其余类是内置能力（文件/命令/网络），由工具面板覆盖。
+/// 技能是**方法论文档**（无执行语义），所以只读查看，不做「运行」按钮。
+#[derive(Clone, Debug)]
+struct SkillRow {
+    id: String,
+    name: String,
+    description: String,
+    version: String,
+    updated_at: Option<String>,
+}
+
+/// 技能使用统计的一行（`GET /api/v1/skills/stats` 的 `skills[]`）。
+///
+/// 方法论技能没有「执行成败」语义，这里只反映**采纳频率**与 handler 层异常。
+#[derive(Clone, Debug)]
+struct SkillStatRow {
+    skill_id: String,
+    total_calls: u64,
+    success_calls: u64,
+    avg_time_ms: f64,
+}
+
+/// 定时智能体任务（`GET /scheduled-tasks`）。
+///
+/// 间隔制（ADR-024）：`interval_secs` 是「距上次执行 ≥ 此值即触发」，
+/// 服务未运行期间超期的任务在重启后补跑一次。时间戳是 **Unix 秒**（不是 RFC3339）。
+#[derive(Clone, Debug)]
+struct SchedTaskRow {
+    id: String,
+    name: String,
+    interval_secs: u64,
+    workspace: String,
+    prompt: String,
+    enabled: bool,
+    last_run_at: Option<i64>,
+    next_run_at: Option<i64>,
+    last_result: Option<String>,
+}
+
+/// 记忆条目（`GET /memory` 的 `memories[]`）。
+///
+/// 后端已把三类来源聚合齐（`memory/` 事实与决策、`user/` 画像、`agent/patterns` 模式），
+/// 并只返回叶子（目录只是导航中间节点）。三层内容是 VFS 的 L0/L1/L2：
+/// 列表看 L0（abstract），详情默认展 L1（overview），L2（detail）按需展开。
+#[derive(Clone, Debug)]
+struct MemoryRow {
+    uri: String,
+    name: String,
+    relative_path: String,
+    importance: f32,
+    updated_at: String,
+    tags: Vec<String>,
+    abstract_text: Option<String>,
+    overview_text: Option<String>,
+    detail_text: Option<String>,
+}
+
+/// 洞察页总览（`GET /stats`）。
+///
+/// 四个追踪面：技能（方法论采纳）、工具（原子操作调用）、文档（VFS 访问）、搜索。
+#[derive(Clone, Debug, Default)]
+struct InsightStats {
+    total_skills_tracked: u64,
+    total_skill_calls: u64,
+    total_tools_tracked: u64,
+    total_tool_calls: u64,
+    total_docs_tracked: u64,
+    total_searches: u64,
+}
+
+/// 模型用量总计（`GET /usage/stats` 的 `total`）。
+#[derive(Clone, Debug, Default)]
+struct UsageTotal {
+    calls: u64,
+    uncached_input: u64,
+    cached_input: u64,
+    completion_tokens: u64,
+    total_tokens: u64,
+    cache_hit_rate: f64,
+}
+
+/// 模型用量分组（`grouped[]`：按 model 或 provider）。
+#[derive(Clone, Debug)]
+struct UsageGroup {
+    group: String,
+    calls: u64,
+    total_tokens: u64,
+    cache_hit_rate: f64,
+}
+
+/// 调度器任务状态（`GET /scheduler/status` 的 `tasks[]`）。
+#[derive(Clone, Debug)]
+struct SchedStatusRow {
+    id: String,
+    name: String,
+    interval_secs: u64,
+    run_count: u64,
+    last_run_ago_secs: u64,
+    next_due_in_secs: u64,
+}
+
+/// 审批自动规则（`config.auto_approval_rules[]` 的展示子集）。
+#[derive(Clone, Debug)]
+struct ApprovalRuleRow {
+    name: String,
+    decision: String,
+    enabled: bool,
+}
+
+/// 审批审计记录（`recent_records[]` 的展示子集）。
+///
+/// 「结果」是三元：`None` = 还没执行完 / `Some(true)` = 执行成功 / `Some(false)` = 失败。
+#[derive(Clone, Debug)]
+struct ApprovalHistRow {
+    description: String,
+    risk: String,
+    decision: String,
+    session_id: String,
+    result: Option<bool>,
+}
+
+/// 知识条目（`GET /knowledge/entries`）。三层是否齐备决定详情能读哪些层。
+#[derive(Clone, Debug)]
+struct KbEntryRow {
+    uri: String,
+    name: String,
+    is_dir: bool,
+    has_abstract: bool,
+    has_overview: bool,
+    has_detail: bool,
+}
+
+/// 知识检索结果（`GET /knowledge/search` 的 `results[]`）。
+#[derive(Clone, Debug)]
+struct KbSearchRow {
+    id: String,
+    content: String,
+    source: String,
+    score: f32,
 }
 
 /// 设置页的 provider 行。
@@ -1566,6 +1886,92 @@ struct ClientApp {
     roles_status: String,
     /// 角色操作结果提示（回退/退役后的一行反馈）
     roles_action_msg: Option<String>,
+    /// 工具页：工具目录（`GET /api/v1/tools`，与 LLM 收到的 tools 列表同源）
+    tools: Vec<ToolRow>,
+    /// 工具页：搜索关键词（输入框实体在 `tools_search`）
+    tools_query: String,
+    tools_search: Entity<InputState>,
+    /// 工具页：选中的工具名（None = 未选，右侧显示引导）
+    tools_selected: Option<String>,
+    /// 技能页：学习方法论技能（`GET /api/v1/skills` 中 `category == "custom"` 的那批）
+    skills: Vec<SkillRow>,
+    /// 技能页：技能使用统计（`GET /api/v1/skills/stats`；失败不阻塞面板）
+    skill_stats: Vec<SkillStatRow>,
+    /// 技能页：累计调用次数（0 = 不显示统计条与排行）
+    skills_total_calls: u64,
+    /// 技能页：搜索关键词（输入框实体在 `skills_search`）
+    skills_query: String,
+    skills_search: Entity<InputState>,
+    /// 技能页：选中的技能 id
+    skills_selected: Option<String>,
+    /// 技能页：选中技能的完整 markdown 内容（详情接口按需拉）
+    skill_content: Option<String>,
+    /// 技能页状态行（加载/失败提示）
+    skills_status: String,
+    /// 定时任务页：任务列表（`GET /scheduled-tasks`，ADR-024 间隔制）
+    sched_tasks: Vec<SchedTaskRow>,
+    /// 定时任务页：新建表单是否展开
+    sched_form_open: bool,
+    /// 定时任务页：表单选中的间隔预设（秒；`0` = 自定义，读 `sched_custom_secs`）
+    sched_preset: u64,
+    /// 定时任务页：表单输入框（名称 / 自定义秒 / 工作目录 / 指令）
+    sched_name: Entity<InputState>,
+    sched_custom_secs: Entity<InputState>,
+    sched_workspace: Entity<InputState>,
+    sched_prompt: Entity<TextareaState>,
+    /// 定时任务页状态行（创建/删除结果）
+    sched_status: String,
+    /// 记忆页：全部记忆条目（`GET /memory`，已聚合 memory/ + user/ + agent/patterns）
+    memories: Vec<MemoryRow>,
+    /// 记忆页状态行
+    memories_status: String,
+    /// 记忆页：选中的记忆 uri
+    memory_selected: Option<String>,
+    /// 记忆页：L2 全文是否展开（默认收起——L0/L1 才是浏览主视图）
+    memory_detail_open: bool,
+    /// 洞察页：总览统计（`GET /stats`：技能/工具/文档/搜索四个追踪面）
+    insight_stats: Option<InsightStats>,
+    /// 洞察页：模型用量总计与分组（`GET /usage/stats?days=N`）
+    usage_total: Option<UsageTotal>,
+    usage_grouped: Vec<UsageGroup>,
+    usage_days: i64,
+    /// 洞察页：调度器状态（`GET /scheduler/status`）
+    scheduler_running: bool,
+    scheduler_executing: Option<String>,
+    sched_status_tasks: Vec<SchedStatusRow>,
+    /// 洞察页状态行
+    insights_status: String,
+    /// 审批页：工作流配置摘要（`GET /approval/status` 的 `config`）
+    approval_mode: String,
+    approval_auto: bool,
+    approval_timeout: u64,
+    approval_max_pending: u64,
+    approval_prompt_cmds: Vec<String>,
+    approval_rules: Vec<ApprovalRuleRow>,
+    /// 审批页：待用户确认的操作指纹（「询问用户」降级链路，agent loop 追问中）
+    pending_confirmations: Vec<String>,
+    confirmed_action_count: usize,
+    /// 审批页：审计记录（后端倒序 50 条，界面显示前 20）
+    approval_history: Vec<ApprovalHistRow>,
+    /// 审批页状态行
+    approvals_page_status: String,
+    /// 知识页：当前 tab（0 = 浏览 / 1 = 导入 / 2 = 搜索）
+    kb_tab: u8,
+    /// 知识页·浏览：当前目录（相对知识根，空 = 根）
+    kb_path: String,
+    kb_entries: Vec<KbEntryRow>,
+    /// 知识页·浏览：选中的条目 uri 与读到的内容（`(level, content)`）
+    kb_selected: Option<String>,
+    kb_content: Option<(String, String)>,
+    /// 知识页状态行（浏览/导入/搜索共用一行）
+    kb_status: String,
+    /// 知识页·导入：路径与分类输入框、每文件结果
+    kb_ingest_path: Entity<InputState>,
+    kb_ingest_category: Entity<InputState>,
+    kb_ingest_results: Vec<(String, String)>,
+    /// 知识页·搜索：查询输入框与结果
+    kb_search: Entity<InputState>,
+    kb_results: Vec<KbSearchRow>,
     /// 目录选择器：当前浏览目录（绝对路径；浏览根时为「浏览根」）
     picker_current: String,
     /// 目录选择器：上级目录（None = 已在浏览根）
@@ -1691,6 +2097,48 @@ impl ClientApp {
             },
         )
         .detach();
+        // 工具页的搜索框：改动即过滤（同 roles_search 的口径）
+        let tools_search = cx.new(|cx| InputState::new(window, cx).placeholder("搜索工具..."));
+        cx.subscribe_in(
+            &tools_search,
+            window,
+            |this, _input, event: &InputEvent, _window, cx| {
+                if let InputEvent::Change = event {
+                    this.tools_query = this.tools_search.read(cx).value().to_string();
+                    cx.notify();
+                }
+            },
+        )
+        .detach();
+        // 技能页的搜索框（同口径）
+        let skills_search = cx.new(|cx| InputState::new(window, cx).placeholder("搜索技能..."));
+        cx.subscribe_in(
+            &skills_search,
+            window,
+            |this, _input, event: &InputEvent, _window, cx| {
+                if let InputEvent::Change = event {
+                    this.skills_query = this.skills_search.read(cx).value().to_string();
+                    cx.notify();
+                }
+            },
+        )
+        .detach();
+        // 知识页的三个输入框（导入路径 / 导入分类 / 搜索词）
+        let kb_ingest_path =
+            cx.new(|cx| InputState::new(window, cx).placeholder("文件或目录的绝对路径"));
+        let kb_ingest_category = cx
+            .new(|cx| InputState::new(window, cx).placeholder("分类（可选，如 technical / docs）"));
+        let kb_search = cx.new(|cx| InputState::new(window, cx).placeholder("搜索知识库..."));
+        // 定时任务页的四个表单输入框（名称 / 自定义秒 / 工作目录 / 指令）。
+        // 不订阅 Change：值只在「创建」时读一次，没必要每敲一个字就刷视图。
+        let sched_name = cx.new(|cx| InputState::new(window, cx).placeholder("任务名称"));
+        let sched_custom_secs =
+            cx.new(|cx| InputState::new(window, cx).placeholder("自定义间隔（秒，最小 60）"));
+        let sched_workspace = cx
+            .new(|cx| InputState::new(window, cx).placeholder("工作目录（绝对路径，留空 = 默认）"));
+        let sched_prompt = cx.new(|cx| {
+            TextareaState::new(window, cx).placeholder("给智能体的指令（每次触发让它做的事）")
+        });
         // 设置页的两个编辑框：endpoint 与 api_key（打开编辑时从 `GET /config` 回填）
         let endpoint_input =
             cx.new(|cx| TextareaState::new(window, cx).placeholder("API 端点（http(s)://…）"));
@@ -1727,6 +2175,59 @@ impl ClientApp {
             role_detail: None,
             roles_status: "正在加载子智能体…".to_string(),
             roles_action_msg: None,
+            tools: Vec::new(),
+            tools_query: String::new(),
+            tools_search,
+            tools_selected: None,
+            skills: Vec::new(),
+            skill_stats: Vec::new(),
+            skills_total_calls: 0,
+            skills_query: String::new(),
+            skills_search,
+            skills_selected: None,
+            skill_content: None,
+            skills_status: "正在加载技能…".to_string(),
+            sched_tasks: Vec::new(),
+            sched_form_open: false,
+            sched_preset: 21600,
+            sched_name,
+            sched_custom_secs,
+            sched_workspace,
+            sched_prompt,
+            sched_status: String::new(),
+            memories: Vec::new(),
+            memories_status: "正在加载记忆…".to_string(),
+            memory_selected: None,
+            memory_detail_open: false,
+            insight_stats: None,
+            usage_total: None,
+            usage_grouped: Vec::new(),
+            usage_days: 7,
+            scheduler_running: false,
+            scheduler_executing: None,
+            sched_status_tasks: Vec::new(),
+            insights_status: "正在加载洞察…".to_string(),
+            approval_mode: String::new(),
+            approval_auto: false,
+            approval_timeout: 0,
+            approval_max_pending: 0,
+            approval_prompt_cmds: Vec::new(),
+            approval_rules: Vec::new(),
+            pending_confirmations: Vec::new(),
+            confirmed_action_count: 0,
+            approval_history: Vec::new(),
+            approvals_page_status: "正在加载审批状态…".to_string(),
+            kb_tab: 0,
+            kb_path: String::new(),
+            kb_entries: Vec::new(),
+            kb_selected: None,
+            kb_content: None,
+            kb_status: "正在加载知识库…".to_string(),
+            kb_ingest_path,
+            kb_ingest_category,
+            kb_ingest_results: Vec::new(),
+            kb_search,
+            kb_results: Vec::new(),
             picker_current: String::new(),
             picker_parent: None,
             picker_entries: Vec::new(),
@@ -2539,6 +3040,1013 @@ impl ClientApp {
     }
 
     /// 加载子智能体列表（`GET /roles`）。
+    /// 加载审批页（`GET /approval/status`：工作流配置 + 待处理 + 审计）。
+    ///
+    /// 同时刷一次待审批列表（`load_approvals`）—— 那个走的是同一份
+    /// `pending_approvals`，两个入口（对话横幅 / 审批页）必须看到同一批数据。
+    /// 知识页·浏览：拉某一级条目（`GET /knowledge/entries?path=`）。
+    fn load_kb_entries(&self, path: String, cx: &mut Context<Self>) {
+        let port = self.port;
+        cx.spawn(async move |this, cx| {
+            let mut url = format!("http://{SERVER_HOST}:{port}/api/v1/knowledge/entries");
+            if !path.is_empty() {
+                url.push_str(&format!("?path={}", url_encode(&path)));
+            }
+            match fetch_json(url).await {
+                Ok(body) => {
+                    let rows: Vec<KbEntryRow> = body
+                        .get("entries")
+                        .and_then(|v| v.as_array())
+                        .map(|arr| {
+                            arr.iter()
+                                .filter_map(|e| {
+                                    Some(KbEntryRow {
+                                        uri: e.get("uri")?.as_str()?.to_string(),
+                                        name: e
+                                            .get("name")
+                                            .and_then(|v| v.as_str())
+                                            .unwrap_or_default()
+                                            .to_string(),
+                                        is_dir: e
+                                            .get("is_directory")
+                                            .and_then(|v| v.as_bool())
+                                            .unwrap_or(false),
+                                        has_abstract: e
+                                            .get("has_abstract")
+                                            .and_then(|v| v.as_bool())
+                                            .unwrap_or(false),
+                                        has_overview: e
+                                            .get("has_overview")
+                                            .and_then(|v| v.as_bool())
+                                            .unwrap_or(false),
+                                        has_detail: e
+                                            .get("has_detail")
+                                            .and_then(|v| v.as_bool())
+                                            .unwrap_or(false),
+                                    })
+                                })
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    let n = rows.len();
+                    let _ = this.update(cx, |this, cx| {
+                        this.kb_path = path;
+                        this.kb_entries = rows;
+                        this.kb_status = format!("{n} 个条目");
+                        cx.notify();
+                    });
+                }
+                Err(e) => {
+                    let _ = this.update(cx, |this, cx| {
+                        this.kb_status = format!("加载知识条目失败：{e}");
+                        cx.notify();
+                    });
+                }
+            }
+        })
+        .detach();
+    }
+
+    /// 知识页·浏览：读条目某一层内容（`GET /knowledge/entries/read`）。
+    fn read_kb_entry(&self, uri: String, level: String, cx: &mut Context<Self>) {
+        let port = self.port;
+        cx.spawn(async move |this, cx| {
+            let url = format!(
+                "http://{SERVER_HOST}:{port}/api/v1/knowledge/entries/read?uri={}&level={}",
+                url_encode(&uri),
+                url_encode(&level)
+            );
+            match fetch_json(url).await {
+                Ok(body) => {
+                    let got_level = body
+                        .get("level")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or(&level)
+                        .to_string();
+                    let content = body
+                        .get("content")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or_default()
+                        .to_string();
+                    let _ = this.update(cx, |this, cx| {
+                        this.kb_selected = Some(uri);
+                        this.kb_content = Some((got_level, content));
+                        cx.notify();
+                    });
+                }
+                Err(e) => {
+                    let _ = this.update(cx, |this, cx| {
+                        this.kb_status = format!("读取条目失败：{e}");
+                        cx.notify();
+                    });
+                }
+            }
+        })
+        .detach();
+    }
+
+    /// 知识页·浏览：删除条目（`POST /knowledge/entries/delete`；仅 knowledge 命名空间）。
+    fn delete_kb_entry(&mut self, uri: String, cx: &mut Context<Self>) {
+        let port = self.port;
+        cx.spawn(async move |this, cx| {
+            let url = format!("http://{SERVER_HOST}:{port}/api/v1/knowledge/entries/delete");
+            let res = post_json(url, serde_json::json!({ "uri": uri })).await;
+            let _ = this.update(cx, |this, cx| {
+                match res {
+                    Ok(_) => {
+                        this.kb_status = "已删除".to_string();
+                        this.kb_selected = None;
+                        this.kb_content = None;
+                        this.load_kb_entries(this.kb_path.clone(), cx);
+                    }
+                    Err(e) => this.kb_status = format!("删除失败：{e}"),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// 知识页·搜索：语义检索（`GET /knowledge/search?q=`）。
+    fn search_kb(&self, q: String, cx: &mut Context<Self>) {
+        if q.trim().is_empty() {
+            return;
+        }
+        let port = self.port;
+        cx.spawn(async move |this, cx| {
+            let url = format!(
+                "http://{SERVER_HOST}:{port}/api/v1/knowledge/search?q={}&limit=20",
+                url_encode(&q)
+            );
+            match fetch_json(url).await {
+                Ok(body) => {
+                    let rows: Vec<KbSearchRow> = body
+                        .get("results")
+                        .and_then(|v| v.as_array())
+                        .map(|arr| {
+                            arr.iter()
+                                .filter_map(|r| {
+                                    Some(KbSearchRow {
+                                        id: r.get("id")?.as_str()?.to_string(),
+                                        content: r
+                                            .get("content")
+                                            .and_then(|v| v.as_str())
+                                            .unwrap_or_default()
+                                            .to_string(),
+                                        source: r
+                                            .get("source")
+                                            .and_then(|v| v.as_str())
+                                            .unwrap_or_default()
+                                            .to_string(),
+                                        score: r
+                                            .get("score")
+                                            .and_then(|v| v.as_f64())
+                                            .unwrap_or(0.0)
+                                            as f32,
+                                    })
+                                })
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    let total = body.get("total").and_then(|v| v.as_u64()).unwrap_or(0);
+                    let _ = this.update(cx, |this, cx| {
+                        this.kb_results = rows;
+                        this.kb_status = format!("命中 {total} 条");
+                        cx.notify();
+                    });
+                }
+                Err(e) => {
+                    let _ = this.update(cx, |this, cx| {
+                        this.kb_status = format!("检索失败：{e}");
+                        cx.notify();
+                    });
+                }
+            }
+        })
+        .detach();
+    }
+
+    /// 知识页·导入：读本地路径 → multipart 上传（`POST /knowledge/ingest`）。
+    ///
+    /// 用**路径输入**而不是系统文件选择器：与 workspace 目录选择器同一手感，
+    /// 且能被自动化 API 直接驱动（文件选择器是模态的，脚本没法点）。
+    /// 目录会递归收集（上限 200 个文件——防手滑把整个盘导进去）。
+    fn ingest_kb(&mut self, cx: &mut Context<Self>) {
+        let raw = self.kb_ingest_path.read(cx).value().trim().to_string();
+        let category = self.kb_ingest_category.read(cx).value().trim().to_string();
+        self.kb_ingest_direct(raw, category, cx);
+    }
+
+    /// 真正执行导入（UI 表单与自动化 `kb_ingest` **共用这一份**）。
+    fn kb_ingest_direct(&mut self, raw: String, category: String, cx: &mut Context<Self>) {
+        if raw.is_empty() {
+            self.kb_status = "请填写要导入的文件或目录路径".to_string();
+            cx.notify();
+            return;
+        }
+        let root = std::path::PathBuf::from(&raw);
+        let mut files: Vec<std::path::PathBuf> = Vec::new();
+        if root.is_file() {
+            files.push(root);
+        } else if root.is_dir() {
+            let mut stack = vec![root];
+            'walk: while let Some(dir) = stack.pop() {
+                let Ok(entries) = std::fs::read_dir(&dir) else {
+                    continue;
+                };
+                for entry in entries.flatten() {
+                    let p = entry.path();
+                    if p.is_dir() {
+                        stack.push(p);
+                    } else {
+                        files.push(p);
+                        if files.len() >= 200 {
+                            break 'walk;
+                        }
+                    }
+                }
+            }
+        } else {
+            self.kb_status = format!("路径不存在：{raw}");
+            cx.notify();
+            return;
+        }
+        if files.is_empty() {
+            self.kb_status = "该目录下没有可导入的文件".to_string();
+            cx.notify();
+            return;
+        }
+        let port = self.port;
+        self.kb_status = format!("正在导入 {} 个文件…", files.len());
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let mut form = reqwest::multipart::Form::new();
+            if !category.is_empty() {
+                form = form.text(
+                    "metadata",
+                    serde_json::json!({ "source_type": category }).to_string(),
+                );
+            }
+            for f in &files {
+                // 一次性导入动作，文件不大；此处阻塞读可接受（在 tokio 线程上顺序读）
+                let Ok(bytes) = std::fs::read(f) else {
+                    continue;
+                };
+                let name = f
+                    .file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_else(|| "file".to_string());
+                form = form.part(
+                    "files",
+                    reqwest::multipart::Part::bytes(bytes).file_name(name),
+                );
+            }
+            let url = format!("http://{SERVER_HOST}:{port}/api/v1/knowledge/ingest");
+            let res = reqwest::Client::new()
+                .post(&url)
+                .multipart(form)
+                .send()
+                .await;
+            let parsed = match res {
+                Ok(resp) => match resp.json::<serde_json::Value>().await {
+                    Ok(body) => Ok(body),
+                    Err(e) => Err(format!("响应解析失败：{e}")),
+                },
+                Err(e) => Err(format!("请求失败：{e}")),
+            };
+            let _ = this.update(cx, |this, cx| {
+                match parsed {
+                    Ok(body) => {
+                        let msg = body
+                            .get("message")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("已提交")
+                            .to_string();
+                        this.kb_ingest_results = body
+                            .get("files")
+                            .and_then(|v| v.as_array())
+                            .map(|arr| {
+                                arr.iter()
+                                    .filter_map(|f| {
+                                        Some((
+                                            f.get("filename")?.as_str()?.to_string(),
+                                            f.get("status")
+                                                .and_then(|v| v.as_str())
+                                                .unwrap_or("?")
+                                                .to_string(),
+                                        ))
+                                    })
+                                    .collect()
+                            })
+                            .unwrap_or_default();
+                        this.kb_status = msg;
+                        this.load_kb_entries(String::new(), cx);
+                    }
+                    Err(e) => this.kb_status = e,
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn load_approval_page(&self, cx: &mut Context<Self>) {
+        self.load_approvals(cx);
+        let port = self.port;
+        cx.spawn(async move |this, cx| {
+            let url = format!("http://{SERVER_HOST}:{port}/api/v1/approval/status");
+            match fetch_json(url).await {
+                Ok(body) => {
+                    let config = body.get("config");
+                    let mode = config
+                        .and_then(|c| c.get("mode"))
+                        .map(|v| {
+                            v.as_str()
+                                .map(|s| s.to_string())
+                                .unwrap_or_else(|| v.to_string())
+                        })
+                        .unwrap_or_default();
+                    let auto = config
+                        .and_then(|c| c.get("enable_auto_approval"))
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false);
+                    let timeout = config
+                        .and_then(|c| c.get("default_timeout_secs"))
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0);
+                    let max_pending = config
+                        .and_then(|c| c.get("max_pending_approvals"))
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0);
+                    let prompt_cmds: Vec<String> = config
+                        .and_then(|c| c.get("prompt_commands"))
+                        .and_then(|v| v.as_array())
+                        .map(|arr| {
+                            arr.iter()
+                                .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    let rules: Vec<ApprovalRuleRow> = config
+                        .and_then(|c| c.get("auto_approval_rules"))
+                        .and_then(|v| v.as_array())
+                        .map(|arr| {
+                            arr.iter()
+                                .filter_map(|r| {
+                                    Some(ApprovalRuleRow {
+                                        name: r.get("name")?.as_str()?.to_string(),
+                                        decision: r
+                                            .get("decision")
+                                            .map(|v| {
+                                                v.as_str()
+                                                    .map(|s| s.to_string())
+                                                    .unwrap_or_else(|| v.to_string())
+                                            })
+                                            .unwrap_or_default(),
+                                        enabled: r
+                                            .get("enabled")
+                                            .and_then(|v| v.as_bool())
+                                            .unwrap_or(true),
+                                    })
+                                })
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    let pending_conf: Vec<String> = body
+                        .get("pending_confirmations")
+                        .and_then(|v| v.as_array())
+                        .map(|arr| {
+                            arr.iter()
+                                .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    let confirmed = body
+                        .get("confirmed_action_count")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0) as usize;
+                    let history: Vec<ApprovalHistRow> = body
+                        .get("recent_records")
+                        .and_then(|v| v.as_array())
+                        .map(|arr| {
+                            arr.iter()
+                                .filter_map(|r| {
+                                    let req = r.get("request")?;
+                                    Some(ApprovalHistRow {
+                                        description: req
+                                            .get("action_description")
+                                            .and_then(|v| v.as_str())
+                                            .unwrap_or_default()
+                                            .to_string(),
+                                        risk: req
+                                            .get("risk_level")
+                                            .map(|v| {
+                                                v.as_str()
+                                                    .map(|s| s.to_string())
+                                                    .unwrap_or_else(|| v.to_string())
+                                            })
+                                            .unwrap_or_default(),
+                                        decision: r
+                                            .get("response")
+                                            .and_then(|resp| resp.get("decision"))
+                                            .map(|v| {
+                                                v.as_str()
+                                                    .map(|s| s.to_string())
+                                                    .unwrap_or_else(|| v.to_string())
+                                            })
+                                            .unwrap_or_else(|| "未决".to_string()),
+                                        session_id: req
+                                            .get("session_id")
+                                            .and_then(|v| v.as_str())
+                                            .unwrap_or_default()
+                                            .to_string(),
+                                        result: r.get("execution_result").and_then(|v| v.as_bool()),
+                                    })
+                                })
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    let n = history.len();
+                    let _ = this.update(cx, |this, cx| {
+                        this.approval_mode = mode;
+                        this.approval_auto = auto;
+                        this.approval_timeout = timeout;
+                        this.approval_max_pending = max_pending;
+                        this.approval_prompt_cmds = prompt_cmds;
+                        this.approval_rules = rules;
+                        this.pending_confirmations = pending_conf;
+                        this.confirmed_action_count = confirmed;
+                        this.approval_history = history;
+                        this.approvals_page_status = format!("审计记录 {n} 条");
+                        cx.notify();
+                    });
+                }
+                Err(e) => {
+                    let _ = this.update(cx, |this, cx| {
+                        this.approvals_page_status = format!("加载审批状态失败：{e}");
+                        cx.notify();
+                    });
+                }
+            }
+        })
+        .detach();
+    }
+
+    /// 加载洞察数据（`/stats` + `/usage/stats?days=N` + `/scheduler/status`）。
+    ///
+    /// 三个请求都失败也只是少一块，不阻塞整页（每个面独立降级）。
+    fn load_insights(&self, cx: &mut Context<Self>) {
+        let port = self.port;
+        let days = self.usage_days;
+        cx.spawn(async move |this, cx| {
+            let stats_res = fetch_json(format!("http://{SERVER_HOST}:{port}/api/v1/stats")).await;
+            let usage_res = fetch_json(format!(
+                "http://{SERVER_HOST}:{port}/api/v1/usage/stats?days={days}"
+            ))
+            .await;
+            let sched_res = fetch_json(format!(
+                "http://{SERVER_HOST}:{port}/api/v1/scheduler/status"
+            ))
+            .await;
+
+            let stats = stats_res.ok().map(|b| InsightStats {
+                total_skills_tracked: b
+                    .get("total_skills_tracked")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0),
+                total_skill_calls: b
+                    .get("total_skill_calls")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0),
+                total_tools_tracked: b
+                    .get("total_tools_tracked")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0),
+                total_tool_calls: b
+                    .get("total_tool_calls")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0),
+                total_docs_tracked: b
+                    .get("total_docs_tracked")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0),
+                total_searches: b
+                    .get("total_searches")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0),
+            });
+
+            let (usage_total, usage_grouped) = match usage_res {
+                Ok(b) => {
+                    let total = b.get("total").filter(|v| !v.is_null()).map(|t| UsageTotal {
+                        calls: t.get("calls").and_then(|v| v.as_u64()).unwrap_or(0),
+                        uncached_input: t
+                            .get("uncached_input")
+                            .and_then(|v| v.as_u64())
+                            .unwrap_or(0),
+                        cached_input: t.get("cached_input").and_then(|v| v.as_u64()).unwrap_or(0),
+                        completion_tokens: t
+                            .get("completion_tokens")
+                            .and_then(|v| v.as_u64())
+                            .unwrap_or(0),
+                        total_tokens: t.get("total_tokens").and_then(|v| v.as_u64()).unwrap_or(0),
+                        cache_hit_rate: t
+                            .get("cache_hit_rate")
+                            .and_then(|v| v.as_f64())
+                            .unwrap_or(0.0),
+                    });
+                    let grouped: Vec<UsageGroup> = b
+                        .get("grouped")
+                        .and_then(|v| v.as_array())
+                        .map(|arr| {
+                            arr.iter()
+                                .filter_map(|g| {
+                                    Some(UsageGroup {
+                                        group: g.get("group")?.as_str()?.to_string(),
+                                        calls: g.get("calls").and_then(|v| v.as_u64()).unwrap_or(0),
+                                        total_tokens: g
+                                            .get("total_tokens")
+                                            .and_then(|v| v.as_u64())
+                                            .unwrap_or(0),
+                                        cache_hit_rate: g
+                                            .get("cache_hit_rate")
+                                            .and_then(|v| v.as_f64())
+                                            .unwrap_or(0.0),
+                                    })
+                                })
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    (total, grouped)
+                }
+                Err(_) => (None, Vec::new()),
+            };
+
+            let (running, executing, sched_tasks) = match sched_res {
+                Ok(b) => {
+                    let running = b.get("running").and_then(|v| v.as_bool()).unwrap_or(false);
+                    let executing = b
+                        .get("executing_task_id")
+                        .and_then(|v| v.as_str())
+                        .map(|v| v.to_string());
+                    let tasks: Vec<SchedStatusRow> = b
+                        .get("tasks")
+                        .and_then(|v| v.as_array())
+                        .map(|arr| {
+                            arr.iter()
+                                .filter_map(|t| {
+                                    Some(SchedStatusRow {
+                                        id: t.get("id")?.as_str()?.to_string(),
+                                        name: t
+                                            .get("name")
+                                            .and_then(|v| v.as_str())
+                                            .unwrap_or_default()
+                                            .to_string(),
+                                        interval_secs: t
+                                            .get("interval_secs")
+                                            .and_then(|v| v.as_u64())
+                                            .unwrap_or(0),
+                                        run_count: t
+                                            .get("run_count")
+                                            .and_then(|v| v.as_u64())
+                                            .unwrap_or(0),
+                                        last_run_ago_secs: t
+                                            .get("last_run_ago_secs")
+                                            .and_then(|v| v.as_u64())
+                                            .unwrap_or(0),
+                                        next_due_in_secs: t
+                                            .get("next_due_in_secs")
+                                            .and_then(|v| v.as_u64())
+                                            .unwrap_or(0),
+                                    })
+                                })
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    (running, executing, tasks)
+                }
+                Err(_) => (false, None, Vec::new()),
+            };
+
+            let n = sched_tasks.len();
+            let _ = this.update(cx, |this, cx| {
+                this.insight_stats = stats;
+                this.usage_total = usage_total;
+                this.usage_grouped = usage_grouped;
+                this.scheduler_running = running;
+                this.scheduler_executing = executing;
+                this.sched_status_tasks = sched_tasks;
+                this.insights_status = format!(
+                    "调度器{} · {n} 个任务",
+                    if running { "运行中" } else { "未装配" }
+                );
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// 加载记忆条目（`GET /memory`）。
+    ///
+    /// 后端已聚合三类来源（`memory/` 事实与决策、`user/` 画像、`agent/patterns` 模式）
+    /// 并且只返回叶子：目录只是导航中间节点，内容为空、importance 是默认值，
+    /// 直接展示只会误导（这是后端注释里的原话，界面不再二次筛选）。
+    fn load_memories(&self, cx: &mut Context<Self>) {
+        let port = self.port;
+        cx.spawn(async move |this, cx| {
+            let url = format!("http://{SERVER_HOST}:{port}/api/v1/memory");
+            match fetch_json(url).await {
+                Ok(body) => {
+                    let rows: Vec<MemoryRow> = body
+                        .get("memories")
+                        .and_then(|v| v.as_array())
+                        .cloned()
+                        .unwrap_or_default()
+                        .iter()
+                        .filter_map(|m| {
+                            let meta = m.get("metadata");
+                            let text_of = |key: &str| {
+                                m.get(key)
+                                    .and_then(|v| v.as_str())
+                                    .map(|s| s.to_string())
+                                    .filter(|s| !s.trim().is_empty())
+                            };
+                            Some(MemoryRow {
+                                uri: m.get("uri")?.as_str()?.to_string(),
+                                name: m
+                                    .get("name")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or_default()
+                                    .to_string(),
+                                relative_path: m
+                                    .get("relative_path")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or_default()
+                                    .to_string(),
+                                importance: meta
+                                    .and_then(|v| v.get("importance"))
+                                    .and_then(|v| v.as_f64())
+                                    .unwrap_or(0.5)
+                                    as f32,
+                                updated_at: meta
+                                    .and_then(|v| v.get("updated_at"))
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or_default()
+                                    .to_string(),
+                                tags: meta
+                                    .and_then(|v| v.get("tags"))
+                                    .and_then(|v| v.as_array())
+                                    .map(|arr| {
+                                        arr.iter()
+                                            .filter_map(|t| t.as_str().map(|s| s.to_string()))
+                                            .collect()
+                                    })
+                                    .unwrap_or_default(),
+                                abstract_text: text_of("abstract"),
+                                overview_text: text_of("overview"),
+                                detail_text: text_of("detail"),
+                            })
+                        })
+                        .collect();
+                    let n = rows.len();
+                    let _ = this.update(cx, |this, cx| {
+                        this.memories = rows;
+                        this.memories_status = format!("{n} 条记忆（L0/L1/L2 三层）");
+                        cx.notify();
+                    });
+                }
+                Err(e) => {
+                    let _ = this.update(cx, |this, cx| {
+                        this.memories_status = format!("加载记忆失败：{e}");
+                        cx.notify();
+                    });
+                }
+            }
+        })
+        .detach();
+    }
+
+    /// 加载定时任务列表（`GET /scheduled-tasks`）。
+    fn load_sched_tasks(&self, cx: &mut Context<Self>) {
+        let port = self.port;
+        cx.spawn(async move |this, cx| {
+            let url = format!("http://{SERVER_HOST}:{port}/api/v1/scheduled-tasks");
+            match fetch_json(url).await {
+                Ok(body) => {
+                    let rows: Vec<SchedTaskRow> = body
+                        .as_array()
+                        .cloned()
+                        .unwrap_or_default()
+                        .iter()
+                        .filter_map(|t| {
+                            Some(SchedTaskRow {
+                                id: t.get("id")?.as_str()?.to_string(),
+                                name: t
+                                    .get("name")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or_default()
+                                    .to_string(),
+                                interval_secs: t
+                                    .get("interval_secs")
+                                    .and_then(|v| v.as_u64())
+                                    .unwrap_or(0),
+                                workspace: t
+                                    .get("workspace")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or_default()
+                                    .to_string(),
+                                prompt: t
+                                    .get("prompt")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or_default()
+                                    .to_string(),
+                                enabled: t.get("enabled").and_then(|v| v.as_bool()).unwrap_or(true),
+                                last_run_at: t.get("last_run_at").and_then(|v| v.as_i64()),
+                                next_run_at: t.get("next_run_at").and_then(|v| v.as_i64()),
+                                last_result: t
+                                    .get("last_result")
+                                    .and_then(|v| v.as_str())
+                                    .map(|v| v.to_string()),
+                            })
+                        })
+                        .collect();
+                    let n = rows.len();
+                    let _ = this.update(cx, |this, cx| {
+                        this.sched_tasks = rows;
+                        this.sched_status = format!("{n} 个定时任务");
+                        cx.notify();
+                    });
+                }
+                Err(e) => {
+                    let _ = this.update(cx, |this, cx| {
+                        this.sched_status = format!("加载定时任务失败：{e}");
+                        cx.notify();
+                    });
+                }
+            }
+        })
+        .detach();
+    }
+
+    /// 创建定时任务（`POST /scheduled-tasks`）。
+    ///
+    /// 间隔取预设；预设为 `0`（自定义）时读秒数输入框，最小 60 秒
+    /// （与 Web 版 `min={60}` 同口径 —— 更短的间隔没有意义，只会刷屏）。
+    fn create_sched_task(&mut self, cx: &mut Context<Self>) {
+        let name = self.sched_name.read(cx).value().trim().to_string();
+        let workspace = self.sched_workspace.read(cx).value().trim().to_string();
+        let prompt = self.sched_prompt.read(cx).value().trim().to_string();
+        let secs = if self.sched_preset == 0 {
+            self.sched_custom_secs
+                .read(cx)
+                .value()
+                .trim()
+                .parse::<u64>()
+                .unwrap_or(0)
+        } else {
+            self.sched_preset
+        };
+        if name.is_empty() || prompt.is_empty() || secs < 60 {
+            self.sched_status = "名称与指令不能为空，间隔至少 60 秒".to_string();
+            cx.notify();
+            return;
+        }
+        self.create_sched_task_direct(name, secs, workspace, prompt, cx);
+    }
+
+    /// 真正发创建请求（UI 表单与自动化 `sched_create` **共用这一份**）。
+    ///
+    /// 分开的理由同 ADR-052 D8：自动化若另写一份请求构造，两条路径就分叉了。
+    /// 校验也放在调用方之前各做一次，这里只信任入参。
+    fn create_sched_task_direct(
+        &mut self,
+        name: String,
+        secs: u64,
+        workspace: String,
+        prompt: String,
+        cx: &mut Context<Self>,
+    ) {
+        let port = self.port;
+        cx.spawn(async move |this, cx| {
+            let url = format!("http://{SERVER_HOST}:{port}/api/v1/scheduled-tasks");
+            let body = serde_json::json!({
+                "name": name,
+                "interval_secs": secs,
+                "workspace": workspace,
+                "prompt": prompt,
+            });
+            let res = post_json(url, body).await;
+            let _ = this.update(cx, |this, cx| {
+                match res {
+                    Ok(_) => {
+                        this.sched_status = "定时任务已创建".to_string();
+                        this.sched_form_open = false;
+                        this.load_sched_tasks(cx);
+                    }
+                    Err(e) => this.sched_status = format!("创建失败：{e}"),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// 删除定时任务（`DELETE /scheduled-tasks/{id}`）。
+    fn delete_sched_task(&mut self, id: String, cx: &mut Context<Self>) {
+        let port = self.port;
+        cx.spawn(async move |this, cx| {
+            let url = format!(
+                "http://{SERVER_HOST}:{port}/api/v1/scheduled-tasks/{}",
+                url_encode(&id)
+            );
+            let res = delete_json(url).await;
+            let _ = this.update(cx, |this, cx| {
+                match res {
+                    Ok(()) => {
+                        this.sched_status = "定时任务已删除".to_string();
+                        this.load_sched_tasks(cx);
+                    }
+                    Err(e) => this.sched_status = format!("删除失败：{e}"),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// 加载学习方法论技能（`GET /skills` + `GET /skills/stats`）。
+    ///
+    /// 只保留 `category == "custom"`：其余类是内置能力（文件/命令/网络），
+    /// 那些由工具面板覆盖（与 Web 版 `SkillsPanel` 同口径）。
+    /// 统计失败不阻塞面板（只影响右上统计条与列表里的调用次数）。
+    fn load_skills(&self, cx: &mut Context<Self>) {
+        let port = self.port;
+        cx.spawn(async move |this, cx| {
+            let list_url = format!("http://{SERVER_HOST}:{port}/api/v1/skills");
+            let stats_url = format!("http://{SERVER_HOST}:{port}/api/v1/skills/stats");
+            let list_res = fetch_json(list_url).await;
+            let stats_res = fetch_json(stats_url).await;
+
+            let rows: Vec<SkillRow> = list_res
+                .ok()
+                .filter(|body| body.get("skills").is_some())
+                .map(|body| {
+                    body.get("skills")
+                        .and_then(|v| v.as_array())
+                        .cloned()
+                        .unwrap_or_default()
+                })
+                .unwrap_or_default()
+                .iter()
+                .filter(|s| s.get("category").and_then(|v| v.as_str()) == Some("custom"))
+                .filter_map(|s| {
+                    Some(SkillRow {
+                        id: s.get("id")?.as_str()?.to_string(),
+                        name: s
+                            .get("name")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or_default()
+                            .to_string(),
+                        description: s
+                            .get("description")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or_default()
+                            .to_string(),
+                        version: s
+                            .get("version")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or_default()
+                            .to_string(),
+                        updated_at: s
+                            .get("updated_at")
+                            .and_then(|v| v.as_str())
+                            .map(|v| v.to_string()),
+                    })
+                })
+                .collect();
+
+            let (stats, total_calls) = match stats_res {
+                Ok(body) => {
+                    let total = body
+                        .get("total_calls")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0);
+                    let stats: Vec<SkillStatRow> = body
+                        .get("skills")
+                        .and_then(|v| v.as_array())
+                        .map(|arr| {
+                            arr.iter()
+                                .filter_map(|s| {
+                                    Some(SkillStatRow {
+                                        skill_id: s.get("skill_id")?.as_str()?.to_string(),
+                                        total_calls: s
+                                            .get("total_calls")
+                                            .and_then(|v| v.as_u64())
+                                            .unwrap_or(0),
+                                        success_calls: s
+                                            .get("success_calls")
+                                            .and_then(|v| v.as_u64())
+                                            .unwrap_or(0),
+                                        avg_time_ms: s
+                                            .get("avg_time_ms")
+                                            .and_then(|v| v.as_f64())
+                                            .unwrap_or(0.0),
+                                    })
+                                })
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    (stats, total)
+                }
+                Err(_) => (Vec::new(), 0),
+            };
+
+            let n = rows.len();
+            let _ = this.update(cx, |this, cx| {
+                this.skills = rows;
+                this.skill_stats = stats;
+                this.skills_total_calls = total_calls;
+                this.skills_status = format!("{n} 个方法论技能");
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// 拉选中技能的完整 markdown 内容（`GET /skills/{id}`）。
+    fn load_skill_detail(&self, id: String, cx: &mut Context<Self>) {
+        let port = self.port;
+        cx.spawn(async move |this, cx| {
+            let url = format!(
+                "http://{SERVER_HOST}:{port}/api/v1/skills/{}",
+                url_encode(&id)
+            );
+            let res = fetch_json(url).await;
+            let _ = this.update(cx, |this, cx| {
+                match res {
+                    Ok(body) => {
+                        this.skill_content = body
+                            .get("content")
+                            .and_then(|v| v.as_str())
+                            .map(|v| v.to_string());
+                        this.skills_status = "已加载技能内容".to_string();
+                    }
+                    Err(e) => {
+                        this.skill_content = None;
+                        this.skills_status = format!("加载技能详情失败：{e}");
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// 加载工具目录（`GET /api/v1/tools`：与 LLM 收到的 tools 列表同源）。
+    fn load_tools(&self, cx: &mut Context<Self>) {
+        let port = self.port;
+        cx.spawn(async move |this, cx| {
+            let url = format!("http://{SERVER_HOST}:{port}/api/v1/tools");
+            match fetch_json(url).await {
+                Ok(body) => {
+                    let rows: Vec<ToolRow> = body
+                        .get("tools")
+                        .and_then(|v| v.as_array())
+                        .map(|arr| {
+                            arr.iter()
+                                .filter_map(|t| {
+                                    Some(ToolRow {
+                                        name: t.get("name")?.as_str()?.to_string(),
+                                        description: t
+                                            .get("description")
+                                            .and_then(|v| v.as_str())
+                                            .unwrap_or_default()
+                                            .to_string(),
+                                        parameters: t
+                                            .get("parameters")
+                                            .cloned()
+                                            .unwrap_or(serde_json::Value::Null),
+                                    })
+                                })
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    let _ = this.update(cx, |this, cx| {
+                        this.tools = rows;
+                        cx.notify();
+                    });
+                }
+                Err(e) => {
+                    let _ = this.update(cx, |this, cx| {
+                        this.status = format!("加载工具失败：{e}");
+                        cx.notify();
+                    });
+                }
+            }
+        })
+        .detach();
+    }
+
     fn load_roles(&self, cx: &mut Context<Self>) {
         let port = self.port;
         cx.spawn(async move |this, cx| {
@@ -3373,6 +4881,34 @@ impl ClientApp {
         // 文件页首次进入才拉目录树（工作区根 = 会话绑定目录）
         if view == View::Workspace && self.ws_root.is_empty() {
             self.load_workspace_tree(String::new(), cx);
+        }
+        // 工具页首次进入才拉工具目录（与 roles 同一懒加载口径）
+        if view == View::Tools && self.tools.is_empty() {
+            self.load_tools(cx);
+        }
+        // 技能页首次进入才拉（列表 + 使用统计）
+        if view == View::Skills && self.skills.is_empty() {
+            self.load_skills(cx);
+        }
+        // 定时任务页每次进入都刷新：agent 可能刚用 schedule_task 建过任务
+        if view == View::Scheduled {
+            self.load_sched_tasks(cx);
+        }
+        // 记忆页每次进入都刷新：演化任务会在会话结束后写入
+        if view == View::Memory {
+            self.load_memories(cx);
+        }
+        // 洞察页每次进入都刷新（用量/调度状态随时在变）
+        if view == View::Insights {
+            self.load_insights(cx);
+        }
+        // 审批页每次进入都刷新（挂起请求随时可能出现）
+        if view == View::Approval {
+            self.load_approval_page(cx);
+        }
+        // 知识页首次进入才拉根目录（后续导航自己发请求）
+        if view == View::Knowledge && self.kb_entries.is_empty() {
+            self.load_kb_entries(String::new(), cx);
         }
         cx.notify();
     }
@@ -4378,33 +5914,6 @@ impl ClientApp {
         .detach();
     }
 
-    /// 未迁移入口的占位页。
-    ///
-    /// 明确写「未迁移 + 去 Tauri 版用」而不是留白——留白会被当成 bug 或加载失败。
-    fn render_placeholder(&self, view: View, _cx: &mut Context<Self>) -> impl IntoElement {
-        let label = NAV_ITEMS
-            .iter()
-            .find(|(_, _, v)| *v == view)
-            .map(|(_, label, _)| *label)
-            .unwrap_or("该页面");
-        div()
-            .size_full()
-            .flex()
-            .flex_col()
-            .items_center()
-            .justify_center()
-            .gap_2()
-            .bg(rgb(colors::BG_PRIMARY))
-            .text_color(rgb(colors::TEXT_PRIMARY))
-            .child(div().text_lg().child(format!("{label} · 未迁移")))
-            .child(
-                div()
-                    .text_sm()
-                    .text_color(rgb(colors::TEXT_TERTIARY))
-                    .child("该页面目前仍在 Tauri 版（gui-vite）中；原生客户端按 设置 → 任务/审批 → workspace 的顺序补齐"),
-            )
-    }
-
     /// 打开 provider 编辑器：把该 provider 的 endpoint / api_key 回填进输入框。
     ///
     /// 必须**同步**做（`set_value` 要 `&mut Window`），所以值取自随列表缓存的那份
@@ -5040,6 +6549,2529 @@ impl ClientApp {
             )
             .child(detail)
             .into_any_element()
+    }
+
+    /// 记忆页：左列表（按目录分组）+ 右详情（L0/L1/L2 三层，L2 默认收起）。
+    ///
+    /// 不建完整树（Web 版 `buildMemoryTree`）：记忆条目本就按目录扁平分布，
+    /// 一层分组标题 + 平铺足够定位，且省掉树节点的展开态管理。
+    /// 知识页：三 tab（浏览 / 导入 / 搜索）。
+    fn render_knowledge(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let mut tabs = div().flex().flex_row().items_center().gap_1();
+        for (i, label) in ["浏览", "导入", "搜索"].iter().enumerate() {
+            let idx = i as u8;
+            let is_cur = self.kb_tab == idx;
+            tabs = tabs.child(
+                div()
+                    .id(("kb-tab", i))
+                    .px_3()
+                    .py_1()
+                    .rounded_md()
+                    .border_1()
+                    .border_color(rgb(if is_cur {
+                        colors::ACCENT
+                    } else {
+                        colors::BORDER
+                    }))
+                    .bg(rgb(if is_cur {
+                        colors::BG_TERTIARY
+                    } else {
+                        colors::BG_SECONDARY
+                    }))
+                    .cursor_pointer()
+                    .text_size(px(11.))
+                    .text_color(rgb(if is_cur {
+                        colors::ACCENT
+                    } else {
+                        colors::TEXT_SECONDARY
+                    }))
+                    .child(*label)
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.kb_tab = idx;
+                        cx.notify();
+                    })),
+            );
+        }
+
+        let content = match self.kb_tab {
+            1 => self.render_kb_ingest(cx).into_any_element(),
+            2 => self.render_kb_search_tab(cx).into_any_element(),
+            _ => self.render_kb_browse(cx).into_any_element(),
+        };
+
+        div()
+            .size_full()
+            .flex()
+            .flex_col()
+            .child(
+                div()
+                    .px_4()
+                    .py_3()
+                    .border_b_1()
+                    .border_color(rgb(colors::BORDER))
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .justify_between()
+                    .child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .gap_3()
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_row()
+                                    .items_center()
+                                    .gap_2()
+                                    .child(
+                                        svg()
+                                            .path(IconName::BookOpen.path())
+                                            .size(px(16.))
+                                            .text_color(rgb(colors::TEXT_SECONDARY)),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_size(px(15.))
+                                            .text_color(rgb(colors::TEXT_PRIMARY))
+                                            .child("知识库"),
+                                    ),
+                            )
+                            .child(tabs),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(10.))
+                            .text_color(rgb(colors::TEXT_TERTIARY))
+                            .child(self.kb_status.clone()),
+                    ),
+            )
+            .child(content)
+    }
+
+    /// 知识页·浏览：面包屑 + 条目列表 + 右内容（L0/L1/L2 切换）。
+    fn render_kb_browse(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let mut crumbs = div().flex().flex_row().items_center().gap_1().child(
+            div()
+                .id("kb-root")
+                .px_2()
+                .py_1()
+                .rounded_md()
+                .cursor_pointer()
+                .text_size(px(10.))
+                .text_color(rgb(colors::TEXT_SECONDARY))
+                .child("知识库根")
+                .on_click(cx.listener(|this, _, _, cx| this.load_kb_entries(String::new(), cx))),
+        );
+        if !self.kb_path.is_empty() {
+            let parent = self
+                .kb_path
+                .rsplit_once('/')
+                .map(|(p, _)| p.to_string())
+                .unwrap_or_default();
+            crumbs = crumbs
+                .child(
+                    div()
+                        .text_size(px(10.))
+                        .text_color(rgb(colors::TEXT_TERTIARY))
+                        .child(format!("/ {}", self.kb_path)),
+                )
+                .child(
+                    div()
+                        .id("kb-up")
+                        .px_2()
+                        .py_1()
+                        .rounded_md()
+                        .cursor_pointer()
+                        .text_size(px(10.))
+                        .text_color(rgb(colors::ACCENT))
+                        .child("↑ 上级")
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.load_kb_entries(parent.clone(), cx)
+                        })),
+                );
+        }
+
+        let mut list = div().flex_1().min_h_0().p_2().flex().flex_col().gap_1();
+        if self.kb_entries.is_empty() {
+            list = list.child(
+                div()
+                    .py_6()
+                    .text_size(px(11.))
+                    .text_color(rgb(colors::TEXT_TERTIARY))
+                    .child("这个目录是空的（或尚未导入任何文档）"),
+            );
+        }
+        for (ix, e) in self.kb_entries.iter().enumerate() {
+            let is_sel = self.kb_selected.as_deref() == Some(e.uri.as_str());
+            let uri = e.uri.clone();
+            let is_dir = e.is_dir;
+            let layers = format!(
+                "{}{}{}",
+                if e.has_abstract { "L0 " } else { "" },
+                if e.has_overview { "L1 " } else { "" },
+                if e.has_detail { "L2" } else { "" }
+            );
+            list = list.child(
+                div()
+                    .id(("kb", ix))
+                    .w_full()
+                    .px_2()
+                    .py_2()
+                    .rounded_lg()
+                    .bg(rgb(if is_sel {
+                        colors::BG_TERTIARY
+                    } else {
+                        colors::BG_SECONDARY
+                    }))
+                    .cursor_pointer()
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .gap_2()
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .text_size(px(12.))
+                                    .text_color(rgb(if is_sel {
+                                        colors::ACCENT
+                                    } else {
+                                        colors::TEXT_PRIMARY
+                                    }))
+                                    .whitespace_nowrap()
+                                    .overflow_hidden()
+                                    .child(format!(
+                                        "{}{}",
+                                        if is_dir { "[D] " } else { "" },
+                                        e.name
+                                    )),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(9.))
+                                    .text_color(rgb(colors::TEXT_TERTIARY))
+                                    .child(layers),
+                            ),
+                    )
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        if is_dir {
+                            // 目录：uri → 相对知识根的路径（`tianyan://knowledge/a/b` → `a/b`）
+                            let rel = uri
+                                .split("knowledge/")
+                                .nth(1)
+                                .unwrap_or_default()
+                                .to_string();
+                            this.load_kb_entries(rel, cx);
+                        } else {
+                            this.kb_selected = Some(uri.clone());
+                            this.read_kb_entry(uri.clone(), "detail".to_string(), cx);
+                        }
+                    })),
+            );
+        }
+
+        let detail = match (&self.kb_selected, &self.kb_content) {
+            (Some(uri), Some((level, text))) => {
+                let uri_owned = uri.clone();
+                let uri_del = uri.clone();
+                let mut levels = div().flex().flex_row().items_center().gap_1();
+                for (li, lv) in ["abstract", "overview", "detail"].iter().enumerate() {
+                    let is_cur = level == lv;
+                    let u = uri_owned.clone();
+                    levels = levels.child(
+                        div()
+                            .id(("kb-lv", li))
+                            .px_2()
+                            .py_1()
+                            .rounded_md()
+                            .border_1()
+                            .border_color(rgb(if is_cur {
+                                colors::ACCENT
+                            } else {
+                                colors::BORDER
+                            }))
+                            .cursor_pointer()
+                            .text_size(px(10.))
+                            .text_color(rgb(if is_cur {
+                                colors::ACCENT
+                            } else {
+                                colors::TEXT_SECONDARY
+                            }))
+                            .child(lv.to_string())
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.read_kb_entry(u.clone(), lv.to_string(), cx)
+                            })),
+                    );
+                }
+                div()
+                    .size_full()
+                    .flex()
+                    .flex_col()
+                    .child(
+                        div()
+                            .px_4()
+                            .py_3()
+                            .border_b_1()
+                            .border_color(rgb(colors::BORDER))
+                            .flex()
+                            .flex_col()
+                            .gap_2()
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_row()
+                                    .items_center()
+                                    .gap_2()
+                                    .child(
+                                        div()
+                                            .flex_1()
+                                            .min_w_0()
+                                            .text_size(px(11.))
+                                            .text_color(rgb(colors::TEXT_SECONDARY))
+                                            .whitespace_nowrap()
+                                            .overflow_hidden()
+                                            .child(uri_owned.clone()),
+                                    )
+                                    .child(
+                                        div()
+                                            .id("kb-del")
+                                            .px_2()
+                                            .py_1()
+                                            .rounded_md()
+                                            .bg(rgb(colors::ERROR))
+                                            .cursor_pointer()
+                                            .text_size(px(10.))
+                                            .text_color(rgb(colors::TEXT_PRIMARY))
+                                            .child("删除")
+                                            .on_click(cx.listener(move |this, _, _, cx| {
+                                                this.delete_kb_entry(uri_del.clone(), cx)
+                                            })),
+                                    ),
+                            )
+                            .child(levels),
+                    )
+                    .child(
+                        div().flex_1().min_h_0().p_4().child(
+                            div()
+                                .w_full()
+                                .child(TextView::markdown(
+                                    ("kb-md", 0usize),
+                                    SharedString::from(text.clone()),
+                                ))
+                                .overflow_y_scrollbar(),
+                        ),
+                    )
+                    .into_any_element()
+            }
+            _ => div()
+                .size_full()
+                .flex()
+                .flex_col()
+                .items_center()
+                .justify_center()
+                .gap_2()
+                .child(
+                    svg()
+                        .path(IconName::BookOpen.path())
+                        .size(px(40.))
+                        .text_color(rgb(colors::TEXT_TERTIARY)),
+                )
+                .child(
+                    div()
+                        .text_size(px(13.))
+                        .text_color(rgb(colors::TEXT_TERTIARY))
+                        .child("选一个条目查看内容（目录点进去）"),
+                )
+                .into_any_element(),
+        };
+
+        div()
+            .flex_1()
+            .min_h_0()
+            .flex()
+            .flex_col()
+            .child(div().px_4().py_2().child(crumbs))
+            .child(
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    .flex()
+                    .flex_row()
+                    .child(
+                        div()
+                            .w(px(320.))
+                            .h_full()
+                            .flex()
+                            .flex_col()
+                            .border_r_1()
+                            .border_color(rgb(colors::BORDER))
+                            .bg(rgb(colors::BG_SECONDARY))
+                            .child(list.overflow_y_scrollbar()),
+                    )
+                    .child(div().flex_1().min_w_0().h_full().child(detail)),
+            )
+    }
+
+    /// 知识页·导入：路径 + 分类 → 读本地文件 → multipart 上传。
+    fn render_kb_ingest(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let mut results = div().flex().flex_col().gap_1().w_full();
+        for (i, (name, status)) in self.kb_ingest_results.iter().enumerate() {
+            results = results.child(
+                div()
+                    .id(("kb-ir", i))
+                    .w_full()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .text_size(px(11.))
+                            .text_color(rgb(colors::TEXT_SECONDARY))
+                            .whitespace_nowrap()
+                            .overflow_hidden()
+                            .child(name.clone()),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(10.))
+                            .text_color(rgb(colors::TEXT_TERTIARY))
+                            .child(status.clone()),
+                    ),
+            );
+        }
+        div()
+            .flex_1()
+            .min_h_0()
+            .p_4()
+            .flex()
+            .flex_col()
+            .gap_3()
+            .child(
+                div()
+                    .p_3()
+                    .rounded_lg()
+                    .border_1()
+                    .border_color(rgb(colors::BORDER))
+                    .bg(rgb(colors::BG_SECONDARY))
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .child(
+                        div()
+                            .text_size(px(11.))
+                            .text_color(rgb(colors::TEXT_TERTIARY))
+                            .child(
+                                "填本地文件或目录的绝对路径；目录会递归导入（上限 200 个文件）。\
+                                 导入是异步任务，L0/L1 摘要生成前浏览里可能还看不到。",
+                            ),
+                    )
+                    .child(field_wrap(&self.kb_ingest_path))
+                    .child(field_wrap(&self.kb_ingest_category))
+                    .child(
+                        div()
+                            .id("kb-ingest")
+                            .px_3()
+                            .py_2()
+                            .rounded_md()
+                            .bg(rgb(colors::ACCENT))
+                            .cursor_pointer()
+                            .text_size(px(11.))
+                            .text_color(rgb(colors::TEXT_PRIMARY))
+                            .child("开始导入")
+                            .on_click(cx.listener(|this, _, _, cx| this.ingest_kb(cx))),
+                    ),
+            )
+            .child(results)
+            .overflow_y_scrollbar()
+    }
+
+    /// 知识页·搜索：语义检索结果（分数 + 来源 + 内容片段）。
+    fn render_kb_search_tab(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let mut results = div().flex().flex_col().gap_2().w_full();
+        if self.kb_results.is_empty() {
+            results = results.child(
+                div()
+                    .py_6()
+                    .text_size(px(11.))
+                    .text_color(rgb(colors::TEXT_TERTIARY))
+                    .child("没有结果——输入词后点搜索"),
+            );
+        }
+        for (i, r) in self.kb_results.iter().enumerate() {
+            results = results.child(
+                div()
+                    .id(("kb-r", i))
+                    .w_full()
+                    .p_2()
+                    .rounded_md()
+                    .border_1()
+                    .border_color(rgb(colors::BORDER))
+                    .bg(rgb(colors::BG_SECONDARY))
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .gap_2()
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .text_size(px(10.))
+                                    .text_color(rgb(colors::TEXT_TERTIARY))
+                                    .whitespace_nowrap()
+                                    .overflow_hidden()
+                                    .child(r.source.clone()),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(10.))
+                                    .text_color(rgb(colors::ACCENT))
+                                    .child(format!("{:.3}", r.score)),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(11.))
+                            .text_color(rgb(colors::TEXT_SECONDARY))
+                            .child(ellipsis(&r.content.replace('\n', " "), 300)),
+                    ),
+            );
+        }
+        div()
+            .flex_1()
+            .min_h_0()
+            .p_4()
+            .flex()
+            .flex_col()
+            .gap_3()
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_2()
+                    .child(div().flex_1().child(field_wrap(&self.kb_search)))
+                    .child(
+                        div()
+                            .id("kb-do-search")
+                            .px_3()
+                            .py_2()
+                            .rounded_md()
+                            .bg(rgb(colors::ACCENT))
+                            .cursor_pointer()
+                            .text_size(px(11.))
+                            .text_color(rgb(colors::TEXT_PRIMARY))
+                            .child("搜索")
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                let q = this.kb_search.read(cx).value().to_string();
+                                this.search_kb(q, cx);
+                            })),
+                    ),
+            )
+            .child(results.overflow_y_scrollbar())
+    }
+
+    /// 审批页：工作流配置 + 待审批（可操作）+ 待确认指纹 + 审计记录。
+    ///
+    /// 审批链路口径（ADR-033）：工具执行门控 → 风险分级 → 自动审批规则
+    /// （Deny 优先）→ `ApprovalMode` 三态短路 → 人工审批挂起通道。
+    /// 本页是这个链路的**观测面**：配置长什么样、当前挂起什么、过往怎么判的。
+    fn render_approval(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let mut body = div().flex_1().min_h_0().p_4().flex().flex_col().gap_3();
+
+        // 1. 配置卡
+        let mut cfg = div()
+            .p_3()
+            .rounded_lg()
+            .border_1()
+            .border_color(rgb(colors::BORDER))
+            .bg(rgb(colors::BG_SECONDARY))
+            .flex()
+            .flex_col()
+            .gap_2()
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_2()
+                    .flex_wrap()
+                    .child(
+                        div()
+                            .text_size(px(12.))
+                            .text_color(rgb(colors::TEXT_PRIMARY))
+                            .child("工作流配置"),
+                    )
+                    .child(
+                        div()
+                            .px_2()
+                            .py_1()
+                            .rounded_md()
+                            .border_1()
+                            .border_color(rgb(colors::BORDER))
+                            .bg(rgb(colors::BG_TERTIARY))
+                            .text_size(px(10.))
+                            .text_color(rgb(colors::ACCENT))
+                            .child(if self.approval_mode.is_empty() {
+                                "未装配".to_string()
+                            } else {
+                                format!("模式 {}", self.approval_mode)
+                            }),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(10.))
+                            .text_color(rgb(if self.approval_auto {
+                                colors::SUCCESS
+                            } else {
+                                colors::TEXT_TERTIARY
+                            }))
+                            .child(if self.approval_auto {
+                                "自动审批已启用"
+                            } else {
+                                "自动审批已关闭"
+                            }),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(10.))
+                            .text_color(rgb(colors::TEXT_TERTIARY))
+                            .child(format!(
+                                "超时 {}s · 最大挂起 {} · 已确认指纹 {}",
+                                self.approval_timeout,
+                                self.approval_max_pending,
+                                self.confirmed_action_count
+                            )),
+                    ),
+            );
+        if !self.approval_prompt_cmds.is_empty() {
+            let mut chips = div().flex().flex_row().items_center().gap_1().flex_wrap();
+            for c in &self.approval_prompt_cmds {
+                chips = chips.child(
+                    div()
+                        .px_2()
+                        .py_1()
+                        .rounded_md()
+                        .border_1()
+                        .border_color(rgb(colors::WARNING))
+                        .text_size(px(10.))
+                        .text_color(rgb(colors::WARNING))
+                        .child(c.clone()),
+                );
+            }
+            cfg = cfg.child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .child(
+                        div()
+                            .text_size(px(10.))
+                            .text_color(rgb(colors::TEXT_TERTIARY))
+                            .child("总是询问的命令（不被自动规则与任何模式放行）"),
+                    )
+                    .child(chips),
+            );
+        }
+        if !self.approval_rules.is_empty() {
+            let mut rules = div().flex().flex_col().gap_1().w_full();
+            for r in self.approval_rules.iter().take(12) {
+                rules = rules.child(
+                    div()
+                        .w_full()
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap_2()
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .text_size(px(10.))
+                                .text_color(rgb(colors::TEXT_SECONDARY))
+                                .whitespace_nowrap()
+                                .overflow_hidden()
+                                .child(r.name.clone()),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(10.))
+                                .text_color(rgb(if r.decision.eq_ignore_ascii_case("deny") {
+                                    colors::ERROR
+                                } else {
+                                    colors::SUCCESS
+                                }))
+                                .child(r.decision.clone()),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(10.))
+                                .text_color(rgb(colors::TEXT_TERTIARY))
+                                .child(if r.enabled { "启用" } else { "停用" }),
+                        ),
+                );
+            }
+            cfg = cfg.child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .child(
+                        div()
+                            .text_size(px(10.))
+                            .text_color(rgb(colors::TEXT_TERTIARY))
+                            .child(format!(
+                                "自动审批规则（{} 条，Deny 优先）",
+                                self.approval_rules.len()
+                            )),
+                    )
+                    .child(rules),
+            );
+        }
+        body = body.child(cfg);
+
+        // 2. 待审批（可操作）
+        let mut pending = div()
+            .p_3()
+            .rounded_lg()
+            .border_1()
+            .border_color(rgb(if self.pending_approvals.is_empty() {
+                colors::BORDER
+            } else {
+                colors::WARNING
+            }))
+            .bg(rgb(colors::BG_SECONDARY))
+            .flex()
+            .flex_col()
+            .gap_2()
+            .child(
+                div()
+                    .text_size(px(12.))
+                    .text_color(rgb(colors::TEXT_PRIMARY))
+                    .child(format!("待审批（{}）", self.pending_approvals.len())),
+            );
+        if self.pending_approvals.is_empty() {
+            pending = pending.child(
+                div()
+                    .text_size(px(11.))
+                    .text_color(rgb(colors::TEXT_TERTIARY))
+                    .child("没有挂起的审批请求"),
+            );
+        }
+        for (ix, a) in self.pending_approvals.iter().enumerate() {
+            let rid_a = a.request_id.clone();
+            let rid_d = a.request_id.clone();
+            pending = pending.child(
+                div()
+                    .w_full()
+                    .p_2()
+                    .rounded_md()
+                    .border_1()
+                    .border_color(rgb(colors::BORDER))
+                    .bg(rgb(colors::BG_PRIMARY))
+                    .flex()
+                    .flex_row()
+                    .items_start()
+                    .gap_2()
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .flex()
+                            .flex_col()
+                            .gap_1()
+                            .child(
+                                div()
+                                    .text_size(px(11.))
+                                    .text_color(rgb(colors::TEXT_PRIMARY))
+                                    .child(a.description.clone()),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(10.))
+                                    .text_color(rgb(risk_color(&a.risk)))
+                                    .child(format!("风险 {}", a.risk)),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .id(("ap-ok", ix))
+                            .px_2()
+                            .py_1()
+                            .rounded_md()
+                            .bg(rgb(colors::SUCCESS))
+                            .cursor_pointer()
+                            .text_size(px(10.))
+                            .text_color(rgb(colors::TEXT_PRIMARY))
+                            .child("允许")
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.respond_approval(rid_a.clone(), "approve", cx)
+                            })),
+                    )
+                    .child(
+                        div()
+                            .id(("ap-no", ix))
+                            .px_2()
+                            .py_1()
+                            .rounded_md()
+                            .bg(rgb(colors::ERROR))
+                            .cursor_pointer()
+                            .text_size(px(10.))
+                            .text_color(rgb(colors::TEXT_PRIMARY))
+                            .child("拒绝")
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.respond_approval(rid_d.clone(), "deny", cx)
+                            })),
+                    ),
+            );
+        }
+        body = body.child(pending);
+
+        // 3. 待确认指纹（「询问用户」降级链路）
+        if !self.pending_confirmations.is_empty() {
+            let mut list = div().flex().flex_col().gap_1().w_full();
+            for (ix, fp) in self.pending_confirmations.iter().enumerate() {
+                list = list.child(
+                    div()
+                        .id(("ap-fp", ix))
+                        .w_full()
+                        .text_size(px(10.))
+                        .text_color(rgb(colors::TEXT_SECONDARY))
+                        .child(fp.clone()),
+                );
+            }
+            body = body.child(
+                div()
+                    .p_3()
+                    .rounded_lg()
+                    .border_1()
+                    .border_color(rgb(colors::BORDER))
+                    .bg(rgb(colors::BG_SECONDARY))
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .child(
+                        div()
+                            .text_size(px(12.))
+                            .text_color(rgb(colors::TEXT_PRIMARY))
+                            .child(format!(
+                                "待确认操作指纹（{}）",
+                                self.pending_confirmations.len()
+                            )),
+                    )
+                    .child(list),
+            );
+        }
+
+        // 4. 审计记录
+        let mut hist = div()
+            .p_3()
+            .rounded_lg()
+            .border_1()
+            .border_color(rgb(colors::BORDER))
+            .bg(rgb(colors::BG_SECONDARY))
+            .flex()
+            .flex_col()
+            .gap_2()
+            .child(
+                div()
+                    .text_size(px(12.))
+                    .text_color(rgb(colors::TEXT_PRIMARY))
+                    .child(format!("审计记录（{}）", self.approval_history.len())),
+            );
+        if self.approval_history.is_empty() {
+            hist = hist.child(
+                div()
+                    .text_size(px(11.))
+                    .text_color(rgb(colors::TEXT_TERTIARY))
+                    .child("暂无审批记录"),
+            );
+        }
+        for h in self.approval_history.iter().take(20) {
+            hist = hist.child(
+                div()
+                    .w_full()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        div()
+                            .text_size(px(10.))
+                            .text_color(rgb(risk_color(&h.risk)))
+                            .child(h.risk.clone()),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .text_size(px(10.))
+                            .text_color(rgb(colors::TEXT_SECONDARY))
+                            .whitespace_nowrap()
+                            .overflow_hidden()
+                            .child(h.description.clone()),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(10.))
+                            .text_color(rgb(if h.decision.eq_ignore_ascii_case("deny") {
+                                colors::ERROR
+                            } else if h.decision.eq_ignore_ascii_case("approve") {
+                                colors::SUCCESS
+                            } else {
+                                colors::TEXT_TERTIARY
+                            }))
+                            .child(h.decision.clone()),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(10.))
+                            .text_color(rgb(match h.result {
+                                Some(true) => colors::SUCCESS,
+                                Some(false) => colors::ERROR,
+                                None => colors::TEXT_TERTIARY,
+                            }))
+                            .child(match h.result {
+                                Some(true) => "执行成功".to_string(),
+                                Some(false) => "执行失败".to_string(),
+                                None => "未执行".to_string(),
+                            }),
+                    ),
+            );
+        }
+        body = body.child(hist);
+
+        div()
+            .size_full()
+            .flex()
+            .flex_col()
+            .child(
+                div()
+                    .px_4()
+                    .py_3()
+                    .border_b_1()
+                    .border_color(rgb(colors::BORDER))
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .justify_between()
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap_1()
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_row()
+                                    .items_center()
+                                    .gap_2()
+                                    .child(
+                                        svg()
+                                            .path(IconName::Shield.path())
+                                            .size(px(16.))
+                                            .text_color(rgb(colors::TEXT_SECONDARY)),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_size(px(15.))
+                                            .text_color(rgb(colors::TEXT_PRIMARY))
+                                            .child("审批"),
+                                    ),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(11.))
+                                    .text_color(rgb(colors::TEXT_TERTIARY))
+                                    .child(self.approvals_page_status.clone()),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .id("ap-reload")
+                            .px_2()
+                            .py_1()
+                            .rounded_md()
+                            .border_1()
+                            .border_color(rgb(colors::BORDER))
+                            .cursor_pointer()
+                            .text_size(px(11.))
+                            .text_color(rgb(colors::TEXT_SECONDARY))
+                            .child("刷新")
+                            .on_click(cx.listener(|this, _, _, cx| this.load_approval_page(cx))),
+                    ),
+            )
+            .child(body.overflow_y_scrollbar())
+    }
+
+    /// 洞察页：总览四卡 + 模型用量（含分组）+ 调度器任务表。
+    fn render_insights(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let s = self.insight_stats.clone().unwrap_or_default();
+        let mut body = div().flex_1().min_h_0().p_4().flex().flex_col().gap_3();
+
+        body = body.child(
+            div()
+                .flex()
+                .flex_row()
+                .gap_2()
+                .flex_wrap()
+                .child(stat_card(
+                    "技能",
+                    format!("{}", s.total_skills_tracked),
+                    format!("累计调用 {} 次", group_thousands(s.total_skill_calls)),
+                ))
+                .child(stat_card(
+                    "工具",
+                    format!("{}", s.total_tools_tracked),
+                    format!("累计调用 {} 次", group_thousands(s.total_tool_calls)),
+                ))
+                .child(stat_card(
+                    "文档",
+                    format!("{}", s.total_docs_tracked),
+                    "VFS 访问过的文档".to_string(),
+                ))
+                .child(stat_card(
+                    "搜索",
+                    format!("{}", s.total_searches),
+                    "检索次数".to_string(),
+                )),
+        );
+
+        if let Some(t) = &self.usage_total {
+            let mut usage = div()
+                .p_3()
+                .rounded_lg()
+                .border_1()
+                .border_color(rgb(colors::BORDER))
+                .bg(rgb(colors::BG_SECONDARY))
+                .flex()
+                .flex_col()
+                .gap_2()
+                .child(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap_3()
+                        .flex_wrap()
+                        .child(
+                            div()
+                                .text_size(px(12.))
+                                .text_color(rgb(colors::TEXT_PRIMARY))
+                                .child(format!("近 {} 天模型用量", self.usage_days)),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(10.))
+                                .text_color(rgb(colors::TEXT_TERTIARY))
+                                .child(format!(
+                                    "{} 次调用 · 总 token {} · 缓存命中 {:.1}%",
+                                    group_thousands(t.calls),
+                                    group_thousands(t.total_tokens),
+                                    t.cache_hit_rate * 100.0
+                                )),
+                        ),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap_3()
+                        .flex_wrap()
+                        .text_size(px(10.))
+                        .text_color(rgb(colors::TEXT_TERTIARY))
+                        .child(format!("未命中输入 {}", group_thousands(t.uncached_input)))
+                        .child(format!("缓存命中输入 {}", group_thousands(t.cached_input)))
+                        .child(format!("输出 {}", group_thousands(t.completion_tokens))),
+                );
+            if !self.usage_grouped.is_empty() {
+                let mut rows = div().flex().flex_col().gap_1().w_full();
+                for g in self.usage_grouped.iter().take(10) {
+                    rows = rows.child(
+                        div()
+                            .w_full()
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .gap_2()
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .text_size(px(11.))
+                                    .text_color(rgb(colors::TEXT_SECONDARY))
+                                    .whitespace_nowrap()
+                                    .overflow_hidden()
+                                    .child(g.group.clone()),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(10.))
+                                    .text_color(rgb(colors::TEXT_TERTIARY))
+                                    .child(format!(
+                                        "{} 次 · {} tok · 命中 {:.0}%",
+                                        group_thousands(g.calls),
+                                        group_thousands(g.total_tokens),
+                                        g.cache_hit_rate * 100.0
+                                    )),
+                            ),
+                    );
+                }
+                usage = usage.child(rows);
+            }
+            body = body.child(usage);
+        }
+
+        let mut sched = div()
+            .p_3()
+            .rounded_lg()
+            .border_1()
+            .border_color(rgb(colors::BORDER))
+            .bg(rgb(colors::BG_SECONDARY))
+            .flex()
+            .flex_col()
+            .gap_2()
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        div()
+                            .text_size(px(12.))
+                            .text_color(rgb(colors::TEXT_PRIMARY))
+                            .child("调度器"),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(10.))
+                            .text_color(rgb(if self.scheduler_running {
+                                colors::SUCCESS
+                            } else {
+                                colors::TEXT_TERTIARY
+                            }))
+                            .child(if self.scheduler_running {
+                                "运行中"
+                            } else {
+                                "未装配"
+                            }),
+                    ),
+            );
+        if let Some(id) = &self.scheduler_executing {
+            sched = sched.child(
+                div()
+                    .text_size(px(10.))
+                    .text_color(rgb(colors::ACCENT))
+                    .child(format!("正在执行 {id}")),
+            );
+        }
+        if self.sched_status_tasks.is_empty() {
+            sched = sched.child(
+                div()
+                    .text_size(px(11.))
+                    .text_color(rgb(colors::TEXT_TERTIARY))
+                    .child("没有已注册的定时任务"),
+            );
+        }
+        for t in &self.sched_status_tasks {
+            sched = sched.child(
+                div()
+                    .w_full()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .text_size(px(11.))
+                            .text_color(rgb(colors::TEXT_SECONDARY))
+                            .whitespace_nowrap()
+                            .overflow_hidden()
+                            .child(t.name.clone()),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(10.))
+                            .text_color(rgb(colors::TEXT_TERTIARY))
+                            .child(format!(
+                                "{} · 跑 {} 次 · 上次 {}前",
+                                format_interval(t.interval_secs),
+                                t.run_count,
+                                format_secs_short(t.last_run_ago_secs)
+                            )),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(10.))
+                            .text_color(rgb(colors::TEXT_TERTIARY))
+                            .child(format!("下次 {}后", format_secs_short(t.next_due_in_secs))),
+                    ),
+            );
+        }
+        body = body.child(sched);
+
+        // 天数切换 + 刷新
+        let mut days_bar = div().flex().flex_row().items_center().gap_1();
+        for d in [1i64, 3, 7, 30] {
+            let is_cur = self.usage_days == d;
+            days_bar = days_bar.child(
+                div()
+                    .id(("ins-days", d as usize))
+                    .px_2()
+                    .py_1()
+                    .rounded_md()
+                    .border_1()
+                    .border_color(rgb(if is_cur {
+                        colors::ACCENT
+                    } else {
+                        colors::BORDER
+                    }))
+                    .bg(rgb(if is_cur {
+                        colors::BG_TERTIARY
+                    } else {
+                        colors::BG_SECONDARY
+                    }))
+                    .cursor_pointer()
+                    .text_size(px(10.))
+                    .text_color(rgb(if is_cur {
+                        colors::ACCENT
+                    } else {
+                        colors::TEXT_SECONDARY
+                    }))
+                    .child(format!("{d} 天"))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.usage_days = d;
+                        this.load_insights(cx);
+                    })),
+            );
+        }
+
+        div()
+            .size_full()
+            .flex()
+            .flex_col()
+            .child(
+                div()
+                    .px_4()
+                    .py_3()
+                    .border_b_1()
+                    .border_color(rgb(colors::BORDER))
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .justify_between()
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap_1()
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_row()
+                                    .items_center()
+                                    .gap_2()
+                                    .child(
+                                        svg()
+                                            .path(IconName::ChartLine.path())
+                                            .size(px(16.))
+                                            .text_color(rgb(colors::TEXT_SECONDARY)),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_size(px(15.))
+                                            .text_color(rgb(colors::TEXT_PRIMARY))
+                                            .child("洞察"),
+                                    ),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(11.))
+                                    .text_color(rgb(colors::TEXT_TERTIARY))
+                                    .child(self.insights_status.clone()),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .gap_2()
+                            .child(days_bar)
+                            .child(
+                                div()
+                                    .id("ins-reload")
+                                    .px_2()
+                                    .py_1()
+                                    .rounded_md()
+                                    .border_1()
+                                    .border_color(rgb(colors::BORDER))
+                                    .cursor_pointer()
+                                    .text_size(px(10.))
+                                    .text_color(rgb(colors::TEXT_SECONDARY))
+                                    .child("刷新")
+                                    .on_click(cx.listener(|this, _, _, cx| this.load_insights(cx))),
+                            ),
+                    ),
+            )
+            .child(body.overflow_y_scrollbar())
+    }
+
+    fn render_memory(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        // 按目录分组（relative_path 的父段；根级归到「(根)」）
+        let mut groups: Vec<(String, Vec<&MemoryRow>)> = Vec::new();
+        for m in &self.memories {
+            let key = m
+                .relative_path
+                .rsplit_once('/')
+                .map(|(d, _)| d.to_string())
+                .unwrap_or_else(|| "(根)".to_string());
+            match groups.iter_mut().find(|(k, _)| *k == key) {
+                Some((_, v)) => v.push(m),
+                None => groups.push((key, vec![m])),
+            }
+        }
+        let selected = self
+            .memories
+            .iter()
+            .find(|m| self.memory_selected.as_deref() == Some(m.uri.as_str()))
+            .cloned();
+
+        // 左：分组列表
+        let mut list = div().flex_1().min_h_0().p_2().flex().flex_col().gap_2();
+        if self.memories.is_empty() {
+            list = list.child(
+                div()
+                    .py_8()
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        svg()
+                            .path(IconName::Brain.path())
+                            .size(px(32.))
+                            .text_color(rgb(colors::TEXT_TERTIARY)),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(13.))
+                            .text_color(rgb(colors::TEXT_TERTIARY))
+                            .child("暂无记忆——自演化综述任务会在会话结束后写入"),
+                    ),
+            );
+        }
+        for (gi, (dir, items)) in groups.iter().enumerate() {
+            let mut section = div().flex().flex_col().gap_1().child(
+                div()
+                    .px_2()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        div()
+                            .text_size(px(10.))
+                            .text_color(rgb(colors::TEXT_TERTIARY))
+                            .child(dir.clone()),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(10.))
+                            .text_color(rgb(colors::TEXT_TERTIARY))
+                            .child(format!("· {}", items.len())),
+                    ),
+            );
+            for (ix, m) in items.iter().enumerate() {
+                let is_sel = self.memory_selected.as_deref() == Some(m.uri.as_str());
+                let uri = m.uri.clone();
+                // 重要度三档配色：≥0.7 绿（稳固）/ ≥0.4 次级 / 其余红（待巩固）
+                let imp_color = if m.importance >= 0.7 {
+                    colors::SUCCESS
+                } else if m.importance >= 0.4 {
+                    colors::TEXT_SECONDARY
+                } else {
+                    colors::ERROR
+                };
+                section = section.child(
+                    div()
+                        .id(("mem", gi * 1000 + ix))
+                        .w_full()
+                        .px_2()
+                        .py_2()
+                        .rounded_lg()
+                        .bg(rgb(if is_sel {
+                            colors::BG_TERTIARY
+                        } else {
+                            colors::BG_SECONDARY
+                        }))
+                        .cursor_pointer()
+                        .flex()
+                        .flex_col()
+                        .gap_1()
+                        .child(
+                            div()
+                                .flex()
+                                .flex_row()
+                                .items_center()
+                                .gap_2()
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .min_w_0()
+                                        .text_size(px(12.))
+                                        .text_color(rgb(if is_sel {
+                                            colors::ACCENT
+                                        } else {
+                                            colors::TEXT_PRIMARY
+                                        }))
+                                        .whitespace_nowrap()
+                                        .overflow_hidden()
+                                        .child(m.name.clone()),
+                                )
+                                .child(
+                                    div()
+                                        .text_size(px(10.))
+                                        .text_color(rgb(imp_color))
+                                        .child(format!("{:.2}", m.importance)),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(10.))
+                                .text_color(rgb(colors::TEXT_TERTIARY))
+                                .whitespace_nowrap()
+                                .overflow_hidden()
+                                .child(
+                                    m.abstract_text
+                                        .as_ref()
+                                        .map(|t| ellipsis(t, 56))
+                                        .unwrap_or_else(|| "（无摘要）".to_string()),
+                                ),
+                        )
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.memory_selected = Some(uri.clone());
+                            this.memory_detail_open = false;
+                            cx.notify();
+                        })),
+                );
+            }
+            list = list.child(section);
+        }
+
+        // 右：详情（L0 → L1 → L2，L2 折叠）
+        let detail = match &selected {
+            None => div()
+                .size_full()
+                .flex()
+                .flex_col()
+                .items_center()
+                .justify_center()
+                .gap_2()
+                .child(
+                    svg()
+                        .path(IconName::Brain.path())
+                        .size(px(40.))
+                        .text_color(rgb(colors::TEXT_TERTIARY)),
+                )
+                .child(
+                    div()
+                        .text_size(px(13.))
+                        .text_color(rgb(colors::TEXT_TERTIARY))
+                        .child("选择一条记忆查看三层内容"),
+                )
+                .into_any_element(),
+            Some(m) => {
+                let mut head = div()
+                    .px_4()
+                    .py_3()
+                    .border_b_1()
+                    .border_color(rgb(colors::BORDER))
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .child(
+                        div()
+                            .text_size(px(14.))
+                            .text_color(rgb(colors::TEXT_PRIMARY))
+                            .child(m.name.clone()),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(10.))
+                            .text_color(rgb(colors::TEXT_TERTIARY))
+                            .child(m.relative_path.clone()),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .gap_2()
+                            .flex_wrap()
+                            .text_size(px(10.))
+                            .text_color(rgb(colors::TEXT_TERTIARY))
+                            .child(format!("重要度 {:.2}", m.importance))
+                            .child(if m.updated_at.is_empty() {
+                                String::new()
+                            } else {
+                                format!("更新于 {}", short_stamp(&m.updated_at))
+                            })
+                            .child(if m.tags.is_empty() {
+                                String::new()
+                            } else {
+                                format!("#{}", m.tags.join(" #"))
+                            }),
+                    );
+                let mut body = div().flex_1().min_h_0().p_4().flex().flex_col().gap_3();
+                if let Some(t) = &m.abstract_text {
+                    body = body.child(memory_block("L0 摘要", t.clone()));
+                }
+                if let Some(t) = &m.overview_text {
+                    body = body.child(memory_block("L1 概览", t.clone()));
+                }
+                if let Some(t) = &m.detail_text {
+                    let open = self.memory_detail_open;
+                    let label = if open {
+                        "▾ L2 全文（收起）".to_string()
+                    } else {
+                        format!("▸ L2 全文（{} 字，点击展开）", t.chars().count())
+                    };
+                    body = body.child(
+                        div()
+                            .id("mem-detail-toggle")
+                            .cursor_pointer()
+                            .text_size(px(10.))
+                            .text_color(rgb(colors::ACCENT))
+                            .child(label)
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.memory_detail_open = !this.memory_detail_open;
+                                cx.notify();
+                            })),
+                    );
+                    if open {
+                        body = body.child(
+                            div()
+                                .text_size(px(11.))
+                                .text_color(rgb(colors::TEXT_SECONDARY))
+                                .child(t.clone()),
+                        );
+                    }
+                }
+                head = head.child(
+                    div()
+                        .text_size(px(10.))
+                        .text_color(rgb(colors::TEXT_TERTIARY))
+                        .child(m.uri.clone()),
+                );
+                div()
+                    .size_full()
+                    .flex()
+                    .flex_col()
+                    .child(head)
+                    .child(body.overflow_y_scrollbar())
+                    .into_any_element()
+            }
+        };
+
+        div()
+            .size_full()
+            .flex()
+            .flex_col()
+            .child(
+                div()
+                    .px_4()
+                    .py_3()
+                    .border_b_1()
+                    .border_color(rgb(colors::BORDER))
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .justify_between()
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap_1()
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_row()
+                                    .items_center()
+                                    .gap_2()
+                                    .child(
+                                        svg()
+                                            .path(IconName::Brain.path())
+                                            .size(px(16.))
+                                            .text_color(rgb(colors::TEXT_SECONDARY)),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_size(px(15.))
+                                            .text_color(rgb(colors::TEXT_PRIMARY))
+                                            .child("记忆"),
+                                    ),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(11.))
+                                    .text_color(rgb(colors::TEXT_TERTIARY))
+                                    .child(self.memories_status.clone()),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .id("mem-reload")
+                            .px_2()
+                            .py_1()
+                            .rounded_md()
+                            .border_1()
+                            .border_color(rgb(colors::BORDER))
+                            .cursor_pointer()
+                            .text_size(px(11.))
+                            .text_color(rgb(colors::TEXT_SECONDARY))
+                            .child("刷新")
+                            .on_click(cx.listener(|this, _, _, cx| this.load_memories(cx))),
+                    ),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    .flex()
+                    .flex_row()
+                    .child(
+                        div()
+                            .w(px(320.))
+                            .h_full()
+                            .flex()
+                            .flex_col()
+                            .border_r_1()
+                            .border_color(rgb(colors::BORDER))
+                            .bg(rgb(colors::BG_SECONDARY))
+                            .child(list.overflow_y_scrollbar()),
+                    )
+                    .child(div().flex_1().min_w_0().h_full().child(detail)),
+            )
+    }
+
+    /// 定时任务页：列表卡片 + 新建表单（间隔预设 / 自定义秒 / 工作区 / 指令）。
+    ///
+    /// 与 Web 版 `ScheduledTasksSection` 同口径：间隔预设按钮组而非下拉
+    /// （GPUI 没有原生 select；按钮行反而更好点），自定义走秒数输入。
+    fn render_scheduled(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let head = div()
+            .px_4()
+            .py_3()
+            .border_b_1()
+            .border_color(rgb(colors::BORDER))
+            .flex()
+            .flex_row()
+            .items_center()
+            .justify_between()
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .gap_2()
+                            .child(
+                                svg()
+                                    .path(IconName::CalendarClock.path())
+                                    .size(px(16.))
+                                    .text_color(rgb(colors::TEXT_SECONDARY)),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(15.))
+                                    .text_color(rgb(colors::TEXT_PRIMARY))
+                                    .child("定时任务"),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(11.))
+                            .text_color(rgb(colors::TEXT_TERTIARY))
+                            .child(
+                                "按执行间隔调用智能体在指定工作区工作；\
+                                 服务停机期间超期的任务重启后补跑一次",
+                            ),
+                    ),
+            )
+            .child(
+                div()
+                    .id("sched-toggle")
+                    .px_2()
+                    .py_1()
+                    .rounded_md()
+                    .border_1()
+                    .border_color(rgb(colors::BORDER))
+                    .cursor_pointer()
+                    .text_size(px(11.))
+                    .text_color(rgb(colors::TEXT_SECONDARY))
+                    .child(if self.sched_form_open {
+                        "取消"
+                    } else {
+                        "＋ 新建定时任务"
+                    })
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.sched_form_open = !this.sched_form_open;
+                        cx.notify();
+                    })),
+            );
+
+        let mut body = div().flex_1().min_h_0().p_4().flex().flex_col().gap_3();
+
+        // 状态行（创建/删除结果；空串不占位）
+        if !self.sched_status.is_empty() {
+            body = body.child(
+                div()
+                    .text_size(px(11.))
+                    .text_color(rgb(colors::TEXT_TERTIARY))
+                    .child(self.sched_status.clone()),
+            );
+        }
+
+        // 新建表单
+        if self.sched_form_open {
+            let mut presets = div().flex().flex_row().items_center().gap_1().flex_wrap();
+            for (secs, label) in SCHED_PRESETS {
+                let is_cur = self.sched_preset == secs;
+                presets = presets.child(
+                    div()
+                        .id(("sched-preset", secs))
+                        .px_2()
+                        .py_1()
+                        .rounded_md()
+                        .border_1()
+                        .border_color(rgb(if is_cur {
+                            colors::ACCENT
+                        } else {
+                            colors::BORDER
+                        }))
+                        .bg(rgb(if is_cur {
+                            colors::BG_TERTIARY
+                        } else {
+                            colors::BG_SECONDARY
+                        }))
+                        .cursor_pointer()
+                        .text_size(px(11.))
+                        .text_color(rgb(if is_cur {
+                            colors::ACCENT
+                        } else {
+                            colors::TEXT_SECONDARY
+                        }))
+                        .child(label)
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.sched_preset = secs;
+                            cx.notify();
+                        })),
+                );
+            }
+            let mut form = div()
+                .p_3()
+                .rounded_lg()
+                .border_1()
+                .border_color(rgb(colors::BORDER))
+                .bg(rgb(colors::BG_SECONDARY))
+                .flex()
+                .flex_col()
+                .gap_2()
+                .child(field_wrap(&self.sched_name))
+                .child(presets);
+            if self.sched_preset == 0 {
+                form = form.child(field_wrap(&self.sched_custom_secs));
+            }
+            form = form
+                .child(field_wrap(&self.sched_workspace))
+                .child(field_wrap_area(&self.sched_prompt))
+                .child(
+                    div()
+                        .id("sched-create")
+                        .px_3()
+                        .py_2()
+                        .rounded_md()
+                        .bg(rgb(colors::ACCENT))
+                        .cursor_pointer()
+                        .text_size(px(11.))
+                        .text_color(rgb(colors::TEXT_PRIMARY))
+                        .child("创建")
+                        .on_click(cx.listener(|this, _, _, cx| this.create_sched_task(cx))),
+                );
+            body = body.child(form);
+        }
+
+        // 列表
+        if self.sched_tasks.is_empty() {
+            body = body.child(
+                div()
+                    .py_8()
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        svg()
+                            .path(IconName::CalendarClock.path())
+                            .size(px(32.))
+                            .text_color(rgb(colors::TEXT_TERTIARY)),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(13.))
+                            .text_color(rgb(colors::TEXT_TERTIARY))
+                            .child(
+                                "暂无定时任务——可让智能体用 schedule_task 工具创建，或在此手动创建",
+                            ),
+                    ),
+            );
+        } else {
+            let mut list = div().flex().flex_col().gap_2().w_full();
+            for (ix, t) in self.sched_tasks.iter().enumerate() {
+                let id = t.id.clone();
+                let mut card = div()
+                    .p_3()
+                    .rounded_lg()
+                    .border_1()
+                    .border_color(rgb(colors::BORDER))
+                    .bg(rgb(colors::BG_SECONDARY))
+                    .flex()
+                    .flex_row()
+                    .items_start()
+                    .gap_2()
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .flex()
+                            .flex_col()
+                            .gap_1()
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_row()
+                                    .items_center()
+                                    .gap_2()
+                                    .child(
+                                        div()
+                                            .text_size(px(13.))
+                                            .text_color(rgb(colors::TEXT_PRIMARY))
+                                            .child(t.name.clone()),
+                                    )
+                                    .child(
+                                        div()
+                                            .px_2()
+                                            .py_1()
+                                            .rounded_md()
+                                            .border_1()
+                                            .border_color(rgb(colors::BORDER))
+                                            .bg(rgb(colors::BG_TERTIARY))
+                                            .text_size(px(10.))
+                                            .text_color(rgb(colors::ACCENT))
+                                            .child(format_interval(t.interval_secs)),
+                                    ),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(11.))
+                                    .text_color(rgb(colors::TEXT_TERTIARY))
+                                    .child(format!(
+                                        "工作区: {}",
+                                        if t.workspace.is_empty() {
+                                            "(默认)"
+                                        } else {
+                                            &t.workspace
+                                        }
+                                    )),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(11.))
+                                    .text_color(rgb(colors::TEXT_SECONDARY))
+                                    .child(ellipsis(&t.prompt, 140)),
+                            )
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_row()
+                                    .items_center()
+                                    .gap_2()
+                                    .text_size(px(10.))
+                                    .text_color(rgb(colors::TEXT_TERTIARY))
+                                    .child(format!(
+                                        "下次(约): {}",
+                                        t.next_run_at
+                                            .map(relative_from_now)
+                                            .unwrap_or_else(|| "待定".to_string())
+                                    ))
+                                    .child(
+                                        t.last_run_at
+                                            .map(|ts| format!("上次: {}", relative_from_now(ts)))
+                                            .unwrap_or_default(),
+                                    ),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .id(("sched-del", ix))
+                            .px_2()
+                            .py_1()
+                            .rounded_md()
+                            .cursor_pointer()
+                            .text_size(px(11.))
+                            .text_color(rgb(colors::TEXT_TERTIARY))
+                            .child("删除")
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.delete_sched_task(id.clone(), cx)
+                            })),
+                    );
+                if let Some(res) = t.last_result.as_ref().filter(|r| !r.is_empty()) {
+                    card = card.child(
+                        div()
+                            .text_size(px(10.))
+                            .text_color(rgb(colors::TEXT_TERTIARY))
+                            .child(format!("结果: {}", ellipsis(res, 120))),
+                    );
+                }
+                list = list.child(card);
+            }
+            body = body.child(list);
+        }
+
+        div()
+            .size_full()
+            .flex()
+            .flex_col()
+            .child(head)
+            .child(body.overflow_y_scrollbar())
+    }
+
+    /// 技能页：顶部采纳统计 + 左列表（搜索）+ 右详情（markdown 正文）。
+    ///
+    /// 与 Web 版 `SkillsPanel` 同口径：技能是方法论文档，只读；不做「运行」按钮
+    /// （执行语义归工具面板与对话里的工具卡）。
+    fn render_skills(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let query = self.skills_query.trim().to_lowercase();
+        let visible: Vec<SkillRow> = self
+            .skills
+            .iter()
+            .filter(|s| {
+                query.is_empty()
+                    || s.name.to_lowercase().contains(&query)
+                    || s.description.to_lowercase().contains(&query)
+            })
+            .cloned()
+            .collect();
+        let selected = self
+            .skills
+            .iter()
+            .find(|s| self.skills_selected.as_deref() == Some(s.id.as_str()))
+            .cloned();
+
+        // 顶部：累计调用 + 采纳排行（方法论技能无「执行成败」语义，只看频率）
+        let mut stats_bar = div()
+            .px_4()
+            .py_3()
+            .border_b_1()
+            .border_color(rgb(colors::BORDER))
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_3()
+            .flex_wrap();
+        if self.skills_total_calls > 0 {
+            stats_bar = stats_bar.child(
+                div()
+                    .text_size(px(12.))
+                    .text_color(rgb(colors::TEXT_SECONDARY))
+                    .child(format!(
+                        "技能累计调用 {} 次",
+                        group_thousands(self.skills_total_calls)
+                    )),
+            );
+            let mut chips = div().flex().flex_row().items_center().gap_1().flex_wrap();
+            for st in self.skill_stats.iter().take(8) {
+                chips = chips.child(
+                    div()
+                        .px_2()
+                        .py_1()
+                        .rounded_md()
+                        .border_1()
+                        .border_color(rgb(colors::BORDER))
+                        .bg(rgb(colors::BG_SECONDARY))
+                        .text_size(px(10.))
+                        .text_color(rgb(colors::TEXT_SECONDARY))
+                        .child(format!("{} {} 次", st.skill_id, st.total_calls)),
+                );
+            }
+            stats_bar = stats_bar.child(chips);
+        } else {
+            stats_bar = stats_bar.child(
+                div()
+                    .text_size(px(12.))
+                    .text_color(rgb(colors::TEXT_TERTIARY))
+                    .child("暂无技能调用统计——智能体调用技能后，这里会展示采纳排行与平均耗时"),
+            );
+        }
+
+        // 左：技能列表
+        let mut list = div().flex_1().min_h_0().p_2().flex().flex_col().gap_1();
+        if visible.is_empty() {
+            list = list.child(
+                div()
+                    .py_8()
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        svg()
+                            .path(IconName::Lightbulb.path())
+                            .size(px(32.))
+                            .text_color(rgb(colors::TEXT_TERTIARY)),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(13.))
+                            .text_color(rgb(colors::TEXT_TERTIARY))
+                            .child(if self.skills.is_empty() {
+                                "暂无学习方法论技能"
+                            } else {
+                                "未找到匹配技能"
+                            }),
+                    ),
+            );
+        }
+        for (ix, skill) in visible.iter().enumerate() {
+            let is_sel = self.skills_selected.as_deref() == Some(skill.id.as_str());
+            let id = skill.id.clone();
+            let stat = self.skill_stats.iter().find(|s| s.skill_id == skill.id);
+            let mut row = div()
+                .id(("skill", ix))
+                .w_full()
+                .px_2()
+                .py_2()
+                .rounded_lg()
+                .bg(rgb(if is_sel {
+                    colors::BG_TERTIARY
+                } else {
+                    colors::BG_SECONDARY
+                }))
+                .cursor_pointer()
+                .flex()
+                .flex_col()
+                .gap_1()
+                .child(
+                    div()
+                        .text_size(px(13.))
+                        .text_color(rgb(if is_sel {
+                            colors::ACCENT
+                        } else {
+                            colors::TEXT_PRIMARY
+                        }))
+                        .child(skill.name.clone()),
+                )
+                .child(
+                    div()
+                        .text_size(px(11.))
+                        .text_color(rgb(colors::TEXT_TERTIARY))
+                        .whitespace_nowrap()
+                        .overflow_hidden()
+                        .child(ellipsis(&skill.description, 52)),
+                );
+            if let Some(st) = stat.filter(|st| st.total_calls > 0) {
+                let mut line = format!(
+                    "调用 {} 次 · 均值 {}ms",
+                    st.total_calls,
+                    st.avg_time_ms.round() as u64
+                );
+                if st.total_calls > st.success_calls {
+                    line.push_str(&format!(
+                        " · 执行异常 {} 次",
+                        st.total_calls - st.success_calls
+                    ));
+                }
+                row = row.child(
+                    div()
+                        .text_size(px(10.))
+                        .text_color(rgb(colors::TEXT_TERTIARY))
+                        .child(line),
+                );
+            }
+            if let Some(t) = &skill.updated_at {
+                row = row.child(
+                    div()
+                        .text_size(px(10.))
+                        .text_color(rgb(colors::TEXT_TERTIARY))
+                        .child(format!("更新于 {}", short_stamp(t))),
+                );
+            }
+            list = list.child(row.on_click(cx.listener(move |this, _, _, cx| {
+                this.skills_selected = Some(id.clone());
+                this.skill_content = None;
+                this.skills_status = "正在加载技能内容…".to_string();
+                this.load_skill_detail(id.clone(), cx);
+                cx.notify();
+            })));
+        }
+
+        // 右：详情
+        let detail = match &selected {
+            None => div()
+                .flex_1()
+                .min_h_0()
+                .flex()
+                .flex_col()
+                .items_center()
+                .justify_center()
+                .gap_2()
+                .child(
+                    svg()
+                        .path(IconName::Lightbulb.path())
+                        .size(px(40.))
+                        .text_color(rgb(colors::TEXT_TERTIARY)),
+                )
+                .child(
+                    div()
+                        .text_size(px(13.))
+                        .text_color(rgb(colors::TEXT_TERTIARY))
+                        .child("选择一个技能查看详情"),
+                )
+                .into_any_element(),
+            Some(skill) => {
+                let content = self.skill_content.clone().unwrap_or_default();
+                let mut chips = div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_2()
+                    .flex_wrap()
+                    .child(
+                        div()
+                            .px_2()
+                            .py_1()
+                            .rounded_md()
+                            .border_1()
+                            .border_color(rgb(colors::BORDER))
+                            .bg(rgb(colors::BG_SECONDARY))
+                            .text_size(px(10.))
+                            .text_color(rgb(colors::TEXT_TERTIARY))
+                            .child(format!("v{}", skill.version)),
+                    );
+                if let Some(t) = &skill.updated_at {
+                    chips = chips.child(
+                        div()
+                            .text_size(px(10.))
+                            .text_color(rgb(colors::TEXT_TERTIARY))
+                            .child(format!("更新于 {}", short_stamp(t))),
+                    );
+                }
+                div()
+                    .size_full()
+                    .flex()
+                    .flex_col()
+                    .child(
+                        div()
+                            .px_4()
+                            .py_3()
+                            .border_b_1()
+                            .border_color(rgb(colors::BORDER))
+                            .flex()
+                            .flex_col()
+                            .gap_1()
+                            .child(
+                                div()
+                                    .text_size(px(15.))
+                                    .text_color(rgb(colors::TEXT_PRIMARY))
+                                    .child(skill.name.clone()),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(12.))
+                                    .text_color(rgb(colors::TEXT_SECONDARY))
+                                    .child(skill.description.clone()),
+                            )
+                            .child(chips),
+                    )
+                    .child(div().flex_1().min_h_0().p_4().child(if content.is_empty() {
+                        div()
+                            .text_size(px(12.))
+                            .text_color(rgb(colors::TEXT_TERTIARY))
+                            .child(
+                                if self.skills_status.starts_with("加载技能详情失败")
+                                    || self.skills_status.starts_with("正在加载")
+                                {
+                                    self.skills_status.clone()
+                                } else {
+                                    "该技能没有可查看的内容".to_string()
+                                },
+                            )
+                            .into_any_element()
+                    } else {
+                        div()
+                            .w_full()
+                            .child(TextView::markdown(
+                                ("skill-md", 0usize),
+                                SharedString::from(content),
+                            ))
+                            .overflow_y_scrollbar()
+                            .into_any_element()
+                    }))
+                    .into_any_element()
+            }
+        };
+
+        div().size_full().flex().flex_col().child(stats_bar).child(
+            div()
+                .flex_1()
+                .min_h_0()
+                .flex()
+                .flex_row()
+                .child(
+                    div()
+                        .w(px(colors::LIST_WIDTH))
+                        .h_full()
+                        .flex()
+                        .flex_col()
+                        .border_r_1()
+                        .border_color(rgb(colors::BORDER))
+                        .bg(rgb(colors::BG_SECONDARY))
+                        .child(
+                            div()
+                                .px_4()
+                                .py_3()
+                                .border_b_1()
+                                .border_color(rgb(colors::BORDER))
+                                .flex()
+                                .flex_col()
+                                .gap_1()
+                                .child(
+                                    div()
+                                        .flex()
+                                        .flex_row()
+                                        .items_center()
+                                        .gap_2()
+                                        .child(
+                                            svg()
+                                                .path(IconName::Lightbulb.path())
+                                                .size(px(16.))
+                                                .text_color(rgb(colors::TEXT_SECONDARY)),
+                                        )
+                                        .child(
+                                            div()
+                                                .text_size(px(15.))
+                                                .text_color(rgb(colors::TEXT_PRIMARY))
+                                                .child("技能"),
+                                        ),
+                                )
+                                .child(
+                                    div()
+                                        .text_size(px(11.))
+                                        .text_color(rgb(colors::TEXT_TERTIARY))
+                                        .child("自动学习方法论（GEPA 总结），只读查看"),
+                                )
+                                .child(
+                                    div()
+                                        .w_full()
+                                        .rounded_md()
+                                        .border_1()
+                                        .border_color(rgb(colors::BORDER))
+                                        .bg(rgb(colors::BG_PRIMARY))
+                                        .px_2()
+                                        .py_1()
+                                        .child(Input::new(&self.skills_search).appearance(false)),
+                                ),
+                        )
+                        .child(list.overflow_y_scrollbar()),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .h_full()
+                        .flex()
+                        .flex_col()
+                        .child(detail),
+                ),
+        )
+    }
+
+    /// 工具页：左列表（搜索 + 名称/描述）+ 右详情（参数 JSON Schema）。
+    ///
+    /// 与 Web 版 `ToolsPanel` 同口径：工具是**原子操作**，与「技能」（方法论）两套概念。
+    /// 参数不做表单（工具是给 LLM 调用的，人只读 schema）。
+    fn render_tools(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let query = self.tools_query.trim().to_lowercase();
+        let visible: Vec<ToolRow> = self
+            .tools
+            .iter()
+            .filter(|t| {
+                query.is_empty()
+                    || t.name.to_lowercase().contains(&query)
+                    || t.description.to_lowercase().contains(&query)
+            })
+            .cloned()
+            .collect();
+        let selected = self
+            .tools
+            .iter()
+            .find(|t| self.tools_selected.as_deref() == Some(t.name.as_str()))
+            .cloned();
+
+        let mut list = div().flex_1().min_h_0().p_2().flex().flex_col().gap_1();
+        if visible.is_empty() {
+            list = list.child(
+                div()
+                    .py_8()
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        svg()
+                            .path(IconName::Wrench.path())
+                            .size(px(32.))
+                            .text_color(rgb(colors::TEXT_TERTIARY)),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(13.))
+                            .text_color(rgb(colors::TEXT_TERTIARY))
+                            .child(if self.tools.is_empty() {
+                                "暂无可用工具"
+                            } else {
+                                "未找到匹配工具"
+                            }),
+                    ),
+            );
+        }
+        for (ix, tool) in visible.iter().enumerate() {
+            let is_sel = self.tools_selected.as_deref() == Some(tool.name.as_str());
+            let name = tool.name.clone();
+            list = list.child(
+                div()
+                    .id(("tool", ix))
+                    .w_full()
+                    .px_2()
+                    .py_2()
+                    .rounded_lg()
+                    .bg(rgb(if is_sel {
+                        colors::BG_TERTIARY
+                    } else {
+                        colors::BG_SECONDARY
+                    }))
+                    .cursor_pointer()
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .child(
+                        div()
+                            .text_size(px(13.))
+                            .text_color(rgb(if is_sel {
+                                colors::ACCENT
+                            } else {
+                                colors::TEXT_PRIMARY
+                            }))
+                            .child(tool.name.clone()),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(11.))
+                            .text_color(rgb(colors::TEXT_TERTIARY))
+                            .whitespace_nowrap()
+                            .overflow_hidden()
+                            .child(ellipsis(&tool.description, 56)),
+                    )
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.tools_selected = Some(name.clone());
+                        cx.notify();
+                    })),
+            );
+        }
+
+        let detail = match &selected {
+            None => div()
+                .flex_1()
+                .min_h_0()
+                .flex()
+                .flex_col()
+                .items_center()
+                .justify_center()
+                .gap_2()
+                .child(
+                    svg()
+                        .path(IconName::Wrench.path())
+                        .size(px(40.))
+                        .text_color(rgb(colors::TEXT_TERTIARY)),
+                )
+                .child(
+                    div()
+                        .text_size(px(13.))
+                        .text_color(rgb(colors::TEXT_TERTIARY))
+                        .child("选择一个工具查看详情"),
+                )
+                .into_any_element(),
+            Some(tool) => {
+                let schema = serde_json::to_string_pretty(&tool.parameters)
+                    .unwrap_or_else(|_| "（参数无法序列化）".to_string());
+                div()
+                    .size_full()
+                    .flex()
+                    .flex_col()
+                    .child(
+                        div()
+                            .px_4()
+                            .py_3()
+                            .border_b_1()
+                            .border_color(rgb(colors::BORDER))
+                            .flex()
+                            .flex_col()
+                            .gap_1()
+                            .child(
+                                div()
+                                    .text_size(px(15.))
+                                    .text_color(rgb(colors::TEXT_PRIMARY))
+                                    .child(tool.name.clone()),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(12.))
+                                    .text_color(rgb(colors::TEXT_SECONDARY))
+                                    .child(tool.description.clone()),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_h_0()
+                            .p_4()
+                            .flex()
+                            .flex_col()
+                            .gap_2()
+                            .child(
+                                div()
+                                    .text_size(px(12.))
+                                    .text_color(rgb(colors::TEXT_SECONDARY))
+                                    .child("参数 Schema"),
+                            )
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_h_0()
+                                    .rounded_md()
+                                    .border_1()
+                                    .border_color(rgb(colors::BORDER))
+                                    .bg(rgb(colors::BG_SECONDARY))
+                                    .p_3()
+                                    .child(
+                                        div()
+                                            .text_size(px(11.))
+                                            .text_color(rgb(colors::TEXT_SECONDARY))
+                                            .child(schema)
+                                            .overflow_y_scrollbar(),
+                                    ),
+                            ),
+                    )
+                    .into_any_element()
+            }
+        };
+
+        div()
+            .size_full()
+            .flex()
+            .flex_row()
+            .child(
+                div()
+                    .w(px(colors::LIST_WIDTH))
+                    .h_full()
+                    .flex()
+                    .flex_col()
+                    .border_r_1()
+                    .border_color(rgb(colors::BORDER))
+                    .bg(rgb(colors::BG_SECONDARY))
+                    .child(
+                        div()
+                            .px_4()
+                            .py_3()
+                            .border_b_1()
+                            .border_color(rgb(colors::BORDER))
+                            .flex()
+                            .flex_col()
+                            .gap_1()
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_row()
+                                    .items_center()
+                                    .gap_2()
+                                    .child(
+                                        svg()
+                                            .path(IconName::Wrench.path())
+                                            .size(px(16.))
+                                            .text_color(rgb(colors::TEXT_SECONDARY)),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_size(px(15.))
+                                            .text_color(rgb(colors::TEXT_PRIMARY))
+                                            .child("工具"),
+                                    ),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(11.))
+                                    .text_color(rgb(colors::TEXT_TERTIARY))
+                                    .child(format!(
+                                        "系统内置原子操作（{} 个），LLM 通过 tool call 调用",
+                                        self.tools.len()
+                                    )),
+                            )
+                            .child(
+                                div()
+                                    .w_full()
+                                    .rounded_md()
+                                    .border_1()
+                                    .border_color(rgb(colors::BORDER))
+                                    .bg(rgb(colors::BG_PRIMARY))
+                                    .px_2()
+                                    .py_1()
+                                    .child(Input::new(&self.tools_search).appearance(false)),
+                            ),
+                    )
+                    .child(list.overflow_y_scrollbar()),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .h_full()
+                    .flex()
+                    .flex_col()
+                    .child(detail),
+            )
     }
 
     fn render_roles(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -6948,7 +10980,13 @@ impl Render for ClientApp {
                 View::Settings => self.render_settings(cx).into_any_element(),
                 View::Roles => self.render_roles(cx).into_any_element(),
                 View::Workspace => self.render_workspace(cx).into_any_element(),
-                other => self.render_placeholder(other, cx).into_any_element(),
+                View::Tools => self.render_tools(cx).into_any_element(),
+                View::Skills => self.render_skills(cx).into_any_element(),
+                View::Scheduled => self.render_scheduled(cx).into_any_element(),
+                View::Memory => self.render_memory(cx).into_any_element(),
+                View::Insights => self.render_insights(cx).into_any_element(),
+                View::Approval => self.render_approval(cx).into_any_element(),
+                View::Knowledge => self.render_knowledge(cx).into_any_element(),
             }))
             .child(if self.dialog.is_some() {
                 self.render_dialog(cx)
