@@ -763,6 +763,31 @@ impl ClientApp {
                 let effort = arg_opt(cmd, "effort").filter(|v| v != "off");
                 self.select_thinking(effort, cx);
             }
+            // 消息区滚到顶部 / 底部：验证「用户气泡」这类靠上内容时必需
+            // （列表默认 `ListAlignment::Bottom`，打开会话即贴底）
+            "scroll_messages" => {
+                match arg_str(cmd, "to")?.as_str() {
+                    "top" => {
+                        // 先退出「贴底跟随」，否则 scroll_to 会被 follow 逻辑拉回底部
+                        self.msg_list_state
+                            .set_follow_mode(gpui_kit::FollowMode::Normal);
+                        self.msg_list_state.scroll_to(gpui_kit::ListOffset {
+                            item_ix: 0,
+                            offset_in_item: gpui_kit::px(0.),
+                        });
+                    }
+                    "end" | "bottom" => {
+                        // 恢复跟随（用户回到对话尾部的正常行为）
+                        self.msg_list_state
+                            .set_follow_mode(gpui_kit::FollowMode::Tail);
+                        self.msg_list_state.scroll_to_end();
+                    }
+                    other => return Err(format!("to 只能是 top / bottom：{other}")),
+                }
+                // ⚠️ 必须触发重绘：`scroll_to` 只改内部状态，不 notify 界面不会动
+                // （此前漏了这一句，导致「滚到顶部」从没生效，验证一直在看底部）
+                cx.notify();
+            }
             // 模型下拉：`open` 显式指定，不带才取反（三个浮层同口径、互斥）
             "model_menu" => {
                 self.model_menu_open = cmd

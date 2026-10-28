@@ -355,6 +355,12 @@ struct Palette {
     text_tertiary: u32,
     border: u32,
     accent: u32,
+    /// 用户消息气泡底色（**独立于 accent**：accent 还要给按钮/链接做前景色，
+    /// 而气泡需要「深底 + 反白字」的成对关系，借用 accent 会让浅色主题下的
+    /// 白字看不见）
+    bubble_bg: u32,
+    /// 用户消息气泡文字色（与 `bubble_bg` 成对，对比度 ≥ 4.5:1）
+    bubble_text: u32,
     success: u32,
     error: u32,
     warning: u32,
@@ -371,6 +377,9 @@ const PALETTE_GRAPHITE: Palette = Palette {
     text_tertiary: 0x75757d,
     border: 0x2f2f35,
     accent: 0x60a5fa,
+    // 蓝 600 + 白字（vite `bg-blue-500 text-white` 同观感）
+    bubble_bg: 0x2563eb,
+    bubble_text: 0xffffff,
     success: 0x22c55e,
     error: 0xf87171,
     warning: 0xeab308,
@@ -387,6 +396,9 @@ const PALETTE_PARCHMENT: Palette = Palette {
     text_tertiary: 0x93856e,
     border: 0xd0c2a2,
     accent: 0x8a5524,
+    // 深棕底 + 米白字（≈6.8:1）。此前是 accent 底 + 主题墨字（≈1.4:1，看不清）
+    bubble_bg: 0x8a5524,
+    bubble_text: 0xfff8ec,
     success: 0x4a7c3f,
     error: 0xa5372a,
     warning: 0x9a6b00,
@@ -403,6 +415,8 @@ const PALETTE_MIDNIGHT: Palette = Palette {
     text_tertiary: 0x71717a,
     border: 0x27272a,
     accent: 0x3b82f6,
+    bubble_bg: 0x2563eb,
+    bubble_text: 0xffffff,
     success: 0x22c55e,
     error: 0xef4444,
     warning: 0xeab308,
@@ -575,6 +589,14 @@ mod colors {
     /// 强调色。
     pub fn ACCENT() -> u32 {
         palette().accent
+    }
+    /// 用户消息气泡底色。
+    pub fn BUBBLE_BG() -> u32 {
+        palette().bubble_bg
+    }
+    /// 用户消息气泡文字色（与 `BUBBLE_BG` 成对）。
+    pub fn BUBBLE_TEXT() -> u32 {
+        palette().bubble_text
     }
     /// 成功。
     pub fn SUCCESS() -> u32 {
@@ -2026,6 +2048,55 @@ fn render_tool_card(
 /// 多个同类增量，逐段渲染会让同一条思考碎成十几个小卡片。
 fn render_msg_body(msg: &MsgRow, mi: usize, expand: &ExpandRef, app: &AppRef) -> AnyElement {
     let is_user = msg.role == "user" && !msg.compression;
+    if is_user {
+        // 用户消息：强调色底 + 反白字，**右对齐**（vite `justify-end` +
+        // `bg-blue-500 text-white rounded-2xl` 同形态）。
+        //
+        // 两个坑，都实测过：
+        // ① 外层必须 `w_full()`——否则这一行按内容收缩，`justify_end()` 无从推挤，
+        //    气泡仍贴在左边；
+        // ② 正文**不能**走 `TextView::markdown`——它内部用组件主题的
+        //    `foreground`（羊皮纸 = 深棕），不继承父级 `text_color`，落在深棕
+        //    气泡上等于看不见。用户消息本就是短句纯文本，直接渲染文字即可。
+        return div()
+            .w_full()
+            .px_4()
+            .py_1()
+            .flex()
+            .flex_row()
+            .justify_end()
+            .child({
+                let mut bubble = div()
+                    .rounded_2xl()
+                    // 右下角小圆角（vite `rounded-br-sm`）：气泡指向发送者
+                    .rounded_br_sm()
+                    .bg(rgb(colors::BUBBLE_BG()))
+                    .text_color(rgb(colors::BUBBLE_TEXT()))
+                    .px_4()
+                    .py_2()
+                    .whitespace_normal()
+                    .child(msg.text.clone());
+                // 宽度：短消息随内容（「你好」那种窄气泡），长消息给 640 上限。
+                //
+                // 实测记录（省得下次再试一圈）：本机 GPUI 下 `max_w` **压不住**
+                // 宽度——`max_w` / `w_full + max_w` / 再加 `min_w_0` 三种写法都会
+                // 撑满整列（900+px）；显式 `w(px(640.))` 在宽窗口下生效，窗口收窄
+                // 时按父宽收缩（用户实测「缩短宽度也能正常显示」）。
+                // 判据用**半角单位估算**（中文 1 字 ≈ 2 半角），60 单位 ≈ 30 汉字：
+                // 阈值定 78 时 `请写一篇 800 字…`（77 单位）差 1 没触发，看着就像
+                // 「改了没效果」——阈值不要卡在临界值上。
+                let est_units: usize = msg
+                    .text
+                    .chars()
+                    .map(|c| if (c as u32) > 0x2E80 { 2 } else { 1 })
+                    .sum();
+                if est_units > 60 {
+                    bubble = bubble.w(px(640.)).min_w_0();
+                }
+                bubble
+            })
+            .into_any_element();
+    }
     let mut body = div().flex().flex_col().gap_2();
     if msg.compression {
         body = body.child(
@@ -2123,27 +2194,7 @@ fn render_msg_body(msg: &MsgRow, mi: usize, expand: &ExpandRef, app: &AppRef) ->
             }
         }
     }
-    if is_user {
-        div()
-            .px_4()
-            .py_1()
-            .flex()
-            .flex_row()
-            .justify_end()
-            .child(
-                div()
-                    .max_w(px(640.))
-                    .rounded_2xl()
-                    .bg(rgb(colors::ACCENT()))
-                    .text_color(rgb(0xffffff))
-                    .px_4()
-                    .py_2()
-                    .child(body),
-            )
-            .into_any_element()
-    } else {
-        div().px_4().py_2().w_full().child(body).into_any_element()
-    }
+    div().px_4().py_2().w_full().child(body).into_any_element()
 }
 /// 消息区里可折叠块的展开状态（思考块 / 工具参数 / 工具结果）。
 ///
