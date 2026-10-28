@@ -1404,6 +1404,12 @@ struct MsgRow {
     compression: bool,
     /// 本轮请求的 token 用量（`GET /messages` 每条都带）：上下文占用按会话恢复的取数点
     usage: Option<MsgUsage>,
+    /// 用户消息携带的图片（data URL）：`data:image/png;base64,...`。
+    /// 渲染时解码成 GPUI `Image`（不落盘——`Image::from_bytes` 直接吃字节）
+    images: Vec<String>,
+    /// 显示用时间（`HH:mm:ss`）。历史消息后端不下发 `timestamp`，只有本轮
+    /// 新产生的 assistant 消息由本地打点（与 vite `startNewAssistantTurn` 同口径）
+    ts: Option<String>,
 }
 
 /// 一条消息携带的 token 用量（`/messages` 的 `usage` 与流式 `usage` 块同形）。
@@ -1432,6 +1438,65 @@ fn parse_msg_usage(msg: &serde_json::Value) -> Option<MsgUsage> {
             .unwrap_or(0),
         cache_read: u.get("cache_read").and_then(|v| v.as_u64()).unwrap_or(0),
     })
+}
+
+/// 消息里的图片 data URL 列表（仅用户消息；空 = 没有图片）。
+fn parse_msg_images(msg: &serde_json::Value) -> Vec<String> {
+    msg.get("images")
+        .and_then(|v| v.as_array())
+        .map(|a| {
+            a.iter()
+                .filter_map(|x| x.as_str())
+                .map(|s| s.to_string())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// 后端 `timestamp`（RFC3339）→ 本地 `HH:mm:ss`；缺失/非法返回 `None`。
+///
+/// 注：历史消息后端**不下发** `timestamp`（`ChatMessage.timestamp` 恒 None），
+/// 所以历史消息不显示时间——与 vite 一致（它只在流式轮次开始时本地打点）。
+fn parse_msg_ts(msg: &serde_json::Value) -> Option<String> {
+    let raw = msg.get("timestamp").and_then(|v| v.as_str())?;
+    let dt = chrono::DateTime::parse_from_rfc3339(raw).ok()?;
+    Some(
+        dt.with_timezone(&chrono::Local)
+            .format("%H:%M:%S")
+            .to_string(),
+    )
+}
+
+/// 当前本地时钟 `HH:mm:ss`（新一轮 assistant 消息打点用）。
+fn now_clock() -> String {
+    chrono::Local::now().format("%H:%M:%S").to_string()
+}
+
+/// 解 data URL（`data:image/png;base64,...`）→ `(格式, 原始字节)`。
+///
+/// GPUI 的 `img()` 不认 data URL，但 `Image::from_bytes` 直接吃编码后的字节
+/// （内部按 `ImageFormat` 解码），所以**不需要落盘**。非法/不支持的格式返回
+/// `None`——图片退化为不渲染，不影响文字与气泡。
+fn decode_data_url(src: &str) -> Option<(gpui_kit::ImageFormat, Vec<u8>)> {
+    use base64::Engine as _;
+    let rest = src.strip_prefix("data:")?;
+    let (meta, payload) = rest.split_once(',')?;
+    if !meta.contains(";base64") {
+        return None;
+    }
+    let mime = meta.split(';').next().unwrap_or_default();
+    let format = match mime {
+        "image/png" => gpui_kit::ImageFormat::Png,
+        "image/jpeg" | "image/jpg" => gpui_kit::ImageFormat::Jpeg,
+        "image/webp" => gpui_kit::ImageFormat::Webp,
+        "image/gif" => gpui_kit::ImageFormat::Gif,
+        "image/bmp" => gpui_kit::ImageFormat::Bmp,
+        _ => return None,
+    };
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(payload)
+        .ok()?;
+    Some((format, bytes))
 }
 
 /// 从消息 JSON 的 segments 里拼接正文（ADR-002：正文单一事实源是 segments，
@@ -2067,6 +2132,10 @@ fn render_msg_body(msg: &MsgRow, mi: usize, expand: &ExpandRef, app: &AppRef) ->
             .justify_end()
             .child({
                 let mut bubble = div()
+                    // 气泡内纵向排：图片 → 正文 → 时间（vite 同序，时间在气泡内末尾）
+                    .flex()
+                    .flex_col()
+                    .gap_2()
                     .rounded_2xl()
                     // 右下角小圆角（vite `rounded-br-sm`）：气泡指向发送者
                     .rounded_br_sm()
@@ -2074,8 +2143,38 @@ fn render_msg_body(msg: &MsgRow, mi: usize, expand: &ExpandRef, app: &AppRef) ->
                     .text_color(rgb(colors::BUBBLE_TEXT()))
                     .px_4()
                     .py_2()
-                    .whitespace_normal()
-                    .child(msg.text.clone());
+                    .whitespace_normal();
+                // 图片（vite：图在文字上方，单张 240px 上限）：data URL 解码成
+                // GPUI `Image` 直接渲染，**不落盘**（`Image::from_bytes` 吃字节）
+                if !msg.images.is_empty() {
+                    let mut imgs = div().flex().flex_row().flex_wrap().gap_2();
+                    for src in &msg.images {
+                        let Some((format, bytes)) = decode_data_url(src) else {
+                            continue;
+                        };
+                        let image = gpui_kit::Image::from_bytes(format, bytes);
+                        imgs = imgs.child(
+                            gpui_kit::img(gpui_kit::ImageSource::Image(std::sync::Arc::new(image)))
+                                .max_w(px(240.))
+                                .max_h(px(240.))
+                                .rounded_lg(),
+                        );
+                    }
+                    bubble = bubble.child(imgs);
+                }
+                bubble = bubble.child(div().child(msg.text.clone()));
+                if let Some(ts) = &msg.ts {
+                    // 气泡内右对齐（靠一层 row + justify_end，GPUI 的 div 没有
+                    // text-align）；白字降透明度，与 vite `text-blue-100 opacity-60` 同观感
+                    bubble = bubble.child(
+                        div()
+                            .w_full()
+                            .flex()
+                            .flex_row()
+                            .justify_end()
+                            .child(div().text_size(px(11.)).opacity(0.7).child(ts.clone())),
+                    );
+                }
                 // 宽度：短消息随内容（「你好」那种窄气泡），长消息给 640 上限。
                 //
                 // 实测记录（省得下次再试一圈）：本机 GPUI 下 `max_w` **压不住**
@@ -2193,6 +2292,16 @@ fn render_msg_body(msg: &MsgRow, mi: usize, expand: &ExpandRef, app: &AppRef) ->
                 }
             }
         }
+    }
+    // assistant 侧时间：正文/工具卡之后，低对比度小字（vite `text-left
+    // text-[var(--color-text-tertiary)]`）
+    if let Some(ts) = &msg.ts {
+        body = body.child(
+            div()
+                .text_size(px(11.))
+                .text_color(rgb(colors::TEXT_TERTIARY()))
+                .child(ts.clone()),
+        );
     }
     div().px_4().py_2().w_full().child(body).into_any_element()
 }
@@ -6041,6 +6150,8 @@ impl ClientApp {
                             tool_calls,
                             compression: false,
                             usage: parse_msg_usage(m),
+                            images: parse_msg_images(m),
+                            ts: parse_msg_ts(m),
                         }
                     })
                     .collect();
@@ -11879,6 +11990,9 @@ impl ClientApp {
             tool_calls: Vec::new(),
             compression: false,
             usage: None,
+            images: Vec::new(),
+            // 用户消息发送即打点（vite 同样在本地取时间；后端 `timestamp` 恒空）
+            ts: Some(now_clock()),
         });
         next.push(MsgRow {
             role: "assistant".to_string(),
@@ -11887,6 +12001,9 @@ impl ClientApp {
             tool_calls: Vec::new(),
             compression: false,
             usage: None,
+            images: Vec::new(),
+            // 与 vite `startNewAssistantTurn` 同口径：本轮 assistant 开始时打点
+            ts: Some(now_clock()),
         });
         if next.len() > RENDER_LIMIT {
             let drop_n = next.len() - RENDER_LIMIT;
@@ -11972,6 +12089,8 @@ impl ClientApp {
                                     .and_then(|v| v.as_bool())
                                     .unwrap_or(false),
                                 usage: parse_msg_usage(m),
+                                images: parse_msg_images(m),
+                                ts: parse_msg_ts(m),
                             }
                         })
                         .collect();

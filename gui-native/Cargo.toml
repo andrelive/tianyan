@@ -29,6 +29,10 @@ tokio = { version = "1.35", features = ["full"] }
 # multipart：知识页导入要传文件（服务端 `ingest_handler` 收 multipart）
 reqwest = { version = "0.12", features = ["json", "stream", "multipart"] }
 serde_json = "1.0"
+# 用户消息图片：data URL 是 base64，要解码成字节交给 GPUI 的 `Image::from_bytes`
+base64 = "0.22"
+# 消息时间（对齐 vite：流式轮次开始时打本地时间 HH:mm:ss）
+chrono = "0.4"
 # 自动化端口（ADR-052）：只在 `TIANYAN_GUI_AUTOMATION_PORT` 存在时监听
 axum = "0.8"
 futures = "0.3"

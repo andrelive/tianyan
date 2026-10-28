@@ -254,7 +254,15 @@ impl ChatMessage {
                 cache_write: m.tokens.cache.write as u32,
             }),
             compression_marker: m.compression_marker,
-            timestamp: None,
+            // 消息时间：核心 `MessageTime.created` 是 epoch 毫秒（落库时写入
+            // `session_messages.ts`）。此前这里恒 `None`，导致**历史消息在任何
+            // 前端都显示不出时间**（前端只有流式轮次本地打点）；补上后
+            // gui-vite / gui-native 的历史消息时间一致可用。
+            timestamp: if m.time.created > 0 {
+                chrono::DateTime::from_timestamp_millis(m.time.created).map(|dt| dt.to_rfc3339())
+            } else {
+                None
+            },
             // 时间线：与历史加载同构（方案 B）——流式边界事件携带服务端
             // 权威 segments，前端 applyServerMessage 以服务端为准
             segments: Self::segments_from_parts(&m.role, &m.parts),
@@ -443,7 +451,13 @@ impl ChatMessage {
                     usage,
                     // 压缩摘要标记：历史加载与压缩响应一致（前端识别摘要消息）
                     compression_marker: m.compression_marker,
-                    timestamp: None,
+                    // 历史加载同样带消息时间（核心 `MessageTime.created`，epoch 毫秒）
+                    timestamp: if m.time.created > 0 {
+                        chrono::DateTime::from_timestamp_millis(m.time.created)
+                            .map(|dt| dt.to_rfc3339())
+                    } else {
+                        None
+                    },
                     // 时间线（方案 B）：parts 顺序 = 真实到达顺序——历史与
                     // 流式共用同一渲染管线（前端 SegmentBlocks）
                     segments: Self::segments_from_parts(&m.role, &m.parts),
