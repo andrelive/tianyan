@@ -1005,6 +1005,13 @@ enum Dialog {
     DeleteRole { name: String },
     /// 知识导入的文件选择弹窗（**GPUI 自绘**，不是 OS 对话框 —— 所以自动化点得到）
     KbFilePicker,
+    /// 回退到某条用户输入之前（`POST /sessions/{id}/messages/delete`，ADR-040 事务）
+    RollbackMessage {
+        session_id: String,
+        message_id: String,
+        /// 该消息开头若干字，确认框里给用户看「回退到哪」
+        preview: String,
+    },
 }
 
 impl Dialog {
@@ -1017,6 +1024,7 @@ impl Dialog {
             Dialog::ResetRole { .. } => "reset_role",
             Dialog::DeleteRole { .. } => "delete_role",
             Dialog::KbFilePicker => "kb_file_picker",
+            Dialog::RollbackMessage { .. } => "rollback_message",
         }
     }
 }
@@ -1393,6 +1401,9 @@ struct ToolCall {
 
 #[derive(Clone, Debug)]
 struct MsgRow {
+    /// 消息 id（服务端稳定键）：回退/删除按它定位。
+    /// 本地刚发出、还没落库的占位消息是空串（此时不提供回退入口）。
+    id: String,
     role: String,
     /// SharedString（Arc 语义）：clone 是 O(1)，避免每帧复制正文
     text: gpui_kit::SharedString,
@@ -1470,6 +1481,31 @@ fn parse_msg_ts(msg: &serde_json::Value) -> Option<String> {
 /// 当前本地时钟 `HH:mm:ss`（新一轮 assistant 消息打点用）。
 fn now_clock() -> String {
     chrono::Local::now().format("%H:%M:%S").to_string()
+}
+
+/// 本地图片文件 → data URL（`data:image/png;base64,...`）。
+///
+/// 后端 `ChatRequest.message.images` 收的就是这个形式（vite 直传 data URL）。
+/// 非图片扩展名 / 读失败 / 超过 8MB 返回 `None`（该张跳过，不阻断整批）。
+fn image_path_to_data_url(path: &std::path::Path) -> Option<String> {
+    use base64::Engine as _;
+    let ext = path.extension()?.to_str()?.to_lowercase();
+    let mime = match ext.as_str() {
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "webp" => "image/webp",
+        "gif" => "image/gif",
+        "bmp" => "image/bmp",
+        _ => return None,
+    };
+    let bytes = std::fs::read(path).ok()?;
+    if bytes.is_empty() || bytes.len() > 8 * 1024 * 1024 {
+        return None;
+    }
+    Some(format!(
+        "data:{mime};base64,{}",
+        base64::engine::general_purpose::STANDARD.encode(bytes)
+    ))
 }
 
 /// 解 data URL（`data:image/png;base64,...`）→ `(格式, 原始字节)`。
@@ -2107,11 +2143,115 @@ fn render_tool_card(
     card.into_any_element()
 }
 
+/// 用户气泡末尾的操作行：复制 / 回退（仅已落库消息）+ 右对齐时间。
+///
+/// 单独成函数是为了**控制 `render_msg_body` 的栈帧大小**——GPUI 的
+/// prepaint/paint 是递归的，每层帧都计入栈；这段内联回去会让单帧翻倍
+/// （实测：内联版在启动首帧就 `has overflowed its stack`）。
+fn render_user_footer(msg: &MsgRow, mi: usize, app: &AppRef, session_id: &str) -> AnyElement {
+    let mut footer = div().w_full().flex().flex_row().items_center().gap_2();
+    let copy_text = msg.text.to_string();
+    footer = footer.child(
+        div()
+            .id(("msg-copy", mi))
+            .px_1()
+            .rounded_md()
+            .cursor_pointer()
+            .opacity(0.65)
+            .child(
+                svg()
+                    .path(IconName::Copy.path())
+                    .size(px(11.))
+                    .text_color(rgb(colors::BUBBLE_TEXT())),
+            )
+            .on_click(move |_, _, cx: &mut App| {
+                cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string(copy_text.clone()));
+            }),
+    );
+    // 回退只对**已落库**的用户消息开放（本地占位没有服务端 id）
+    if !msg.id.is_empty() {
+        let app_for_rb = app.clone();
+        let sid = session_id.to_string();
+        let mid = msg.id.clone();
+        let text = msg.text.to_string();
+        footer = footer.child(
+            div()
+                .id(("msg-rollback", mi))
+                .px_1()
+                .rounded_md()
+                .cursor_pointer()
+                .opacity(0.65)
+                .child(
+                    svg()
+                        .path(IconName::Undo2.path())
+                        .size(px(11.))
+                        .text_color(rgb(colors::BUBBLE_TEXT())),
+                )
+                .on_click(move |_, _, cx| {
+                    if let Some(w) = app_for_rb.lock().ok().and_then(|g| g.clone()) {
+                        let (sid2, mid2, text2) = (sid.clone(), mid.clone(), text.clone());
+                        let _ = w.update(cx, |this: &mut ClientApp, cx| {
+                            this.request_rollback(sid2, mid2, text2, cx);
+                        });
+                    }
+                }),
+        );
+    }
+    footer = footer.child(div().flex_1());
+    if let Some(ts) = &msg.ts {
+        footer = footer.child(div().text_size(px(11.)).opacity(0.7).child(ts.clone()));
+    }
+    footer.into_any_element()
+}
+
+/// assistant 消息末尾的操作行：复制 + 时间（低对比度小字）。
+///
+/// 同 [`render_user_footer`]：拆出来只为压 `render_msg_body` 的栈帧。
+fn render_assistant_footer(msg: &MsgRow, mi: usize) -> AnyElement {
+    let mut footer = div().w_full().flex().flex_row().items_center().gap_2();
+    if !msg.text.trim().is_empty() {
+        let copy_text = msg.text.to_string();
+        footer = footer.child(
+            div()
+                .id(("msg-copy-a", mi))
+                .px_1()
+                .rounded_md()
+                .cursor_pointer()
+                .opacity(0.65)
+                .child(
+                    svg()
+                        .path(IconName::Copy.path())
+                        .size(px(11.))
+                        .text_color(rgb(colors::TEXT_TERTIARY())),
+                )
+                .on_click(move |_, _, cx: &mut App| {
+                    cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string(copy_text.clone()));
+                }),
+        );
+    }
+    footer = footer.child(div().flex_1());
+    if let Some(ts) = &msg.ts {
+        footer = footer.child(
+            div()
+                .text_size(px(11.))
+                .text_color(rgb(colors::TEXT_TERTIARY()))
+                .child(ts.clone()),
+        );
+    }
+    footer.into_any_element()
+}
+
 /// 单条消息的正文（口径对齐 Web 版 `SegmentBlocks`）。
 ///
 /// **相邻同类段合并**（thinking / text 各自连成一块）：模型一次输出常被切成
 /// 多个同类增量，逐段渲染会让同一条思考碎成十几个小卡片。
-fn render_msg_body(msg: &MsgRow, mi: usize, expand: &ExpandRef, app: &AppRef) -> AnyElement {
+fn render_msg_body(
+    msg: &MsgRow,
+    mi: usize,
+    expand: &ExpandRef,
+    app: &AppRef,
+    session_id: &str,
+) -> AnyElement {
     let is_user = msg.role == "user" && !msg.compression;
     if is_user {
         // 用户消息：强调色底 + 反白字，**右对齐**（vite `justify-end` +
@@ -2186,18 +2326,10 @@ fn render_msg_body(msg: &MsgRow, mi: usize, expand: &ExpandRef, app: &AppRef) ->
                 if !body_text.is_empty() {
                     bubble = bubble.child(div().child(body_text));
                 }
-                if let Some(ts) = &msg.ts {
-                    // 气泡内右对齐（靠一层 row + justify_end，GPUI 的 div 没有
-                    // text-align）；白字降透明度，与 vite `text-blue-100 opacity-60` 同观感
-                    bubble = bubble.child(
-                        div()
-                            .w_full()
-                            .flex()
-                            .flex_row()
-                            .justify_end()
-                            .child(div().text_size(px(11.)).opacity(0.7).child(ts.clone())),
-                    );
-                }
+                // 气泡末尾的操作行（复制 / 回退 + 时间）单独成函数：GPUI 递归
+                // prepaint 时每层帧都算进栈，把它内联进本函数会让单帧翻倍
+                // （实测会 `has overflowed its stack`）。
+                bubble = bubble.child(render_user_footer(msg, mi, app, session_id));
                 // 宽度：短消息随内容（「你好」那种窄气泡），长消息给 640 上限。
                 //
                 // 实测记录（省得下次再试一圈）：本机 GPUI 下 `max_w` **压不住**
@@ -2316,16 +2448,7 @@ fn render_msg_body(msg: &MsgRow, mi: usize, expand: &ExpandRef, app: &AppRef) ->
             }
         }
     }
-    // assistant 侧时间：正文/工具卡之后，低对比度小字（vite `text-left
-    // text-[var(--color-text-tertiary)]`）
-    if let Some(ts) = &msg.ts {
-        body = body.child(
-            div()
-                .text_size(px(11.))
-                .text_color(rgb(colors::TEXT_TERTIARY()))
-                .child(ts.clone()),
-        );
-    }
+    body = body.child(render_assistant_footer(msg, mi));
     div().px_4().py_2().w_full().child(body).into_any_element()
 }
 /// 消息区里可折叠块的展开状态（思考块 / 工具参数 / 工具结果）。
@@ -2516,6 +2639,8 @@ struct ClientApp {
     dialog: Option<Dialog>,
     /// 放大查看的用户消息图片（点击图片打开全屏遮罩；None = 未打开）
     zoomed_image: Option<std::sync::Arc<gpui_kit::Image>>,
+    /// 待发送的图片（data URL 列表）：控件行「图片」按钮选入，发送后清空
+    composer_images: Vec<String>,
     /// 新会话待绑定的工作目录（「＋新目录」设置）：随首条消息以
     /// `working_directory` 下发，服务端建会话时固化（目录不存在则不绑定）
     new_session_workspace: Option<String>,
@@ -2790,6 +2915,7 @@ impl ClientApp {
             ws_diff_status: String::new(),
             dialog: None,
             zoomed_image: None,
+            composer_images: Vec::new(),
             new_session_workspace: None,
             dialog_input: None,
             messages,
@@ -3121,6 +3247,124 @@ impl ClientApp {
         .detach();
     }
 
+    /// 选择图片附件（OS 文件对话框）→ 读成 data URL 挂到待发送列表。
+    ///
+    /// 注：OS 模态框不可自动化（ADR-052），自动化验收走 `attach_image` 动作
+    /// 直接给路径（与知识导入「按路径导入」同一口径）。
+    fn pick_composer_images(&mut self, cx: &mut Context<Self>) {
+        let rx = cx.prompt_for_paths(gpui_kit::PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: true,
+            prompt: Some("选择图片".into()),
+        });
+        cx.spawn(async move |this, cx| {
+            let Ok(Ok(Some(paths))) = rx.await else {
+                return;
+            };
+            let urls: Vec<String> = paths
+                .iter()
+                .filter_map(|p| image_path_to_data_url(p))
+                .collect();
+            if urls.is_empty() {
+                return;
+            }
+            let _ = this.update(cx, |this, cx| {
+                this.composer_images.extend(urls);
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// 输入卡片里的附件缩略图条（每张带移除按钮）。
+    ///
+    /// 抽成独立方法只为**压 `render_chat` 的栈帧**（GPUI 递归 prepaint，单帧过大
+    /// 会栈溢出）。
+    fn render_composer_attachments(&self, cx: &mut Context<Self>) -> AnyElement {
+        let mut strip = div().w_full().flex().flex_row().flex_wrap().gap_2();
+        for (i, src) in self.composer_images.iter().enumerate() {
+            let Some((fmt, bytes)) = decode_data_url(src) else {
+                continue;
+            };
+            let arc = std::sync::Arc::new(gpui_kit::Image::from_bytes(fmt, bytes));
+            strip = strip.child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_start()
+                    .gap_1()
+                    .child(
+                        gpui_kit::img(gpui_kit::ImageSource::Image(arc))
+                            .max_w(px(64.))
+                            .max_h(px(64.))
+                            .rounded_md(),
+                    )
+                    .child(
+                        div()
+                            .id(("rm-attach", i))
+                            .px_1()
+                            .rounded_md()
+                            .cursor_pointer()
+                            .child(
+                                svg()
+                                    .path(IconName::X.path())
+                                    .size(px(10.))
+                                    .text_color(rgb(colors::TEXT_TERTIARY())),
+                            )
+                            .on_click(cx.listener(move |this, _, _w, cx| {
+                                if i < this.composer_images.len() {
+                                    this.composer_images.remove(i);
+                                }
+                                cx.notify();
+                            })),
+                    ),
+            );
+        }
+        strip.into_any_element()
+    }
+
+    /// 请求回退到某条用户消息之前：先弹确认框（删除不可恢复）。
+    fn request_rollback(
+        &mut self,
+        session_id: String,
+        message_id: String,
+        text: String,
+        cx: &mut Context<Self>,
+    ) {
+        self.dialog = Some(Dialog::RollbackMessage {
+            session_id,
+            message_id,
+            preview: ellipsis(text.trim(), 16),
+        });
+        cx.notify();
+    }
+
+    /// 确认回退：`POST /sessions/{id}/messages/delete`（删该消息及其后全部；
+    /// ADR-040 事务内含工作区文件回退），成功后重拉消息链与会话统计。
+    fn confirm_rollback(&mut self, session_id: String, message_id: String, cx: &mut Context<Self>) {
+        self.dialog = None;
+        let port = self.port;
+        cx.spawn(async move |this, cx| {
+            let url =
+                format!("http://{SERVER_HOST}:{port}/api/v1/sessions/{session_id}/messages/delete");
+            let res = post_json(url, serde_json::json!({ "message_id": message_id })).await;
+            let _ = this.update(cx, |this, cx| {
+                match res {
+                    Ok(_) => {
+                        this.status = "已回退".to_string();
+                        this.load_messages(session_id.clone(), cx);
+                        this.load_session_usage(cx);
+                        this.load_sessions(cx);
+                    }
+                    Err(e) => this.status = format!("回退失败：{e}"),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
     /// 确认删除会话（`DELETE /sessions/{id}`）。
     ///
     /// 删除的是当前会话时清空主区（消息 / 统计 / 待办 / 目标），回到「选一个会话」空态。
@@ -3206,6 +3450,14 @@ impl ClientApp {
                 "退役删除角色".to_string(),
                 Some(format!("退役并删除角色 {name}（定义与会话一并删除）？")),
                 "删除".to_string(),
+                true,
+            ),
+            Dialog::RollbackMessage { preview, .. } => (
+                "回退到此处".to_string(),
+                Some(format!(
+                    "将删除「{preview}」这条消息及其之后的全部内容（含工作区文件回退），不可恢复。"
+                )),
+                "回退".to_string(),
                 true,
             ),
         };
@@ -3298,6 +3550,11 @@ impl ClientApp {
                                 Some(Dialog::DeleteRole { name }) => {
                                     this.confirm_delete_role(name, cx)
                                 }
+                                Some(Dialog::RollbackMessage {
+                                    session_id,
+                                    message_id,
+                                    ..
+                                }) => this.confirm_rollback(session_id, message_id, cx),
                                 None => {}
                             }),
                         ),
@@ -5233,6 +5490,8 @@ impl ClientApp {
         self.ctx_window_live = 0;
         self.ctx_panel_open = false;
         self.ctx_compress = None;
+        // 待发送附件是按会话的临时草稿：切走即丢弃（避免误发到别的会话）
+        self.composer_images.clear();
         self.messages = Rc::new(Vec::new());
         self.msg_list_state = GpuiListState::new(0, ListAlignment::Bottom, px(120.));
         self.message_total = 0;
@@ -6166,6 +6425,11 @@ impl ClientApp {
                     .map(|m| {
                         let (segs, tool_calls) = parse_segments(m);
                         MsgRow {
+                            id: m
+                                .get("id")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or_default()
+                                .to_string(),
                             role: m
                                 .get("role")
                                 .and_then(|v| v.as_str())
@@ -11998,6 +12262,8 @@ impl ClientApp {
         if self.streaming {
             return;
         }
+        // 待发送图片随本条消息一起走（发送即清空草稿）
+        let pending_images = std::mem::take(&mut self.composer_images);
         // 新会话：id 必须在发起前确定（事件按 session_id 路由）
         let session_id = match self.current_session.clone() {
             Some(sid) => sid,
@@ -12016,9 +12282,12 @@ impl ClientApp {
             tool_calls: Vec::new(),
             compression: false,
             usage: None,
-            images: Vec::new(),
+            // 本地占位直接带图：发送后立刻能看到自己贴的图（历史重载后仍可见）
+            images: pending_images.clone(),
             // 用户消息发送即打点（vite 同样在本地取时间；后端 `timestamp` 恒空）
             ts: Some(now_clock()),
+            // 本地占位：尚未落库，无服务端 id（回退入口据此隐藏）
+            id: String::new(),
         });
         next.push(MsgRow {
             role: "assistant".to_string(),
@@ -12030,6 +12299,7 @@ impl ClientApp {
             images: Vec::new(),
             // 与 vite `startNewAssistantTurn` 同口径：本轮 assistant 开始时打点
             ts: Some(now_clock()),
+            id: String::new(),
         });
         if next.len() > RENDER_LIMIT {
             let drop_n = next.len() - RENDER_LIMIT;
@@ -12043,9 +12313,14 @@ impl ClientApp {
         self.status = format!("生成中… · {session_id}");
 
         let port = self.port;
+        // 图片走 `message.images`（data URL 数组；后端 `CoreMessage::user_with_images`）
+        let mut message = serde_json::json!({ "role": "user", "content": text });
+        if !pending_images.is_empty() {
+            message["images"] = serde_json::json!(pending_images);
+        }
         let mut body = serde_json::json!({
             "session_id": session_id,
-            "message": { "role": "user", "content": text },
+            "message": message,
             "stream": true,
             "temperature": 0.7,
             "max_tokens": 2048
@@ -12117,6 +12392,11 @@ impl ClientApp {
                                 usage: parse_msg_usage(m),
                                 images: parse_msg_images(m),
                                 ts: parse_msg_ts(m),
+                                id: m
+                                    .get("id")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or_default()
+                                    .to_string(),
                             }
                         })
                         .collect();
@@ -12640,6 +12920,11 @@ impl ClientApp {
                                                 let items = self.messages.clone();
                                                 let expand = self.expand.clone();
                                                 let app = self.app_ref.clone();
+                                                // 回退需要会话 id（消息操作按钮用）
+                                                let sid = self
+                                                    .current_session
+                                                    .clone()
+                                                    .unwrap_or_default();
                                                 gpui_list(
                                                     self.msg_list_state.clone(),
                                                     move |ix, _window, _cx| {
@@ -12648,7 +12933,7 @@ impl ClientApp {
                                                         };
                                                         // 段渲染口径见 `render_msg_body`（思考块 / 工具卡可折叠，
                                                         // 结果按 `tool_calls` 的 id 关联）
-                                                        render_msg_body(m, ix, &expand, &app)
+                                                        render_msg_body(m, ix, &expand, &app, &sid)
                                                     },
                                                 )
                                                 .size_full()
@@ -12716,6 +13001,12 @@ impl ClientApp {
                                                     .h(px(64.))
                                                     .appearance(false),
                                             )
+                                            // 待发送图片缩略图（单独成函数：压 render_chat 栈帧）
+                                            .children(if self.composer_images.is_empty() {
+                                                None
+                                            } else {
+                                                Some(self.render_composer_attachments(cx))
+                                            })
                                             .child(
                                                 div()
                                                     .relative()
@@ -12731,6 +13022,28 @@ impl ClientApp {
                                                             .items_center()
                                                             .gap_1()
                                                             // 控件顺序对齐 vite `ChatInput`：模型 → 思考 → 上下文环 → 发送
+                                                            // 附件（图片）：OS 选择器 → data URL 挂到待发送列表
+                                                            .child(
+                                                                div()
+                                                                    .id("attach-image")
+                                                                    .px_1()
+                                                                    .py_1()
+                                                                    .rounded_lg()
+                                                                    .cursor_pointer()
+                                                                    .child(
+                                                                        svg()
+                                                                            .path(IconName::ImagePlus.path())
+                                                                            .size(px(14.))
+                                                                            .text_color(rgb(
+                                                                                colors::TEXT_SECONDARY(),
+                                                                            )),
+                                                                    )
+                                                                    .on_click(cx.listener(
+                                                                        |this, _, _window, cx| {
+                                                                            this.pick_composer_images(cx)
+                                                                        },
+                                                                    )),
+                                                            )
                                                             .child(
                                                                 // 模型选择：浮层挂在自己身上（`relative` 定位 +
                                                                 // `deferred` 延迟绘制）——这样它出现在**按钮正上方**，

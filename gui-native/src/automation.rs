@@ -580,6 +580,8 @@ impl ClientApp {
                 "ctx_compressing": self.ctx_compressing,
                 // 图片放大遮罩是否打开（点击用户消息图片）
                 "zoomed_image": self.zoomed_image.is_some(),
+                // 待发送附件数（图片）
+                "composer_images": self.composer_images.len(),
                 "ctx_compress": self.ctx_compress.as_ref().map(|(ok, m)| serde_json::json!({
                     "ok": ok, "message": m,
                 })),
@@ -794,6 +796,17 @@ impl ClientApp {
                 cx.notify();
             }
             // 模型下拉：`open` 显式指定，不带才取反（三个浮层同口径、互斥）
+            // 附加图片附件（OS 文件对话框不可自动化，这里直接给路径）
+            "attach_image" => {
+                let path = arg_str(cmd, "path")?;
+                match crate::image_path_to_data_url(std::path::Path::new(&path)) {
+                    Some(url) => {
+                        self.composer_images.push(url);
+                        cx.notify();
+                    }
+                    None => return Err(format!("不是受支持的图片或读取失败：{path}")),
+                }
+            }
             // 图片放大（对齐 vite `ZoomableImage`）：不带 `open` 时取反；
             // 打开时取当前消息里**最近一条含图消息的第一张**（验证用）
             "zoom_image" => {
