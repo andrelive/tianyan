@@ -632,6 +632,37 @@ fn field_wrap_area(input: &Entity<TextareaState>) -> gpui_kit::AnyElement {
         .into_any_element()
 }
 
+/// 把选中的路径展开成待上传文件列表（目录递归；上限 200 个——防手滑导入整盘）。
+///
+/// 两个入口共用：路径输入（单路径）与系统文件选择器（多选，可含目录）。
+fn collect_ingest_files(paths: &[std::path::PathBuf]) -> Vec<std::path::PathBuf> {
+    const MAX_FILES: usize = 200;
+    let mut files: Vec<std::path::PathBuf> = Vec::new();
+    let mut stack: Vec<std::path::PathBuf> = paths.iter().filter(|p| p.exists()).cloned().collect();
+    while let Some(p) = stack.pop() {
+        if p.is_file() {
+            files.push(p);
+        } else if p.is_dir() {
+            let Ok(entries) = std::fs::read_dir(&p) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                let child = entry.path();
+                if child.is_dir() {
+                    stack.push(child);
+                } else {
+                    files.push(child);
+                }
+            }
+        }
+        if files.len() >= MAX_FILES {
+            break;
+        }
+    }
+    files.truncate(MAX_FILES);
+    files
+}
+
 /// 记忆详情里的一段（L0 摘要 / L1 概览 / L2 全文）。
 fn memory_block(label: &'static str, text: String) -> gpui_kit::AnyElement {
     div()
@@ -870,8 +901,10 @@ struct SchedTaskRow {
     workspace: String,
     prompt: String,
     enabled: bool,
-    last_run_at: Option<i64>,
-    next_run_at: Option<i64>,
+    /// 上次执行时间（RFC3339；统一口径——历史上这里是 epoch 秒）
+    last_run_at: Option<String>,
+    /// 下次预计执行时间（RFC3339）
+    next_run_at: Option<String>,
     last_result: Option<String>,
 }
 
@@ -3241,42 +3274,28 @@ impl ClientApp {
         self.kb_ingest_direct(raw, category, cx);
     }
 
-    /// 真正执行导入（UI 表单与自动化 `kb_ingest` **共用这一份**）。
+    /// 路径输入入口：单一路径 → 交给 [`ClientApp::kb_ingest_paths`]。
+    ///
+    /// 自动化 `kb_ingest` 与手输路径共用这一条；文件选择器直接走 `kb_ingest_paths`。
     fn kb_ingest_direct(&mut self, raw: String, category: String, cx: &mut Context<Self>) {
         if raw.is_empty() {
-            self.kb_status = "请填写要导入的文件或目录路径".to_string();
+            self.kb_status = "请选择文件/目录，或填写绝对路径".to_string();
             cx.notify();
             return;
         }
-        let root = std::path::PathBuf::from(&raw);
-        let mut files: Vec<std::path::PathBuf> = Vec::new();
-        if root.is_file() {
-            files.push(root);
-        } else if root.is_dir() {
-            let mut stack = vec![root];
-            'walk: while let Some(dir) = stack.pop() {
-                let Ok(entries) = std::fs::read_dir(&dir) else {
-                    continue;
-                };
-                for entry in entries.flatten() {
-                    let p = entry.path();
-                    if p.is_dir() {
-                        stack.push(p);
-                    } else {
-                        files.push(p);
-                        if files.len() >= 200 {
-                            break 'walk;
-                        }
-                    }
-                }
-            }
-        } else {
-            self.kb_status = format!("路径不存在：{raw}");
-            cx.notify();
-            return;
-        }
+        self.kb_ingest_paths(vec![std::path::PathBuf::from(&raw)], category, cx);
+    }
+
+    /// 按路径列表导入（**路径输入与文件选择器共用这一份**）。
+    fn kb_ingest_paths(
+        &mut self,
+        paths: Vec<std::path::PathBuf>,
+        category: String,
+        cx: &mut Context<Self>,
+    ) {
+        let files = collect_ingest_files(&paths);
         if files.is_empty() {
-            self.kb_status = "该目录下没有可导入的文件".to_string();
+            self.kb_status = "选中的路径里没有可导入的文件".to_string();
             cx.notify();
             return;
         }
@@ -3765,8 +3784,15 @@ impl ClientApp {
                                     .unwrap_or_default()
                                     .to_string(),
                                 enabled: t.get("enabled").and_then(|v| v.as_bool()).unwrap_or(true),
-                                last_run_at: t.get("last_run_at").and_then(|v| v.as_i64()),
-                                next_run_at: t.get("next_run_at").and_then(|v| v.as_i64()),
+                                // RFC3339 字符串（磁盘上的旧 epoch 数字由后端兼容读入）
+                                last_run_at: t
+                                    .get("last_run_at")
+                                    .and_then(|v| v.as_str())
+                                    .map(|s| s.to_string()),
+                                next_run_at: t
+                                    .get("next_run_at")
+                                    .and_then(|v| v.as_str())
+                                    .map(|s| s.to_string()),
                                 last_result: t
                                     .get("last_result")
                                     .and_then(|v| v.as_str())
@@ -6975,24 +7001,72 @@ impl ClientApp {
                             .text_size(px(11.))
                             .text_color(rgb(colors::TEXT_TERTIARY))
                             .child(
-                                "填本地文件或目录的绝对路径；目录会递归导入（上限 200 个文件）。\
-                                 导入是异步任务，L0/L1 摘要生成前浏览里可能还看不到。",
+                                "「浏览文件…」可多选文件与目录；也可在下方填绝对路径走批量导入。\
+                                 目录会递归收集（上限 200 个文件）。导入是异步任务，L0/L1 摘要\
+                                 生成前浏览里可能还看不到。",
                             ),
                     )
                     .child(field_wrap(&self.kb_ingest_path))
                     .child(field_wrap(&self.kb_ingest_category))
                     .child(
                         div()
-                            .id("kb-ingest")
-                            .px_3()
-                            .py_2()
-                            .rounded_md()
-                            .bg(rgb(colors::ACCENT))
-                            .cursor_pointer()
-                            .text_size(px(11.))
-                            .text_color(rgb(colors::TEXT_PRIMARY))
-                            .child("开始导入")
-                            .on_click(cx.listener(|this, _, _, cx| this.ingest_kb(cx))),
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .gap_2()
+                            .child(
+                                div()
+                                    .id("kb-pick")
+                                    .px_3()
+                                    .py_2()
+                                    .rounded_md()
+                                    .border_1()
+                                    .border_color(rgb(colors::ACCENT))
+                                    .bg(rgb(colors::BG_TERTIARY))
+                                    .cursor_pointer()
+                                    .text_size(px(11.))
+                                    .text_color(rgb(colors::ACCENT))
+                                    .child("浏览文件…")
+                                    .on_click(cx.listener(|_this, _, _window, cx| {
+                                        // 原生文件/目录选择器：选完**直接导入**。
+                                        // 不回填输入框是因为 `InputState` 没有 `set_value`
+                                        // （它要 `&mut Window`，而这里是异步回调上下文）。
+                                        let rx = cx.prompt_for_paths(PathPromptOptions {
+                                            files: true,
+                                            directories: true,
+                                            multiple: true,
+                                            prompt: Some("选择要导入知识库的文件或目录".into()),
+                                        });
+                                        cx.spawn(async move |this, cx| {
+                                            let Ok(Ok(Some(paths))) = rx.await else {
+                                                return;
+                                            };
+                                            if paths.is_empty() {
+                                                return;
+                                            }
+                                            let _ = this.update(cx, |this, cx| {
+                                                this.kb_status =
+                                                    format!("已选 {} 项，开始导入…", paths.len());
+                                                this.kb_ingest_paths(paths, String::new(), cx);
+                                                cx.notify();
+                                            });
+                                        })
+                                        .detach();
+                                    })),
+                            )
+                            .child(
+                                div()
+                                    .id("kb-ingest")
+                                    .px_3()
+                                    .py_2()
+                                    .rounded_md()
+                                    .bg(rgb(colors::ACCENT))
+                                    .cursor_pointer()
+                                    .text_size(px(11.))
+                                    .text_color(rgb(colors::TEXT_PRIMARY))
+                                    .child("按路径导入")
+                                    .on_click(cx.listener(|this, _, _, cx| this.ingest_kb(cx))),
+                            ),
                     ),
             )
             .child(results)
@@ -8428,11 +8502,15 @@ impl ClientApp {
                                     .child(format!(
                                         "下次(约): {}",
                                         t.next_run_at
+                                            .as_deref()
+                                            .and_then(parse_rfc3339_secs)
                                             .map(relative_from_now)
                                             .unwrap_or_else(|| "待定".to_string())
                                     ))
                                     .child(
                                         t.last_run_at
+                                            .as_deref()
+                                            .and_then(parse_rfc3339_secs)
                                             .map(|ts| format!("上次: {}", relative_from_now(ts)))
                                             .unwrap_or_default(),
                                     ),

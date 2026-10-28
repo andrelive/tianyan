@@ -705,9 +705,10 @@ export interface ScheduledAgentTask {
   workspace: string;
   prompt: string;
   enabled: boolean;
-  created_at: number;
-  last_run_at: number | null;
-  next_run_at: number | null;
+  /** RFC3339（统一口径：与 sessions / skills / memory 一致，不再是 epoch 秒）。 */
+  created_at: string;
+  last_run_at: string | null;
+  next_run_at: string | null;
   last_result: string | null;
 }
 

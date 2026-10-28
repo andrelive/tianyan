@@ -8,30 +8,33 @@ use axum::{
     Json,
 };
 
-use crate::scheduled_tasks::types::{CreateScheduledTaskRequest, ScheduledAgentTask};
+use crate::scheduled_tasks::types::{CreateScheduledTaskRequest, ScheduledTaskResponse};
 use crate::state::AppState;
 
 /// 列出全部定时任务（无装配时返回空数组）。
-pub async fn list_tasks(State(state): State<Arc<AppState>>) -> Json<Vec<ScheduledAgentTask>> {
+///
+/// 返回 [`ScheduledTaskResponse`]：时间字段对外统一 RFC3339（落盘仍是 epoch 秒，
+/// 见该类型的文档）。
+pub async fn list_tasks(State(state): State<Arc<AppState>>) -> Json<Vec<ScheduledTaskResponse>> {
     let tasks = match state.scheduled_agent_tasks().await {
         Some(m) => m.list().await,
         None => Vec::new(),
     };
-    Json(tasks)
+    Json(tasks.iter().map(ScheduledTaskResponse::from).collect())
 }
 
 /// 创建定时任务（未装配 agent 时返回 503）。
 pub async fn create_task(
     State(state): State<Arc<AppState>>,
     Json(req): Json<CreateScheduledTaskRequest>,
-) -> Result<Json<ScheduledAgentTask>, (StatusCode, String)> {
+) -> Result<Json<ScheduledTaskResponse>, (StatusCode, String)> {
     let m = state.scheduled_agent_tasks().await.ok_or_else(|| {
         (
             StatusCode::SERVICE_UNAVAILABLE,
             "定时任务未装配".to_string(),
         )
     })?;
-    Ok(Json(m.create(&req).await))
+    Ok(Json(ScheduledTaskResponse::from(&m.create(&req).await)))
 }
 
 /// 删除定时任务。

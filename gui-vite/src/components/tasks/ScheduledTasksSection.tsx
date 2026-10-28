@@ -7,7 +7,7 @@ import {
   deleteScheduledTask,
   type ScheduledAgentTask,
 } from '@/lib/api-client';
-import { formatTimestamp, formatInterval } from '@/lib/utils';
+import { formatDateTime, formatInterval } from '@/lib/utils';
 import { CalendarClock, Loader2, Plus, Trash2, X } from 'lucide-react';
 
 /** 间隔预设（ADR-024 间隔制；自定义走秒数输入）。 */
@@ -190,8 +190,8 @@ export default function ScheduledTasksSection() {
                     {t.prompt}
                   </p>
                   <div className="flex items-center gap-2 mt-1 text-[10px] text-[var(--color-text-tertiary)]">
-                    <span>下次(约): {t.next_run_at ? formatTimestamp(t.next_run_at) : '待定'}</span>
-                    {t.last_run_at !== null && <span>上次: {formatTimestamp(t.last_run_at)}</span>}
+                    <span>下次(约): {t.next_run_at ? formatDateTime(t.next_run_at) : '待定'}</span>
+                    {t.last_run_at !== null && <span>上次: {formatDateTime(t.last_run_at)}</span>}
                   </div>
                   {t.last_result && (
                     <p className="text-xs text-[var(--color-text-tertiary)] mt-1 break-words line-clamp-2">

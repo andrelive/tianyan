@@ -109,7 +109,11 @@ impl DynamicToolExecutor for ScheduleTaskTool {
             "id": task.id,
             "name": task.name,
             "cron": task.cron,
-            "next_run_at": task.next_run_at,
+            // 与 REST API 同口径：对外一律 RFC3339（内部仍按 epoch 秒记账）
+            "next_run_at": task
+                .next_run_at
+                .and_then(|secs| chrono::DateTime::<chrono::Utc>::from_timestamp(secs, 0))
+                .map(|d| d.to_rfc3339()),
         }))
     }
 }

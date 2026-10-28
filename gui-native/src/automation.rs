@@ -411,6 +411,20 @@ impl ClientApp {
                     "id": &t.id, "name": &t.name, "interval_secs": t.interval_secs,
                     "workspace": &t.workspace, "prompt": &t.prompt, "enabled": t.enabled,
                     "last_run_at": t.last_run_at, "next_run_at": t.next_run_at,
+                    // 页面实际显示的那行字（与渲染同一函数生成）：把「时间戳 → 相对时间」
+                    // 整条链也纳入可断言范围，否则只能靠看图确认
+                    "last_run_display": t
+                        .last_run_at
+                        .as_deref()
+                        .and_then(crate::parse_rfc3339_secs)
+                        .map(|ts| format!("上次: {}", crate::relative_from_now(ts)))
+                        .unwrap_or_default(),
+                    "next_run_display": t
+                        .next_run_at
+                        .as_deref()
+                        .and_then(crate::parse_rfc3339_secs)
+                        .map(crate::relative_from_now)
+                        .unwrap_or_else(|| "待定".to_string()),
                     "last_result": &t.last_result,
                 })).collect::<Vec<_>>(),
             },
