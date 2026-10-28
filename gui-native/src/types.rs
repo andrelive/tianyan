@@ -230,12 +230,19 @@ pub(crate) struct ModelRow {
     pub(crate) name: String,
     /// 能力标签（kebab-case，逗号拼接；`chat` / `vision` / `text-embedding` …）
     pub(crate) capabilities: String,
+    /// 能力标签原样（判定「能不能设为嵌入/视觉」要看它，字符串包含判定会误判
+    /// ——`text-embedding` 也含 `embedding`，`multimodal-embedding` 同理）
+    pub(crate) caps: Vec<String>,
     pub(crate) context: Option<u64>,
     /// 该模型自己声明的思考强度档位（`/config/models` 的 `reasoning_efforts`）。
     /// 空 = 不支持思考 → 输入区的「思考」选择器整体隐藏（对齐 vite `ThinkingSelect`）
     pub(crate) reasoning_efforts: Vec<String>,
     /// 是否为当前 chat 首选模型（`preferences.chat` 命中）
     pub(crate) is_chat: bool,
+    /// 是否为当前嵌入首选模型（`preferences.embedding` 命中）
+    pub(crate) is_embedding: bool,
+    /// 是否为当前视觉首选模型（`preferences.vision` 命中）
+    pub(crate) is_vision: bool,
 }
 
 /// 定时任务的间隔预设（秒；`0` = 自定义）。对齐 Web 版 `INTERVAL_PRESETS`。

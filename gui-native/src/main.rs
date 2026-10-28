@@ -361,6 +361,9 @@ struct ClientApp {
     pub(crate) settings_msg: String,
     /// 设置页字段引擎：上面那条是否为错误。
     pub(crate) settings_msg_err: bool,
+    /// 设置页字段引擎：配置是否已经回填进编辑器（编辑器初始为空，未回填时保存会
+    /// 把所有文本字段当成「被清空」——所以回填必须可靠触发，见 `backfill_settings_fields`）
+    pub(crate) settings_backfilled: bool,
     // ── 设置页「人设」 ──
     /// 人设正文编辑器（`PUT /config/soul` 的内容源）
     pub(crate) soul_editor: Entity<TextareaState>,
@@ -408,6 +411,34 @@ struct ClientApp {
     pub(crate) health_info: Option<HealthInfo>,
     /// 探活状态行（失败文案）
     pub(crate) health_msg: String,
+    // ── 设置页「模型服务」 ──
+    /// 提供商/模型增删改的状态行（本栏目独立于整页 `settings_status`）
+    pub(crate) models_msg: String,
+    /// 上面那条是否为错误
+    pub(crate) models_msg_err: bool,
+    /// 新增模型表单是否展开
+    pub(crate) model_form_open: bool,
+    /// 新增模型表单：目标提供商（点选）
+    pub(crate) model_form_provider: Option<String>,
+    /// 新增模型表单：模型名
+    pub(crate) model_form_name: Entity<InputState>,
+    /// 新增模型表单：能力标签（kebab-case，可多选）
+    pub(crate) model_form_caps: Vec<&'static str>,
+    /// 新增提供商表单是否展开
+    pub(crate) prov_form_open: bool,
+    /// 新增提供商表单：名称
+    pub(crate) prov_form_name: Entity<InputState>,
+    /// 新增提供商表单：端点（可留空走预置）
+    pub(crate) prov_form_endpoint: Entity<InputState>,
+    /// 新增提供商表单：密钥
+    pub(crate) prov_form_key: Entity<InputState>,
+    /// 新增提供商表单：首个模型名（后端校验要求提供商至少有一个模型，
+    /// 所以「新增提供商」必须一次带一个模型，否则 PUT 会被 422 拒绝）
+    pub(crate) prov_form_model: Entity<InputState>,
+    /// 新增提供商表单：首个模型的能力标签
+    pub(crate) prov_form_caps: Vec<&'static str>,
+    /// 待确认删除的项：`(kind, provider, model)`；`kind` = `provider` / `model`
+    pub(crate) delete_confirm: Option<(String, String, String)>,
     /// 本窗口句柄。
     ///
     /// 自动化端口在 `Context` 里执行动作时**没有 `&mut Window`**，而往输入框插文本

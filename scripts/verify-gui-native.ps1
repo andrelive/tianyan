@@ -309,7 +309,99 @@ if ($mcpCount -gt 0) {
     Write-Host "  （本机未配置 MCP 服务器：跳过启停/测试断言）" -ForegroundColor DarkGray
 }
 
-# ── 8. 数据存储 + 连接/关于 ─────────────────────────────────────────────
+# ── 8. 模型服务（偏好切换 / 增删） ─────────────────────────────────────
+Write-Host "`n[模型服务]" -ForegroundColor Cyan
+$r = Act @{ action = "settings_tab"; tab = "models" } 1500
+$s = StateOf $r
+$models = @($s.models_page.models)
+Check "模型列表非空" ($models.Count -gt 0) "（实际 $($models.Count)）"
+Check "模型带能力标签原值" ($null -ne $models[0].caps)
+Check "模型带三种偏好标记" ($null -ne $models[0].is_embedding -and $null -ne $models[0].is_vision)
+
+# 8a. 偏好切换：找两个都具备 vision 的模型，互相切再切回
+$visionModels = @($models | Where-Object { $_.caps -contains "vision" })
+if ($visionModels.Count -ge 2) {
+    $orig = $visionModels | Where-Object { $_.is_vision } | Select-Object -First 1
+    $target = $visionModels | Where-Object { -not $_.is_vision } | Select-Object -First 1
+    if ($orig -and $target) {
+        Act @{ action = "pref_set"; provider = $target.provider; model = $target.name; kind = "vision" } 1800 | Out-Null
+        $null = Wait-Until {
+            $p = (Invoke-RestMethod -Uri "$serverBase/api/v1/config" -TimeoutSec 10).config.models.preferences.vision
+            ($p.model -eq $target.name) -and ($p.provider -eq $target.provider)
+        }
+        $pref = (Invoke-RestMethod -Uri "$serverBase/api/v1/config" -TimeoutSec 10).config.models.preferences.vision
+        Check "视觉偏好切换已落库" (($pref.model -eq $target.name) -and ($pref.provider -eq $target.provider)) "（实际 $($pref.provider)/$($pref.model)）"
+        Act @{ action = "pref_set"; provider = $orig.provider; model = $orig.name; kind = "vision" } 1800 | Out-Null
+        $null = Wait-Until {
+            $p = (Invoke-RestMethod -Uri "$serverBase/api/v1/config" -TimeoutSec 10).config.models.preferences.vision
+            $p.model -eq $orig.name
+        }
+        $pref2 = (Invoke-RestMethod -Uri "$serverBase/api/v1/config" -TimeoutSec 10).config.models.preferences.vision
+        Check "视觉偏好已恢复" ($pref2.model -eq $orig.name) "（实际 $($pref2.model)）"
+    }
+} else {
+    Write-Host "  （本机 vision 模型不足 2 个：跳过偏好切换断言）" -ForegroundColor DarkGray
+}
+
+# 8b. 增删模型（净零）：加一个探针模型再删掉
+$probeModel = "zzz-acceptance-probe"
+$anyProvider = @($s.models_page.providers) | Select-Object -First 1
+if ($anyProvider) {
+    Act @{ action = "model_form"; open = $true } 300 | Out-Null
+    Act @{ action = "model_form_set"; field = "provider"; value = $anyProvider.name } 200 | Out-Null
+    Act @{ action = "model_form_set"; field = "name"; value = $probeModel } 200 | Out-Null
+    Act @{ action = "model_form_set"; field = "cap"; value = "chat" } 200 | Out-Null
+    Act @{ action = "model_add" } 1800 | Out-Null
+    $null = Wait-Until {
+        $c = (Invoke-RestMethod -Uri "$serverBase/api/v1/config" -TimeoutSec 10).config
+        $null -ne (@($c.models.providers | ForEach-Object { $_.models }) | ForEach-Object { $_ } | Where-Object { $_.name -eq $probeModel })
+    }
+    $cfg8 = (Invoke-RestMethod -Uri "$serverBase/api/v1/config" -TimeoutSec 10).config
+    $added = @($cfg8.models.providers | ForEach-Object { $_.models } | Where-Object { $_.name -eq $probeModel })
+    Check "添加模型已落库" ($added.Count -ge 1)
+    Act @{ action = "model_remove"; provider = $anyProvider.name; model = $probeModel } 1800 | Out-Null
+    $null = Wait-Until {
+        $c = (Invoke-RestMethod -Uri "$serverBase/api/v1/config" -TimeoutSec 10).config
+        -not (@($c.models.providers | ForEach-Object { $_.models } | Where-Object { $_.name -eq $probeModel }).Count -ge 1)
+    }
+    $cfg9 = (Invoke-RestMethod -Uri "$serverBase/api/v1/config" -TimeoutSec 10).config
+    $left = @($cfg9.models.providers | ForEach-Object { $_.models } | Where-Object { $_.name -eq $probeModel })
+    Check "探针模型已删除（净零）" ($left.Count -eq 0) "（残留 $($left.Count)）"
+} else {
+    Write-Host "  （没有任何提供商：跳过模型增删断言）" -ForegroundColor DarkGray
+}
+
+Act @{ action = "prov_form"; open = $true } 300 | Out-Null
+$s = Get-State
+Check "新增提供商表单可展开" ($s.models_page.prov_form_open -eq $true)
+
+# 8c. 增删提供商（净零）：后端校验要求「至少一个模型」，所以一次带一个模型
+$probeProv = "zzz-provider-probe"
+Act @{ action = "prov_form_set"; field = "name"; value = $probeProv } 200 | Out-Null
+Act @{ action = "prov_form_set"; field = "endpoint"; value = "http://127.0.0.1:1/v1" } 200 | Out-Null
+Act @{ action = "prov_form_set"; field = "model"; value = "probe-model" } 200 | Out-Null
+Act @{ action = "prov_form_set"; field = "cap"; value = "chat" } 200 | Out-Null
+Act @{ action = "prov_add" } 2200 | Out-Null
+$null = Wait-Until {
+    $c = (Invoke-RestMethod -Uri "$serverBase/api/v1/config" -TimeoutSec 10).config
+    @($c.models.providers | Where-Object { $_.name -eq $probeProv }).Count -ge 1
+}
+$cfg10 = (Invoke-RestMethod -Uri "$serverBase/api/v1/config" -TimeoutSec 10).config
+$probe = @($cfg10.models.providers | Where-Object { $_.name -eq $probeProv })
+Check "添加提供商已落库（含首个模型）" ($probe.Count -eq 1) "（实际 $($probe.Count)）"
+if ($probe.Count -eq 1) {
+    Check "提供商带上了首个模型" (@($probe[0].models).Count -ge 1)
+}
+Act @{ action = "prov_remove"; name = $probeProv } 2200 | Out-Null
+$null = Wait-Until {
+    $c = (Invoke-RestMethod -Uri "$serverBase/api/v1/config" -TimeoutSec 10).config
+    -not (@($c.models.providers | Where-Object { $_.name -eq $probeProv }).Count -ge 1)
+}
+$cfg11 = (Invoke-RestMethod -Uri "$serverBase/api/v1/config" -TimeoutSec 10).config
+$probeLeft = @($cfg11.models.providers | Where-Object { $_.name -eq $probeProv })
+Check "探针提供商已删除（净零）" ($probeLeft.Count -eq 0) "（残留 $($probeLeft.Count)）"
+
+# ── 9. 数据存储 + 连接/关于 ─────────────────────────────────────────────
 Write-Host "`n[数据存储 / 连接]" -ForegroundColor Cyan
 $r = Act @{ action = "settings_tab"; tab = "storage" } 600
 $s = StateOf $r

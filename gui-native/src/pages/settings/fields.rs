@@ -845,6 +845,7 @@ impl ClientApp {
                 editor.update(cx, |state, cx| state.set_value(text, window, cx));
             }
         });
+        self.settings_backfilled = true;
         cx.notify();
     }
 

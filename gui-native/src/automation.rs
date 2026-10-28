@@ -37,6 +37,8 @@ use axum::{
     Json, Router,
 };
 use gpui_kit::{App, AsyncApp, WeakEntity};
+use gpui_kit::component::input::InputState;
+use gpui_kit::Entity;
 use tokio::sync::{mpsc, oneshot};
 
 use crate::{
@@ -695,10 +697,27 @@ impl ClientApp {
                     "provider": &m.provider, "name": &m.name,
                     "capabilities": &m.capabilities, "context": m.context,
                     "is_chat": m.is_chat,
+                    "is_embedding": m.is_embedding,
+                    "is_vision": m.is_vision,
+                    "caps": &m.caps,
                 })).collect::<Vec<_>>(),
                 "providers": self.providers.iter().map(|p| serde_json::json!({
                     "name": &p.name, "endpoint": &p.endpoint,
+                    "model_count": p.model_count,
                 })).collect::<Vec<_>>(),
+                // 模型服务的增删改状态（与整页 `settings_status` 分开）
+                "msg": &self.models_msg,
+                "msg_err": self.models_msg_err,
+                "model_form": {
+                    "open": self.model_form_open,
+                    "provider": &self.model_form_provider,
+                    "name": self.model_form_name.read(cx).value().to_string(),
+                    "caps": &self.model_form_caps,
+                },
+                "prov_form_open": self.prov_form_open,
+                "delete_confirm": self.delete_confirm.as_ref().map(|(k, p, m)| serde_json::json!({
+                    "kind": k, "provider": p, "model": m,
+                })),
             },
             "usage": {
                 // 上下文环口径：分子 = 最近一轮请求的 `prompt_tokens`（不是
@@ -767,6 +786,23 @@ impl ClientApp {
             Ok(()) => serde_json::json!({ "ok": true, "action": action }),
             Err(e) => serde_json::json!({ "ok": false, "action": action, "error": e }),
         }
+    }
+
+    /// 往单行输入框写值（自动化动作共用；写值要 `&mut Window`，经窗口句柄现取）。
+    fn set_input_text(
+        &mut self,
+        entity: Entity<InputState>,
+        text: String,
+        cx: &mut gpui_kit::Context<Self>,
+    ) -> Result<(), String> {
+        let handle = self.window_handle;
+        handle
+            .update(cx, move |_, window, cx| {
+                entity.update(cx, |state, cx| state.set_value(text, window, cx));
+            })
+            .map_err(|e| format!("窗口已关闭：{e}"))?;
+        cx.notify();
+        Ok(())
     }
 
     /// 动作分派。每个分支只调既有方法，不新造逻辑。
@@ -1124,8 +1160,13 @@ impl ClientApp {
                     )
                 })?;
                 self.settings_tab = tab;
-                if tab.config_key().is_some() && self.raw_config.is_none() {
-                    self.load_config_summary(cx);
+                // 与界面点击同一条懒加载 + 回填路径
+                if tab.config_key().is_some() {
+                    if self.raw_config.is_none() {
+                        self.load_config_summary(cx);
+                    } else if !self.settings_backfilled {
+                        self.backfill_settings_fields(cx);
+                    }
                 }
                 // 与界面点击同一套懒加载（自动化路径不得分叉）
                 match tab {
@@ -1138,6 +1179,109 @@ impl ClientApp {
                 cx.notify();
             }
             // ---- 设置页字段引擎（写操作与界面共用同一条保存管线）----
+            // ---- 设置页「模型服务」（偏好切换 / 增删）----
+            "pref_set" => {
+                let provider = arg_str(cmd, "provider")?;
+                let model = arg_str(cmd, "model")?;
+                let kind = arg_str(cmd, "kind")?;
+                self.set_model_preference(provider, model, &kind, cx);
+            }
+            "reload_models" => self.load_models(cx),
+            "model_form" => {
+                self.model_form_open = cmd
+                    .get("open")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(!self.model_form_open);
+                if self.model_form_provider.is_none() {
+                    self.model_form_provider = self.providers.first().map(|p| p.name.clone());
+                }
+                cx.notify();
+            }
+            "model_form_set" => {
+                let field = arg_str(cmd, "field")?;
+                let value = arg_str(cmd, "value")?;
+                match field.as_str() {
+                    "name" => {
+                        let entity = self.model_form_name.clone();
+                        self.set_input_text(entity, value, cx)?;
+                    }
+                    "provider" => {
+                        self.model_form_provider = Some(value);
+                        cx.notify();
+                    }
+                    "cap" => {
+                        let key = crate::pages::settings::models::CAPS
+                            .iter()
+                            .find(|(k, _)| *k == value.as_str())
+                            .map(|(k, _)| *k)
+                            .ok_or_else(|| {
+                                format!(
+                                    "未知能力：{value}（可选 chat / vision / text-embedding / multimodal-embedding）"
+                                )
+                            })?;
+                        if let Some(pos) = self.model_form_caps.iter().position(|c| *c == key) {
+                            self.model_form_caps.remove(pos);
+                        } else {
+                            self.model_form_caps.push(key);
+                        }
+                        cx.notify();
+                    }
+                    other => {
+                        return Err(format!("field 只能是 name / provider / cap：{other}"))
+                    }
+                }
+            }
+            "model_add" => self.add_model_to_provider(cx),
+            "model_remove" => {
+                let provider = arg_str(cmd, "provider")?;
+                let model = arg_str(cmd, "model")?;
+                self.remove_model(provider, model, cx);
+            }
+            "prov_form" => {
+                self.prov_form_open = cmd
+                    .get("open")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(!self.prov_form_open);
+                cx.notify();
+            }
+            "prov_form_set" => {
+                let field = arg_str(cmd, "field")?;
+                let value = arg_str(cmd, "value")?;
+                match field.as_str() {
+                    "name" | "endpoint" | "key" | "model" => {
+                        let entity = match field.as_str() {
+                            "name" => self.prov_form_name.clone(),
+                            "endpoint" => self.prov_form_endpoint.clone(),
+                            "key" => self.prov_form_key.clone(),
+                            _ => self.prov_form_model.clone(),
+                        };
+                        self.set_input_text(entity, value, cx)?;
+                    }
+                    "cap" => {
+                        let key = crate::pages::settings::models::CAPS
+                            .iter()
+                            .find(|(k, _)| *k == value.as_str())
+                            .map(|(k, _)| *k)
+                            .ok_or_else(|| format!("未知能力：{value}"))?;
+                        if let Some(pos) = self.prov_form_caps.iter().position(|c| *c == key) {
+                            self.prov_form_caps.remove(pos);
+                        } else {
+                            self.prov_form_caps.push(key);
+                        }
+                        cx.notify();
+                    }
+                    other => {
+                        return Err(format!(
+                            "field 只能是 name / endpoint / key / model / cap：{other}"
+                        ))
+                    }
+                }
+            }
+            "prov_add" => self.add_provider(cx),
+            "prov_remove" => {
+                let name = arg_str(cmd, "name")?;
+                self.remove_provider(name, cx);
+            }
             "settings_save" => self.save_settings_fields(cx),
             "settings_discard" => {
                 // 与界面「放弃」按钮同一条路径

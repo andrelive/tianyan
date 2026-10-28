@@ -96,6 +96,8 @@ GPUI 侧分档：
 | 14 | **`flex_1` 只在 flex 父容器里生效** | 设置页某栏目的根用 `flex_1().min_h_0()` 想撑满，但父容器只是普通 `div` → 高度退化成内容高度：人设编辑器被压成一行、长栏目**滚不动**（内容被裁切） | 父容器同时给 `.flex().flex_col()`；子栏目的根再给 `.flex_1().min_h_0()`。判据：`flex_1` 的父元素 `display` 必须是 flex |
 | 15 | **PowerShell 5.1 会把 JSON 里的中文写坏**（本次事故：把人设写坏两次） | ① `Invoke-RestMethod -Body`（字符串）按 ANSI 处理非 ASCII → 服务端 400 `invalid unicode code point`；② 更隐蔽：**响应头没有 `charset` 时按 ISO-8859-1 解码**，读到的中文本身已是乱码，再写回就把数据彻底写坏 | 脚本必须跑在 `pwsh`（7+，默认 UTF-8），并在文件头写 `#requires -Version 7`；发送中文一定「落 UTF-8 无 BOM 文件 → `-InFile`」，不要塞 `-Body`。已被写坏时可用 `latin1.GetBytes → UTF8.GetString` 反向解（每次解掉一层） |
 | 16 | **`render_to_image` 取的是「最近一次绘制的帧」** | 窗口被遮挡 → GPUI 跳过重绘 → 截到旧帧（连切 3 个栏目 sha256 全同）；`show=false` 创建的窗口 → 1×1 | 截图前提前台（`tray::show_main_window()`，`screenshot` 动作内已调）；**视觉核对用可见窗口跑，断言用隐藏窗口跑** |
+| 17 | **后端校验要求「提供商至少有一个模型」** | 只加 provider（`models: []`）→ `PUT /config` 被 422 拒绝（`提供商 'x' 至少需要一个模型`），UI 上表现为「点了没反应」 | 新增提供商表单必须**一次带首个模型名 + 能力标签**（`core/src/config/model.rs::validate`） |
+| 18 | **`flex_1` 撑满 + 编辑器回填不能依赖 `render`** | ①栏目根用 `flex_1` 但父容器不是 flex → 高度塌陷；②「置标志、由 render 消费回填」在隐藏窗口下永不执行 → 编辑器全空，一保存就把所有文本字段写成空值（报一片「不能为空」） | ①父容器 `.flex().flex_col()`；②回填统一走 `window_handle.update` 现取 `&mut Window`，并用 `settings_backfilled` 标志保证「有配置就补回填」 |
 
 ## API 备忘（实测签名，省一次翻源码）
 

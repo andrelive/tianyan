@@ -259,6 +259,7 @@ impl ClientApp {
             settings_dirty: std::collections::HashMap::new(),
             settings_msg: String::new(),
             settings_msg_err: false,
+            settings_backfilled: false,
             soul_editor: cx
                 .new(|cx| TextareaState::new(window, cx).placeholder("智能体核心人设（Markdown）")),
             soul_default: String::new(),
@@ -289,6 +290,24 @@ impl ClientApp {
             usage_msg: String::new(),
             health_info: None,
             health_msg: String::new(),
+            models_msg: String::new(),
+            models_msg_err: false,
+            model_form_open: false,
+            model_form_provider: None,
+            model_form_name: cx
+                .new(|cx| InputState::new(window, cx).placeholder("模型名（与上游一致，如 gpt-4o）")),
+            model_form_caps: Vec::new(),
+            prov_form_open: false,
+            prov_form_name: cx
+                .new(|cx| InputState::new(window, cx).placeholder("提供商名称（如 openai / ollama）")),
+            prov_form_endpoint: cx.new(|cx| {
+                InputState::new(window, cx).placeholder("端点（可留空：命中预置时自动补齐）")
+            }),
+            prov_form_key: cx.new(|cx| InputState::new(window, cx).placeholder("密钥（可选）")),
+            prov_form_model: cx
+                .new(|cx| InputState::new(window, cx).placeholder("首个模型名（必填，如 gpt-4o）")),
+            prov_form_caps: Vec::new(),
+            delete_confirm: None,
             window_handle: window.window_handle(),
             last_screenshot: None,
         };
