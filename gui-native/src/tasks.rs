@@ -404,7 +404,7 @@ impl ClientApp {
                                 .and_then(|v| v.as_str())
                                 .unwrap_or("?")
                                 .to_string(),
-                            text: segments_text(m).into(),
+                            text: segments_body_text(m).into(),
                             segs,
                             tool_calls,
                             compression: false,

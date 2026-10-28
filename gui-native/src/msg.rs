@@ -116,9 +116,17 @@ pub(crate) fn decode_data_url(src: &str) -> Option<(gpui_kit::ImageFormat, Vec<u
     Some((format, bytes))
 }
 
-/// 从消息 JSON 的 segments 里拼接正文（ADR-002：正文单一事实源是 segments，
-/// 不是 content——后者只在请求方向携带）
-pub(crate) fn segments_text(msg: &serde_json::Value) -> String {
+/// 只拼 `text` 段（**不含**思考与工具）——`MsgRow.text` 的取值口径。
+///
+/// 历史教训（务必别改回去）：这里曾经是「把 segments 全拍平成一段可读文本」，
+/// 思考段渲染成 Markdown 引用块 `> 🧠 思考：…`。当思考块末尾紧接正文时，
+/// CommonMark 的 **lazy continuation** 会把正文第一段并进引用块——实测症状是
+/// 「思考块里吞掉了回复的第一段」，正文直到第一个空行才出现；同时 `「**」`
+/// 这类行内标记也被当引用块内的懒续行处理，加粗渲染随之错位。
+///
+/// 根因不是「拼接顺序」，而是**用一个纯文本字段承载了分块信息**。所以：
+/// `MsgRow.text` 只放正文（宽度估算 / 纯文本回退用），分块真相源是 `MsgRow.segs`。
+pub(crate) fn segments_body_text(msg: &serde_json::Value) -> String {
     let Some(arr) = msg.get("segments").and_then(|v| v.as_array()) else {
         return msg
             .get("content")
@@ -128,37 +136,32 @@ pub(crate) fn segments_text(msg: &serde_json::Value) -> String {
     };
     let mut out = String::new();
     for seg in arr {
-        let ty = seg.get("type").and_then(|v| v.as_str()).unwrap_or_default();
-        match ty {
-            "text" => {
-                if let Some(t) = seg.get("text").and_then(|v| v.as_str()) {
-                    out.push_str(t);
-                    out.push('\n');
-                }
-            }
-            "thinking" | "reasoning" => {
-                if let Some(t) = seg.get("text").and_then(|v| v.as_str()) {
-                    if !t.is_empty() {
-                        out.push_str("> 🧠 思考：");
-                        out.push_str(&t.replace('\n', "\n> "));
-                        out.push('\n');
-                    }
-                }
-            }
-            "tool" => {
-                // 真实结构：{ type: "tool", tool_call: { name, arguments, .. } }
-                let tc = seg.get("tool_call");
-                let name = tc
-                    .and_then(|v| v.get("name"))
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("unknown");
-                out.push_str(&format!("`🔧 {name}`\n"));
-            }
-            _ => {}
+        if seg.get("type").and_then(|v| v.as_str()) != Some("text") {
+            continue;
         }
+        let Some(t) = seg.get("text").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        if t.is_empty() {
+            continue;
+        }
+        // 相邻 text 段之间补一个换行（后端本会把连续正文并成一段，这里只是兜底）
+        if !out.is_empty() && !out.ends_with('\n') {
+            out.push('\n');
+        }
+        out.push_str(t);
     }
+    // 一个 text 段都没有（只有思考、只有工具调用，或老数据只写了顶层 thinking）：
+    // 回退到 `content`。**这个兜底不能省**——修复前是「拼全部段」，那种消息至少
+    // 还有思考文本可显示；只拼 text 段会让它的 `MsgRow.text` 变成空串，而
+    // `render_msg_body` 在 `segs` 为空时正是靠 `text` 兜底渲染的（实测表现：
+    // 消息整条空白，smoke 里「最后一条消息有正文」直接红）。
     if out.trim().is_empty() {
-        out.push_str("(空消息)");
+        return msg
+            .get("content")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string();
     }
     out
 }
@@ -166,7 +169,8 @@ pub(crate) fn segments_text(msg: &serde_json::Value) -> String {
 /// 把消息 JSON 的 `segments` 解析成展示块。
 ///
 /// ADR-002：正文的单一事实源是 `segments`（不是 `content`——后者只用于请求方向）。
-/// 与 [`segments_text`] 的区别：那个把思考/工具都拼成一段文字（早期纯文本渲染用），
+/// 与 [`segments_body_text`] 的区别：那个只取正文段拼成一段纯文本（`MsgRow.text`
+/// 的取值口径，给宽度估算与纯文本回退用），
 /// 这个保留块类型，交给渲染层分别画成 Markdown / 灰字思考 / 工具卡片。
 /// 解析消息的时间线段与工具调用（含结果）。
 ///
@@ -253,6 +257,22 @@ pub(crate) fn parse_segments(msg: &serde_json::Value) -> (Vec<Seg>, Vec<ToolCall
             });
         }
     }
+
+    // 顶层 `thinking` 回退（vite `MessageBubble` 同口径：用 `message.thinking`）。
+    //
+    // 后端消息既有顶层 `thinking` 字段、也有 `segments[type=thinking]`；但**早期
+    // 消息只写了顶层 `thinking`**（`segments` 为空/空串）。只认 `segments` 的话，
+    // 这些历史会话的思考块会凭空消失，而 Web 版正常显示——同一个会话在两个客户端
+    // 里看起来不一样。放最前：思考总在正文之前。
+    let has_thinking_seg = segs.iter().any(|s| matches!(s, Seg::Thinking(_)));
+    if !has_thinking_seg {
+        if let Some(t) = msg.get("thinking").and_then(|v| v.as_str()) {
+            if !t.trim().is_empty() {
+                segs.insert(0, Seg::Thinking(t.to_string()));
+            }
+        }
+    }
+
     (segs, tools)
 }
 
@@ -901,7 +921,7 @@ pub(crate) fn render_msg_body(
                     }
                     bubble = bubble.child(imgs);
                 }
-                // 正文：`trim_end()` 去掉 `segments_text` 拼接时补的尾部换行——
+                // 正文：`trim_end()` 去掉 `segments_body_text` 拼接时补的尾部换行——
                 // 否则气泡内文字与时间之间会凭空多一个空行（用户截图指出的那条）
                 let body_text = msg.text.trim_end().to_string();
                 if !body_text.is_empty() {

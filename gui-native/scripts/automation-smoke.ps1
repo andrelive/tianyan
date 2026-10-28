@@ -94,7 +94,9 @@ if ($last) {
     "  最后一条：role={0}  chars={1}  segs={2}  tool_calls={3}" -f `
         $last.role, $last.chars, $last.segs, $last.tool_calls
     "  正文头：{0}" -f (($last.head -replace "`r?`n", " / ") | ForEach-Object { if ($_.Length -gt 90) { $_.Substring(0, 90) + "…" } else { $_ } })
-    Check ($last.chars -gt 0) "最后一条消息有正文（以前只能靠看图确认）"
+    # `text` 只装正文：纯思考 / 纯工具调用的消息 chars 本就是 0（不是空白消息），
+    # 所以判据是「有正文 或 有分段」。
+    Check ($last.chars -gt 0 -or $last.segs -gt 0) "最后一条消息有内容（正文或分段）"
     Check ($last.segs -ge 0) "结构化分段已解析（segs=$($last.segs)）"
 }
 

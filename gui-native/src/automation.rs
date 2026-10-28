@@ -40,7 +40,7 @@ use gpui_kit::{App, AsyncApp, WeakEntity};
 use tokio::sync::{mpsc, oneshot};
 
 use crate::{
-    decode_data_url, tokens_per_sec, ClientApp, Dialog, FilePickPurpose, PickerTarget,
+    decode_data_url, tokens_per_sec, ClientApp, Dialog, FilePickPurpose, PickerTarget, Seg,
     SessionListRow, View, SERVER_HOST,
 };
 
@@ -251,13 +251,51 @@ impl ClientApp {
         // 最后一条消息的正文头：「消息内容到底显示出来没有」不必看图即可断言。
         let last_msg = self.messages.last().map(|m| {
             let text: &str = m.text.as_ref();
+            // 观测口径：`text` 只装**正文**（`segments_body_text`），所以「纯思考」或
+            // 「纯工具调用」的消息它的 chars 为 0 —— 那是正确语义，不是空白消息。
+            // 但自动化只看 chars 会把这些消息误判成没渲染出来（实测一条只有思考段的
+            // 消息让 smoke 的「最后一条消息有正文」变红）。`head` 因此回退到首个分段，
+            // 反映「这条消息有东西可显示」。
+            let head = if !text.trim().is_empty() {
+                text.chars().take(160).collect::<String>()
+            } else {
+                m.segs
+                    .first()
+                    .map(|s| match s {
+                        Seg::Thinking(t) => format!("[思考] {t}"),
+                        Seg::Text(t) => t.clone(),
+                        Seg::Tool { name, .. } => format!("[工具] {name}"),
+                    })
+                    .map(|s| s.chars().take(160).collect::<String>())
+                    .unwrap_or_default()
+            };
             serde_json::json!({
                 "role": &m.role,
                 "chars": text.chars().count(),
-                "head": text.chars().take(160).collect::<String>(),
+                "head": head,
                 "segs": m.segs.len(),
                 "tool_calls": m.tool_calls.len(),
                 "compression": m.compression,
+                // 分段明细：断言「思考段与正文段是否分离」只能看这里。
+                // 截图不行——长消息里思考块滚出视野，靠像素根本定位不到；
+                // 而 `text` 字段是拍平后的正文，看不出分块边界。
+                "segments": m.segs.iter().map(|s| match s {
+                    Seg::Thinking(t) => serde_json::json!({
+                        "type": "thinking",
+                        "chars": t.chars().count(),
+                        "head": t.chars().take(60).collect::<String>(),
+                        "tail": t.chars().rev().take(40).collect::<String>()
+                            .chars().rev().collect::<String>(),
+                    }),
+                    Seg::Text(t) => serde_json::json!({
+                        "type": "text",
+                        "chars": t.chars().count(),
+                        "head": t.chars().take(60).collect::<String>(),
+                    }),
+                    Seg::Tool { name, .. } => serde_json::json!({
+                        "type": "tool", "name": name,
+                    }),
+                }).collect::<Vec<_>>(),
             })
         });
 

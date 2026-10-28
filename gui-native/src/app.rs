@@ -499,8 +499,19 @@ impl ClientApp {
                     }
                 }
             }
-            // 思考增量暂不并入正文（会污染 Markdown 结构），待独立渲染区
-            "thought" => {}
+            // 思考增量：取 **`thinking` 字段**（不是 `delta`）——vite
+            // `chat-slice.appendThinking` 同口径：思考与正文分两个字段下发、分开渲染。
+            //
+            // 这行曾经是 `"thought" => {}`（注释「待独立渲染区」），于是流式期间
+            // 完全看不到思考过程，只能在流结束后靠 `text` 里的 Markdown 引用块近似
+            // ——那条路会踩 lazy continuation（见 `segments_body_text` 的注释）。
+            "thought" => {
+                let delta = ev
+                    .get("thinking")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default();
+                self.append_thinking_delta(delta);
+            }
             "tool_call" => {
                 let name = ev
                     .get("tool_call")
@@ -524,8 +535,7 @@ impl ClientApp {
             "message" => {
                 if let Some(msg) = ev.get("message") {
                     if msg.get("role").and_then(|v| v.as_str()) == Some("assistant") {
-                        let full = segments_text(msg);
-                        self.replace_last(&full);
+                        self.apply_authoritative_message(msg);
                     }
                 }
             }
@@ -556,7 +566,13 @@ impl ClientApp {
         cx.notify();
     }
 
-    /// 往最后一条 assistant 消息追加增量（虚拟列表 count 不变，只重测末项）
+    /// 往最后一条 assistant 消息追加**正文**增量。
+    ///
+    /// 两份表示必须同步更新，否则渲染会漏内容：
+    /// - `text`：纯正文（宽度估算 / 纯文本回退用）；
+    /// - `segs` 末尾的 `Seg::Text`：**渲染真相源**——只更新 `text` 的话，
+    ///   一旦 `segs` 里已经有思考段（`thought` 增量建的），渲染就走 segs 分支，
+    ///   正文根本不显示。
     pub(crate) fn append_delta(&mut self, delta: &str) {
         if delta.is_empty() {
             return;
@@ -569,21 +585,64 @@ impl ClientApp {
         }
         let mut next: Vec<MsgRow> = (*self.messages).clone();
         let idx = next.len() - 1;
-        let merged = format!("{}{}", next[idx].text, delta);
-        next[idx].text = merged.into();
+        next[idx].text = format!("{}{}", next[idx].text, delta).into();
+        push_seg_delta(&mut next[idx].segs, delta, false);
         self.messages = Rc::new(next);
         self.msg_list_state.remeasure_items(idx..idx + 1);
         self.msg_list_state.scroll_to_end();
     }
 
-    /// 用权威全文替换最后一条 assistant 消息
-    pub(crate) fn replace_last(&mut self, full: &str) {
-        if self.messages.last().map(|m| m.role.as_str()) != Some("assistant") {
+    /// 往最后一条 assistant 消息追加**思考**增量（实时渲染可折叠思考块）。
+    ///
+    /// 思考**不进** `text`：那是正文口径（宽度估算按正文算，思考不该撑宽气泡）。
+    pub(crate) fn append_thinking_delta(&mut self, delta: &str) {
+        if delta.is_empty() {
+            return;
+        }
+        let Some(last) = self.messages.last() else {
+            return;
+        };
+        if last.role != "assistant" {
             return;
         }
         let mut next: Vec<MsgRow> = (*self.messages).clone();
         let idx = next.len() - 1;
-        next[idx].text = full.to_string().into();
+        push_seg_delta(&mut next[idx].segs, delta, true);
+        self.messages = Rc::new(next);
+        self.msg_list_state.remeasure_items(idx..idx + 1);
+        self.msg_list_state.scroll_to_end();
+    }
+
+    /// 用流末尾的**权威消息**替换占位（ADR-002：正文真相源是 `segments`）。
+    ///
+    /// 必须同时换掉 `segs` / `tool_calls` / `id` / `usage`——早期只换 `text`，
+    /// 于是渲染继续走「纯文本兜底」路径：思考与正文的分块信息全丢，思考块只能
+    /// 靠 Markdown 引用块近似，而引用块会把紧随其后的正文第一段并进去
+    /// （lazy continuation）。顺带把 `id` 补上，否则流式结束后的消息仍然没有
+    /// 回退入口（占位消息的 id 是空串）。
+    pub(crate) fn apply_authoritative_message(&mut self, msg: &serde_json::Value) {
+        if self.messages.last().map(|m| m.role.as_str()) != Some("assistant") {
+            return;
+        }
+        let (segs, tool_calls) = parse_segments(msg);
+        let mut next: Vec<MsgRow> = (*self.messages).clone();
+        let idx = next.len() - 1;
+        next[idx].text = segments_body_text(msg).into();
+        next[idx].segs = segs;
+        next[idx].tool_calls = tool_calls;
+        if let Some(u) = parse_msg_usage(msg) {
+            next[idx].usage = Some(u);
+        }
+        if let Some(id) = msg
+            .get("id")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+        {
+            next[idx].id = id.to_string();
+        }
+        if let Some(ts) = parse_msg_ts(msg) {
+            next[idx].ts = Some(ts);
+        }
         self.messages = Rc::new(next);
         self.msg_list_state.remeasure_items(idx..idx + 1);
         self.msg_list_state.scroll_to_end();
@@ -728,7 +787,7 @@ impl ClientApp {
                                     .and_then(|v| v.as_str())
                                     .unwrap_or("?")
                                     .to_string(),
-                                text: segments_text(m).into(),
+                                text: segments_body_text(m).into(),
                                 segs,
                                 tool_calls,
                                 compression: m
@@ -929,5 +988,22 @@ impl ClientApp {
             });
         })
         .detach();
+    }
+}
+
+/// 把增量并入 `segs` 末尾同类段；类型不同就新起一段。
+///
+/// 段合并规则与 Web 版一致（`MessageSegments.tsx`：连续 `thinking` 合并成一个
+/// 折叠块、连续 `text` 合并成一个 Markdown 块）——流式增量天然是「一段连续
+/// 同类型」，所以这里只需看最后一段。
+fn push_seg_delta(segs: &mut Vec<Seg>, delta: &str, thinking: bool) {
+    match (thinking, segs.last_mut()) {
+        (true, Some(Seg::Thinking(t))) => t.push_str(delta),
+        (false, Some(Seg::Text(t))) => t.push_str(delta),
+        _ => segs.push(if thinking {
+            Seg::Thinking(delta.to_string())
+        } else {
+            Seg::Text(delta.to_string())
+        }),
     }
 }
