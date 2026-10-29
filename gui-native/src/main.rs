@@ -256,6 +256,12 @@ struct ClientApp {
     pub(crate) zoomed_image: Option<std::sync::Arc<gpui_kit::Image>>,
     /// 待发送的图片（data URL 列表）：控件行「图片」按钮选入，发送后清空
     pub(crate) composer_images: Vec<String>,
+    /// 按会话保存的输入草稿：`会话 id → (正文, 待发图片)`；新会话用空串当键。
+    ///
+    /// 为什么要它：Web 版 `ChatInput` 按 `sessionId ?? PENDING` 存草稿，切走再切回
+    /// 写了一半的内容还在；原生早先切会话直接丢（输入框与图片都清空）——写长 prompt
+    /// 时最容易踩，且丢了就找不回来。
+    pub(crate) drafts: std::collections::HashMap<String, (String, Vec<String>)>,
     /// 打开的会话 Tab（浏览器式；按打开顺序，最多 [`MAX_SESSION_TABS`] 个）
     pub(crate) open_tabs: Vec<String>,
     /// 新会话待绑定的工作目录（「＋新目录」设置）：随首条消息以

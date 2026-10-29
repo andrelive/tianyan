@@ -213,6 +213,7 @@ impl ClientApp {
             dialog: None,
             zoomed_image: None,
             composer_images: Vec::new(),
+            drafts: std::collections::HashMap::new(),
             open_tabs: Vec::new(),
             new_session_workspace: None,
             dialog_input: None,
@@ -981,6 +982,9 @@ impl ClientApp {
         }
         self.input
             .update(cx, |state, cx| state.set_value("", window, cx));
+        // 发送即清该会话的草稿（连同图片一起，send_text 已 take 走）
+        let key = self.current_session.clone().unwrap_or_default();
+        self.drafts.remove(&key);
         self.send_text(text, cx);
     }
 

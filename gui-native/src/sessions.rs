@@ -195,9 +195,41 @@ impl ClientApp {
         self.rebuild_session_rows(cx);
     }
 
+    /// 保存当前输入草稿（按会话键；新会话用空串）。
+    ///
+    /// 切换会话 / 新建会话**之前**调用。空正文且无图片时不占位（顺手清掉空条目）。
+    pub(crate) fn save_composer_draft(&mut self, cx: &App) {
+        let key = self.current_session.clone().unwrap_or_default();
+        let text = self.input.read(cx).value().to_string();
+        if text.trim().is_empty() && self.composer_images.is_empty() {
+            self.drafts.remove(&key);
+            return;
+        }
+        self.drafts
+            .insert(key, (text, self.composer_images.clone()));
+    }
+
+    /// 恢复目标会话的草稿（`open_session` / `start_new_session` 设好键之后调用）。
+    ///
+    /// 经窗口句柄现取 `&mut Window`：`Context` 里没有 window，而
+    /// `TextareaState::set_value` 需要它（与 `backfill_settings_fields` 同一手法，
+    /// 不依赖 render —— 隐藏窗口下也必须生效）。
+    pub(crate) fn restore_composer_draft(&mut self, cx: &mut Context<Self>) {
+        let key = self.current_session.clone().unwrap_or_default();
+        let (text, images) = self.drafts.get(&key).cloned().unwrap_or_default();
+        self.composer_images = images;
+        let handle = self.window_handle;
+        let input = self.input.clone();
+        let _ = handle.update(cx, move |_, window, cx| {
+            input.update(cx, |state, cx| state.set_value(text, window, cx));
+        });
+    }
+
     /// 新建会话：清空选中与消息。真正的会话记录由服务端在首条消息时按本地
     /// 生成的 id 创建（事件按 `session_id` 路由，id 必须发起前就确定）。
     pub(crate) fn start_new_session(&mut self, cx: &mut Context<Self>) {
+        // 先存草稿：切走再切回写了一半的内容还在（与 Web 版 ChatInput 同语义）
+        self.save_composer_draft(cx);
         self.current_session = None;
         self.streaming = false;
         self.session_model = None;
@@ -208,8 +240,10 @@ impl ClientApp {
         self.ctx_window_live = 0;
         self.ctx_panel_open = false;
         self.ctx_compress = None;
-        // 待发送附件是按会话的临时草稿：切走即丢弃（避免误发到别的会话）
+        // 附件也按会话存草稿（上面已 save），这里清空后由 restore 填回本档的草稿
+        // ——不会把上一会话的附件误发到新会话，也不会丢掉自己写了一半的内容
         self.composer_images.clear();
+        self.restore_composer_draft(cx);
         self.messages = Rc::new(Vec::new());
         self.msg_list_state = GpuiListState::new(0, ListAlignment::Bottom, px(120.));
         self.message_total = 0;
@@ -219,6 +253,10 @@ impl ClientApp {
 
     /// 选中会话：切换路由键并拉消息
     pub(crate) fn open_session(&mut self, id: String, cx: &mut Context<Self>) {
+        // 切换前先存当前会话的草稿（写了一半的 prompt 不能因为点另一个会话就没了）
+        if self.current_session.as_deref() != Some(id.as_str()) {
+            self.save_composer_draft(cx);
+        }
         self.current_session = Some(id.clone());
         // 浏览器式会话 Tab：打开过的会话留在顶部（去重；超上限丢最早且非当前的）
         if !self.open_tabs.iter().any(|t| t == &id) {
@@ -266,6 +304,7 @@ impl ClientApp {
         self.load_todos_goals(cx);
         self.load_approvals(cx);
         // 选中态与「当前会话始终可见」都体现在左栏行上
+        self.restore_composer_draft(cx);
         self.rebuild_session_rows(cx);
     }
 

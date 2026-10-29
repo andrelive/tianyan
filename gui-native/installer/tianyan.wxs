@@ -17,13 +17,13 @@
 
   构建（先在 gui-native 下 cargo build 带 release 参数）：
     cd gui-native\installer
-    wix build -o tianyan-native-1.1.1-x64.msi tianyan.wxs
+    wix build -o tianyan-native-1.1.0-x64.msi tianyan.wxs
 -->
 <Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
   <Package
       Name="天演"
       Manufacturer="Tianyan"
-      Version="1.1.1.0"
+      Version="1.1.0.0"
       UpgradeCode="8E4B2A1C-7F3D-4E5B-9A6C-1D2E3F4A5B6C"
       Scope="perUser"
       Language="2052"
