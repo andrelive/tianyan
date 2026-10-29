@@ -533,6 +533,8 @@ impl ClientApp {
         {
             "answer" => {
                 let delta = ev.get("delta").and_then(|v| v.as_str()).unwrap_or_default();
+                // 工具步收尾后的第一段正文 = 新的一步（新消息），与库里的「每步一条」对齐
+                self.start_new_step_after_tools();
                 self.append_delta(delta);
                 // 上下文占用（`ContextRing` 的数据源）：usage 随 answer 块下发。
                 // 分子取 `prompt_tokens`（本轮上下文）——`total_tokens` 含输出，
@@ -565,19 +567,46 @@ impl ClientApp {
                     .get("thinking")
                     .and_then(|v| v.as_str())
                     .unwrap_or_default();
+                // 上一步已产出内容（正文 / 工具都出结果）→ 这是新一步的思考，新开消息
+                self.start_new_step();
                 self.append_thinking_delta(delta);
             }
             "tool_call" => {
-                let name = ev
-                    .get("tool_call")
-                    .and_then(|v| v.get("name"))
+                // 结构化工具卡（对齐 vite `appendToolCalls`）：**不再**把工具调用塞成正文
+                // 文本——那样没有参数/结果/耗时，而且会和正文混在同一个 Markdown 段里。
+                let Some(tc) = ev.get("tool_call") else {
+                    return;
+                };
+                let name = tc
+                    .get("name")
                     .and_then(|v| v.as_str())
-                    .unwrap_or("工具");
-                self.append_delta(&format!("\n`🔧 {name}`\n"));
+                    .unwrap_or("工具")
+                    .to_string();
+                self.start_new_step_after_tools();
+                self.append_tool_call(
+                    tc.get("id")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or_default()
+                        .to_string(),
+                    name.clone(),
+                    tc.get("arguments")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or_default()
+                        .to_string(),
+                    tc.get("presentation")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("generic")
+                        .to_string(),
+                );
                 // ask_user 是**同步工具**：工具执行挂起等回答，输入区要被追问接管
                 if name == "ask_user" {
                     if let Some(args) = ev.get("tool_call").and_then(|v| v.get("arguments")) {
-                        let questions = parse_ask_user(args);
+                        let parsed = match args.as_str() {
+                            Some(s) => serde_json::from_str::<serde_json::Value>(s)
+                                .unwrap_or(serde_json::Value::Null),
+                            None => args.clone(),
+                        };
+                        let questions = parse_ask_user(&parsed);
                         if !questions.is_empty() {
                             self.clarify_answers = vec![String::new(); questions.len()];
                             self.clarification = Some(questions);
@@ -585,7 +614,29 @@ impl ClientApp {
                     }
                 }
             }
-            "observation" => {}
+            "observation" => {
+                // 工具执行结果：按 `tool_call_id` 回填调用卡片（耗时 / 成败 / 结果内容）。
+                // 早期这里是空实现 —— 流式期与流结束后都看不到工具结果，只能等历史重载。
+                if let Some(tr) = ev.get("tool_result") {
+                    let id = tr
+                        .get("tool_call_id")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or_default();
+                    if !id.is_empty() {
+                        self.apply_tool_result(
+                            id,
+                            tr.get("duration_ms").and_then(|v| v.as_i64()).unwrap_or(-1),
+                            tr.get("success").and_then(|v| v.as_bool()).unwrap_or(true),
+                            tr.get("error")
+                                .and_then(|v| v.as_str())
+                                .map(|s| s.to_string()),
+                            tr.get("content")
+                                .and_then(|v| v.as_str())
+                                .map(|s| s.to_string()),
+                        );
+                    }
+                }
+            }
             // 消息边界：流末尾的 assistant 完整消息（含工具段）为权威全文，替换占位
             "message" => {
                 if let Some(msg) = ev.get("message") {
@@ -621,6 +672,163 @@ impl ClientApp {
         cx.notify();
     }
 
+    /// 推入一条空的 assistant 占位（本步骤的开始）。
+    ///
+    /// 为什么需要新建而不是“全部堆一条”：后端一轮对话是**多步**的（LLM 响应→工具→
+    /// LLM 响应…），库里每个 assistant 响应是**独立一条消息**（实测四步就是 4 条）。
+    /// 早期前端把整轮所有步堆在同一条占位里，于是：工具调用只能当正文塞成
+    /// `` `🔧 name` `` 文本（没有参数/结果/耗时），而一旦任何地方把这条消息换成
+    /// 后端的权威消息，前面几步就一起消失了（用户报的「流式结束后工具调用都不见了」）。
+    fn push_assistant_row(&mut self) -> usize {
+        let mut next: Vec<MsgRow> = (*self.messages).clone();
+        next.push(MsgRow {
+            role: "assistant".to_string(),
+            text: "".into(),
+            segs: Vec::new(),
+            tool_calls: Vec::new(),
+            compression: false,
+            usage: None,
+            images: Vec::new(),
+            ts: Some(now_clock()),
+            id: String::new(),
+        });
+        if next.len() > RENDER_LIMIT {
+            let drop_n = next.len() - RENDER_LIMIT;
+            next.drain(..drop_n);
+        }
+        let idx = next.len() - 1;
+        self.messages = Rc::new(next);
+        self.msg_list_state.reset(self.messages.len());
+        self.msg_list_state.scroll_to_end();
+        self.message_total = self.messages.len();
+        idx
+    }
+
+    /// 确保最后一条是 assistant（否则新建）。返回是否新建。
+    fn ensure_assistant_tail(&mut self) -> bool {
+        if self.messages.last().map(|m| m.role.as_str()) == Some("assistant") {
+            return false;
+        }
+        self.push_assistant_row();
+        true
+    }
+
+    /// 上一条 assistant 是否已经「收尾」（该给它后面开新消息了）。
+    ///
+    /// 判据（对齐 vite `chat-stream.ts` 的 `hasPrevTurn`，并补上「工具都已出结果」）：
+    /// - 已有正文段 → 这一步的产出完成了；
+    /// - 工具调用全部拿到结果 → 工具步收尾了（下一步 LLM 响应属于新消息）。
+    /// 只有思考段、或有未出结果的工具 → 仍属当前步，继续往这条上追加。
+    fn step_closed(m: &MsgRow) -> bool {
+        if m.segs
+            .iter()
+            .any(|s| matches!(s, Seg::Text(t) if !t.trim().is_empty()))
+        {
+            return true;
+        }
+        !m.tool_calls.is_empty() && m.tool_calls.iter().all(|t| t.result.is_some())
+    }
+
+    /// 步边界：上一条已收尾（或根本不是 assistant）→ 新开一条 assistant 消息。
+    fn start_new_step(&mut self) {
+        let need = match self.messages.last() {
+            None => true,
+            Some(m) if m.role != "assistant" => true,
+            Some(m) => Self::step_closed(m),
+        };
+        if need {
+            self.push_assistant_row();
+        }
+    }
+
+    /// `answer` / `tool_call` 用的步边界判据：只有「工具步已收尾」时才新开。
+    ///
+    /// 为什么不复用 [`Self::start_new_step`]：正文是**逐块**流下来的，若按
+    /// 「已有正文段就新开」判定，第二块 delta 就会另起一条消息——一句回复被劈成几十条。
+    fn start_new_step_after_tools(&mut self) {
+        let need = match self.messages.last() {
+            None => true,
+            Some(m) if m.role != "assistant" => true,
+            Some(m) => {
+                !m.tool_calls.is_empty() && m.tool_calls.iter().all(|t| t.result.is_some())
+            }
+        };
+        if need {
+            self.push_assistant_row();
+        }
+    }
+
+    /// 追加一条**结构化**工具调用（`tool_call` 事件）→ `Seg::Tool` + `ToolCall` 占位。
+    ///
+    /// 结果由 `apply_tool_result` 按 id 回填。**不要**再退回「往正文里塞
+    /// `` `🔧 name` `` 文本」——那条路上工具没有参数/结果/耗时，而且会和正文
+    /// 混在同一个 Markdown 段里把渲染搞乱。
+    pub(crate) fn append_tool_call(
+        &mut self,
+        id: String,
+        name: String,
+        arguments: String,
+        presentation: String,
+    ) {
+        self.ensure_assistant_tail();
+        if self.messages.last().is_none() {
+            return;
+        }
+        let mut next: Vec<MsgRow> = (*self.messages).clone();
+        let idx = next.len() - 1;
+        next[idx].segs.push(Seg::Tool {
+            id: id.clone(),
+            name: name.clone(),
+            arguments: arguments.clone(),
+            presentation: presentation.clone(),
+        });
+        next[idx].tool_calls.push(ToolCall {
+            id,
+            name,
+            arguments,
+            presentation,
+            result: None,
+            duration_ms: None,
+            error: None,
+        });
+        self.messages = Rc::new(next);
+        self.msg_list_state.remeasure_items(idx..idx + 1);
+        self.msg_list_state.scroll_to_end();
+    }
+
+    /// 填充工具执行结果（`observation` / `tool_result` 事件）：按 id 回填卡片状态。
+    ///
+    /// 从最后一条往前找：工具结果总是来自**已收尾**的那一步，而当前可能已经新开了
+    /// 一条（下一步的思考先到、结果后到），只认最后一条会丢。
+    pub(crate) fn apply_tool_result(
+        &mut self,
+        tool_call_id: &str,
+        duration_ms: i64,
+        success: bool,
+        error: Option<String>,
+        content: Option<String>,
+    ) {
+        let mut next: Vec<MsgRow> = (*self.messages).clone();
+        let mut hit: Option<usize> = None;
+        'outer: for (mi, m) in next.iter_mut().enumerate().rev() {
+            for t in m.tool_calls.iter_mut() {
+                if t.id == tool_call_id {
+                    t.duration_ms = Some(duration_ms);
+                    if content.is_some() {
+                        t.result = content.clone();
+                    }
+                    t.error = if success { None } else { error.clone() };
+                    hit = Some(mi);
+                    break 'outer;
+                }
+            }
+        }
+        if let Some(mi) = hit {
+            self.messages = Rc::new(next);
+            self.msg_list_state.remeasure_items(mi..mi + 1);
+        }
+    }
+
     /// 往最后一条 assistant 消息追加**正文**增量。
     ///
     /// 两份表示必须同步更新，否则渲染会漏内容：
@@ -632,10 +840,10 @@ impl ClientApp {
         if delta.is_empty() {
             return;
         }
-        let Some(last) = self.messages.last() else {
-            return;
-        };
-        if last.role != "assistant" {
+        // 最后一条不是 assistant（刚发的用户消息 / system 通知）→ 新开一条，
+        // 而不是把正文丢掉（早期直接 `return`，表现为「模型说话了但界面什么都不显示」）
+        self.ensure_assistant_tail();
+        if self.messages.last().is_none() {
             return;
         }
         let mut next: Vec<MsgRow> = (*self.messages).clone();
@@ -654,10 +862,8 @@ impl ClientApp {
         if delta.is_empty() {
             return;
         }
-        let Some(last) = self.messages.last() else {
-            return;
-        };
-        if last.role != "assistant" {
+        self.ensure_assistant_tail();
+        if self.messages.last().is_none() {
             return;
         }
         let mut next: Vec<MsgRow> = (*self.messages).clone();
@@ -1060,5 +1266,90 @@ fn push_seg_delta(segs: &mut Vec<Seg>, delta: &str, thinking: bool) {
         } else {
             Seg::Text(delta.to_string())
         }),
+    }
+}
+
+#[cfg(test)]
+mod step_boundary_tests {
+    //! 「一步一条消息」判据的回归（用户报的「流式结束后工具调用全不见」的根因）。
+    //!
+    //! 为什么用单测而不是 UI 断言：这条逻辑只看数据结构（segs / tool_calls 的形态），
+    //! 而真实流式要等 LLM 返回、还要截图比对边界，成本高且不稳定。判据本身是纯函数，
+    //! 单测能钉住四类形态。
+    // ⚠️ 不要写 `use super::*`：bin crate 根是 `main.rs`，glob 会拉进整棵模块树，
+    // `#[test]` 宏展开时直接撞 `recursion_limit`（实测报
+    // “recursion limit reached while expanding `#[test]`”）。只显式导入需要的类型。
+    use crate::types::{MsgRow, Seg, ToolCall};
+    use crate::ClientApp;
+
+    fn tool(id: &str, done: bool) -> ToolCall {
+        ToolCall {
+            id: id.to_string(),
+            name: "read_file".to_string(),
+            arguments: "{}".to_string(),
+            presentation: "read".to_string(),
+            result: if done { Some("ok".to_string()) } else { None },
+            duration_ms: if done { Some(12) } else { None },
+            error: None,
+        }
+    }
+
+    fn row(segs: Vec<Seg>, tools: Vec<ToolCall>) -> MsgRow {
+        MsgRow {
+            id: String::new(),
+            role: "assistant".to_string(),
+            text: "".into(),
+            segs,
+            tool_calls: tools,
+            compression: false,
+            usage: None,
+            images: Vec::new(),
+            ts: None,
+        }
+    }
+
+    #[test]
+    fn empty_placeholder_is_not_closed() {
+        assert!(!ClientApp::step_closed(&row(Vec::new(), Vec::new())));
+    }
+
+    #[test]
+    fn thinking_only_is_not_closed() {
+        let m = row(vec![Seg::Thinking("想一想".into())], Vec::new());
+        assert!(!ClientApp::step_closed(&m), "思考还在流，不能开新消息");
+    }
+
+    #[test]
+    fn text_closes_step() {
+        let m = row(vec![Seg::Text("答案".into())], Vec::new());
+        assert!(ClientApp::step_closed(&m), "已有正文 → 下一步该是新消息");
+    }
+
+    #[test]
+    fn pending_tool_keeps_step_open() {
+        let m = row(
+            vec![Seg::Tool {
+                id: "c1".into(),
+                name: "read_file".into(),
+                arguments: "{}".into(),
+                presentation: "read".into(),
+            }],
+            vec![tool("c1", false)],
+        );
+        assert!(!ClientApp::step_closed(&m), "工具还没出结果 → 同一批并行工具不该被拆开");
+    }
+
+    #[test]
+    fn finished_tools_close_step() {
+        let m = row(
+            vec![Seg::Tool {
+                id: "c1".into(),
+                name: "read_file".into(),
+                arguments: "{}".into(),
+                presentation: "read".into(),
+            }],
+            vec![tool("c1", true)],
+        );
+        assert!(ClientApp::step_closed(&m), "工具出结果 → 下一步是新的 LLM 响应");
     }
 }

@@ -327,6 +327,29 @@ impl ClientApp {
                 "loaded": self.messages.len(),
                 "total": self.message_total,
                 "last": last_msg,
+                // 最近几段的「骨架」：断言「一轮多步是否分成多条消息」「工具卡有没有
+                // 拿到结果」只能看这里（截图看不出边界，`text` 又是拍平后的正文）。
+                // `segs` 形如 ["thinking","tool","tool"]。
+                "recent": self
+                    .messages
+                    .iter()
+                    .rev()
+                    .take(10)
+                    .rev()
+                    .map(|m| {
+                        serde_json::json!({
+                            "role": &m.role,
+                            "segs": m.segs.iter().map(|s| match s {
+                                Seg::Text(_) => "text",
+                                Seg::Thinking(_) => "thinking",
+                                Seg::Tool { .. } => "tool",
+                            }).collect::<Vec<_>>(),
+                            "tool_calls": m.tool_calls.len(),
+                            "tools_done": m.tool_calls.iter().filter(|t| t.result.is_some()).count(),
+                            "id_empty": m.id.is_empty(),
+                        })
+                    })
+                    .collect::<Vec<_>>(),
             },
             "input": self.input.read(cx).value().to_string(),
             "sessions_rows": session_rows,
@@ -992,6 +1015,12 @@ impl ClientApp {
                         cx.notify();
                     }
                     None => return Err(format!("不是受支持的图片或读取失败：{path}")),
+                }
+            }
+            // 从系统剪贴板贴图（= 用户截图后点「粘贴图片」的同一份实现）
+            "paste_image" => {
+                if !self.paste_image_from_clipboard(cx) {
+                    return Err("剪贴板里没有图片（先截图到剪贴板再试）".to_string());
                 }
             }
             // 图片放大（对齐 vite `ZoomableImage`）：不带 `open` 时取反；

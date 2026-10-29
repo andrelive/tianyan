@@ -12,6 +12,14 @@ use gpui_kit::assets::IconName;
 use crate::types::*;
 use crate::format::*;
 
+/// 任务是否仍「活跃」（`pending` / `running`）。
+///
+/// 面板分组（活跃在上、已结束沉底）、折叠条计数、左栏会话角标都用这一处判据——
+/// 三处各写一遍 match 迟早漂移成「角标有数但面板里没卡片」。
+pub(crate) fn task_active(status: &str) -> bool {
+    matches!(status, "pending" | "running")
+}
+
 impl ClientApp {
     /// 拉取本会话的后台任务（`GET /api/v1/tasks`，按 `parent_session_id` 归属过滤）。
     ///
@@ -94,13 +102,17 @@ impl ClientApp {
     /// （顺序由后端返回决定）、终态保留展示。**取消按钮暂未接**（`POST /tasks/{id}/cancel`）。
     pub(crate) fn render_tasks_panel(&self, cx: &mut Context<Self>) -> impl IntoElement {
         if self.tasks_collapsed {
-            return div()
+            // 折叠态：只留一条 36px 竖条。**必须带图标 + 运行中计数**——早先只写
+            // 「任务」两个字，用户根本认不出那是任务面板（实测反馈「看不到后台任务」）。
+            let running = self.tasks.iter().filter(|t| task_active(&t.status)).count();
+            let mut bar = div()
                 .id("tasks-expand")
                 .w(px(36.))
                 .h_full()
                 .flex()
                 .flex_col()
                 .items_center()
+                .gap_1()
                 .py_2()
                 .border_l_1()
                 .border_color(rgb(colors::BORDER()))
@@ -111,11 +123,60 @@ impl ClientApp {
                     cx.notify();
                 }))
                 .child(
-                    div()
-                        .text_xs()
-                        .text_color(rgb(colors::TEXT_SECONDARY()))
-                        .child("任务"),
+                    svg()
+                        .path(IconName::Layers.path())
+                        .size(px(14.))
+                        .text_color(rgb(colors::TEXT_SECONDARY())),
                 );
+            if running > 0 {
+                bar = bar.child(
+                    div()
+                        .px_1()
+                        .rounded_full()
+                        .bg(rgb(colors::ACCENT()))
+                        .text_size(px(9.))
+                        .text_color(rgb(colors::BG_PRIMARY()))
+                        .child(running.to_string()),
+                );
+            }
+            return bar.child(
+                div()
+                    .text_xs()
+                    .text_color(rgb(colors::TEXT_SECONDARY()))
+                    .child("任务"),
+            );
+        }
+        // 活跃 / 已结束分组（与 Web 版同口径：活跃在上、已结束沉底，头部给两组计数）
+        let active_ids: Vec<&TaskRow> = self
+            .tasks
+            .iter()
+            .filter(|t| task_active(&t.status))
+            .collect();
+        let done_count = self.tasks.len() - active_ids.len();
+        // 头部：标题 + 两组计数（与 Web 版 `AgentTasksPanel` 同信息，但空组不占位——
+        // 只有一项任务时也不出现「已结束 0」这种噪声）
+        let mut title = div()
+            .flex_1()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_2()
+            .text_xs()
+            .text_color(rgb(colors::TEXT_SECONDARY()))
+            .child("后台任务");
+        if !active_ids.is_empty() {
+            title = title.child(
+                div()
+                    .text_color(rgb(colors::ACCENT()))
+                    .child(format!("运行中 {}", active_ids.len())),
+            );
+        }
+        if done_count > 0 {
+            title = title.child(
+                div()
+                    .text_color(rgb(colors::TEXT_TERTIARY()))
+                    .child(format!("已结束 {done_count}")),
+            );
         }
         let mut panel = div()
             .w(px(300.))
@@ -133,13 +194,7 @@ impl ClientApp {
                     .gap_2()
                     .px_3()
                     .py_2()
-                    .child(
-                        div()
-                            .flex_1()
-                            .text_xs()
-                            .text_color(rgb(colors::TEXT_SECONDARY()))
-                            .child(format!("后台任务 {}", self.tasks.len())),
-                    )
+                    .child(title)
                     .child(
                         div()
                             .id("tasks-collapse")
@@ -157,18 +212,26 @@ impl ClientApp {
                     ),
             );
         if self.tasks.is_empty() {
+            // 两种「空」要说清：没选会话（面板不知道该显示谁的任务）vs 会话没任务。
+            // 前者提示去点会话，否则用户会以为面板坏了（实测反馈）。
+            let hint = if self.current_session.is_none() {
+                "选一个会话后显示它的后台任务"
+            } else {
+                "本会话暂无后台任务"
+            };
             panel = panel.child(
                 div()
                     .px_3()
                     .py_2()
                     .text_xs()
                     .text_color(rgb(colors::TEXT_TERTIARY()))
-                    .child("本会话暂无后台任务"),
+                    .child(hint),
             );
         }
         // 任务卡片（对齐 Tauri 版 `AgentTasksPanel`）：头 = 箭头 + 状态 + 类型徽章 +
         // 描述 + 状态文案 + 取消；展开体 = 终端输出尾部 / 子代理消息流。
-        let mut cards: Vec<AnyElement> = Vec::new();
+        let mut active_cards: Vec<AnyElement> = Vec::new();
+        let mut done_cards: Vec<AnyElement> = Vec::new();
         for (ix, t) in self.tasks.iter().enumerate() {
             let open = self.expanded_task.as_deref() == Some(t.id.as_str());
             let terminal = matches!(
@@ -341,19 +404,49 @@ impl ClientApp {
                 }
                 card = card.child(body);
             }
-            cards.push(card.into_any_element());
+            if task_active(&t.status) {
+                active_cards.push(card.into_any_element());
+            } else {
+                done_cards.push(card.into_any_element());
+            }
         }
         panel
             .child(
-                div()
-                    .flex_1()
-                    .min_h_0()
-                    .flex()
-                    .flex_col()
-                    .gap_1()
-                    .p_2()
-                    .children(cards)
-                    .overflow_y_scrollbar(),
+                {
+                    let mut list = div()
+                        .flex_1()
+                        .min_h_0()
+                        .flex()
+                        .flex_col()
+                        .gap_1()
+                        .p_2()
+                        .overflow_y_scrollbar();
+                    list = list.children(active_cards);
+                    // 「已结束」分隔行：只在两组都有时才画（否则一条光秃秃的分隔线）
+                    if !done_cards.is_empty() && !active_ids.is_empty() {
+                        list = list.child(
+                            div()
+                                .flex()
+                                .flex_row()
+                                .items_center()
+                                .gap_2()
+                                .pt_1()
+                                .child(
+                                    div()
+                                        .text_size(px(10.))
+                                        .text_color(rgb(colors::TEXT_TERTIARY()))
+                                        .child("已结束"),
+                                )
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .h(px(1.))
+                                        .bg(rgb(colors::BORDER())),
+                                ),
+                        );
+                    }
+                    list.children(done_cards)
+                },
             )
             .id("tasks-panel")
     }

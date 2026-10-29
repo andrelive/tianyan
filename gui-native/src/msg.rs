@@ -69,7 +69,6 @@ pub(crate) fn now_clock() -> String {
 /// 后端 `ChatRequest.message.images` 收的就是这个形式（vite 直传 data URL）。
 /// 非图片扩展名 / 读失败 / 超过 8MB 返回 `None`（该张跳过，不阻断整批）。
 pub(crate) fn image_path_to_data_url(path: &std::path::Path) -> Option<String> {
-    use base64::Engine as _;
     let ext = path.extension()?.to_str()?.to_lowercase();
     let mime = match ext.as_str() {
         "png" => "image/png",
@@ -80,6 +79,18 @@ pub(crate) fn image_path_to_data_url(path: &std::path::Path) -> Option<String> {
         _ => return None,
     };
     let bytes = std::fs::read(path).ok()?;
+    bytes_to_data_url(mime, &bytes)
+}
+
+/// 图片字节 → data URL（`data:image/png;base64,...`）。
+///
+/// 两个入参都从 **剪贴板粘贴**（`ClipboardEntry::Image` 直接给原始字节 + 格式）与
+/// **文件选择**共用：后端 `ChatRequest.message.images` 收的就是 data URL。
+///
+/// 8MB 上限：超大图既拖慢 base64 与 SSE 传输，也会撑爆模型上下文——超限直接跳过
+/// （不阻断整批）。
+pub(crate) fn bytes_to_data_url(mime: &str, bytes: &[u8]) -> Option<String> {
+    use base64::Engine as _;
     if bytes.is_empty() || bytes.len() > 8 * 1024 * 1024 {
         return None;
     }

@@ -629,6 +629,18 @@ impl ClientApp {
                     .flex()
                     .flex_col()
                     .gap_2()
+                    // Ctrl+V：剪贴板里是**图片**时直接贴成附件（截图→粘贴的最短路径）。
+                    // 只有贴成功才吞掉事件；纯文本仍交给 Textarea 自己粘贴。
+                    .on_key_down(cx.listener(
+                        |this, ev: &gpui_kit::KeyDownEvent, _window, cx| {
+                            let k = &ev.keystroke;
+                            if k.modifiers.control && k.key == "v" {
+                                if this.paste_image_from_clipboard(cx) {
+                                    cx.stop_propagation();
+                                }
+                            }
+                        },
+                    ))
                     // 编辑器自身不画边框与底色（`appearance(false)`），
                     // 由外层卡片充当「输入框」——否则会看成上下分离的
                     // 两块（上面一个输入框 + 下面一排按钮），与 Tauri
@@ -704,6 +716,33 @@ impl ClientApp {
                                             .on_click(cx.listener(
                                                 |this, _, _window, cx| {
                                                     this.pick_composer_images(cx)
+                                                },
+                                            )),
+                                    )
+                                    // 贴图：截图直接在剪贴板里时，比「附件 → 翻文件夹」短一步
+                                    .child(
+                                        div()
+                                            .id("paste-image")
+                                            .px_1()
+                                            .py_1()
+                                            .rounded_lg()
+                                            .cursor_pointer()
+                                            .child(
+                                                svg()
+                                                    .path(IconName::ClipboardPaste.path())
+                                                    .size(px(14.))
+                                                    .text_color(rgb(
+                                                        colors::TEXT_SECONDARY(),
+                                                    )),
+                                            )
+                                            .on_click(cx.listener(
+                                                |this, _, _window, cx| {
+                                                    if !this.paste_image_from_clipboard(cx) {
+                                                        this.status =
+                                                            "剪贴板里没有图片（截图后直接点这里即可贴上）"
+                                                                .to_string();
+                                                        cx.notify();
+                                                    }
                                                 },
                                             )),
                                     )
@@ -1268,6 +1307,41 @@ impl ClientApp {
             );
         }
         strip.into_any_element()
+    }
+
+    /// 从系统剪贴板贴图片（截图后直接 Ctrl+V / 点「粘贴图片」）。
+    ///
+    /// 为何必要：用户排查界面问题的方式就是**截图 → 粘贴**。没有这条路就只能
+    /// 「附件 → 翻文件夹找图」，而截图往往只存在剪贴板里。
+    ///
+    /// GPUI 的 `ClipboardEntry::Image` 直接给原始字节 + 格式，不必落盘，
+    /// 复用 [`bytes_to_data_url`] 转成后端认的 data URL。
+    /// 返回是否真贴上（剪贴板没有图片时返回 `false`，调用方保留文本粘贴）。
+    pub(crate) fn paste_image_from_clipboard(&mut self, cx: &mut Context<Self>) -> bool {
+        let Some(item) = cx.read_from_clipboard() else {
+            return false;
+        };
+        for entry in item.entries {
+            if let gpui_kit::ClipboardEntry::Image(img) = entry {
+                let mime = match img.format {
+                    gpui_kit::ImageFormat::Png => "image/png",
+                    gpui_kit::ImageFormat::Jpeg => "image/jpeg",
+                    gpui_kit::ImageFormat::Gif => "image/gif",
+                    gpui_kit::ImageFormat::Bmp => "image/bmp",
+                    _ => "image/png",
+                };
+                if let Some(url) = bytes_to_data_url(mime, &img.bytes) {
+                    self.composer_images.push(url);
+                    self.status = "已从剪贴板贴上图片".to_string();
+                    cx.notify();
+                    return true;
+                }
+                self.status = "剪贴板图片超过 8MB，未贴上".to_string();
+                cx.notify();
+                return false;
+            }
+        }
+        false
     }
 
     /// 选择图片附件（OS 文件对话框）→ 读成 data URL 挂到待发送列表。

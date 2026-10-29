@@ -4,7 +4,7 @@
 name = "tianyan-gui-native"
 # 版本与 server / tauri 版对齐（打包成 MSI 后 ARP 里显示的就是这个号，
 # 三处不一致会让「替换 tauri 版」看起来像换了个产品）
-version = "1.0.1"
+version = "1.1.0"
 edition = "2021"
 description = "天演原生桌面客户端（GPUI，与 gui-vite 并存）"
 publish = false
@@ -95,3 +95,4 @@ gpui-pre-platform = { opt-level = 3 }
 rustybuzz = { opt-level = 3 }
 taffy = { opt-level = 3 }
 ttf-parser = { opt-level = 3 }
+

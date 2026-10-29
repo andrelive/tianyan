@@ -100,6 +100,9 @@ GPUI 侧分档：
 | 18 | **`flex_1` 撑满 + 编辑器回填不能依赖 `render`** | ①栏目根用 `flex_1` 但父容器不是 flex → 高度塌陷；②「置标志、由 render 消费回填」在隐藏窗口下永不执行 → 编辑器全空，一保存就把所有文本字段写成空值（报一片「不能为空」） | ①父容器 `.flex().flex_col()`；②回填统一走 `window_handle.update` 现取 `&mut Window`，并用 `settings_backfilled` 标志保证「有配置就补回填」 |
 | 19 | **`window_close` 只是「藏到托盘」，不是退出** | 验收脚本用它收尾 → 进程一直活着占着 exe，下一次 `cargo build --release` 报「拒绝访问 (os error 5)」，而且每跑一轮就攒一个隐形实例（托盘里越堆越多） | 自动化新增 `quit` 动作（= 托盘「退出天演」：`tray::begin_quit()` + `remove_window()`）；脚本收尾改用它，并额外用 `-PassThru` 记 PID 兜底强杀 |
 | 20 | **MSI 是 32 位包，ARP 落在 `HKLM\WOW6432Node`** | 按 perUser 装完却在 `HKCU\...\Uninstall` 找不到条目，容易误判「没注册、没法卸载」 | 这是 MSI 规范行为（`ALLUSERS=2` 时 ARP 跟 ALLUSERS 走）。条目在 `HKLM\Software\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\{ProductCode}`，控制面板可见、卸载不需要提权。要挪到非 WOW 位置就显式 `<Package Platform="x64">` |
+| 21 | **流式多步：一轮对话 = 多条 assistant 消息** | 流式期能看到「🔧 工具名」，流一结束（或切换会话重载）前面几步的工具调用全不见；工具没有参数/结果/耗时 | 后端一轮是**多步**（LLM→工具→LLM…），库里每个 assistant 响应是独立一条消息（实测 4 步=4 条）。前端早期把整轮堆在一条占位里，`tool_call` 还被塞成正文文本 `` `🔧 name` ``、`observation` 空实现。正解=对齐 vite：`tool_call` → `Seg::Tool` + `ToolCall` 占位；`observation` → 按 `tool_call_id` 回填结果/耗时；步边界→新开一条（判据 `step_closed`：已有正文段 或 工具都已出结果），并配 5 个单测钉住 |
+| 22 | **bin crate 里写 `#[test]` 别用 `use super::*`** | `recursion limit reached while expanding #[test]`；更狠时 rustc 直接 `STATUS_STACK_OVERFLOW`（0xc00000fd） | bin crate 的根是 `main.rs`，`super::*` 把整棵模块树 + 巨大泛型拉进宏展开。显式 `use crate::types::{MsgRow, Seg, ToolCall}`；必要时 `$env:RUST_MIN_STACK = "67108864"` 给 rustc 加栈 |
+| 23 | **剪贴板图片可直接读，不用落盘** | 想「截图→粘贴」，以为得走 Win32 `CF_DIB` + 手工转 PNG | GPUI 的 `cx.read_from_clipboard()` 返回 `ClipboardItem.entries`，其中 `ClipboardEntry::Image(Image { format, bytes, .. })` 直接给原始字节 + 格式，复用 `bytes_to_data_url` 即可（8MB 上限） |
 
 ## API 备忘（实测签名，省一次翻源码）
 
@@ -252,15 +255,25 @@ Tauri 版由监督循环在进程内完成；原生端在上一次进程退出�
 
 ## MSI 打包与自动更新（已实测）
 
-### 出包一条链（产品级，已实测 1.0.1）
+### 1.1.0 修的三处（用户实测反馈）
+
+| # | 症状 | 根因 / 修法 |
+|---|---|---|
+| 1 | 输入框没法**粘贴截图** | 只有「附件→翻文件夹」。新增 **「粘贴图片」按钮**（`IconName::ClipboardPaste`，在附件图标右边）：读剪贴板 `ClipboardEntry::Image` 的原始字节 → data URL（8MB 上限），不落盘、不进 VFS |
+| 2 | **流式时工具渲染不对** | `tool_call` 事件曾被塞成正文文本 `` `🔧 name` ``（没有参数/结果/耗时，还和正文混在同一个 Markdown 段里）。改为结构化 `Seg::Tool` + `ToolCall` 占位，渲染走与历史消息**同一条** `render_tool_card` |
+| 3 | **流式结束后前面的工具调用全不见** | 一轮是**多步**（LLM→工具→LLM…），库里每步一条 assistant 消息，而前端把整轮堆在一条占位里 → 任何一次「用权威消息替换最后一条」都会把前面几步抹掉。改为**步边界新开消息**（判据 `step_closed`），并让 `observation` 按 `tool_call_id` 回填结果（此前是空实现，结果永不显示） |
+
+回归：`step_boundary_tests` 5 个单测（空占位/只有思考/已有正文/工具未回结果/工具已回结果）+ 77 项界面断言全绿。
+
+### 出包一条链（产品级，已实测 1.1.0）
 
 ```powershell
 cd gui-native
 cargo build --release                 # build.rs 会把 tauri/icons/icon.ico 嵌进 exe 资源
 pwsh -NoProfile -File ..\scripts\verify-gui-native.ps1 -Release   # 77 项断言（验的是要发的那份）
 cd installer
-wix build -o tianyan-native-1.0.1-x64.msi tianyan.wxs
-msiexec /i tianyan-native-1.0.1-x64.msi /qn      # perUser：2.8 秒，无 UAC
+wix build -o tianyan-native-1.1.0-x64.msi tianyan.wxs
+msiexec /i tianyan-native-1.1.0-x64.msi /qn      # perUser：2.8 秒，无 UAC
 ```
 
 `tianyan.wxs` 是**产品级**清单，与 `main.wxs` / `peruser.wxs`（早期验证用，Source 指向 `target\debug`）
