@@ -1098,6 +1098,53 @@ impl ClientApp {
                     .text_color(rgb(colors::TEXT_TERTIARY()))
                     .child("以上为最近一轮请求 · 输入框下方小字为会话累计"),
             );
+        // 压缩点**可见入口**：会话链里有压缩点就在浮层里给一行，点击滚到列表顶
+        // （`render_window` 已把最近一条压缩点提到窗口最前）。
+        //
+        // 为什么必须有：压缩点只是历史里一条很长的摘要消息，落在窗口外就完全
+        // 不可见——用户实测「上下文占比从 58% 掉到 2%，一个压缩点都没找到」
+        // （native 是被 60 条窗口截掉，Web 是被 50 条分页挡在第 3 页）。
+        let marker_positions: Vec<usize> = self
+            .messages
+            .iter()
+            .enumerate()
+            .filter(|(_, m)| m.compression)
+            .map(|(i, _)| i)
+            .collect();
+        if let Some(first) = marker_positions.first().copied() {
+            ctx_panel = ctx_panel.child(
+                div()
+                    .id("ctx-jump-marker")
+                    .w_full()
+                    .py(px(5.))
+                    .rounded_lg()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .justify_center()
+                    .gap_1()
+                    .cursor_pointer()
+                    .text_color(rgb(colors::TEXT_SECONDARY()))
+                    .child(
+                        svg()
+                            .path(IconName::Minimize2.path())
+                            .size(px(12.))
+                            .text_color(rgb(colors::TEXT_SECONDARY())),
+                    )
+                    .child(format!(
+                        "压缩点 {} 处 · 跳到最近一次",
+                        marker_positions.len()
+                    ))
+                    .on_click(cx.listener(move |this, _, _window, cx| {
+                        this.msg_list_state.scroll_to(gpui_kit::ListOffset {
+                            item_ix: first,
+                            offset_in_item: px(0.),
+                        });
+                        this.ctx_panel_open = false;
+                        cx.notify();
+                    })),
+            );
+        }
         // 压缩按钮：流式中 / 压缩中不可点（同 vite 的 disabled 口径）
         let compressing = self.ctx_compressing;
         let can_compress = self.current_session.is_some()
