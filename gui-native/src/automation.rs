@@ -1496,6 +1496,18 @@ impl ClientApp {
             "window_close" => {
                 crate::tray::post_close();
             }
+            // 真正退出进程（与托盘菜单「退出天演」同一条路径）。
+            //
+            // 为什么必须有：`window_close` 只是发 `WM_CLOSE`，而本应用把「关闭按钮」
+            // 拦成**藏到托盘**（`tray::post_close` 里拦截，进程继续活着、占着 exe）。
+            // 验收脚本以前用 `window_close` 收尾，结果每跑一次就留一个僵尸进程在
+            // 托盘里——既让 exe 无法被覆盖（`cargo build --release` 报「拒绝访问」），
+            // 也会攒出一堆隐形实例。
+            "quit" => {
+                crate::tray::begin_quit();
+                let handle = self.window_handle;
+                let _ = handle.update(cx, |_, window, _cx| window.remove_window());
+            }
             // 全局快捷键的**动作**（不是按键本身）：热键线程收到 WM_HOTKEY 后
             // 调的就是这个函数。真正的按键路径由 `simulate_hotkey.ps1` 端到端验证。
             "hotkey_toggle" => {

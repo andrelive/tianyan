@@ -24,14 +24,21 @@
 param(
     [int]$Port = 3010,
     [switch]$Restart,
-    [switch]$KeepAlive
+    [switch]$KeepAlive,
+    # 用 release 构建验证（打包 MSI 前必跑这一遍：debug 与 release 的 PE
+    # subsystem / 优化行为不同，出包前要验的是 release 那份）
+    [switch]$Release
 )
 
 $ErrorActionPreference = "Stop"
 $ProgressPreference = "SilentlyContinue"
 
 $repo = Split-Path -Parent $PSScriptRoot
-$exe = Join-Path $repo "gui-native\target\debug\tianyan-gui-native.exe"
+$exe = if ($Release) {
+    Join-Path $repo "gui-native\target\release\tianyan-gui-native.exe"
+} else {
+    Join-Path $repo "gui-native\target\debug\tianyan-gui-native.exe"
+}
 $base = "http://127.0.0.1:$Port"
 
 $script:pass = 0
@@ -127,8 +134,13 @@ try {
 
 if ($running -and $Restart) {
     Write-Host "关闭已有实例…" -ForegroundColor Yellow
-    try { Act @{ action = "window_close" } 200 | Out-Null } catch { }
-    Start-Sleep -Milliseconds 1200
+    # ⚠️ 必须用 `quit`（= 托盘「退出天演」），不能用 `window_close`：
+    # 后者被应用拦成「藏到托盘」，进程继续活着占着 exe —— 于是 `cargo build
+    # --release` 报「拒绝访问」，而且每跑一次验收就攒一个隐形实例。
+    try { Act @{ action = "quit" } 200 | Out-Null } catch { }
+    Start-Sleep -Milliseconds 1500
+    Get-Process tianyan-gui-native -ErrorAction SilentlyContinue | Stop-Process -Force
+    Start-Sleep -Milliseconds 500
     $running = $false
 }
 
@@ -140,7 +152,7 @@ if (-not $running) {
     Write-Host "以隐藏窗口启动原生端…" -ForegroundColor Yellow
     $env:TIANYAN_GUI_AUTOMATION_PORT = "$Port"
     $env:TIANYAN_GUI_START_HIDDEN = "1"
-    Start-Process -FilePath $exe -WorkingDirectory (Join-Path $repo "gui-native") -WindowStyle Hidden
+    $proc = Start-Process -FilePath $exe -WorkingDirectory (Join-Path $repo "gui-native") -WindowStyle Hidden -PassThru
     if (-not (Wait-Ready -TimeoutSec 90)) {
         Write-Host "自动化端口未就绪（$base）" -ForegroundColor Red
         exit 1
@@ -441,7 +453,16 @@ Check "验收后配置回到基线（cleanup_days）" ($cfgEnd.storage.cleanup_d
 
 if (-not $KeepAlive) {
     Write-Host "关闭实例…" -ForegroundColor Yellow
-    try { Act @{ action = "window_close" } 200 | Out-Null } catch { }
+    # 语义化退出（与托盘菜单同路径），而不是 window_close（那只是藏到托盘）
+    try { Act @{ action = "quit" } 200 | Out-Null } catch { }
+    Start-Sleep -Milliseconds 1500
+    if ($proc) {
+        $alive = Get-Process -Id $proc.Id -ErrorAction SilentlyContinue
+        if ($alive) {
+            $alive | Stop-Process -Force
+            Write-Host "（quit 未生效，已强制结束 PID $($proc.Id)）" -ForegroundColor DarkYellow
+        }
+    }
 } else {
     Write-Host "实例保持运行（下次直接复用，零启动等待）" -ForegroundColor DarkGreen
 }

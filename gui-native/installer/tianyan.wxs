@@ -1,0 +1,65 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  天演原生客户端 MSI（产品级，perUser）
+
+  设计要点（都与「替换掉本地 tauri 版」直接相关）：
+
+  1. **perUser**：装到 %LOCALAPPDATA%\Programs\Tianyan，不需要管理员权限、不弹 UAC，
+     以后自研 updater 可以 `msiexec /i /qn` 静默升级。
+  2. **独立目录**：不复用 tauri 版的 `D:\Program Files\Tianyan`——那里已经被历史
+     产物污染（一堆 png 截图 + .playwright-mcp），混进去只会互相干扰。
+  3. **同一套图标**：exe 图标由 build.rs 嵌入（复用 tauri/icons/icon.ico），MSI 的
+     ARP 图标与开始菜单快捷方式用同一个文件，系统里看起来是同一个产品。
+  4. **不碰数据目录**：安装/卸载只动 `%LOCALAPPDATA%\Programs\Tianyan` 下的文件，
+     用户数据在 `D:\tianyan`（配置里的 storage.data_dir），卸载不会删。
+  5. **MajorUpgrade**：同 UpgradeCode 的新版本会替换旧版本（实测 0.1.1→0.1.3 静默
+     升级无残留双条目）。
+
+  构建（先在 gui-native 下 cargo build 带 release 参数）：
+    cd gui-native\installer
+    wix build -o tianyan-native-1.0.1-x64.msi tianyan.wxs
+-->
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+  <Package
+      Name="天演"
+      Manufacturer="Tianyan"
+      Version="1.0.1.0"
+      UpgradeCode="8E4B2A1C-7F3D-4E5B-9A6C-1D2E3F4A5B6C"
+      Scope="perUser"
+      Language="2052"
+      Codepage="65001">
+
+    <MajorUpgrade DowngradeErrorMessage="已安装更新版本的天演，无需降级安装。" />
+    <MediaTemplate EmbedCab="yes" CompressionLevel="high" />
+
+    <!-- ARP（控制面板）里的图标 -->
+    <Icon Id="AppIcon" SourceFile="..\..\tauri\icons\icon.ico" />
+    <Property Id="ARPPRODUCTICON" Value="AppIcon" />
+
+    <StandardDirectory Id="LocalAppDataFolder">
+      <Directory Id="ProgramsFolder" Name="Programs">
+        <Directory Id="INSTALLFOLDER" Name="Tianyan" />
+      </Directory>
+    </StandardDirectory>
+
+    <!-- 开始菜单：单独一个「天演」文件夹，避免和 tauri 版（Tianyan）混放 -->
+    <StandardDirectory Id="ProgramMenuFolder">
+      <Directory Id="AppMenuFolder" Name="天演" />
+    </StandardDirectory>
+
+    <Feature Id="Main" Title="天演（GPUI 原生端）" Level="1">
+      <Component Id="MainExe" Directory="INSTALLFOLDER" Guid="*">
+        <File Id="MainExeFile"
+              Source="..\target\release\tianyan-gui-native.exe"
+              KeyPath="yes">
+          <!-- advertised shortcut：图标直接取 exe 资源（build.rs 已嵌入） -->
+          <Shortcut Id="StartMenuShortcut"
+                    Directory="AppMenuFolder"
+                    Name="天演"
+                    Description="天演 · GPUI 原生端"
+                    Advertise="yes" />
+        </File>
+      </Component>
+    </Feature>
+  </Package>
+</Wix>

@@ -98,6 +98,8 @@ GPUI 侧分档：
 | 16 | **`render_to_image` 取的是「最近一次绘制的帧」** | 窗口被遮挡 → GPUI 跳过重绘 → 截到旧帧（连切 3 个栏目 sha256 全同）；`show=false` 创建的窗口 → 1×1 | 截图前提前台（`tray::show_main_window()`，`screenshot` 动作内已调）；**视觉核对用可见窗口跑，断言用隐藏窗口跑** |
 | 17 | **后端校验要求「提供商至少有一个模型」** | 只加 provider（`models: []`）→ `PUT /config` 被 422 拒绝（`提供商 'x' 至少需要一个模型`），UI 上表现为「点了没反应」 | 新增提供商表单必须**一次带首个模型名 + 能力标签**（`core/src/config/model.rs::validate`） |
 | 18 | **`flex_1` 撑满 + 编辑器回填不能依赖 `render`** | ①栏目根用 `flex_1` 但父容器不是 flex → 高度塌陷；②「置标志、由 render 消费回填」在隐藏窗口下永不执行 → 编辑器全空，一保存就把所有文本字段写成空值（报一片「不能为空」） | ①父容器 `.flex().flex_col()`；②回填统一走 `window_handle.update` 现取 `&mut Window`，并用 `settings_backfilled` 标志保证「有配置就补回填」 |
+| 19 | **`window_close` 只是「藏到托盘」，不是退出** | 验收脚本用它收尾 → 进程一直活着占着 exe，下一次 `cargo build --release` 报「拒绝访问 (os error 5)」，而且每跑一轮就攒一个隐形实例（托盘里越堆越多） | 自动化新增 `quit` 动作（= 托盘「退出天演」：`tray::begin_quit()` + `remove_window()`）；脚本收尾改用它，并额外用 `-PassThru` 记 PID 兜底强杀 |
+| 20 | **MSI 是 32 位包，ARP 落在 `HKLM\WOW6432Node`** | 按 perUser 装完却在 `HKCU\...\Uninstall` 找不到条目，容易误判「没注册、没法卸载」 | 这是 MSI 规范行为（`ALLUSERS=2` 时 ARP 跟 ALLUSERS 走）。条目在 `HKLM\Software\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\{ProductCode}`，控制面板可见、卸载不需要提权。要挪到非 WOW 位置就显式 `<Package Platform="x64">` |
 
 ## API 备忘（实测签名，省一次翻源码）
 
@@ -249,6 +251,33 @@ Tauri 版由监督循环在进程内完成；原生端在上一次进程退出�
 | 系统集成：托盘 / 通知 / 全局快捷键 / updater 编排 | tauri/ 那 1163 行的 B 类职责需逐个接管 |
 
 ## MSI 打包与自动更新（已实测）
+
+### 出包一条链（产品级，已实测 1.0.1）
+
+```powershell
+cd gui-native
+cargo build --release                 # build.rs 会把 tauri/icons/icon.ico 嵌进 exe 资源
+pwsh -NoProfile -File ..\scripts\verify-gui-native.ps1 -Release   # 77 项断言（验的是要发的那份）
+cd installer
+wix build -o tianyan-native-1.0.1-x64.msi tianyan.wxs
+msiexec /i tianyan-native-1.0.1-x64.msi /qn      # perUser：2.8 秒，无 UAC
+```
+
+`tianyan.wxs` 是**产品级**清单，与 `main.wxs` / `peruser.wxs`（早期验证用，Source 指向 `target\debug`）
+的区别：
+
+| 项 | 验证包 | 产品包（tianyan.wxs） |
+|---|---|---|
+| 名称/版本 | 「天演原生客户端（验证）」0.1.3.0 | 「天演」1.0.1.0（与 server / tauri 版对齐，ARP 里看起来是同一个产品） |
+| 二进制 | `target\debug` | `target\release`（PE `Subsystem=2`，无控制台窗口） |
+| 图标 | 无 | `build.rs` 嵌 exe 图标（复用 `tauri/icons/icon.ico`）+ ARP/快捷方式图标 |
+| 安装位置 | `%LOCALAPPDATA%\Programs\TianyanGuiNative` | `%LOCALAPPDATA%\Programs\Tianyan`（**不碰** tauri 的 `D:\Program Files\Tianyan`——那里已被历史产物污染） |
+| 快捷方式 | 无 | 开始菜单「天演」 |
+| 数据目录 | 不动 | 不动（`D:\tianyan` 由配置决定，卸载不删） |
+
+体积：release exe 275MB（`[profile.release] strip = "symbols"` 后；不 strip 是 288MB），
+MSI **61MB**。GPUI 的体积大头是静态数据（LanceDB/DataFusion、gpui-kit-assets 的 1800+ SVG、
+tree-sitter 语法），不是符号表——strip 只省 13MB。
 
 ### 打包路径：WiX v6（不是 cargo-wix）
 
