@@ -339,6 +339,9 @@ impl ClientApp {
                     .map(|m| {
                         serde_json::json!({
                             "role": &m.role,
+                            // 压缩点那一行要能在这里断言出来（用户实测的
+                            // 「58% → 2% 却看不到压缩点」就是这条链路断的）
+                            "compression": m.compression,
                             "segs": m.segs.iter().map(|s| match s {
                                 Seg::Text(_) => "text",
                                 Seg::Thinking(_) => "thinking",
@@ -1519,6 +1522,19 @@ impl ClientApp {
             // 清空输入框（测试收尾；真实路径里发送成功后也会清）
             "composer_clear" => {
                 self.clear_composer(cx)?;
+            }
+            // 把一条外部事件直接喂给事件处理器 —— 只验证「事件 → 界面归约」这一段。
+            // 事件本身的**生产侧**由 `server/src/event_push.rs` 的测试保证
+            // （`push_boundary_event` 把 `System || compression_marker` 的落库消息
+            // 映射成 chat_stream/message 帧），这里不伪造业务数据、只回放同一形状。
+            // 需要它是因为：真实压缩要 LLM 生成摘要 + 消息数阈值，隐藏窗口验收里
+            // 造不出稳定前置条件，而「压缩点被丢弃」恰恰是用户实测的 bug。
+            "_inject_event" => {
+                let ev = cmd
+                    .get("event")
+                    .cloned()
+                    .unwrap_or(serde_json::Value::Null);
+                self.handle_event(&ev, cx);
             }
             // 写输入框正文（断言「多行自动增高」等依赖文本内容的渲染行为用；
             // 与真实键入同一个 `TextareaState::set_value`，不另造路径）

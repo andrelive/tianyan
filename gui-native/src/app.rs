@@ -640,8 +640,21 @@ impl ClientApp {
             // 消息边界：流末尾的 assistant 完整消息（含工具段）为权威全文，替换占位
             "message" => {
                 if let Some(msg) = ev.get("message") {
-                    if msg.get("role").and_then(|v| v.as_str()) == Some("assistant") {
-                        self.apply_authoritative_message(msg);
+                    let role = msg.get("role").and_then(|v| v.as_str()).unwrap_or_default();
+                    let is_marker = msg
+                        .get("compression_marker")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false);
+                    match classify_boundary_message(role, is_marker) {
+                        BoundaryMessageAction::ReplaceAssistant => {
+                            self.apply_authoritative_message(msg)
+                        }
+                        // 早先这里只处理 assistant，其余一律丢弃 —— 于是后端「落库即
+                        // 推送」（ADR-028 门控 `System || compression_marker`）推出的
+                        // 压缩点和后台任务完成通知，在界面上一律没有。用户实测：
+                        // 「上下文占比从 58% 掉到 2%，一个压缩点都没显示」。
+                        BoundaryMessageAction::AppendBoundary => self.append_boundary_message(msg),
+                        BoundaryMessageAction::Ignore => {}
                     }
                 }
             }
@@ -907,6 +920,54 @@ impl ClientApp {
         self.messages = Rc::new(next);
         self.msg_list_state.remeasure_items(idx..idx + 1);
         self.msg_list_state.scroll_to_end();
+    }
+
+    /// 边界消息（压缩点 / System 通知）→ **追加成新行**（按 id 幂等）。
+    ///
+    /// 为什么不复用 `apply_authoritative_message`：那个只把内容塞进「最后一条
+    /// assistant 占位」，且前提是最后一条确实是 assistant。压缩点在用户刚发消息
+    /// 之后到达（此时最后一条是 user），于是被整条丢弃——用户实测「上下文占比从
+    /// 58% 掉到 2%，一个压缩点都没显示」。System 通知（后台任务完成）同理。
+    pub(crate) fn append_boundary_message(&mut self, msg: &serde_json::Value) {
+        let id = msg
+            .get("id")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string();
+        // 幂等：推送可能重放（重连快照 + 实时），同 id 不重复追加
+        if !id.is_empty() && self.messages.iter().any(|m| m.id == id) {
+            return;
+        }
+        let (segs, tool_calls) = parse_segments(msg);
+        let row = MsgRow {
+            id,
+            role: msg
+                .get("role")
+                .and_then(|v| v.as_str())
+                .unwrap_or("system")
+                .to_string(),
+            text: segments_body_text(msg).into(),
+            segs,
+            tool_calls,
+            compression: msg
+                .get("compression_marker")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false),
+            usage: parse_msg_usage(msg),
+            images: parse_msg_images(msg),
+            ts: parse_msg_ts(msg),
+        };
+        let mut next: Vec<MsgRow> = (*self.messages).clone();
+        next.push(row);
+        // 与流式追加同一口径：超窗口丢最早的（压缩点的补齐由 `render_window` 负责）
+        if next.len() > crate::RENDER_LIMIT {
+            let cut = next.len() - crate::RENDER_LIMIT;
+            next.drain(..cut);
+        }
+        self.messages = Rc::new(next);
+        self.msg_list_state.reset(self.messages.len());
+        self.msg_list_state.scroll_to_end();
+        self.message_total = self.messages.len();
     }
 
     /// 发送输入框内容（Enter 或「发送」按钮）
@@ -1265,6 +1326,31 @@ fn push_seg_delta(segs: &mut Vec<Seg>, delta: &str, thinking: bool) {
     }
 }
 
+/// `message` 边界事件该走哪条路径（结构判据，单测钉住）。
+///
+/// 三种消息混在同一个事件名里，早先只处理了第一种，于是压缩点和 System 通知
+/// 被静默丢弃（用户实测「58% → 2%，一个压缩点都没有」）。
+#[derive(Debug, PartialEq)]
+pub(crate) enum BoundaryMessageAction {
+    /// 流末尾的 assistant 全文 → 替换最后一条占位（内容与工具段以它为准）
+    ReplaceAssistant,
+    /// 压缩点（user 锚定但带 `compression_marker`）/ System 通知 → **追加新行**
+    AppendBoundary,
+    /// 普通 user 等 → 不动（乐观渲染已经显示过一次，重复插入就是两条）
+    Ignore,
+}
+
+/// 判定一条 `message` 事件的落点。
+pub(crate) fn classify_boundary_message(role: &str, is_marker: bool) -> BoundaryMessageAction {
+    if role == "assistant" {
+        BoundaryMessageAction::ReplaceAssistant
+    } else if is_marker || role == "system" {
+        BoundaryMessageAction::AppendBoundary
+    } else {
+        BoundaryMessageAction::Ignore
+    }
+}
+
 /// 渲染窗口：最近 `limit` 条；若被截掉的部分含压缩点，把**最近一条**提到最前面。
 ///
 /// 为什么需要：压缩点几乎总落在被截掉的早期，而界面只渲染最近 `limit` 条 ——
@@ -1296,6 +1382,7 @@ mod step_boundary_tests {
     use crate::types::{MsgRow, Seg, ToolCall};
     use crate::ClientApp;
     use crate::app::render_window;
+    use crate::app::{classify_boundary_message, BoundaryMessageAction};
 
     fn tool(id: &str, done: bool) -> ToolCall {
         ToolCall {
@@ -1367,6 +1454,42 @@ mod step_boundary_tests {
         let got = render_window(&rows, 60);
         assert_eq!(got.len(), 3);
         assert!(got[0].compression);
+    }
+
+    #[test]
+    fn boundary_event_assistant_replaces_placeholder() {
+        assert_eq!(
+            classify_boundary_message("assistant", false),
+            BoundaryMessageAction::ReplaceAssistant
+        );
+    }
+
+    #[test]
+    fn boundary_event_compression_marker_is_appended() {
+        // 压缩点是 user 锚定的——**不能**因为它 role=user 就当成乐观渲染过的用户消息
+        assert_eq!(
+            classify_boundary_message("user", true),
+            BoundaryMessageAction::AppendBoundary,
+            "压缩点必须追加成新行，否则界面永远看不到它"
+        );
+    }
+
+    #[test]
+    fn boundary_event_system_notice_is_appended() {
+        assert_eq!(
+            classify_boundary_message("system", false),
+            BoundaryMessageAction::AppendBoundary,
+            "后台任务完成通知也要显示"
+        );
+    }
+
+    #[test]
+    fn boundary_event_plain_user_is_ignored() {
+        // 普通用户消息已由乐观渲染显示过，再追加就是两条
+        assert_eq!(
+            classify_boundary_message("user", false),
+            BoundaryMessageAction::Ignore
+        );
     }
 
     #[test]
