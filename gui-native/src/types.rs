@@ -363,6 +363,14 @@ pub(crate) enum Dialog {
         /// 该消息开头若干字，确认框里给用户看「回退到哪」
         preview: String,
     },
+    /// 审批「编辑后批准」：就地改写命令再批准。
+    ///
+    /// 后端语义（`RespondApprovalRequest.edited_command`）：编辑值**记入审计与
+    /// 通知文本，实际执行仍由 agent 按原命令发起** —— 所以弹窗里必须写明，
+    /// 否则用户会以为改了就按新的执行。
+    EditApproval {
+        request_id: String,
+    },
 }
 
 impl Dialog {
@@ -380,6 +388,7 @@ impl Dialog {
                 FilePickPurpose::Mention => "mention_file_picker",
             },
             Dialog::RollbackMessage { .. } => "rollback_message",
+            Dialog::EditApproval { .. } => "edit_approval",
         }
     }
 }
@@ -819,6 +828,11 @@ pub(crate) struct ApprovalRow {
     pub(crate) request_id: String,
     pub(crate) description: String,
     pub(crate) risk: String,
+    /// 具体操作（`approval_status` 里 `action` 的紧凑 JSON，截断展示）。
+    ///
+    /// 为什么必须有：只给 `action_description` 时用户根本看不到“到底要执行什么就
+    /// 被要求批准”——而这个面板的存在意义就是让人看清再点。编辑后批准也从这里回填。
+    pub(crate) action_detail: String,
 }
 
 /// 后台任务面板的一行（对齐 Tauri 版 `AgentTasksPanel` 的展示字段）。

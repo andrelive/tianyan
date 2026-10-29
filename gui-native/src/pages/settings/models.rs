@@ -1206,6 +1206,11 @@ impl ClientApp {
                         }
                         this.settings_status = format!("模型 {n} 个");
                         this.settings_error = false;
+                        // 首次启动引导的判据就在这里：**有没有可用对话模型**。
+                        // 不用 `config/status` 的 `configured` —— 内嵌 server 起来后
+                        // 配置文件可能已存在（甚至自定义 TIANYAN_CONFIG 路径根本没被
+                        // 那个判据看到），而「一个对话模型都没有」才是真的不能用。
+                        this.recompute_setup();
                         cx.notify();
                     }
                     Err(e) => {

@@ -526,7 +526,7 @@ impl ClientApp {
                     .flex_col()
                     // 顶部：打开的会话 Tab 条（浏览器式；无 tab 时退回单行标题）
                     .child(self.render_session_tabs(cx))
-                    .child(self.render_message_column())
+                    .child(self.render_message_column(cx))
                     .child(self.render_banners(cx))
                     .child(self.render_composer(cx))
                     .child(self.render_usage_line())
@@ -538,15 +538,51 @@ impl ClientApp {
     ///
     /// 父级用 `flex_col + items_center` 让限宽块水平居中；限宽块自身
     /// `w_full + max_w` 才会在宽窗口下取 896。
-    pub(crate) fn render_message_column(&self) -> AnyElement {
-        div()
+    pub(crate) fn render_message_column(&self, cx: &mut Context<Self>) -> AnyElement {
+        let mut col = div()
             .flex_1()
             .min_h_0()
             .w_full()
             .flex()
             .flex_col()
-            .items_center()
-            .child(
+            .items_center();
+        // 更早历史入口：`has_more` 为真才出现。
+        //
+        // Web 版是「滚到顶自动加载」，这里给显式按钮——GPUI 的 `ListState` 没有可靠的
+        // 「滚到顶」回调，硬凑会变成轮询式试探；按钮语义明确、还能显示加载中状态。
+        if self.has_more_history {
+            col = col.child(
+                div()
+                    .w_full()
+                    .max_w(px(colors::CHAT_MAX_W))
+                    .pt_2()
+                    .flex()
+                    .flex_row()
+                    .justify_center()
+                    .child(
+                        div()
+                            .id("load-older")
+                            .px_3()
+                            .py_1()
+                            .rounded_full()
+                            .border_1()
+                            .border_color(rgb(colors::BORDER()))
+                            .bg(rgb(colors::BG_SECONDARY()))
+                            .text_size(px(11.))
+                            .text_color(rgb(colors::TEXT_SECONDARY()))
+                            .cursor_pointer()
+                            .child(if self.loading_older {
+                                "正在加载更早的消息…".to_string()
+                            } else {
+                                "↑ 加载更早的消息".to_string()
+                            })
+                            .on_click(cx.listener(|this, _, _window, cx| {
+                                this.load_older_messages(cx)
+                            })),
+                    ),
+            );
+        }
+        col.child(
                 div()
                     .flex_1()
                     .min_h_0()

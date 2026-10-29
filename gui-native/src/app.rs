@@ -214,6 +214,11 @@ impl ClientApp {
             zoomed_image: None,
             composer_images: Vec::new(),
             drafts: std::collections::HashMap::new(),
+            oldest_seq: None,
+            has_more_history: false,
+            loading_older: false,
+            needs_setup: false,
+            setup_dismissed: false,
             open_tabs: Vec::new(),
             new_session_workspace: None,
             dialog_input: None,
@@ -706,8 +711,8 @@ impl ClientApp {
             ts: Some(now_clock()),
             id: String::new(),
         });
-        if next.len() > RENDER_LIMIT {
-            let drop_n = next.len() - RENDER_LIMIT;
+        if next.len() > crate::MAX_LOADED_MESSAGES {
+            let drop_n = next.len() - crate::MAX_LOADED_MESSAGES;
             next.drain(..drop_n);
         }
         let idx = next.len() - 1;
@@ -939,30 +944,12 @@ impl ClientApp {
         if !id.is_empty() && self.messages.iter().any(|m| m.id == id) {
             return;
         }
-        let (segs, tool_calls) = parse_segments(msg);
-        let row = MsgRow {
-            id,
-            role: msg
-                .get("role")
-                .and_then(|v| v.as_str())
-                .unwrap_or("system")
-                .to_string(),
-            text: segments_body_text(msg).into(),
-            segs,
-            tool_calls,
-            compression: msg
-                .get("compression_marker")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false),
-            usage: parse_msg_usage(msg),
-            images: parse_msg_images(msg),
-            ts: parse_msg_ts(msg),
-        };
+        let row = parse_msg_row(msg);
         let mut next: Vec<MsgRow> = (*self.messages).clone();
         next.push(row);
         // 与流式追加同一口径：超窗口丢最早的（压缩点的补齐由 `render_window` 负责）
-        if next.len() > crate::RENDER_LIMIT {
-            let cut = next.len() - crate::RENDER_LIMIT;
+        if next.len() > crate::MAX_LOADED_MESSAGES {
+            let cut = next.len() - crate::MAX_LOADED_MESSAGES;
             next.drain(..cut);
         }
         self.messages = Rc::new(next);
@@ -1032,8 +1019,8 @@ impl ClientApp {
             ts: Some(now_clock()),
             id: String::new(),
         });
-        if next.len() > RENDER_LIMIT {
-            let drop_n = next.len() - RENDER_LIMIT;
+        if next.len() > crate::MAX_LOADED_MESSAGES {
+            let drop_n = next.len() - crate::MAX_LOADED_MESSAGES;
             next.drain(..drop_n);
         }
         self.messages = Rc::new(next);
@@ -1089,12 +1076,26 @@ impl ClientApp {
         .detach();
     }
 
+    /// 重算「是否该显示首次启动引导」。
+    ///
+    /// 判据是**有没有可用对话模型**（`models` 里 `is_chat=true` 的那个），不是
+    /// `GET /config/status` 的 `configured`：
+    /// - 内嵌 server 起来后配置文件往往已存在（`config_exists()` 恒真）；
+    /// - 自定义 `TIANYAN_CONFIG` 路径时那个判据根本看不到这份配置（实测：
+    ///   指向不存在的路径启动，`configured` 仍是 true）；
+    /// - 而「一个对话模型都没有」是用户真正不能用的状态。
+    ///
+    /// `setup_dismissed` 是逃生舱：用户点过「仍然进入应用」就不再拦。
+    pub(crate) fn recompute_setup(&mut self) {
+        self.needs_setup = !self.setup_dismissed && !self.models.iter().any(|m| m.is_chat);
+    }
+
     pub(crate) fn load_messages(&mut self, session_id: String, cx: &mut Context<Self>) {
         let port = self.port;
         println!("[消息] 加载会话 {session_id}");
         cx.spawn(async move |this, cx| {
             let url = format!(
-                "http://{SERVER_HOST}:{port}/api/v1/sessions/{session_id}/messages?limit=200"
+                "http://{SERVER_HOST}:{port}/api/v1/sessions/{session_id}/messages?limit={MESSAGE_PAGE}"
             );
             match fetch_json(url).await {
                 Ok(body) => {
@@ -1103,43 +1104,22 @@ impl ClientApp {
                         .and_then(|v| v.as_array())
                         .cloned()
                         .unwrap_or_default();
+                    // 上滚游标与「还有更早」都由服务端随页下发（ADR-035 §8）。
+                    let cursor = body.get("next_before_seq").and_then(|v| v.as_i64());
+                    let more = body
+                        .get("has_more")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false);
                     let rows: Vec<MsgRow> = arr
                         .iter()
-                        .map(|m| {
-                            let (segs, tool_calls) = parse_segments(m);
-                            MsgRow {
-                                role: m
-                                    .get("role")
-                                    .and_then(|v| v.as_str())
-                                    .unwrap_or("?")
-                                    .to_string(),
-                                text: segments_body_text(m).into(),
-                                segs,
-                                tool_calls,
-                                compression: m
-                                    .get("compression_marker")
-                                    .and_then(|v| v.as_bool())
-                                    .unwrap_or(false),
-                                usage: parse_msg_usage(m),
-                                images: parse_msg_images(m),
-                                ts: parse_msg_ts(m),
-                                id: m
-                                    .get("id")
-                                    .and_then(|v| v.as_str())
-                                    .unwrap_or_default()
-                                    .to_string(),
-                            }
-                        })
+                        .map(parse_msg_row)
                         .collect();
                     let n = rows.len();
-                    println!("[消息] 拉到 {n} 条");
-                    // 性能：只渲染最近 RENDER_LIMIT 条（Markdown 布局成本高，
-                    // 全量渲染 90+ 条会明显卡顿）。历史加载留待后续做上滚分页。
+                    println!("[消息] 首屏 {n} 条（has_more={more}）");
                     let total = n;
-                    let kept = render_window(&rows, RENDER_LIMIT);
                     cx.update(|app| {
                         let _ = this.update(app, |this, cx| {
-                            this.messages = Rc::new(kept);
+                            this.messages = Rc::new(rows);
                             // 条数变了必须重建 list state（item_count 在构造时固定）
                             this.msg_list_state = GpuiListState::new(
                                 this.messages.len(),
@@ -1147,11 +1127,10 @@ impl ClientApp {
                                 px(120.),
                             );
                             this.message_total = total;
-                            this.current_title = if total > RENDER_LIMIT {
-                                format!("会话消息（共 {total} 条，显示最近 {RENDER_LIMIT} 条）")
-                            } else {
-                                format!("会话消息（{total} 条）")
-                            };
+                            this.oldest_seq = cursor;
+                            this.has_more_history = more;
+                            this.loading_older = false;
+                            this.current_title = format!("会话消息（{total} 条）");
                             cx.notify();
                         });
                     });
@@ -1166,6 +1145,92 @@ impl ClientApp {
                     });
                 }
             }
+        })
+        .detach();
+    }
+
+    /// 上滚加载更早一页（`?before_seq=<oldest_seq>`），前插并保持阅读位置。
+    ///
+    /// 与 Web 版 `use-session-history.loadOlder` 同口径：页长 [`MESSAGE_PAGE`]、
+    /// 游标用服务端下发的 `next_before_seq`、`has_more=false` 就不再请求。
+    /// 早先的做法是「一次拉 200 条、只渲染 60 条」——更早的历史永远看不到，
+    /// 拉回来的 140 条还白费。
+    pub(crate) fn load_older_messages(&mut self, cx: &mut Context<Self>) {
+        if self.loading_older || !self.has_more_history {
+            return;
+        }
+        let Some(sid) = self.current_session.clone() else {
+            return;
+        };
+        let Some(cursor) = self.oldest_seq else {
+            return;
+        };
+        if self.messages.len() >= MAX_LOADED_MESSAGES {
+            self.status = format!("已加载 {MAX_LOADED_MESSAGES} 条，不再往前加载");
+            cx.notify();
+            return;
+        }
+        self.loading_older = true;
+        let port = self.port;
+        self.status = "正在加载更早的消息…".to_string();
+        cx.spawn(async move |this, cx| {
+            let url = format!(
+                "http://{SERVER_HOST}:{port}/api/v1/sessions/{sid}/messages?limit={MESSAGE_PAGE}&before_seq={cursor}"
+            );
+            let res = fetch_json(url).await;
+            let _ = this.update(cx, |this, cx| {
+                this.loading_older = false;
+                let body = match res {
+                    Ok(b) => b,
+                    Err(e) => {
+                        this.status = format!("加载更早的消息失败：{e}");
+                        cx.notify();
+                        return;
+                    }
+                };
+                let arr = body
+                    .get("messages")
+                    .and_then(|v| v.as_array())
+                    .cloned()
+                    .unwrap_or_default();
+                let older: Vec<MsgRow> = arr.iter().map(parse_msg_row).collect();
+                // 按 id 去重（服务端页边界可能重叠）：保留前插的那份
+                let known: std::collections::HashSet<String> = this
+                    .messages
+                    .iter()
+                    .map(|m| m.id.clone())
+                    .filter(|id| !id.is_empty())
+                    .collect();
+                let mut merged: Vec<MsgRow> = older
+                    .into_iter()
+                    .filter(|m| m.id.is_empty() || !known.contains(&m.id))
+                    .collect();
+                let added = merged.len();
+                merged.extend((*this.messages).iter().cloned());
+                this.oldest_seq = body.get("next_before_seq").and_then(|v| v.as_i64());
+                this.has_more_history = body
+                    .get("has_more")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+                this.messages = Rc::new(merged);
+                // 重建列表（item_count 构造时固定），并把视线留在**原来那条**上：
+                // 前插了 added 条，原来的第一条现在在索引 added
+                this.msg_list_state =
+                    GpuiListState::new(this.messages.len(), ListAlignment::Bottom, px(120.));
+                if added > 0 {
+                    this.msg_list_state.scroll_to(gpui_kit::ListOffset {
+                        item_ix: added,
+                        offset_in_item: px(0.),
+                    });
+                }
+                this.message_total = this.messages.len();
+                this.status = if added > 0 {
+                    format!("已加载 {added} 条更早的消息")
+                } else {
+                    "没有更早的消息了".to_string()
+                };
+                cx.notify();
+            });
         })
         .detach();
     }
@@ -1330,6 +1395,36 @@ fn push_seg_delta(segs: &mut Vec<Seg>, delta: &str, thinking: bool) {
     }
 }
 
+/// 一条服务端消息 → 界面行。
+///
+/// 历史首屏、上滚分页、边界事件（压缩点 / System 通知）**共用这一份**口径——
+/// 三处各写一遍字段映射，迟早漂移出「历史里有、推送来的没有」这类问题。
+pub(crate) fn parse_msg_row(m: &serde_json::Value) -> MsgRow {
+    let (segs, tool_calls) = parse_segments(m);
+    MsgRow {
+        id: m
+            .get("id")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string(),
+        role: m
+            .get("role")
+            .and_then(|v| v.as_str())
+            .unwrap_or("?")
+            .to_string(),
+        text: segments_body_text(m).into(),
+        segs,
+        tool_calls,
+        compression: m
+            .get("compression_marker")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false),
+        usage: parse_msg_usage(m),
+        images: parse_msg_images(m),
+        ts: parse_msg_ts(m),
+    }
+}
+
 /// `message` 边界事件该走哪条路径（结构判据，单测钉住）。
 ///
 /// 三种消息混在同一个事件名里，早先只处理了第一种，于是压缩点和 System 通知
@@ -1355,24 +1450,6 @@ pub(crate) fn classify_boundary_message(role: &str, is_marker: bool) -> Boundary
     }
 }
 
-/// 渲染窗口：最近 `limit` 条；若被截掉的部分含压缩点，把**最近一条**提到最前面。
-///
-/// 为什么需要：压缩点几乎总落在被截掉的早期，而界面只渲染最近 `limit` 条 ——
-/// 于是出现用户实测的现象：「上下文占比从 58% 掉到 2%，却一个压缩点都没显示」。
-/// 只补最后一条（最近一次压缩），并放在窗口最前面，让它像分隔符一样起头。
-pub(crate) fn render_window(rows: &[MsgRow], limit: usize) -> Vec<MsgRow> {
-    let n = rows.len();
-    if n <= limit {
-        return rows.to_vec();
-    }
-    let cut = n - limit;
-    let mut kept: Vec<MsgRow> = rows[cut..].to_vec();
-    if let Some(marker) = rows[..cut].iter().rev().find(|m| m.compression) {
-        kept.insert(0, marker.clone());
-    }
-    kept
-}
-
 #[cfg(test)]
 mod step_boundary_tests {
     //! 「一步一条消息」判据的回归（用户报的「流式结束后工具调用全不见」的根因）。
@@ -1385,7 +1462,6 @@ mod step_boundary_tests {
     // “recursion limit reached while expanding `#[test]`”）。只显式导入需要的类型。
     use crate::types::{MsgRow, Seg, ToolCall};
     use crate::ClientApp;
-    use crate::app::render_window;
     use crate::app::{classify_boundary_message, BoundaryMessageAction};
 
     fn tool(id: &str, done: bool) -> ToolCall {
@@ -1417,47 +1493,6 @@ mod step_boundary_tests {
     #[test]
     fn empty_placeholder_is_not_closed() {
         assert!(!ClientApp::step_closed(&row(Vec::new(), Vec::new())));
-    }
-
-    /// 构造一条压缩点消息（`role=user` + `compression=true`，与后端落库形态一致）。
-    fn marker() -> MsgRow {
-        let mut m = row(Vec::new(), Vec::new());
-        m.role = "user".to_string();
-        m.compression = true;
-        m
-    }
-
-    #[test]
-    fn window_keeps_tail_when_no_compression() {
-        let rows: Vec<MsgRow> = (0..10).map(|_| row(Vec::new(), Vec::new())).collect();
-        let got = render_window(&rows, 4);
-        assert_eq!(got.len(), 4);
-        assert!(!got.iter().any(|m| m.compression));
-    }
-
-    #[test]
-    fn window_lifts_last_compression_marker_to_front() {
-        // 20 条里 seq 3 / 8 是压缩点，窗口只覆盖后 5 条（15..20）
-        let mut rows: Vec<MsgRow> = (0..20).map(|_| row(Vec::new(), Vec::new())).collect();
-        rows[3] = marker();
-        rows[8] = marker();
-        let got = render_window(&rows, 5);
-        assert_eq!(got.len(), 6, "5 条窗口 + 1 条补进来的压缩点");
-        assert!(got[0].compression, "压缩点必须排在最前面");
-        assert_eq!(
-            got.iter().filter(|m| m.compression).count(),
-            1,
-            "只补最近一条（seq 8），不要把历史上所有压缩点都搬进来"
-        );
-    }
-
-    #[test]
-    fn window_without_truncation_is_untouched() {
-        let mut rows: Vec<MsgRow> = (0..3).map(|_| row(Vec::new(), Vec::new())).collect();
-        rows[0] = marker();
-        let got = render_window(&rows, 60);
-        assert_eq!(got.len(), 3);
-        assert!(got[0].compression);
     }
 
     #[test]

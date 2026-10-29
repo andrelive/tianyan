@@ -202,6 +202,8 @@ impl ClientApp {
         for (ix, a) in self.pending_approvals.iter().enumerate() {
             let rid_a = a.request_id.clone();
             let rid_d = a.request_id.clone();
+            let rid_e = a.request_id.clone();
+            let edit_cmd = a.action_detail.clone();
             pending = pending.child(
                 div()
                     .w_full()
@@ -234,6 +236,42 @@ impl ClientApp {
                                     .child(format!("风险 {}", a.risk)),
                             ),
                     )
+                    // 具体操作原文（审批的意义就是「看清再点」）
+                    .children(if a.action_detail.is_empty() {
+                        None
+                    } else {
+                        Some(
+                            div()
+                                .w_full()
+                                .rounded_md()
+                                .bg(rgb(colors::BG_PRIMARY()))
+                                .p_2()
+                                .text_size(px(10.))
+                                .text_color(rgb(colors::TEXT_SECONDARY()))
+                                .child(ellipsis(&a.action_detail, 400)),
+                        )
+                    })
+                    .child(
+                        div()
+                            .id(("ap-edit", ix))
+                            .px_2()
+                            .py_1()
+                            .rounded_md()
+                            .border_1()
+                            .border_color(rgb(colors::BORDER()))
+                            .cursor_pointer()
+                            .text_size(px(10.))
+                            .text_color(rgb(colors::TEXT_SECONDARY()))
+                            .child("编辑后批准")
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.open_edit_approval(
+                                    rid_e.clone(),
+                                    edit_cmd.clone(),
+                                    window,
+                                    cx,
+                                )
+                            })),
+                    )
                     .child(
                         div()
                             .id(("ap-ok", ix))
@@ -246,7 +284,7 @@ impl ClientApp {
                             .text_color(rgb(colors::TEXT_PRIMARY()))
                             .child("允许")
                             .on_click(cx.listener(move |this, _, _, cx| {
-                                this.respond_approval(rid_a.clone(), "approve", cx)
+                                this.respond_approval(rid_a.clone(), "approve", None, cx)
                             })),
                     )
                     .child(
@@ -261,7 +299,7 @@ impl ClientApp {
                             .text_color(rgb(colors::TEXT_PRIMARY()))
                             .child("拒绝")
                             .on_click(cx.listener(move |this, _, _, cx| {
-                                this.respond_approval(rid_d.clone(), "deny", cx)
+                                this.respond_approval(rid_d.clone(), "deny", None, cx)
                             })),
                     ),
             );

@@ -308,6 +308,12 @@ impl ClientApp {
 
         serde_json::json!({
             "view": self.view.key(),
+            // 首次启动引导状态（断言「新装用户是否被正确拦到引导页」）
+            "setup": {
+                "needs_setup": self.needs_setup,
+                "has_chat_model": self.models.iter().any(|m| m.is_chat),
+                "model_count": self.models.len(),
+            },
             // 内嵌 server 的端口：自动化脚本直接拿它去调后端接口做交叉验证
             // （断言「界面显示的值」确实落到了服务端配置里）。
             "server_port": self.port,
@@ -326,6 +332,10 @@ impl ClientApp {
             "messages": {
                 "loaded": self.messages.len(),
                 "total": self.message_total,
+                // 上滚分页状态（断言「有没有更早的 / 加载后条数是否增加」只看这里）
+                "oldest_seq": self.oldest_seq,
+                "has_more": self.has_more_history,
+                "loading_older": self.loading_older,
                 "last": last_msg,
                 // 最近几段的「骨架」：断言「一轮多步是否分成多条消息」「工具卡有没有
                 // 拿到结果」只能看这里（截图看不出边界，`text` 又是拍平后的正文）。
@@ -874,6 +884,8 @@ impl ClientApp {
             // ---- 对话 ----
             "send_message" => self.send_text(arg_str(cmd, "text")?, cx),
             "stop_turn" => self.stop_current_turn(cx),
+            // 上滚加载更早一页（与顶部「↑ 加载更早的消息」按钮同一个方法）
+            "load_older" => self.load_older_messages(cx),
             // ---- 左栏 ----
             "toggle_group" => self.toggle_group(arg_str(cmd, "key")?, cx),
             "expand_group" => self.expand_group(arg_str(cmd, "key")?, cx),
@@ -1086,8 +1098,8 @@ impl ClientApp {
                 };
                 // `respond_approval` 收 `&'static str`，只能走这两个字面量
                 match decision.as_str() {
-                    "approve" => self.respond_approval(request_id, "approve", cx),
-                    "deny" => self.respond_approval(request_id, "deny", cx),
+                    "approve" => self.respond_approval(request_id, "approve", None, cx),
+                    "deny" => self.respond_approval(request_id, "deny", None, cx),
                     other => return Err(format!("decision 只能是 approve / deny：{other}")),
                 }
             }
@@ -1232,6 +1244,17 @@ impl ClientApp {
                 self.set_model_preference(provider, model, &kind, cx);
             }
             "reload_models" => self.load_models(cx),
+            // 首次启动引导：重跑检测（= 重拉模型列表 + 重算判据）/ 逃生舱放行
+            "check_setup" => {
+                self.load_models(cx);
+                self.recompute_setup();
+                cx.notify();
+            }
+            "setup_enter" => {
+                self.setup_dismissed = true;
+                self.recompute_setup();
+                cx.notify();
+            }
             "model_form" => {
                 self.model_form_open = cmd
                     .get("open")

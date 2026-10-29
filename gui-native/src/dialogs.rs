@@ -16,6 +16,37 @@ use gpui_kit::component::input::Input;
 use crate::types::*;
 
 impl ClientApp {
+    /// 打开「编辑后批准」弹窗（回填原命令）。
+    ///
+    /// 复用 `dialog_input`（与重命名同一个实体槽）：每次新建实体，因为
+    /// `InputState` 没有公开的 `set_value` 可用来回填（同 `open_rename` 的理由）。
+    pub(crate) fn open_edit_approval(
+        &mut self,
+        request_id: String,
+        command: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let prefill = command.clone();
+        self.dialog_input = Some(cx.new(|cx| {
+            InputState::new(window, cx).default_value(prefill)
+        }));
+        self.dialog = Some(Dialog::EditApproval { request_id });
+        cx.notify();
+    }
+
+    /// 「编辑后批准」提交：读输入框内容当 `edited_command`，再按 `approve` 提交。
+    pub(crate) fn confirm_edit_approval(&mut self, request_id: String, cx: &mut Context<Self>) {
+        let edited = self
+            .dialog_input
+            .as_ref()
+            .map(|i| i.read(cx).value().to_string())
+            .unwrap_or_default();
+        self.dialog = None;
+        self.dialog_input = None;
+        self.respond_approval(request_id, "approve", Some(edited), cx);
+    }
+
     /// 模态对话框覆盖层（删除确认 / 重命名）：整窗半透明遮罩 + 居中卡片。
     ///
     /// 自绘而不接组件库 `Dialog`：只有两种形态，自绘更可控（遮罩色、按钮危险色
@@ -73,6 +104,16 @@ impl ClientApp {
                 "回退".to_string(),
                 true,
             ),
+            Dialog::EditApproval { .. } => (
+                "编辑后批准".to_string(),
+                // 后端语义必须说清：编辑值只记审计与通知，实际执行仍按原命令
+                Some(
+                    "改写后的命令会记入审批审计与通知，但**实际执行仍由智能体按原命令发起**。"
+                        .to_string(),
+                ),
+                "批准".to_string(),
+                false,
+            ),
         };
         let mut card = div()
             .w(px(420.))
@@ -99,7 +140,10 @@ impl ClientApp {
             );
         }
         // 重命名用输入框（目录选择器是独立形态，走别的分支）
-        if let (Dialog::RenameSession { .. }, Some(input)) = (&dialog, self.dialog_input.as_ref()) {
+        // 需要输入框的两种弹窗：重命名会话 / 审批「编辑后批准」
+        if let (Dialog::RenameSession { .. } | Dialog::EditApproval { .. }, Some(input)) =
+            (&dialog, self.dialog_input.as_ref())
+        {
             card = card.child(
                 div()
                     .w_full()
@@ -168,6 +212,9 @@ impl ClientApp {
                                     message_id,
                                     ..
                                 }) => this.confirm_rollback(session_id, message_id, cx),
+                                Some(Dialog::EditApproval { request_id, .. }) => {
+                                    this.confirm_edit_approval(request_id, cx)
+                                }
                                 None => {}
                             }),
                         ),

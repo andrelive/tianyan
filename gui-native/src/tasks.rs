@@ -20,6 +20,29 @@ pub(crate) fn task_active(status: &str) -> bool {
     matches!(status, "pending" | "running")
 }
 
+/// 从审批 `action` 的 JSON 里取出「命令 / 路径」原文（展示用 + 「编辑后批准」回填）。
+///
+/// `Action` 是枚举，变体多（ExecuteCommand / WriteFile / DeleteFile / …）且会演进——
+/// 不逐个 match，而是**按字段名递归找** `command` / `path` / `pattern`；找不到返回
+/// `None`（调用方退回整段 JSON）。后端新增变体时这里不必跟着改。
+pub(crate) fn extract_action_command(v: &serde_json::Value) -> Option<String> {
+    const KEYS: [&str; 3] = ["command", "path", "pattern"];
+    match v {
+        serde_json::Value::Object(map) => {
+            for k in KEYS {
+                if let Some(s) = map.get(k).and_then(|x| x.as_str()) {
+                    if !s.is_empty() {
+                        return Some(s.to_string());
+                    }
+                }
+            }
+            map.values().find_map(extract_action_command)
+        }
+        serde_json::Value::Array(items) => items.iter().find_map(extract_action_command),
+        _ => None,
+    }
+}
+
 impl ClientApp {
     /// 拉取本会话的后台任务（`GET /api/v1/tasks`，按 `parent_session_id` 归属过滤）。
     ///
@@ -742,6 +765,18 @@ impl ClientApp {
                                 .and_then(|v| v.as_str())
                                 .unwrap_or("-")
                                 .to_string(),
+                            // 具体操作：`action` 是 Action 枚举（ExecuteCommand /
+                            // WriteFile / …），变体多且会演进 —— 不逐个 match，
+                            // 直接给紧凑 JSON（截断），用户能看到「到底要执行什么」。
+                            action_detail: a
+                                .get("action")
+                                .and_then(extract_action_command)
+                                .or_else(|| {
+                                    a.get("action")
+                                        .map(|v| v.to_string())
+                                        .map(|s| s.chars().take(400).collect())
+                                })
+                                .unwrap_or_default(),
                         });
                     }
                 }
@@ -759,13 +794,20 @@ impl ClientApp {
         &mut self,
         request_id: String,
         decision: &'static str,
+        edited: Option<String>,
         cx: &mut Context<Self>,
     ) {
         let port = self.port;
         self.status = format!("正在提交审批：{decision}");
         cx.spawn(async move |this, cx| {
             let url = format!("http://{SERVER_HOST}:{port}/api/v1/approval/respond");
-            let body = serde_json::json!({ "request_id": request_id, "decision": decision });
+            let mut body = serde_json::json!({ "request_id": request_id, "decision": decision });
+            // 编辑后批准：后端把 `edited_command` 记入审计与通知，
+            // **实际执行仍按原命令**（见 RespondApprovalRequest 的注释）——
+            // 所以 UI 上必须写明，不能让人以为改了就按新的跑。
+            if let Some(cmd) = edited.filter(|s| !s.trim().is_empty()) {
+                body["edited_command"] = serde_json::Value::String(cmd);
+            }
             let res = post_json(url, body).await;
             let _ = this.update(cx, |this, cx| {
                 this.status = match res {
@@ -789,6 +831,8 @@ impl ClientApp {
         };
         let rid_approve = a.request_id.clone();
         let rid_deny = a.request_id.clone();
+        let rid_edit = a.request_id.clone();
+        let edit_cmd = a.action_detail.clone();
         div()
             .px_4()
             .pb_2()
@@ -831,11 +875,48 @@ impl ClientApp {
                             .text_color(rgb(colors::TEXT_PRIMARY()))
                             .child(ellipsis(&a.description, 300)),
                     )
+                    // 具体操作原文：只给 description 时用户看不清「到底要执行什么」
+                    // 就被要求授权——而这个横幅的存在意义就是让人看清再点。
+                    .children(if a.action_detail.is_empty() {
+                        None
+                    } else {
+                        Some(
+                            div()
+                                .w_full()
+                                .rounded_md()
+                                .bg(rgb(colors::BG_PRIMARY()))
+                                .p_2()
+                                .text_size(px(11.))
+                                .text_color(rgb(colors::TEXT_SECONDARY()))
+                                .child(ellipsis(&a.action_detail, 400)),
+                        )
+                    })
                     .child(
                         div()
                             .flex()
                             .flex_row()
                             .gap_2()
+                            .child(
+                                div()
+                                    .id("approve-edit")
+                                    .px_3()
+                                    .py_1()
+                                    .rounded_md()
+                                    .border_1()
+                                    .border_color(rgb(colors::BORDER()))
+                                    .text_color(rgb(colors::TEXT_SECONDARY()))
+                                    .cursor_pointer()
+                                    .text_xs()
+                                    .child("编辑后批准")
+                                    .on_click(cx.listener(move |this, _, window, cx| {
+                                        this.open_edit_approval(
+                                            rid_edit.clone(),
+                                            edit_cmd.clone(),
+                                            window,
+                                            cx,
+                                        );
+                                    })),
+                            )
                             .child(
                                 div()
                                     .id("approve")
@@ -848,7 +929,12 @@ impl ClientApp {
                                     .text_xs()
                                     .child("允许")
                                     .on_click(cx.listener(move |this, _, _w, cx| {
-                                        this.respond_approval(rid_approve.clone(), "approve", cx);
+                                        this.respond_approval(
+                                            rid_approve.clone(),
+                                            "approve",
+                                            None,
+                                            cx,
+                                        );
                                     })),
                             )
                             .child(
@@ -863,7 +949,7 @@ impl ClientApp {
                                     .text_xs()
                                     .child("拒绝")
                                     .on_click(cx.listener(move |this, _, _w, cx| {
-                                        this.respond_approval(rid_deny.clone(), "deny", cx);
+                                        this.respond_approval(rid_deny.clone(), "deny", None, cx);
                                     })),
                             ),
                     ),

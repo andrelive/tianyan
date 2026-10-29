@@ -66,7 +66,17 @@ use types::View;
 pub(crate) const SERVER_HOST: &str = "127.0.0.1";
 pub(crate) const PREFERRED_PORT: u16 = 3000;
 /// 单屏渲染的消息条数上限（无虚拟化时控制 Markdown 布局量，否则滚动卡顿）
-pub(crate) const RENDER_LIMIT: usize = 60;
+/// 消息分页页长（`?limit=`）：与 Web 版 `ChatPanel` 同口径的 50 条一页。
+///
+/// 早先一次性拉 200 条再截到 60 条渲染 —— 结果是「更早的历史永远看不到，
+/// 而拉回来的 200 条里 140 条白拉」。现在是「按页拉、按需前插」。
+pub(crate) const MESSAGE_PAGE: usize = 50;
+
+/// 前插累积的硬上限：超过就不再往上加载（提示已到上限）。
+///
+/// 不是性能闸门（列表是虚拟化的，只布局可见项），而是防「一路滚到 5000 条」
+/// 那种极端内存占用。
+pub(crate) const MAX_LOADED_MESSAGES: usize = 600;
 /// 左栏组内初始可见会话数（对齐 Tauri 版 `SESSIONS_INITIAL_VISIBLE`）
 pub(crate) const SESSIONS_INITIAL_VISIBLE: usize = 3;
 /// 「查看更多」单次要展开的条数（`SESSIONS_LOAD_STEP`）
@@ -262,6 +272,18 @@ struct ClientApp {
     /// 写了一半的内容还在；原生早先切会话直接丢（输入框与图片都清空）——写长 prompt
     /// 时最容易踩，且丢了就找不回来。
     pub(crate) drafts: std::collections::HashMap<String, (String, Vec<String>)>,
+    /// 上滚游标（`GET /sessions/{id}/messages` 的 `next_before_seq`）：
+    /// 指向当前窗口**最早一条**的 seq；`None` = 已到链首，没有更早的了。
+    pub(crate) oldest_seq: Option<i64>,
+    /// 服务端 `has_more`：还有更早的历史可加载（顶部入口据此显示）
+    pub(crate) has_more_history: bool,
+    /// 正在拉上一页（防连点重复请求）
+    pub(crate) loading_older: bool,
+    /// 首次启动引导：`GET /config/status` 报 `configured=false` 时置真，
+    /// render 走全屏引导页（`pages/setup.rs`）而不是主界面。
+    pub(crate) needs_setup: bool,
+    /// 用户点过「仍然进入应用」—— 不再拦（配置误判时的逃生舱）
+    pub(crate) setup_dismissed: bool,
     /// 打开的会话 Tab（浏览器式；按打开顺序，最多 [`MAX_SESSION_TABS`] 个）
     pub(crate) open_tabs: Vec<String>,
     /// 新会话待绑定的工作目录（「＋新目录」设置）：随首条消息以
@@ -523,6 +545,12 @@ impl Render for ClientApp {
                             .rounded_lg(),
                     ),
             );
+        }
+        // 首次启动引导：未配置时用**全屏覆盖层**盖住主界面（而不是早返回另一个
+        // 类型——那会让 `Render::render` 的返回类型具体化，撞 `refining_impl_trait`
+        // 警告。覆盖层同时保证「配置好后立刻回到主界面」，不需要重建视图）
+        if self.needs_setup {
+            root = root.child(self.render_setup_screen(cx));
         }
         root
     }
