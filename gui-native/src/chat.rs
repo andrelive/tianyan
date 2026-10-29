@@ -16,6 +16,15 @@ use gpui_kit::list as gpui_list;
 use crate::types::*;
 use crate::format::*;
 
+/// 待发图片张数上限（与 Web 版 `ChatInput.tsx` 同数：4 张）。
+///
+/// 再多既撑上下文，也会让模型抓不到重点；Web 版在选图按钮满 4 张时禁用，
+/// 这里在粘贴通道拦截并给出提示（粘贴没有「按钮禁用」这个信号）。
+pub(crate) const MAX_COMPOSER_IMAGES: usize = 4;
+
+/// 一次粘贴最多引用多少个文件（与 Web 版同数：20 个）。
+pub(crate) const MAX_COMPOSER_FILES: usize = 20;
+
 impl ClientApp {
     /// 最近一轮请求的用量 → 上下文占用的分子。
     ///
@@ -598,6 +607,38 @@ impl ClientApp {
             .into_any_element()
     }
 
+    /// 输入框高度：随内容增高（2 行起，约 200px 封顶后内部滚动）。
+    ///
+    /// 为什么自己算：GPUI 的 `Textarea` 只暴露 `.h(DefiniteLength)`（固定高度），
+    /// 没有 auto-grow —— 早先写死 64px，用户写三行以上的 prompt 就得在 2.5 行高的
+    /// 小窗里滚动（Web 版是 3.5rem → 200px 自适应）。
+    ///
+    /// 估算口径：全角按 2 个半角宽，一行约 58 个半角字符（896px 卡片宽 / 14px 字号）。
+    /// 误差一两行不影响观感，**宁可高一点**也不要让人手动滚。
+    pub(crate) fn composer_height(&self, cx: &App) -> f32 {
+        const COLS: f32 = 58.0;
+        const LINE_H: f32 = 21.0;
+        const PAD: f32 = 26.0;
+        let text = self.input.read(cx).value().to_string();
+        let mut rows = 0.0f32;
+        for line in text.split('\n') {
+            let mut w = 0.0f32;
+            for ch in line.chars() {
+                // 制表符按 4 个半角宽，其余非 ASCII 按全角
+                w += if ch == '\t' {
+                    4.0
+                } else if ch.is_ascii() {
+                    1.0
+                } else {
+                    2.0
+                };
+            }
+            rows += (w / COLS).ceil().max(1.0);
+        }
+        let rows = rows.max(2.0);
+        (rows * LINE_H + PAD).clamp(64.0, 200.0)
+    }
+
     /// 输入卡片 = **一体式卡片**（对齐 Tauri 版 `ChatInput`）：
     /// 外框限宽 896 居中、bg-secondary、rounded-2xl；卡片内 = 编辑器 + 底部控件行。
     pub(crate) fn render_composer(&self, cx: &mut Context<Self>) -> AnyElement {
@@ -629,15 +670,19 @@ impl ClientApp {
                     .flex()
                     .flex_col()
                     .gap_2()
-                    // Ctrl+V：剪贴板里是**图片**时直接贴成附件（截图→粘贴的最短路径）。
-                    // 只有贴成功才吞掉事件；纯文本仍交给 Textarea 自己粘贴。
+                    // 兜底路径：Textarea 的 `on_paste` 是正解（见下），但它是组件内部
+                    // 钩子——万一某次 gpui-component 升级改了触发时机，用户按 Ctrl+V
+                    // 就会「什么都没发生」。这里再挂一层 `on_key_down`：只有贴图成功
+                    // 才吞事件，纯文本仍交给 Textarea。两条路径都命中时靠
+                    // `paste_image_from_item` 里的去重保证不会贴两份。
                     .on_key_down(cx.listener(
                         |this, ev: &gpui_kit::KeyDownEvent, _window, cx| {
                             let k = &ev.keystroke;
-                            if k.modifiers.control && k.key == "v" {
-                                if this.paste_image_from_clipboard(cx) {
-                                    cx.stop_propagation();
-                                }
+                            if k.modifiers.control
+                                && k.key == "v"
+                                && this.paste_image_from_clipboard(cx)
+                            {
+                                cx.stop_propagation();
                             }
                         },
                     ))
@@ -645,11 +690,32 @@ impl ClientApp {
                     // 由外层卡片充当「输入框」——否则会看成上下分离的
                     // 两块（上面一个输入框 + 下面一排按钮），与 Tauri
                     // 版「按钮在输入框内」的形态不符。
-                    .child(
+                    .child({
+                        // Ctrl+V 的正解是 Textarea 自己的 `on_paste` 钩子（gpui-component
+                        // 专门为「粘贴图片 / 文件」留的，等价于 Web 的 `onPaste`），
+                        // **不是**外层 `on_key_down`：后者在冒泡阶段根本拿不到事件
+                        // （Textarea 内建的 paste action 先消费掉了），实测现象就是
+                        // 「焦点在输入框里按 Ctrl+V 没反应，只能点按钮」。
+                        // 返回 `false` 时文本粘贴照常走默认实现，不抢。
+                        let app = self.app_ref.clone();
+                        let height = self.composer_height(cx);
                         Textarea::new(&self.input)
-                            .h(px(64.))
-                            .appearance(false),
-                    )
+                            .h(px(height))
+                            .appearance(false)
+                            .on_paste(move |item, window, cx| {
+                                let Some(w) = app.lock().ok().and_then(|g| g.clone()) else {
+                                    return false;
+                                };
+                                w.update(cx, |this: &mut ClientApp, cx| {
+                                    // 分流顺序不可"优化"：图片优先，文件只兜底。
+                                    // 反过来会把「复制的 png」变成模型读不了的路径引用
+                                    // （Web 版同一条结论，见 ChatInput.tsx 的图片通道注释）。
+                                    this.paste_image_from_item(item, cx)
+                                        || this.paste_files_from_item(item, window, cx)
+                                })
+                                .unwrap_or(false)
+                            })
+                    })
                     // 待发送图片缩略图（单独成函数：压 render_chat 栈帧）
                     .children(if self.composer_images.is_empty() {
                         None
@@ -1321,27 +1387,97 @@ impl ClientApp {
         let Some(item) = cx.read_from_clipboard() else {
             return false;
         };
-        for entry in item.entries {
-            if let gpui_kit::ClipboardEntry::Image(img) = entry {
-                let mime = match img.format {
-                    gpui_kit::ImageFormat::Png => "image/png",
-                    gpui_kit::ImageFormat::Jpeg => "image/jpeg",
-                    gpui_kit::ImageFormat::Gif => "image/gif",
-                    gpui_kit::ImageFormat::Bmp => "image/bmp",
-                    _ => "image/png",
-                };
-                if let Some(url) = bytes_to_data_url(mime, &img.bytes) {
-                    self.composer_images.push(url);
-                    self.status = "已从剪贴板贴上图片".to_string();
-                    cx.notify();
-                    return true;
-                }
+        self.paste_image_from_item(&item, cx)
+    }
+
+    /// 从一份剪贴板载荷里取图片贴成待发送附件（**输入框 `on_paste` 与按钮共用**）。
+    ///
+    /// 后端只认 PNG/JPEG/WebP/GIF，而 Windows 截图（Win+Shift+S）给的是 BMP ——
+    /// 这里统一过 `normalize_image_for_api` 转码，避免「贴上去看着好好的、一发就
+    /// 400 不支持的图片格式」（实测踩过）。
+    /// 返回是否真贴上（没有图片时返回 `false`，文本粘贴照常走默认实现）。
+    pub(crate) fn paste_image_from_item(
+        &mut self,
+        item: &gpui_kit::ClipboardItem,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        for entry in &item.entries {
+            let gpui_kit::ClipboardEntry::Image(img) = entry else {
+                continue;
+            };
+            let mime = match img.format {
+                gpui_kit::ImageFormat::Png => "image/png",
+                gpui_kit::ImageFormat::Jpeg => "image/jpeg",
+                gpui_kit::ImageFormat::Gif => "image/gif",
+                gpui_kit::ImageFormat::Bmp => "image/bmp",
+                _ => "image/png",
+            };
+            let Some((mime, bytes)) = normalize_image_for_api(mime, &img.bytes) else {
+                self.status = "剪贴板图片无法解码（格式不支持），未贴上".to_string();
+                cx.notify();
+                return false;
+            };
+            let Some(url) = bytes_to_data_url(&mime, &bytes) else {
                 self.status = "剪贴板图片超过 8MB，未贴上".to_string();
                 cx.notify();
                 return false;
+            };
+            // 去重：`Textarea::on_paste` 与外层 `on_key_down` 是**两条**都可能命中的
+            // 路径（见 `render_composer` 的注释），同一张图不能被贴两份。
+            if self.composer_images.iter().any(|u| u == &url) {
+                return true;
             }
+            // 张数上限与 Web 版一致（4 张）：再多既撑上下文，也会让模型抓不到重点
+            if self.composer_images.len() >= MAX_COMPOSER_IMAGES {
+                self.status = format!(
+                    "最多 {} 张图片（先删掉一些再贴）",
+                    MAX_COMPOSER_IMAGES
+                );
+                cx.notify();
+                // 返回 true：这次粘贴算「已处理」，不让文本通道再插一遍
+                return true;
+            }
+            self.composer_images.push(url);
+            self.status = "已从剪贴板贴上图片".to_string();
+            cx.notify();
+            return true;
         }
         false
+    }
+
+    /// 剪贴板里的**文件**（资源管理器 Ctrl+C / 拖入）→ 光标处插入 `@file:"…"` 引用。
+    ///
+    /// 与 Web 版的「路径通道」同一口径：模型拿到路径，自己决定读不读——比塞 base64
+    /// 省上下文，也避免「复制的 png 变成模型读不了的二进制块」。
+    /// 返回是否插入了东西（没有文件条目返回 `false`，纯文本粘贴照常走默认实现）。
+    pub(crate) fn paste_files_from_item(
+        &mut self,
+        item: &gpui_kit::ClipboardItem,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let mut snippet = String::new();
+        for entry in &item.entries {
+            let gpui_kit::ClipboardEntry::ExternalPaths(ext) = entry else {
+                continue;
+            };
+            for path in ext.paths() {
+                // 一次粘贴最多 20 个引用（与 Web 版同数）：超了只丢多余项，
+                // 已有内容与已插入的部分不动
+                if snippet.matches("@file:").count() >= MAX_COMPOSER_FILES {
+                    break;
+                }
+                snippet.push_str(&format!("`@file:\"{}\"` ", path.to_string_lossy()));
+            }
+        }
+        if snippet.is_empty() {
+            return false;
+        }
+        let n = snippet.matches("@file:").count();
+        self.insert_into_composer(snippet, window, cx);
+        self.status = format!("已引用 {n} 个文件");
+        cx.notify();
+        true
     }
 
     /// 选择图片附件（OS 文件对话框）→ 读成 data URL 挂到待发送列表。

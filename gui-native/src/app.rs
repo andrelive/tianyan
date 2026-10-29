@@ -1071,11 +1071,7 @@ impl ClientApp {
                     // 性能：只渲染最近 RENDER_LIMIT 条（Markdown 布局成本高，
                     // 全量渲染 90+ 条会明显卡顿）。历史加载留待后续做上滚分页。
                     let total = n;
-                    let kept: Vec<MsgRow> = if n > RENDER_LIMIT {
-                        rows.into_iter().skip(n - RENDER_LIMIT).collect()
-                    } else {
-                        rows
-                    };
+                    let kept = render_window(&rows, RENDER_LIMIT);
                     cx.update(|app| {
                         let _ = this.update(app, |this, cx| {
                             this.messages = Rc::new(kept);
@@ -1269,6 +1265,24 @@ fn push_seg_delta(segs: &mut Vec<Seg>, delta: &str, thinking: bool) {
     }
 }
 
+/// 渲染窗口：最近 `limit` 条；若被截掉的部分含压缩点，把**最近一条**提到最前面。
+///
+/// 为什么需要：压缩点几乎总落在被截掉的早期，而界面只渲染最近 `limit` 条 ——
+/// 于是出现用户实测的现象：「上下文占比从 58% 掉到 2%，却一个压缩点都没显示」。
+/// 只补最后一条（最近一次压缩），并放在窗口最前面，让它像分隔符一样起头。
+pub(crate) fn render_window(rows: &[MsgRow], limit: usize) -> Vec<MsgRow> {
+    let n = rows.len();
+    if n <= limit {
+        return rows.to_vec();
+    }
+    let cut = n - limit;
+    let mut kept: Vec<MsgRow> = rows[cut..].to_vec();
+    if let Some(marker) = rows[..cut].iter().rev().find(|m| m.compression) {
+        kept.insert(0, marker.clone());
+    }
+    kept
+}
+
 #[cfg(test)]
 mod step_boundary_tests {
     //! 「一步一条消息」判据的回归（用户报的「流式结束后工具调用全不见」的根因）。
@@ -1281,6 +1295,7 @@ mod step_boundary_tests {
     // “recursion limit reached while expanding `#[test]`”）。只显式导入需要的类型。
     use crate::types::{MsgRow, Seg, ToolCall};
     use crate::ClientApp;
+    use crate::app::render_window;
 
     fn tool(id: &str, done: bool) -> ToolCall {
         ToolCall {
@@ -1311,6 +1326,47 @@ mod step_boundary_tests {
     #[test]
     fn empty_placeholder_is_not_closed() {
         assert!(!ClientApp::step_closed(&row(Vec::new(), Vec::new())));
+    }
+
+    /// 构造一条压缩点消息（`role=user` + `compression=true`，与后端落库形态一致）。
+    fn marker() -> MsgRow {
+        let mut m = row(Vec::new(), Vec::new());
+        m.role = "user".to_string();
+        m.compression = true;
+        m
+    }
+
+    #[test]
+    fn window_keeps_tail_when_no_compression() {
+        let rows: Vec<MsgRow> = (0..10).map(|_| row(Vec::new(), Vec::new())).collect();
+        let got = render_window(&rows, 4);
+        assert_eq!(got.len(), 4);
+        assert!(!got.iter().any(|m| m.compression));
+    }
+
+    #[test]
+    fn window_lifts_last_compression_marker_to_front() {
+        // 20 条里 seq 3 / 8 是压缩点，窗口只覆盖后 5 条（15..20）
+        let mut rows: Vec<MsgRow> = (0..20).map(|_| row(Vec::new(), Vec::new())).collect();
+        rows[3] = marker();
+        rows[8] = marker();
+        let got = render_window(&rows, 5);
+        assert_eq!(got.len(), 6, "5 条窗口 + 1 条补进来的压缩点");
+        assert!(got[0].compression, "压缩点必须排在最前面");
+        assert_eq!(
+            got.iter().filter(|m| m.compression).count(),
+            1,
+            "只补最近一条（seq 8），不要把历史上所有压缩点都搬进来"
+        );
+    }
+
+    #[test]
+    fn window_without_truncation_is_untouched() {
+        let mut rows: Vec<MsgRow> = (0..3).map(|_| row(Vec::new(), Vec::new())).collect();
+        rows[0] = marker();
+        let got = render_window(&rows, 60);
+        assert_eq!(got.len(), 3);
+        assert!(got[0].compression);
     }
 
     #[test]

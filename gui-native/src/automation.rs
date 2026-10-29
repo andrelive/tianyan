@@ -756,6 +756,19 @@ impl ClientApp {
                 "zoomed_image": self.zoomed_image.is_some(),
                 // 待发送附件数（图片）
                 "composer_images": self.composer_images.len(),
+                // 输入框高度（随内容增高，64 → 200 封顶）。GPUI 的 Textarea 没有
+                // auto-grow，这个值是 `composer_height` 按文本估算出来的——写成
+                // state 字段才能在自动化里断言「多行输入框真的变高了」。
+                "composer_height": self.composer_height(cx),
+                // 只暴露 data URL 的 mime 前缀（`data:image/png`）。粘贴链路最常见的
+                // 故障就是「格式没转」——Windows 截图是 BMP，后端只认
+                // PNG/JPEG/WebP/GIF，不转直接 400。断言要看得见，又不能把图片字节
+                // 塞进 state（ADR-052：state 是断言面，不是数据通道）。
+                "composer_image_mimes": self
+                    .composer_images
+                    .iter()
+                    .map(|u| u.split(',').next().unwrap_or_default().to_string())
+                    .collect::<Vec<_>>(),
                 // 系统托盘（D2）：是否找到了本进程的主窗口（找不到 = 托盘显隐失效）
                 "tray": {
                     "available": crate::tray::is_available(),
@@ -1506,6 +1519,19 @@ impl ClientApp {
             // 清空输入框（测试收尾；真实路径里发送成功后也会清）
             "composer_clear" => {
                 self.clear_composer(cx)?;
+            }
+            // 写输入框正文（断言「多行自动增高」等依赖文本内容的渲染行为用；
+            // 与真实键入同一个 `TextareaState::set_value`，不另造路径）
+            "composer_set" => {
+                let text = arg_str(cmd, "text")?;
+                let handle = self.window_handle;
+                let input = self.input.clone();
+                handle
+                    .update(cx, move |_, window, cx| {
+                        input.update(cx, |state, cx| state.set_value(text, window, cx));
+                    })
+                    .map_err(|e| format!("窗口已关闭，无法写入输入框：{e}"))?;
+                cx.notify();
             }
             // 系统通知：走全局通道发一条，验证「注册 → 全局包装 → WinRT」整条链路
             // （通知是否真的弹出来只能人眼/截图确认，这里保证调用链没断）

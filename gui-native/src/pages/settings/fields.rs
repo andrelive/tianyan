@@ -862,6 +862,14 @@ impl ClientApp {
     /// 返回 `Result` 是因为数字/多行文本需要解析——解析失败要把**哪一项**不合法
     /// 报给用户（比笼统的「保存失败」有用）。
     fn field_edit_value(&self, def: &FieldDef, cx: &App) -> Result<serde_json::Value, String> {
+        // 从未回填过（没打开过设置页）：编辑器里是建实体时的占位空串，**不是**用户
+        // 输入。此时一律回落配置值，否则每个数字/文本字段都报「不能为空」：
+        // ① 顶部误报「已修改 27 项」；② 点保存时 `save_settings_fields` 收集到一堆
+        // 伪错误，整体中止（用户看到的是「保存失败：数据目录不能为空；…」，实际
+        // 一个字段都没改）。这条与「编辑器缺失回落」是同一条防线的两道口子。
+        if !self.settings_backfilled {
+            return Ok(self.field_config_fallback(def.path));
+        }
         match &def.kind {
             FieldKind::Bool | FieldKind::Enum(_) | FieldKind::ReadOnly => Ok(self
                 .settings_dirty
@@ -870,7 +878,9 @@ impl ClientApp {
                 .or_else(|| self.field_config_value(def.path))
                 .unwrap_or(serde_json::Value::Null)),
             FieldKind::Int { min, max, .. } => {
-                let raw = self.field_editor_text(def.path, cx);
+                let Some(raw) = self.field_editor_text(def.path, cx) else {
+                    return Ok(self.field_config_fallback(def.path));
+                };
                 let text = raw.trim();
                 if text.is_empty() {
                     return Err(format!("{}：不能为空", def.label));
@@ -884,7 +894,9 @@ impl ClientApp {
                 Ok(serde_json::Value::from(n))
             }
             FieldKind::Float { min, max, .. } => {
-                let raw = self.field_editor_text(def.path, cx);
+                let Some(raw) = self.field_editor_text(def.path, cx) else {
+                    return Ok(self.field_config_fallback(def.path));
+                };
                 let text = raw.trim();
                 if text.is_empty() {
                     return Err(format!("{}：不能为空", def.label));
@@ -898,7 +910,9 @@ impl ClientApp {
                 Ok(serde_json::Value::from(n))
             }
             FieldKind::Text { empty_as, .. } => {
-                let raw = self.field_editor_text(def.path, cx);
+                let Some(raw) = self.field_editor_text(def.path, cx) else {
+                    return Ok(self.field_config_fallback(def.path));
+                };
                 // 单行字段：去掉换行（Textarea 的 Enter 会插 \n，对路径/端点无意义）
                 let text = raw.trim().replace(['\n', '\r'], "");
                 if text.is_empty() {
@@ -911,7 +925,9 @@ impl ClientApp {
                 }
             }
             FieldKind::Lines { .. } => {
-                let raw = self.field_editor_text(def.path, cx);
+                let Some(raw) = self.field_editor_text(def.path, cx) else {
+                    return Ok(self.field_config_fallback(def.path));
+                };
                 let items: Vec<serde_json::Value> = raw
                     .split(['\n', '\r', ','])
                     .map(|s| s.trim())
@@ -923,12 +939,24 @@ impl ClientApp {
         }
     }
 
-    /// 读编辑器当前文本（编辑器缺失时按空串处理——不该发生）。
-    fn field_editor_text(&self, path: &str, cx: &App) -> String {
+    /// 读编辑器当前文本；**编辑器还不存在时返回 `None`**（不是空串）。
+    ///
+    /// 编辑器是懒创建的：只有渲染到那个栏目才会建，而窗口隐藏时不渲染。所以
+    /// 「没有编辑器」必须与「编辑器里是空串」分开：
+    /// ① 当成空串 → 每个数字字段都报「不能为空」→ 设置页顶部误报
+    ///    「已修改 27 项」（实测：state 里一片 `<非法值>`）；
+    /// ② 更糟的是保存会把这种伪编辑态当成用户输入写进配置。
+    /// 正确语义：没渲染过 = 用户不可能编辑过 = 回落到配置值（= 不脏）。
+    fn field_editor_text(&self, path: &str, cx: &App) -> Option<String> {
         self.settings_editors
             .get(path)
             .map(|e| e.read(cx).value().to_string())
-            .unwrap_or_default()
+    }
+
+    /// 无编辑器时的回落值：配置里该字段的当前值（缺失则 `null`）。
+    fn field_config_fallback(&self, path: &str) -> serde_json::Value {
+        self.field_config_value(path)
+            .unwrap_or(serde_json::Value::Null)
     }
 
     /// 脏字段数量（顶部状态行用）。

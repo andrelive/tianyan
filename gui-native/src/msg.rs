@@ -79,7 +79,37 @@ pub(crate) fn image_path_to_data_url(path: &std::path::Path) -> Option<String> {
         _ => return None,
     };
     let bytes = std::fs::read(path).ok()?;
-    bytes_to_data_url(mime, &bytes)
+    let (mime, bytes) = normalize_image_for_api(mime, &bytes)?;
+    bytes_to_data_url(&mime, &bytes)
+}
+
+/// 后端接受的图片 MIME 白名单（与 `server/src/api/chat/types.rs` 的
+/// `ACCEPTED_IMAGE_DATA_URL_PREFIXES` 同一口径）。
+pub(crate) const ACCEPTED_IMAGE_MIMES: [&str; 5] = [
+    "image/png",
+    "image/jpeg",
+    "image/jpg",
+    "image/webp",
+    "image/gif",
+];
+
+/// 任意图片字节 → **后端认的** `(mime, 字节)`。
+///
+/// 为什么需要：Windows 的剪贴板截图（Win+Shift+S / PrintScreen）给的是 **BMP**
+/// （`CF_DIB`），而后端 data URL 白名单只有 PNG/JPEG/WebP/GIF —— 原样发
+/// `data:image/bmp;...` 被 400 拒掉（实测：「不支持的图片格式（仅支持
+/// PNG/JPEG/WebP/GIF）」）。非白名单格式在此解码后重编码成 PNG：无损，且
+/// 截图 BMP 转 PNG 通常小一个量级。
+///
+/// 解码失败（数据损坏 / 缺对应 decoder）返回 `None`，调用方跳过该张不阻断整批。
+pub(crate) fn normalize_image_for_api(mime: &str, bytes: &[u8]) -> Option<(String, Vec<u8>)> {
+    if ACCEPTED_IMAGE_MIMES.contains(&mime) {
+        return Some((mime.to_string(), bytes.to_vec()));
+    }
+    let decoded = image::load_from_memory(bytes).ok()?;
+    let mut out = std::io::Cursor::new(Vec::new());
+    decoded.write_to(&mut out, image::ImageFormat::Png).ok()?;
+    Some(("image/png".to_string(), out.into_inner()))
 }
 
 /// 图片字节 → data URL（`data:image/png;base64,...`）。
@@ -986,7 +1016,11 @@ pub(crate) fn render_msg_body(
                 .child(div().flex_1().h(px(1.)).bg(rgb(colors::BORDER()))),
         );
     }
-    if msg.segs.is_empty() {
+    if msg.compression {
+        // 压缩点只做**分隔符**：摘要正文是给模型看的，界面上不铺开（与 Web 版
+        // `MessageBubble.tsx` 的「压缩点」胶囊同口径）——几百字摘要会把窗口占满，
+        // 反而更难看清「压缩点到底在哪」。
+    } else if msg.segs.is_empty() {
         if !msg.text.is_empty() {
             body = body.child(TextView::markdown(("msg", mi), msg.text.clone()));
         }
@@ -1082,3 +1116,70 @@ pub(crate) type ExpandRef = Rc<std::cell::RefCell<ExpandState>>;
 
 /// 反向弱引用（点击回调里 `update` 回 view）。
 pub(crate) type AppRef = Arc<Mutex<Option<WeakEntity<ClientApp>>>>;
+
+#[cfg(test)]
+mod image_mime_tests {
+    //! 「图片进后端前必须转成白名单格式」的回归（用户实测 400：`data:image/bmp`）。
+    //!
+    //! 判据是纯函数（字节进、字节出），不需要 UI、不需要剪贴板、不需要 LLM ——
+    //! 用单测钉住比每次手动截图粘贴可靠得多。
+    // ⚠️ 不要 `use super::*`：bin crate 根是 `main.rs`，glob 会拉进整棵模块树，
+    // `#[test]` 宏展开直接撞 `recursion_limit`（与 `step_boundary_tests` 同一个坑）。
+    use crate::msg::normalize_image_for_api;
+
+    /// 2×2 / 24bpp 的最小 BMP（Windows 截图走的就是这条路：剪贴板给 `CF_DIB`）。
+    fn tiny_bmp() -> Vec<u8> {
+        let (w, h) = (2i32, 2i32);
+        let row = ((w as usize * 3) + 3) / 4 * 4;
+        let pixel_bytes = (row * h as usize) as u32;
+        let file_size = 54 + pixel_bytes;
+        let mut b = Vec::with_capacity(file_size as usize);
+        b.extend_from_slice(b"BM");
+        b.extend_from_slice(&file_size.to_le_bytes());
+        b.extend_from_slice(&0u32.to_le_bytes());
+        b.extend_from_slice(&54u32.to_le_bytes());
+        b.extend_from_slice(&40u32.to_le_bytes());
+        b.extend_from_slice(&w.to_le_bytes());
+        b.extend_from_slice(&h.to_le_bytes());
+        b.extend_from_slice(&1u16.to_le_bytes());
+        b.extend_from_slice(&24u16.to_le_bytes());
+        b.extend_from_slice(&0u32.to_le_bytes());
+        b.extend_from_slice(&pixel_bytes.to_le_bytes());
+        b.extend_from_slice(&2835u32.to_le_bytes());
+        b.extend_from_slice(&2835u32.to_le_bytes());
+        b.extend_from_slice(&0u32.to_le_bytes());
+        b.extend_from_slice(&0u32.to_le_bytes());
+        b.resize(file_size as usize, 0x40);
+        b
+    }
+
+    #[test]
+    fn bmp_is_converted_to_png() {
+        let (mime, out) = normalize_image_for_api("image/bmp", &tiny_bmp())
+            .expect("BMP 必须能解码（剪贴板截图就是 BMP）");
+        assert_eq!(mime, "image/png", "非白名单格式必须转成 PNG");
+        assert_eq!(
+            &out[..8],
+            &[0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a],
+            "输出必须是真正的 PNG（magic 校验）"
+        );
+    }
+
+    #[test]
+    fn whitelisted_mime_passes_through_untouched() {
+        let bytes = vec![1u8, 2, 3, 4];
+        for mime in ["image/png", "image/jpeg", "image/webp", "image/gif"] {
+            let (out_mime, out) = normalize_image_for_api(mime, &bytes).unwrap();
+            assert_eq!(out_mime, mime);
+            assert_eq!(out, bytes, "白名单格式不得改写字节");
+        }
+    }
+
+    #[test]
+    fn garbage_is_rejected_instead_of_leaking_through() {
+        assert!(
+            normalize_image_for_api("image/bmp", b"not an image at all").is_none(),
+            "解码失败必须返回 None，不能把原始字节当图片发出去"
+        );
+    }
+}
