@@ -142,7 +142,7 @@ impl ClientApp {
         let Some(sid) = self.current_session.clone() else {
             return;
         };
-        if self.ctx_compressing || self.streaming {
+        if self.ctx_compressing || self.busy() {
             return;
         }
         self.ctx_compressing = true;
@@ -627,7 +627,7 @@ impl ClientApp {
                     // 「思考中」指示器的两个输入：本轮是否在跑、哪条是末尾。
                     // 判定本身在 `msg::stream_pending` 一处（与下方
                     // `render_stream_below` 共用），这里只负责把「是不是末尾」喂进去。
-                    let streaming = self.streaming;
+                    let streaming = self.busy();
                     let tail_ix = self.messages.len().saturating_sub(1);
                     gpui_list(self.msg_list_state.clone(), move |ix, _window, _cx| {
                         let Some(m) = items.get(ix) else {
@@ -745,7 +745,7 @@ impl ClientApp {
     /// 误判成「没发出去」的那一段静默。一旦思考开始，指示器移到气泡内
     /// （`stream_pending` 单点判定，见 `msg::StreamPending`），这里自动消失。
     pub(crate) fn render_stream_below(&self) -> AnyElement {
-        if !self.streaming {
+        if !self.busy() {
             return div().into_any_element();
         }
         let Some(last) = self.messages.last() else {
@@ -1085,7 +1085,7 @@ impl ClientApp {
                                             }),
                                     )
                             .child({
-                                let stopping = self.streaming;
+                                let stopping = self.busy();
                                 div()
                                     .id("send")
                                     .px_3()
@@ -1135,7 +1135,7 @@ impl ClientApp {
                                     })
                                     .on_click(cx.listener(
                                         |this, _, window, cx| {
-                                            if this.streaming {
+                                            if this.busy() {
                                                 this.stop_current_turn(cx);
                                             } else {
                                                 this.send_current_input(
@@ -1331,10 +1331,8 @@ impl ClientApp {
         }
         // 压缩按钮：流式中 / 压缩中不可点（同 vite 的 disabled 口径）
         let compressing = self.ctx_compressing;
-        let can_compress = self.current_session.is_some()
-            && ctx_usage.is_some()
-            && !compressing
-            && !self.streaming;
+        let can_compress =
+            self.current_session.is_some() && ctx_usage.is_some() && !compressing && !self.busy();
         let btn_color = if can_compress {
             colors::TEXT_SECONDARY()
         } else {

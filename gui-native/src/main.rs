@@ -65,12 +65,20 @@ pub(crate) use types::*;
 
 pub(crate) const SERVER_HOST: &str = "127.0.0.1";
 pub(crate) const PREFERRED_PORT: u16 = 3000;
-/// 单屏渲染的消息条数上限（无虚拟化时控制 Markdown 布局量，否则滚动卡顿）
-/// 消息分页页长（`?limit=`）：与 Web 版 `ChatPanel` 同口径的 50 条一页。
+/// 消息分页页长（`?limit=`）。
 ///
-/// 早先一次性拉 200 条再截到 60 条渲染 —— 结果是「更早的历史永远看不到，
-/// 而拉回来的 200 条里 140 条白拉」。现在是「按页拉、按需前插」。
-pub(crate) const MESSAGE_PAGE: usize = 50;
+/// ⚠️ 与 Web 版**有意不同**（vite 是 50）：库里的粒度是「**一步一条** assistant
+/// 消息」（ADR-002 步边界），一轮多工具对话就能堆出几十条。实测这个会话的一轮
+/// 里有 **68 条**消息 —— 50 条一页的首载会**切在轮中间**：界面从某条 assistant
+/// 开始，那轮的 user 起点与前半段工具卡都不在窗口里，看起来就像「内容丢了/
+/// 跳了一段」（用户实报：切回会话只看到部分工具步骤）。
+///
+/// 200 条足够覆盖常见长轮次；再加一层「首条不是 user 就再补一页」的兜底见
+/// `load_messages_with`。上滚仍按 [`MESSAGE_PAGE`] 分页，不受影响。
+pub(crate) const MESSAGE_PAGE: usize = 200;
+
+/// 上滚「加载更早」的步长（仍按 50 条一页，避免一次拉太多）。
+pub(crate) const MESSAGE_PAGE_OLDER: usize = 50;
 
 /// 前插累积的硬上限：超过就不再往上加载（提示已到上限）。
 ///
@@ -365,6 +373,22 @@ struct ClientApp {
     pub(crate) input: Entity<TextareaState>,
     /// 是否有轮在跑（`turn_state` 驱动，同时闸住重复发送）
     pub(crate) streaming: bool,
+    /// **服务端权威**的轮状态（`turn_state` 事件 / 快照帧的 `turn.state`）。
+    ///
+    /// 为什么必须与 `streaming` 分开（vite 同构，这也是「vite 没这个毛病」的原因）：
+    /// - `streaming` = **本地**视角：`send_text` 置真，收到本轮的 assistant 权威消息
+    ///   （ADR-031 增量即终版）或 `error` 才置假；
+    /// - `turn_running` = **服务端**视角：轮开始/结束由 `turn_state` 与快照帧给出。
+    ///
+    /// 早先两者**挤在同一个 `streaming` 字段里**，后到的覆盖先到的。实测的翻车：
+    /// 服务端收尾时 `turn_state(idle)` 与 assistant 消息边界**走两条不同的投递路径**
+    /// （前者经统一转发器，后者直投广播），顺序不保证 —— 抓包实测 idle 先到、
+    /// `message` 边界后到。于是界面在内容还在路上的那段时间里先回成「发送」，
+    /// 用户误判本轮已结束（实际工具结果与正文随后才补齐）。
+    ///
+    /// 现在按钮 = `streaming || turn_running`（vite `isStreaming || turnRunning`
+    /// 同口径）：任一说「在跑」就是跑，谁也不能把另一个覆盖掉。
+    pub(crate) turn_running: bool,
     /// 消息窗口的**世代号**：每次「快照 replace」与「整页加载落地」都动它。
     ///
     /// 用途：`load_messages` / `load_older_messages` 都是异步的。若请求在飞的时候

@@ -340,6 +340,7 @@ impl ClientApp {
             self.parked.remove(0);
         }
         self.streaming = false;
+        self.turn_running = false;
     }
 
     /// 把视图状态清回默认（首次进入某会话 / park 完一个空会话）。
@@ -382,6 +383,7 @@ impl ClientApp {
         self.current_title = "选择左侧会话查看消息".to_string();
         self.new_session_workspace = None;
         self.streaming = false;
+        self.turn_running = false;
     }
 
     /// 取回目标会话的快照并填入 `self`。
@@ -536,6 +538,7 @@ impl ClientApp {
             self.current_title = "新会话（发送首条消息后创建）".to_string();
         }
         self.streaming = false;
+        self.turn_running = false;
         // 弹层是 UI 瞬态，不随会话恢复
         self.model_menu_open = false;
         self.thinking_menu_open = false;
@@ -574,6 +577,8 @@ impl ClientApp {
         // 切回来按钮必须还是「停止」（用户实测过它退回「发送」）
         let running = self.running_sessions.contains(&id);
         self.streaming = running;
+        // 服务端权威那一路同源（与 `streaming` 并联进 `busy()`，见 `ClientApp::busy`）
+        self.turn_running = running;
         // 弹层（模型 / 思考选择器）是 UI 瞬态，切会话一律收起
         self.model_menu_open = false;
         self.thinking_menu_open = false;
@@ -589,25 +594,20 @@ impl ClientApp {
         // 唯一要兜的情况：最后一条 assistant **还没有 id**（= 这一轮没以权威消息收尾，
         // 多半是切走期间 SSE 断过、事件真的丢了）。这时才拉一页对齐尾部；那一轮还在
         // 跑（`running`）则不动 —— 占位是它的落点，等权威消息整条覆盖即可。
-        // 兜底判据：**恢复出来是空的就一定要拉一页**。
+        // **每次都从库里拉一页权威内容**，快照只提供 UI 态（折叠 / 面板 / 输入框）。
         //
-        // 用户实测报过「进会话完全是空的，点了『加载更早』才出现」—— 那是快照里
-        // 的消息被某条路径清空、而 `restored == true` 又让我们以为「不需要重拉」。
-        // 「有快照」不等于「有内容」：只要列表为空，就补一次整页加载（空会话拉到
-        // 的也是空页，无副作用）。
-        if !restored || self.messages.is_empty() {
-            self.load_messages(id, cx);
-        } else if !running {
-            let stale_tail = self
-                .messages
-                .last()
-                .map(|m| m.role == "assistant" && m.id.is_empty())
-                .unwrap_or(false);
-            if stale_tail {
-                let limit = self.messages.len().clamp(MESSAGE_PAGE, 200);
-                self.load_messages_with(id, limit, None, cx);
-            }
-        }
+        // 为什么推翻「有快照就不重拉」（(63) 那条）：那个策略的前提是「快照一定
+        // 完整」，而用户实测把它打破了 —— 切回会话只看到**部分**工具步骤，可库里
+        // 同一时刻 68 条消息一条不少（我直接查了 `/messages` 对照）。缺口的来源是
+        // `apply_event_offline`：切走期间的事件只有在「该会话仍在 `parked` 里」时才
+        // 写得回去，一旦快照被 LRU 挤掉 / 某条事件丢了，快照就永久停在旧位置，
+        // 而「不重拉」让这个旧位置一直显示下去。
+        //
+        // 正确的分工：**内容权威性归库，滚动位置/折叠态归快照**。页长 [`MESSAGE_PAGE`]
+        // （200）是为了让「最近一轮」的多步消息整轮落在窗口里 —— 库里是一步一条
+        // assistant 消息，一轮几十条，50 条一页会切在轮中间，看起来就像内容被吞了。
+        let _ = restored;
+        self.load_messages(id, cx);
         self.load_session_usage(cx);
         self.load_todos_goals(cx);
         self.load_approvals(cx);
@@ -706,6 +706,7 @@ impl ClientApp {
                         if this.current_session.as_deref() == Some(id.as_str()) {
                             this.current_session = None;
                             this.streaming = false;
+                            this.turn_running = false;
                             this.messages = Rc::new(Vec::new());
                             this.msg_list_state =
                                 GpuiListState::new(0, ListAlignment::Bottom, px(120.));

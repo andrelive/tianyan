@@ -238,6 +238,7 @@ impl ClientApp {
             current_session: None,
             input,
             streaming: false,
+            turn_running: false,
             messages_epoch: 0,
             view: View::Chat,
             models: Vec::new(),
@@ -674,6 +675,10 @@ impl ClientApp {
         } else {
             self.running_sessions.remove(&sid);
         }
+        // 服务端权威轮状态（与 `streaming` 并联进按钮判定，见 `ClientApp::busy`）
+        if self.current_session.as_deref() == Some(sid.as_str()) {
+            self.turn_running = running;
+        }
 
         if self.current_session.as_deref() == Some(sid.as_str()) {
             // replace 判据：**有在飞的增量要保护** 才不 replace。
@@ -685,8 +690,8 @@ impl ClientApp {
             // 就永远残留 → 快照永远不 replace → 界面停在 `open_session` 刚清空的
             // 空白状态（只有 `has_more_history` / 游标被更新，于是「加载更早」按钮
             // 还在）—— 用户实测「进会话完全是空的，点加载更早才出现」正是这条。
-            let protect_inflight = (self.streaming || self.running_sessions.contains(&sid))
-                && !self.messages.is_empty();
+            let protect_inflight =
+                (self.busy() || self.running_sessions.contains(&sid)) && !self.messages.is_empty();
             if !protect_inflight {
                 self.messages = Rc::new(rows);
                 self.msg_list_state =
@@ -697,7 +702,12 @@ impl ClientApp {
             }
             self.oldest_seq = next_before;
             self.has_more_history = has_more;
-            self.streaming = running;
+            // 服务端权威进 `turn_running`；本地 `streaming` 只在**内容被替换**时
+            // 跟着落（替换说明服务端认为这轮已结束、且拿到了权威内容）。
+            self.turn_running = running;
+            if !protect_inflight {
+                self.streaming = false;
+            }
             println!(
                 "[事件] 快照 {sid}：{n} 条（replace={} running={running}）",
                 !protect_inflight
@@ -963,6 +973,7 @@ impl ClientApp {
                 if !self.offline {
                     // 离线（别的会话）时不动当前会话的轮状态与提示条
                     self.streaming = false;
+                    self.turn_running = false;
                     // 流式错误必须进 toast：否则下一次轮询写状态行就把它盖掉了
                     self.set_error(format!("出错：{msg}"));
                 }
@@ -1000,8 +1011,15 @@ impl ClientApp {
                     // 别的会话的轮状态：`running_sessions` 已在 `handle_event` 里记过账，
                     // 这里不碰当前会话的 `streaming` / 状态行 / 统计行
                 } else {
-                    self.streaming = state == "running";
-                    if !self.streaming {
+                    // ⚠️ 只更新**服务端权威**那一半，不碰本地 `streaming`。
+                    //
+                    // 为什么（实测）：收尾时 `turn_state(idle)` 与 assistant 消息边界
+                    // 走两条不同的投递路径，顺序不保证 —— 抓包实测 idle 先到、message
+                    // 边界后到（#130 vs #131）。若这里直接 `self.streaming = false`，
+                    // 界面就会在正文还在路上时先回成「发送」，用户误判本轮结束。
+                    // 本地收尾只认 assistant 权威消息（见 `apply_authoritative_message`）。
+                    self.turn_running = state == "running";
+                    if !self.turn_running && !self.streaming {
                         self.set_status(format!("空闲 · {sid}"));
                         // 本轮结束：刷新底部统计行（token 汇总 + 最近一次请求性能）
                         self.load_session_usage(cx);
@@ -1140,6 +1158,14 @@ impl ClientApp {
         });
         self.messages = Rc::new(next);
         if !self.offline {
+            // **本地流的收尾单点**：本轮 assistant 的权威消息到了 = 这一轮结束
+            // （ADR-031「增量即终版」，服务端只在本轮末尾发这一条边界）。
+            //
+            // 不再由 `turn_state(idle)` 决定按钮：那条与消息边界走**不同的投递
+            // 路径**（转发器 vs 直投广播），顺序不保证 —— 抓包实测 idle 先到、
+            // 本消息后到。让 idle 直接翻按钮就是「正文还在路上、界面已经回到
+            // 发送态」的那个 bug。
+            self.streaming = false;
             self.msg_list_state.remeasure_items(idx..idx + 1);
             self.scroll_to_end_if_following();
         }
@@ -1403,7 +1429,7 @@ impl ClientApp {
 
     /// 发送输入框内容（Enter 或「发送」按钮）
     pub(crate) fn send_current_input(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.streaming {
+        if self.busy() {
             // 生成中发送被禁（与 vite `ChatInput` 的 `if (isStreaming) return` 同口径）。
             // 但必须**说话**：静默 return 时 Enter 只会让 Textarea 插一个换行，用户看到
             // 的现象就是「按回车没反应 / 发不出去」（实测就是这条被当成 bug 报上来的）。
@@ -1455,7 +1481,7 @@ impl ClientApp {
 
     /// 发送一段文本：`POST /chat/stream` 只是开关（ADR-028），输出走常驻 SSE。
     pub(crate) fn send_text(&mut self, text: String, cx: &mut Context<Self>) {
-        if self.streaming {
+        if self.busy() {
             return;
         }
         // 待发送图片随本条消息一起走（发送即清空草稿）
@@ -1512,6 +1538,9 @@ impl ClientApp {
         self.msg_list_state.scroll_to_end();
         self.message_total = self.messages.len();
         self.streaming = true;
+        // 服务端权威那一路也乐观置真：`turn_state(running)` 到达前的这段窗口里，
+        // 两路并联才不会因为「只有本地为真」而被别的路径覆盖（见 `busy`）。
+        self.turn_running = true;
         // 与 `turn_state` 事件同一份记账：服务端的 running 事件到达前按钮就该是
         // 「停止」（否则这一小段窗口里用户点按钮会重复发送）
         self.running_sessions.insert(session_id.clone());
@@ -1564,6 +1593,7 @@ impl ClientApp {
                 Err(e) => {
                     let _ = this.update(cx, |this, cx| {
                         this.streaming = false;
+                        this.turn_running = false;
                         this.running_sessions.remove(&sid_for_cleanup);
                         this.set_error(format!("发送失败：{e}"));
                         this.append_delta(&format!("\n\n> ⚠️ 发送失败：{e}\n"));
@@ -1720,7 +1750,7 @@ impl ClientApp {
         self.set_status("正在加载更早的消息…".to_string());
         cx.spawn(async move |this, cx| {
             let url = format!(
-                "http://{SERVER_HOST}:{port}/api/v1/sessions/{sid}/messages?limit={MESSAGE_PAGE}&before_seq={cursor}"
+                "http://{SERVER_HOST}:{port}/api/v1/sessions/{sid}/messages?limit={MESSAGE_PAGE_OLDER}&before_seq={cursor}"
             );
             let res = fetch_json(url).await;
             let _ = this.update(cx, |this, cx| {
@@ -1887,6 +1917,20 @@ impl ClientApp {
     /// 只认 `current_session`，不看 `open_tabs`：Tab 里留着不等于「还看着它」。
     pub(crate) fn is_stale_for(&self, session: &str) -> bool {
         self.current_session.as_deref() != Some(session)
+    }
+    /// 当前会话是否「有轮在跑」—— 按钮 / 输入闸门的**唯一**判据。
+    ///
+    /// 两路**并联**（vite `isStreaming || turnRunning` 同口径）：
+    /// - `streaming`：本地视角（`send_text` 置真；本轮 assistant 权威消息 / error 置假）；
+    /// - `turn_running`：服务端视角（`turn_state` 事件 + 快照帧的 `turn.state`）。
+    ///
+    /// 为什么要并联而不是合并成一个字段：合并时后到的覆盖先到的，而这两路
+    /// **到达顺序无法保证**（收尾的 `turn_state(idle)` 与 assistant 消息边界走两条
+    /// 不同投递路径，实测 idle 先到）。并联之后任一说「在跑」就是跑，谁也不会
+    /// 把另一个覆盖成「已结束」—— 这正是用户报的「工具执行期间按钮变回发送、
+    /// 误判本轮结束」。
+    pub(crate) fn busy(&self) -> bool {
+        self.streaming || self.turn_running
     }
 
     /// 写状态行（**唯一入口**）。
