@@ -1044,37 +1044,48 @@ impl ClientApp {
     }
 
     /// 发送输入框内容（Enter 或「发送」按钮）
-    /// Enter 发送：先撤掉多行 `Textarea` 刚插入的那个换行，再发。
+    /// Enter 发送。
     ///
-    /// `gpui_base` 处理 Enter 的方式是「在光标处插入换行 → emit `InputEvent::PressEnter`」，
-    /// 所以事件到手时文本里已经多了一个 `\n`：光标在末尾时它跟在最后（Markdown 渲染时
-    /// 不显形，看不出问题），光标在中间时它就卡在句子中间 —— 用户实测的现象是
-    /// 「光标不在文字最后，发出去的消息会有换行」。
+    /// 与 [`Self::send_current_input`] 的唯一差别：**待发送的字符串**去掉「Enter 自己
+    /// 刚插进去的那个换行」，其余一律走同一条路。
     ///
-    /// 发送语义下这个换行一定是多余的：真正的多行输入靠 Shift+Enter，不走本路径。
-    /// `cursor()` 是 **UTF-8 字节**偏移（`gpui_base` 的 `InputBaseState` 文档明示），
-    /// `\n` 是单字节 ASCII，删它不会切坏多字节字符。
+    /// 背景：`gpui_base` 处理 Enter 是「先在光标处插入换行 → 再 emit
+    /// `InputEvent::PressEnter`」，所以事件到手时文本里已经多了一个 `\n`。光标在末尾
+    /// 时它跟在最后（Markdown 渲染不显形），在中间时卡在语句里（用户实测）。
+    ///
+    /// ⚠️ **绝不能在这个回调里 `set_value(fixed)` 把编辑器改回去**（早先那样做过，是
+    /// 错的）：`set_value` 会重设选区、清空 undo 历史，还会打断 IME 的组合态 —— 实测
+    /// 后果是「回车只换行、消息发不出去」（用户反馈）。这里只动**待发送的字符串**，
+    /// 编辑器状态只在最后被清空一次（与按钮发送完全相同的那一次）。
+    ///
+    /// `selected_range()` 是 **UTF-8 字节**偏移（`gpui_base` 文档明示），`\n` 单字节
+    /// ASCII，`remove` 不会切坏多字节字符。
     fn send_on_enter(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.streaming {
             // 生成中发送是被禁的：此时把 Enter 留给 Textarea（它就只是个换行），
             // 否则「生成长文时想排版」会什么都不发生
             return;
         }
-        let input = self.input.clone();
-        input.update(cx, |state, cx| {
-            let cursor = state.selected_range().end;
-            if cursor == 0 {
-                return;
+        let (cursor, text) = {
+            let state = self.input.read(cx);
+            (state.selected_range().end, state.value().to_string())
+        };
+        if text.trim().is_empty() {
+            // 只有空白（空输入框里按 Enter）：把刚插进去的换行清掉，别留一个空行
+            if !text.is_empty() {
+                self.input
+                    .update(cx, |state, cx| state.set_value("", window, cx));
             }
-            let text = state.value().to_string();
-            if text.as_bytes().get(cursor - 1) != Some(&b'\n') {
-                return;
-            }
-            let mut fixed = text;
-            fixed.remove(cursor - 1);
-            state.set_value(fixed, window, cx);
-        });
-        self.send_current_input(window, cx);
+            return;
+        }
+        let mut payload = text;
+        if cursor > 0 && payload.as_bytes().get(cursor - 1) == Some(&b'\n') {
+            payload.remove(cursor - 1);
+        }
+        // 清空输入框（与按钮发送同一处逻辑），再把清理后的正文发出去
+        self.input
+            .update(cx, |state, cx| state.set_value("", window, cx));
+        self.send_text(payload, cx);
     }
 
     pub(crate) fn send_current_input(&mut self, window: &mut Window, cx: &mut Context<Self>) {

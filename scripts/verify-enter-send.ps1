@@ -30,7 +30,19 @@
 param(
     [Parameter(Mandatory = $true)][string]$Exe,
     [int]$Port = 3097,
-    [string]$Tag = "enter"
+    [string]$Tag = "enter",
+    # 待发送正文。**必须能喂中文**：ASCII-only 的验证漏掉过一整类问题
+    # （字节偏移 vs 字符偏移、CJK 宽字符宽度估算），实测吃过这个亏。
+    [string]$Text = "ABCDEF",
+    # 按 Enter 前光标左移几格（0 = 留在末尾）。「光标不在末尾」是换行 bug 的触发条件。
+    [int]$Left = 3,
+    # 连续发送几轮。>1 用来验「发完一条之后 Enter 还能不能继续发」（早先的修法在
+    # `PressEnter` 回调里写了编辑器，实测把后续 Enter 变成纯换行 —— 必须能回归）。
+    [int]$Rounds = 1,
+    # 用**鼠标点击**把焦点放进输入框（模拟真实用户），而不是 `composer_focus` 动作。
+    # 两条路要分别验：动作走 `FocusHandle::focus`，点击走 `on_mouse_down`，焦点落在
+    # 谁身上不一定相同 —— 用户报「回车只换行不发送」时，先分清是哪条路。
+    [switch]$Click
 )
 
 $ErrorActionPreference = "Continue"
@@ -72,11 +84,13 @@ try {
     Start-Sleep -Milliseconds 800
     # 焦点：优先用动作（新版有；旧版没有该动作 → 回退点击窗口中央偏下的输入框）
     $focused = $false
-    try {
-        $r = Invoke-RestMethod "$base/act" -Method Post -TimeoutSec 5 `
-            -ContentType "application/json" -Body '{"action":"composer_focus"}'
-        $focused = [bool]$r.ok
-    } catch { }
+    if (-not $Click) {
+        try {
+            $fres = Invoke-RestMethod "$base/act" -Method Post -TimeoutSec 5 `
+                -ContentType "application/json" -Body '{"action":"composer_focus"}'
+            $focused = [bool]$fres.ok
+        } catch { }
+    }
 
     [void][Microsoft.VisualBasic.Interaction]::AppActivate($proc.Id)
     Start-Sleep -Milliseconds 600
@@ -99,7 +113,9 @@ public class W {
             $rect = New-Object W+RECT
             [void][W]::GetWindowRect($h, [ref]$rect)
             $x = [int](($rect.L + $rect.R) / 2)
-            $y = [int]($rect.B - 90)
+            # 输入卡片底部往上 ~150 物理像素才是 Textarea 本体（再往下是按钮行，
+            # 点那里焦点进不了编辑器 —— 实测点 B-90 时粘贴直接落空）
+            $y = [int]($rect.B - 150)
             [void][W]::SetCursorPos($x, $y)
             [W]::mouse_event(0x0002, 0, 0, 0, 0)   # LEFTDOWN
             [W]::mouse_event(0x0004, 0, 0, 0, 0)   # LEFTUP
@@ -108,28 +124,53 @@ public class W {
         Start-Sleep -Milliseconds 400
     }
 
-    Set-Clipboard -Value "ABCDEF"
     $ws = New-Object -ComObject WScript.Shell
-    $ws.SendKeys("^v")
-    Start-Sleep -Milliseconds 700
-    # ⚠️ `/state` 的返回是 `{ ok, state }` 包装（`/act` 同此形），字段在 `.state` 下 ——
-    # 直接读 `$st.input` 永远是空串（实测踩过，差点误判成「粘贴没进去」）。
-    $st = Invoke-RestMethod "$base/state" -TimeoutSec 5
-    Write-Host "[$Tag] input_after_paste = '$($st.state.input)'" -ForegroundColor Cyan
-
-    # 光标移到正文中间（末尾 3 个字符之后），再按 Enter —— 这是 bug 的触发条件
-    1..3 | ForEach-Object { $ws.SendKeys("{LEFT}"); Start-Sleep -Milliseconds 90 }
-    $ws.SendKeys("{ENTER}")
-    Start-Sleep -Milliseconds 2000
-
-    try {
+    for ($r = 1; $r -le $Rounds; $r++) {
+        $payload = if ($Rounds -gt 1) { "$Text$r" } else { $Text }
+        Set-Clipboard -Value $payload
+        $ws.SendKeys("^v")
+        Start-Sleep -Milliseconds 700
+        # ⚠️ `/state` 的返回是 `{ ok, state }` 包装（`/act` 同此形），字段在 `.state` 下 ——
+        # 直接读 `$st.input` 永远是空串（实测踩过，差点误判成「粘贴没进去」）。
         $st = Invoke-RestMethod "$base/state" -TimeoutSec 5
-        Write-Host "[$Tag] input_after_enter = '$($st.state.input)'" -ForegroundColor Cyan
-        $last = @($st.state.messages.recent)[-1]
-        if ($null -ne $last -and $null -ne $last.PSObject.Properties["newlines"]) {
-            Write-Host "[$Tag] state_last_newlines = $($last.newlines)" -ForegroundColor Cyan
+        Write-Host "[$Tag/r$r] input_after_paste = '$($st.state.input)'" -ForegroundColor Cyan
+
+        # 光标左移若干格，再按 Enter —— `-Left 0` 即「光标在末尾」，>0 即「在中间」
+        for ($k = 0; $k -lt $Left; $k++) {
+            $ws.SendKeys("{LEFT}")
+            Start-Sleep -Milliseconds 90
         }
-    } catch { }
+        $ws.SendKeys("{ENTER}")
+        Start-Sleep -Milliseconds 2000
+
+        try {
+            $st = Invoke-RestMethod "$base/state" -TimeoutSec 5
+            Write-Host "[$Tag/r$r] input_after_enter = '$($st.state.input)'" -ForegroundColor Cyan
+            $last = @($st.state.messages.recent)[-1]
+            if ($null -ne $last -and $null -ne $last.PSObject.Properties["newlines"]) {
+                Write-Host "[$Tag/r$r] state_last_newlines = $($last.newlines)" -ForegroundColor Cyan
+            }
+        } catch { }
+
+        if ($r -lt $Rounds) {
+            # 等这一轮生成结束再发下一条：生成中发送本来就被禁（`streaming` 门），
+            # 不等的话第二轮测的是「生成中按 Enter」，不是「连续两次发送」
+            for ($w = 0; $w -lt 120; $w++) {
+                try {
+                    $s = Invoke-RestMethod "$base/state" -TimeoutSec 3
+                    if (-not $s.state.streaming) { break }
+                } catch { }
+                Start-Sleep -Milliseconds 500
+            }
+            Start-Sleep -Milliseconds 500
+            if (-not $Click) {
+                try {
+                    $null = Invoke-RestMethod "$base/act" -Method Post -TimeoutSec 5 `
+                        -ContentType "application/json" -Body '{"action":"composer_focus"}'
+                } catch { }
+            }
+        }
+    }
 } finally {
     # 只杀本脚本启动的这一份（按 PID）
     try { Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue } catch { }
