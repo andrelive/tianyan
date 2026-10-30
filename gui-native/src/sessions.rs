@@ -525,6 +525,8 @@ impl ClientApp {
             self.dismiss_session_scoped_dialogs();
         }
         self.current_session = Some(id.clone());
+        // 订阅用的 id 副本：下面 `load_messages(id, …)` 会把 `id` move 走
+        let sid_for_subscribe = id.clone();
         // 浏览器式会话 Tab：打开过的会话留在顶部（去重；超上限丢最早且非当前的）
         if !self.open_tabs.iter().any(|t| t == &id) {
             self.open_tabs.push(id.clone());
@@ -577,6 +579,10 @@ impl ClientApp {
         self.load_session_usage(cx);
         self.load_todos_goals(cx);
         self.load_approvals(cx);
+        // 订阅该会话（ADR-029 resident）：服务端收到订阅后推一帧快照，前端 replace
+        // 窗口 —— 幂等（已订阅直接返回），断线重连时由 `on_event_stream_connected`
+        // 整集重放。**这行是"打开/切回就有权威内容"的触发点**，缺了它快照永远不会来。
+        self.subscribe_session(sid_for_subscribe, false, cx);
         // 选中态与「当前会话始终可见」都体现在左栏行上
         self.restore_input(window, cx);
         self.rebuild_session_rows(cx);

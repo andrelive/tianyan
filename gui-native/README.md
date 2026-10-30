@@ -255,7 +255,7 @@ Tauri 版由监督循环在进程内完成；原生端在上一次进程退出�
 
 ## MSI 打包与自动更新（已实测）
 
-### 1.1.0 修的十四处（用户实测反馈 + 顺手修）
+### 1.1.0 修的十五处（用户实测反馈 + 顺手修）
 
 | # | 症状 | 根因 / 修法 |
 |---|---|---|
@@ -273,6 +273,7 @@ Tauri 版由监督循环在进程内完成；原生端在上一次进程退出�
 | 12 | **回车发送后消息里多一个换行**（光标不在文字最后时） | `gpui_base` 处理 Enter 的方式是「先在光标处插入换行 → 再 emit `InputEvent::PressEnter`」。早先收到事件就发送，那个换行已经落进正文：光标在末尾时它跟在最后（Markdown 不显形），在**中间**时卡在语句里（用户实测）。修法 `send_on_enter`：**只把「待发送的字符串」里那个 `\n` 删掉**（`selected_range()` 是 UTF-8 字节偏移，`\n` 单字节，不会切坏多字节字符）；生成中不动（此时发送本就禁用，Enter 就该只是换行）。两条**反例**都踩过：① `capture_key_down` 拦不住（GPUI 的 keybinding→action 派发在原始 key listener **之前**，`dispatch_key_event` 先 `dispatch_key`、后才 `finish_dispatch_key_event`）；② 在 `PressEnter` 回调里 `set_value(fixed)` 把编辑器改回去 —— `set_value` 会重设选区、清空 undo 历史、打断 IME 组合态，实测后果是**回车只换行、消息发不出去**（用户报障）。任何「发送前顺手修一下输入框」的念头都要掐掉：只改 payload |
 | 13 | 停止按钮是**空心方框**；压缩点像一条空消息 | 停止图标：vite 是 `<Square className="fill-current" />`（lucide 描边矩形被填满 = 实心），GPUI 的 `svg()` 只能渲染 stroke 版，改不了 fill → 直接画 12×12 白方块（照抄 lucide `rect x=3 y=3 w=18 h=18 rx=2` 按 16px 渲染的几何，1.5px 圆角，放大截图核对过）。压缩点：先去掉 footer（一个「看不见内容的复制按钮 + 时间戳」比没有更糟），随后按用户选择改成**可展开的摘要卡片**——胶囊 + 分割线照旧，右侧「摘要 ▸」点开显示摘要正文（Markdown，限高 320 可滚，默认收起），展开态存在 `ExpandState.compression`（key `c:{mi}`），`/state` 的 `messages.expanded` 可断言 |
 | 14 | **输入后切走再切回，助手回复只剩一个思考块；更早的历史也没了** | 两个独立根因。①切回时若该轮在跑 → 整页 `load_messages` **替换**列表，把最后一条 assistant **占位**删掉；而流结束的权威 `message` 事件在 `apply_authoritative_message` 第一行就要求「最后一条是 assistant」，否则直接 return —— 于是那轮内容**永远无处落地**。②该轮已结束时反而不重拉，本地缺切走期间的增量（非当前会话的 `answer` 事件被丢弃）。修法：三条**互不重叠**的路 —— 首进拉一页 / **还在跑就什么都不做**（占位留着，等权威消息整条覆盖，切走期间缺的增量由全文一次补齐）/ 已结束则整页重拉且 `limit = 本地已有条数`（不被 50 截断），滚动位置用**顶部那条消息的 seq** 找回。⚠️ 纪律：**前端不要维护「本地消息 ↔ 库里消息」的对应关系**（不要按 seq/id 合并、不要给占位补 seq）—— 那条路要前端替服务端记账，漏一处就是错位（vite 版反复改的就是它）。`seq` 只作**服务端下发值的查询键**（分页游标 `next_before_seq`、滚动锚点） |
+| 15 | **会话输出完了，界面却停在中间某个阶段不动**（按钮已回到「发送」，正文缺最后一段；重启应用才正常） | 根因是**事件流不可靠且没有兜底**。服务端事件走 `broadcast`（有界）→ SSE handler 再转 `mpsc`（有界）：UI 一慢，链条末端满 → `Lagged` → **旧事件被挤出**。被挤掉的如果正好是收尾的 `message`（权威全文），而 `turn_state(idle)` 侥幸留下，就出现「按钮已回到发送、正文停在工具结果」。vite 靠「任何一次重连/订阅都用快照与数据库收敛」恢复；native 此前既不调订阅端点、又把 `snapshot` 帧当未知类型丢掉，只能重启（见下方「事件订阅的可靠性」） |
 
 > **第 10 条的教训（写进纪律）**：`AnyWindowHandle::update` 给的是 `&mut AnyView`，
 > 拿不到 `&mut ClientApp`，所以**自动化永远构造不出 `on_click` 的借用上下文**。
@@ -391,6 +392,35 @@ cargo run            # 首次约 3 分钟，之后增量 2-6 秒
 
 > 反复启动客户端验证是这次被用户点名的干扰源（「任务栏图标反复出现又消失」）。
 > 现在验证只起一个进程，且默认不显示窗口。
+
+### 事件订阅的可靠性（对齐 vite：断线能自己恢复）
+
+`GET /api/v1/events` 是常驻水管（ADR-028）。native 原先只做了「连上 + 断了 1s 重连」，
+其余全靠运气；用户实测「会话输出完了但界面卡在中间某个阶段，**重启应用**才正常」。
+现在补齐成与 vite `use-unified-events.ts` 等价的一套：
+
+| 机制 | vite | native（现在） |
+|---|---|---|
+| 服务端心跳 | 同样缺（全仓搜不到 `KeepAlive`） | `Sse::keep_alive(15s)` —— 半死连接可被发现 |
+| 心跳超时判定 | 浏览器 `EventSource` 内部处理 | **50s 无任何字节 → 判半死、主动重连**（`reqwest` 的 `bytes_stream()` 默认没有读超时，必须自己包 `timeout`） |
+| 断线重连 | `EventSource` 自动 + 退避 | 指数退避 1s→2s→…→30s，连上即重置 |
+| 重连后**重放订阅** | `onopen` 里 `for sid of subscribedSessions: doSubscribe(sid)` | `on_event_stream_connected` 整集重放（`force=true` 绕过幂等） |
+| 订阅端点 | `POST /events/subscribe` → 服务端推**快照** | 同：`subscribe_session`（`open_session` / `send_text` 触发） |
+| 快照应用 | `applySnapshot`：replace + `has_more`/游标 + **轮状态权威值**，流式中跳过 | `apply_snapshot` 同三条口径；非当前会话写回它自己那份 `parked` 快照 |
+| 断线可见 | `eventsConnected` + UI | `/state` 的 `session.events.connected` + 消息列上方横幅 |
+| 订阅集合 | `subscribedSessions`（resident） | `subscribed_sessions`（resident：打开过就保持，切回零延迟） |
+
+**为什么「快照 replace」是那条兜底**：服务端事件走 `broadcast`（有界）→ SSE handler 再转
+`mpsc`（有界）。UI 一慢，链条末端满 → `Lagged` → 旧事件被挤出；被挤掉的如果正好是收尾的
+`message`（权威全文），而 `turn_state(idle)` 侥幸留下，就会看到「按钮已回到发送、正文却停在
+工具结果」。vite 靠「任何一次重连/订阅都用快照与数据库收敛」恢复；native 此前既不订阅、
+也把 `snapshot` 帧当未知类型丢掉，所以只能重启。
+
+实测（隔离实例）：
+- 心跳：直连 `/api/v1/events` 抓原始流 → `[15.0s] : keep-alive`、`[30.0s] : keep-alive`
+- 订阅 + 快照：日志 `[事件] 快照 session-…：2 条（replace=true running=false）`，`/state`
+  的 `session.events.subscribed` 从 0 变 1
+- 重启后（`inputs`/订阅集都空）→ 选中会话 → 快照帧到达 → `loaded=2 last='甲'`
 
 ### 首选：内建自动化端口（ADR-052）—— 不截图、不点坐标
 

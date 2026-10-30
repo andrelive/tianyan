@@ -11,7 +11,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use axum::extract::{Path, State};
-use axum::response::sse::{Event, Sse};
+use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::Json;
 use serde::Deserialize;
 use tokio::sync::mpsc;
@@ -23,6 +23,18 @@ use crate::state::AppState;
 
 /// SSE 流式通道缓冲区大小（与 chat 流一致）。
 const SSE_CHANNEL_BUFFER: usize = 100;
+
+/// SSE 心跳间隔。
+///
+/// **两端都依赖它**（此前服务端 `Sse::new(...)` 没挂 keep-alive，全仓搜不到一处）：
+/// - 客户端（gui-native 手写 `reqwest` 读流，没有读超时）靠它区分「对端没数据」和
+///   「连接已死」：无心跳时半死连接会永久 `Pending`，既不报错也不重连，界面就卡在
+///   某一轮中间不动（用户实测「输出完了但停在工具结果」，只有重启应用才恢复）；
+/// - 反向代理 / 中间设备也靠它避免空闲超时掐断长连接。
+///
+/// 15s 是通行折衷（axum 默认也是 15s）：足够短让客户端在几十秒内识别死连接，
+/// 又不会在长会话里刷出无意义流量。
+const SSE_KEEPALIVE_SECS: u64 = 15;
 
 /// 订阅快照的最近消息条数上限（ADR-035 §8：快照不再推全量——更早历史由前端
 /// 上滚经 `GET /sessions/{id}/messages?before_seq=` 补齐）。
@@ -144,7 +156,7 @@ pub async fn list_tasks(
 /// task_id 渲染到对应任务卡片。客户端断开时静默结束。
 pub async fn stream_tasks(
     State(state): State<Arc<AppState>>,
-) -> Sse<ReceiverStream<Result<Event, Infallible>>> {
+) -> Sse<axum::response::sse::KeepAliveStream<ReceiverStream<Result<Event, Infallible>>>> {
     let (tx, rx) = mpsc::channel::<Result<Event, Infallible>>(SSE_CHANNEL_BUFFER);
     let mut event_rx = state.task_event_tx.subscribe();
     let shutdown_flag = state.shutdown_flag();
@@ -183,7 +195,11 @@ pub async fn stream_tasks(
             }
         }
     });
-    Sse::new(ReceiverStream::new(rx))
+    Sse::new(ReceiverStream::new(rx)).keep_alive(
+        KeepAlive::new()
+            .interval(Duration::from_secs(SSE_KEEPALIVE_SECS))
+            .text("keep-alive"),
+    )
 }
 
 /// 取消后台任务（终态任务幂等；任务不存在返回 404）。

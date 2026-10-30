@@ -658,6 +658,36 @@ impl ClientApp {
         .into_any_element()
     }
 
+    /// 事件流断线横幅：只在 `events_connected == false` 时出现。
+    ///
+    /// 为什么必须有：断线时界面会**停在某一轮中间不动**（按钮已回到「发送」、正文缺
+    /// 最后一段），用户唯一的判断依据就是这条横幅 —— 否则只能怀疑应用卡死然后重启
+    /// （用户实测就是这样恢复的）。重连成功后横幅自动消失，快照帧会把窗口对齐。
+    pub(crate) fn render_connection_banner(&self) -> AnyElement {
+        if self.events_connected {
+            return div().into_any_element();
+        }
+        div()
+            .px_4()
+            .pb_2()
+            .child(
+                div()
+                    .w_full()
+                    .max_w(px(colors::CHAT_MAX_W))
+                    .mx_auto()
+                    .rounded_lg()
+                    .border_1()
+                    .border_color(rgb(colors::WARNING()))
+                    .bg(rgb(colors::BG_SECONDARY()))
+                    .px_3()
+                    .py_2()
+                    .text_xs()
+                    .text_color(rgb(colors::TEXT_SECONDARY()))
+                    .child("与服务端的连接已断开，正在自动重连…（消息不会丢，恢复后会自动对齐）"),
+            )
+            .into_any_element()
+    }
+
     /// 审批横幅 / 追问卡片 / 待办窄条：与消息列、输入卡片同宽居中。
     /// 三者空时各自返回 0 高元素，不占位。
     pub(crate) fn render_banners(&self, cx: &mut Context<Self>) -> AnyElement {
@@ -671,6 +701,12 @@ impl ClientApp {
                     .w_full()
                     .max_w(px(colors::CHAT_MAX_W))
                     .child(self.render_approval_banner(cx)),
+            )
+            .child(
+                div()
+                    .w_full()
+                    .max_w(px(colors::CHAT_MAX_W))
+                    .child(self.render_connection_banner()),
             )
             // 追问面板**不在这里**：它替换输入框（见 `render_composer` 开头），
             // 与 vite `ChatInput` 同位置。

@@ -204,6 +204,8 @@ impl ClientApp {
             offline: false,
             submit_sub: None,
             submit_for: None,
+            subscribed_sessions: std::collections::HashSet::new(),
+            events_connected: false,
             draft_restore_path: String::new(),
             parked: Vec::new(),
             oldest_seq: None,
@@ -351,16 +353,20 @@ impl ClientApp {
         })
         .detach();
         // 统一事件常驻订阅（ADR-028）：订阅在窗口创建时建立，与「发送」解耦
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<serde_json::Value>();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<EventStreamMsg>();
         spawn_event_reader(port, tx);
         cx.spawn(async move |this, cx| loop {
-            let Some(ev) = rx.recv().await else {
+            let Some(msg) = rx.recv().await else {
                 break;
             };
-            if this
-                .update(cx, |this, cx| this.handle_event(&ev, cx))
-                .is_err()
-            {
+            let ok = this
+                .update(cx, |this, cx| match msg {
+                    EventStreamMsg::Event(ev) => this.handle_event(&ev, cx),
+                    EventStreamMsg::Connected => this.on_event_stream_connected(cx),
+                    EventStreamMsg::Disconnected => this.on_event_stream_disconnected(cx),
+                })
+                .is_ok();
+            if !ok {
                 break;
             }
         })
@@ -516,6 +522,136 @@ impl ClientApp {
         cx.notify();
     }
 
+    /// 订阅一个会话（ADR-029）：`POST /events/subscribe` → 服务端把快照（历史 +
+    /// cursor + 轮状态权威值）推进统一事件流，前端收到 `type=snapshot` 后 replace 窗口。
+    ///
+    /// `force` 绕过 resident 幂等：**重连之后必须强制重发** —— 服务端的「已订阅」
+    /// 状态随连接一起消失，不重发就永远等不到快照，而快照正是断线丢事件后的唯一兜底
+    /// （对齐 vite `onopen` 里那段强制 `doSubscribe`）。
+    pub(crate) fn subscribe_session(&mut self, sid: String, force: bool, cx: &mut Context<Self>) {
+        if !force && self.subscribed_sessions.contains(&sid) {
+            return;
+        }
+        self.subscribed_sessions.insert(sid.clone());
+        let port = self.port;
+        cx.spawn(async move |_this, _cx| {
+            let url = format!("http://{SERVER_HOST}:{port}/api/v1/events/subscribe");
+            let body = serde_json::json!({ "session_id": sid });
+            if let Err(e) = post_json(url, body).await {
+                println!("[事件] 订阅 {sid} 失败：{e}");
+            }
+        })
+        .detach();
+    }
+
+    /// 事件流（重新）连上了：**重放所有已打开会话的订阅**（对齐 vite `onopen`）。
+    ///
+    /// 服务端每收到一次订阅就推一帧快照；重连后的这批快照会把各个会话的窗口
+    /// replace 成数据库里的权威内容 —— 断线期间丢掉的增量由此收敛，
+    /// 不需要用户重启应用。
+    pub(crate) fn on_event_stream_connected(&mut self, cx: &mut Context<Self>) {
+        let was_connected = self.events_connected;
+        self.events_connected = true;
+        let subs: Vec<String> = self.subscribed_sessions.iter().cloned().collect();
+        let n = subs.len();
+        for sid in subs {
+            self.subscribe_session(sid, true, cx);
+        }
+        println!(
+            "[事件] {}（重放 {n} 个会话订阅）",
+            if was_connected {
+                "已重连"
+            } else {
+                "已连接"
+            }
+        );
+        cx.notify();
+    }
+
+    /// 事件流断开（进入重连退避）：标记断线态并提示用户。
+    pub(crate) fn on_event_stream_disconnected(&mut self, cx: &mut Context<Self>) {
+        if self.events_connected {
+            self.events_connected = false;
+            self.push_notice(
+                "与服务端的连接断开，正在重连…（内容不会丢，恢复后会自动对齐）",
+                true,
+            );
+        }
+        cx.notify();
+    }
+
+    /// 处理订阅快照帧（`type=snapshot`，ADR-029）：replace 窗口 + 轮状态权威值。
+    ///
+    /// 三条口径（对齐 vite `applySnapshot`）：
+    /// 1. **流式中不 replace**：那一轮增量还在长，覆盖会把占位消息冲掉；此时只校正
+    ///    分页元信息与轮状态。
+    /// 2. 非流式 → 整表 replace，并重建 `GpuiListState`（条数变了不重建会越界）。
+    /// 3. 快照的 `turn.state` 是**权威轮状态**（ADR-045）：断线/丢事件后靠它校正
+    ///    「永久 running」（否则按钮常驻「停止」、Enter 被禁发）。
+    ///
+    /// 非当前会话的快照帧同样处理：写回它自己那份 `parked` 快照（per-session store），
+    /// 并把那份列表状态作废（条数变了，切回时重建）。
+    fn apply_snapshot(&mut self, ev: &serde_json::Value, cx: &mut Context<Self>) {
+        let Some(sid) = ev
+            .get("session_id")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+        else {
+            return;
+        };
+        let rows: Vec<MsgRow> = ev
+            .get("messages")
+            .and_then(|v| v.as_array())
+            .map(|arr| arr.iter().map(parse_msg_row).collect())
+            .unwrap_or_default();
+        let has_more = ev
+            .get("has_more")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let next_before = ev.get("next_before_seq").and_then(|v| v.as_i64());
+        let running = ev
+            .get("turn")
+            .and_then(|t| t.get("state"))
+            .and_then(|v| v.as_str())
+            == Some("running");
+        let n = rows.len();
+
+        if self.current_session.as_deref() == Some(sid.as_str()) {
+            let streaming_now = self.streaming || self.running_sessions.contains(&sid);
+            if !streaming_now {
+                self.messages = Rc::new(rows);
+                self.msg_list_state =
+                    GpuiListState::new(self.messages.len(), ListAlignment::Bottom, px(120.));
+                self.message_total = self.messages.len();
+            }
+            self.oldest_seq = next_before;
+            self.has_more_history = has_more;
+            self.streaming = running;
+            println!(
+                "[事件] 快照 {sid}：{n} 条（replace={} running={running}）",
+                !streaming_now
+            );
+        } else if let Some(pos) = self
+            .parked
+            .iter()
+            .position(|(k, _)| k.as_deref() == Some(sid.as_str()))
+        {
+            let (key, mut snap) = self.parked.remove(pos);
+            snap.messages = Rc::new(rows);
+            snap.message_total = snap.messages.len();
+            snap.oldest_seq = next_before;
+            snap.has_more_history = has_more;
+            // 条数变了 → 那份列表状态作废（切回 restore 时重建，避免 item_count 越界）
+            snap.msg_list_state = None;
+            self.parked.insert(pos, (key, snap));
+            println!("[事件] 快照 {sid}（后台会话）：{n} 条");
+        } else {
+            // 没打开过的会话：不常驻（切回时由 load_messages 拉一页）
+            return;
+        }
+        cx.notify();
+    }
+
     /// 处理一条统一事件。
     ///
     /// 只认 `type=chat_stream`（子代理事件的 `session_id` 是 `task_id`，属于任务面板，
@@ -530,8 +666,17 @@ impl ClientApp {
     /// 占位删掉（流结束的权威消息要求"最后一条是 assistant"才落地，于是那轮内容
     /// 永远无处落地）。用户实测的两条现象（内容只剩思考块 / 历史没了）都源于此。
     pub(crate) fn handle_event(&mut self, ev: &serde_json::Value, cx: &mut Context<Self>) {
-        if ev.get("type").and_then(|v| v.as_str()) != Some("chat_stream") {
-            return;
+        match ev.get("type").and_then(|v| v.as_str()) {
+            Some("chat_stream") => {}
+            // 订阅快照（ADR-029）：打开/重连时的**权威兜底** → replace 窗口。
+            // 早先这里一句 `!= Some("chat_stream") → return` 把快照帧直接丢掉，
+            // 所以即使服务端推了快照也不会生效（更早的问题是根本不订阅）。
+            Some("snapshot") => {
+                self.apply_snapshot(ev, cx);
+                return;
+            }
+            // 任务状态 / 命令输出等：任务面板另有 3s 轮询兜底，这里不接
+            _ => return,
         }
         let sid = ev
             .get("session_id")
@@ -1237,6 +1382,10 @@ impl ClientApp {
                 sid
             }
         };
+        // 这一轮所属的会话立即订阅：服务端收到订阅会推一帧快照，断线后重连时
+        // `on_event_stream_connected` 重放订阅 → 快照 replace 窗口，把丢掉的增量
+        // 补齐。新会话在第一次 `open_session` 之前就走这条，否则这段窗口没有兜底。
+        self.subscribe_session(session_id.clone(), false, cx);
 
         let mut next: Vec<MsgRow> = (*self.messages).clone();
         next.push(MsgRow {

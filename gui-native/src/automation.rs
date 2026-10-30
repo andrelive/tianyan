@@ -351,6 +351,12 @@ impl ClientApp {
                 "current": &self.current_session,
                 "title": &self.current_title,
                 "count": self.session_count,
+                // 事件流的连接态与订阅集（断线可观测：`connected=false` 时界面会挂
+                // 断线横幅，且重连后会自动重放订阅、由快照帧与数据库收敛）
+                "events": {
+                    "connected": self.events_connected,
+                    "subscribed": self.subscribed_sessions.iter().cloned().collect::<Vec<_>>(),
+                },
                 // 顶部会话 Tab（浏览器式）：断言「点 × 有没有真的关掉」只能看这里
                 // —— 实测的 bug 正是「close_tab 删掉、冒泡又把 id 加回来」。
                 "tabs": self.open_tabs.clone(),

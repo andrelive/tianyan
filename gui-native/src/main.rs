@@ -301,6 +301,15 @@ struct ClientApp {
     /// 用于每帧兜底：`self.input` 换了实体（新建）而没走到有窗口的重绑路径时，
     /// `render` 里的 `ensure_composer_submit` 靠这个比较来补挂。
     pub(crate) submit_for: Option<gpui_kit::EntityId>,
+    /// 已订阅的会话集合（ADR-029 resident 语义：打开过就保持订阅，切回零延迟）。
+    ///
+    /// **断线重连后必须整集重放**（服务端订阅态随连接一起丢失）—— 服务端收到订阅
+    /// 会推一帧快照（`type=snapshot`：历史 + cursor + 轮状态权威值），前端据此
+    /// replace 窗口。这就是「断线期间丢了事件也能自己收敛」的唯一兜底，
+    /// 此前 native 一次都没调用过订阅端点，所以丢事件只能重启应用（用户实测）。
+    pub(crate) subscribed_sessions: std::collections::HashSet<String>,
+    /// 事件流当前是否已连接（`/state` 的 `events.connected`，断线横幅的数据源）。
+    pub(crate) events_connected: bool,
     /// 最近一次草稿恢复走的哪条路（诊断用，进 `/state` 的 `usage.draft_restore_path`）。
     ///
     /// `"window"` = 真实点击路径（`on_click` 把 `&mut Window` 直接传下来）；
