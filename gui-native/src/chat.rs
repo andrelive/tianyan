@@ -628,9 +628,29 @@ impl ClientApp {
                         let Some(m) = items.get(ix) else {
                             return div().into_any_element();
                         };
+                        // 这条是否属于**同一轮**的后续步骤：往前跳过 `tool` 消息，
+                        // 上一条非 tool 若是 assistant，说明同一个用户轮次里的下一步
+                        // （一轮多步 → 每步一条 assistant 消息）。用于弱化渲染：
+                        // 轮内后续不打时间戳，否则看起来像几条独立回复。
+                        let is_continuation = {
+                            let mut j = ix;
+                            let mut cont = false;
+                            while j > 0 {
+                                j -= 1;
+                                match items[j].role.as_str() {
+                                    "tool" => continue,
+                                    "assistant" => {
+                                        cont = true;
+                                        break;
+                                    }
+                                    _ => break,
+                                }
+                            }
+                            cont
+                        };
                         // 段渲染口径见 `render_msg_body`（思考块 / 工具卡可折叠，
                         // 结果按 `tool_calls` 的 id 关联）
-                        render_msg_body(m, ix, &expand, &app, &sid)
+                        render_msg_body(m, ix, &expand, &app, &sid, is_continuation)
                     })
                     .size_full()
                 }),

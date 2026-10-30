@@ -891,7 +891,16 @@ pub(crate) fn render_user_footer(
 /// assistant 消息末尾的操作行：复制 + 时间（低对比度小字）。
 ///
 /// 同 [`render_user_footer`]：拆出来只为压 `render_msg_body` 的栈帧。
-pub(crate) fn render_assistant_footer(msg: &MsgRow, mi: usize) -> AnyElement {
+///
+/// `is_continuation` = 这条属于**同一轮**的后续步骤（见 `render_msg_body` 的说明）。
+/// 此时**不渲染时间戳**：一轮多步是常态（LLM→工具→LLM…），每步在库里都是独立
+/// assistant 消息；若每步都打时间，界面看起来就像「同一轮被切成几条独立回复」
+/// （用户实测提出：两个工具调用本该是一轮，中间却被时间戳分开）。
+pub(crate) fn render_assistant_footer(
+    msg: &MsgRow,
+    mi: usize,
+    is_continuation: bool,
+) -> AnyElement {
     let mut footer = div().w_full().flex().flex_row().items_center().gap_2();
     if !msg.text.trim().is_empty() {
         let copy_text = msg.text.to_string();
@@ -914,13 +923,15 @@ pub(crate) fn render_assistant_footer(msg: &MsgRow, mi: usize) -> AnyElement {
         );
     }
     footer = footer.child(div().flex_1());
-    if let Some(ts) = &msg.ts {
+    if !is_continuation {
+        if let Some(ts) = &msg.ts {
         footer = footer.child(
             div()
                 .text_size(px(11.))
                 .text_color(rgb(colors::TEXT_TERTIARY()))
                 .child(ts.clone()),
         );
+        }
     }
     footer.into_any_element()
 }
@@ -935,6 +946,15 @@ pub(crate) fn render_msg_body(
     expand: &ExpandRef,
     app: &AppRef,
     session_id: &str,
+    // 这条 assistant 消息是否属于**同一轮**的后续步骤。
+    //
+    // 一轮对话是**多步**的（LLM 响应 → 工具 → LLM 响应…），库里每步一条独立
+    // assistant 消息（ADR-002 / f354e28 的「步边界新开消息」）。渲染上必须区分：
+    // 轮内后续步骤不打时间戳，否则视觉上像「几条独立回复」（用户实测提出：
+    // 两个工具调用本该同一轮，中间却被时间戳分开）。
+    // 判据由调用方（消息列表闭包）算：往前跳过 `tool` 消息，上一条非 tool 若为
+    // assistant，则本条是同轮后续。
+    is_continuation: bool,
 ) -> AnyElement {
     let is_user = msg.role == "user" && !msg.compression;
     if is_user {
@@ -1151,7 +1171,7 @@ pub(crate) fn render_msg_body(
             }
         }
     }
-    body = body.child(render_assistant_footer(msg, mi));
+    body = body.child(render_assistant_footer(msg, mi, is_continuation));
     div().px_4().py_2().w_full().child(body).into_any_element()
 }
 /// 消息区里可折叠块的展开状态（思考块 / 工具参数 / 工具结果）。
