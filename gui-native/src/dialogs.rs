@@ -877,9 +877,9 @@ impl ClientApp {
                                         colors::TEXT_TERTIARY()
                                     }))
                                     .child(pick_label)
-                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                    .on_click(cx.listener(move |this, _, window, cx| {
                                         if can_pick {
-                                            this.confirm_workspace_picker(target, cx);
+                                            this.confirm_workspace_picker(target, Some(window), cx);
                                         }
                                     })),
                             ),
@@ -962,6 +962,7 @@ impl ClientApp {
     pub(crate) fn confirm_workspace_picker(
         &mut self,
         target: PickerTarget,
+        window: Option<&mut Window>,
         cx: &mut Context<Self>,
     ) {
         // 浏览根（未进入任何盘符）时不可选
@@ -975,7 +976,7 @@ impl ClientApp {
         match target {
             PickerTarget::NewSession => {
                 self.new_session_workspace = Some(path.clone());
-                self.start_new_session(cx);
+                self.start_new_session(window, cx);
                 self.set_status(format!("新会话将绑定目录：{path}"));
                 cx.notify();
             }

@@ -215,6 +215,7 @@ impl ClientApp {
             composer_images: Vec::new(),
             drafts: std::collections::HashMap::new(),
             running_sessions: std::collections::HashSet::new(),
+            draft_restore_path: String::new(),
             oldest_seq: None,
             has_more_history: false,
             loading_older: false,

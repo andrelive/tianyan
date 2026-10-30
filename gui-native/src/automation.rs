@@ -346,6 +346,12 @@ impl ClientApp {
                 "oldest_seq": self.oldest_seq,
                 "has_more": self.has_more_history,
                 "loading_older": self.loading_older,
+                // 「↑ 加载更早的消息」此刻是否可见：判据 = 有更早历史 **且** 列表已滚
+                // 到最前项。用户实测过「常驻顶部不合预期」，这个字段让那条回归可断言。
+                "older_button_visible": self.has_more_history
+                    && self.msg_list_state.logical_scroll_top().item_ix == 0,
+                // 草稿恢复走了哪条路（真实点击=window / 自动化=handle / 失败=handle-failed）
+                "draft_restore_path": self.draft_restore_path,
                 "last": last_msg,
                 // 最近几段的「骨架」：断言「一轮多步是否分成多条消息」「工具卡有没有
                 // 拿到结果」只能看这里（截图看不出边界，`text` 又是拍平后的正文）。
@@ -880,8 +886,15 @@ impl ClientApp {
                 // 直接赋 `self.view` 会跳过它（实测：文件页树因此一直为空）
                 self.switch_view(view, cx);
             }
-            "select_session" => self.open_session(arg_str(cmd, "id")?, cx),
-            "new_session" => self.start_new_session(cx),
+            // ⚠️ 这里只能传 `None`：`AnyWindowHandle::update` 给的是 `&mut AnyView`
+            // （窗口根视图），拿不到 `&mut ClientApp`，因此**自动化无法构造与
+            // `on_click` 相同的借用上下文**。真实点击路径（`Some(window)`）的正确性
+            // 因此不能靠这条自动化验证——它由「有 window 就直接用、不二次借用」
+            // 这个写法本身保证（同 crate 先例：`insert_into_composer`），并且
+            // `restore_composer_draft` 会在 state 里记录实际走的分支
+            // （`usage.draft_restore_path`），复现时能直接看出是哪条。
+            "select_session" => self.open_session(arg_str(cmd, "id")?, None, cx),
+            "new_session" => self.start_new_session(None, cx),
             "reload" => {
                 self.load_sessions(cx);
                 self.load_tasks(cx);
@@ -933,7 +946,7 @@ impl ClientApp {
                 let Some(Dialog::WorkspacePicker { target }) = self.dialog.clone() else {
                     return Err("目录选择器未打开".to_string());
                 };
-                self.confirm_workspace_picker(target, cx);
+                self.confirm_workspace_picker(target, None, cx);
             }
             "picker_cancel" => {
                 self.dialog = None;

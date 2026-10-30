@@ -221,7 +221,11 @@ impl ClientApp {
     /// 经窗口句柄现取 `&mut Window`：`Context` 里没有 window，而
     /// `TextareaState::set_value` 需要它（与 `backfill_settings_fields` 同一手法，
     /// 不依赖 render —— 隐藏窗口下也必须生效）。
-    pub(crate) fn restore_composer_draft(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn restore_composer_draft(
+        &mut self,
+        window: Option<&mut Window>,
+        cx: &mut Context<Self>,
+    ) {
         // 新会话没有草稿可恢复：**必须清空**（不查任何桶）。早先这里用空串键兜底，
         // 于是新建会话读到的是上一个新建会话残留的文字 —— 用户看到的「文字跟着
         // 会话过去了」。
@@ -230,16 +234,43 @@ impl ClientApp {
             None => (String::new(), Vec::new()),
         };
         self.composer_images = images;
-        let handle = self.window_handle;
-        let input = self.input.clone();
-        let _ = handle.update(cx, move |_, window, cx| {
-            input.update(cx, |state, cx| state.set_value(text, window, cx));
-        });
+        // ⚠️ 两条路径的差别是**实测出来的 bug 根因**，别再合并回去：
+        //
+        // 真实点击（切会话 / 新建会话 / 关 Tab）发生在 `on_click` 回调里，那里
+        // 窗口已经在借用中；若再去 `window_handle.update(...)` 等于对同一个窗口
+        // 二次借用 → GPUI 返回 Err，而早先写的是 `let _ =`（静默吞掉）→ 输入框
+        // 根本没被改写，看起来就是「切换会话后上一个会话的文字还在」。
+        // 自动化路径（HTTP handler）不在窗口借用中，所以那条路一直成功——
+        // 这也是上一轮单测/自动化实测「全过」却仍被用户体验到的原因。
+        match window {
+            Some(window) => {
+                self.draft_restore_path = "window".to_string();
+                self.input
+                    .update(cx, |state, cx| state.set_value(text, window, cx));
+            }
+            None => {
+                let handle = self.window_handle;
+                let input = self.input.clone();
+                // 这条路径只来自自动化/后台：失败要**可见**，不再静默
+                if let Err(e) = handle.update(cx, move |_, window, cx| {
+                    input.update(cx, |state, cx| state.set_value(text, window, cx));
+                }) {
+                    self.draft_restore_path = format!("handle-failed: {e}");
+                    self.set_error(format!("草稿恢复失败（窗口不可用）：{e}"));
+                } else {
+                    self.draft_restore_path = "handle".to_string();
+                }
+            }
+        }
     }
 
     /// 新建会话：清空选中与消息。真正的会话记录由服务端在首条消息时按本地
     /// 生成的 id 创建（事件按 `session_id` 路由，id 必须发起前就确定）。
-    pub(crate) fn start_new_session(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn start_new_session(
+        &mut self,
+        window: Option<&mut Window>,
+        cx: &mut Context<Self>,
+    ) {
         // 先存草稿：切走再切回写了一半的内容还在（与 Web 版 ChatInput 同语义）
         self.save_composer_draft(cx);
         self.current_session = None;
@@ -255,7 +286,7 @@ impl ClientApp {
         // 附件也按会话存草稿（上面已 save），这里清空后由 restore 填回本档的草稿
         // ——不会把上一会话的附件误发到新会话，也不会丢掉自己写了一半的内容
         self.composer_images.clear();
-        self.restore_composer_draft(cx);
+        self.restore_composer_draft(window, cx);
         self.messages = Rc::new(Vec::new());
         self.msg_list_state = GpuiListState::new(0, ListAlignment::Bottom, px(120.));
         self.message_total = 0;
@@ -264,7 +295,12 @@ impl ClientApp {
     }
 
     /// 选中会话：切换路由键并拉消息
-    pub(crate) fn open_session(&mut self, id: String, cx: &mut Context<Self>) {
+    pub(crate) fn open_session(
+        &mut self,
+        id: String,
+        window: Option<&mut Window>,
+        cx: &mut Context<Self>,
+    ) {
         // 切换前先存当前会话的草稿（写了一半的 prompt 不能因为点另一个会话就没了）
         if self.current_session.as_deref() != Some(id.as_str()) {
             self.save_composer_draft(cx);
@@ -320,7 +356,7 @@ impl ClientApp {
         self.load_todos_goals(cx);
         self.load_approvals(cx);
         // 选中态与「当前会话始终可见」都体现在左栏行上
-        self.restore_composer_draft(cx);
+        self.restore_composer_draft(window, cx);
         self.rebuild_session_rows(cx);
     }
 
@@ -682,8 +718,8 @@ impl ClientApp {
                             .overflow_hidden()
                             .child(meta),
                     )
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.open_session(id.clone(), cx);
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.open_session(id.clone(), Some(window), cx);
                     }))
                     .on_hover(cx.listener(move |this, hovered: &bool, _window, cx| {
                         // 行内操作按钮只在悬停这一行时渲染（对齐 Web 版口径）
@@ -800,13 +836,13 @@ impl ClientApp {
                                     .size(px(10.))
                                     .text_color(rgb(colors::TEXT_TERTIARY())),
                             )
-                            .on_click(cx.listener(move |this, _, _w, cx| {
-                                this.close_tab(id_close.clone(), cx);
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.close_tab(id_close.clone(), Some(window), cx);
                             })),
                     )
-                    .on_click(cx.listener(move |this, _, _w, cx| {
+                    .on_click(cx.listener(move |this, _, window, cx| {
                         if this.current_session.as_deref() != Some(id_open.as_str()) {
-                            this.open_session(id_open.clone(), cx);
+                            this.open_session(id_open.clone(), Some(window), cx);
                         }
                     })),
             );
@@ -815,12 +851,17 @@ impl ClientApp {
     }
 
     /// 关闭一个会话 Tab：若是当前会话则切到剩余 tab 的最后一个（没有则回空态）。
-    pub(crate) fn close_tab(&mut self, id: String, cx: &mut Context<Self>) {
+    pub(crate) fn close_tab(
+        &mut self,
+        id: String,
+        window: Option<&mut Window>,
+        cx: &mut Context<Self>,
+    ) {
         self.open_tabs.retain(|t| t != &id);
         if self.current_session.as_deref() == Some(id.as_str()) {
             match self.open_tabs.last().cloned() {
-                Some(next) => self.open_session(next, cx),
-                None => self.start_new_session(cx),
+                Some(next) => self.open_session(next, window, cx),
+                None => self.start_new_session(window, cx),
             }
         } else {
             cx.notify();

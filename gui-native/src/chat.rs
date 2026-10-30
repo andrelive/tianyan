@@ -16,6 +16,13 @@ use gpui_kit::component::input::Textarea;
 use gpui_kit::component::progress::ProgressCircle;
 use gpui_kit::list as gpui_list;
 
+/// 输入卡片下方统计行的高度（恒定，含无数据时的占位）。
+///
+/// 旧值是 `pt_2`(8) + 11px 文字行高(≈16) ≈ 24，这里取整为 24 并**固定**：
+/// 切换会话时 `session_usage` 会被清空等新数据，若整行随之消失，
+/// 输入区高度就抖一下（用户实测「多会话切换上下抖动」）。
+const USAGE_LINE_H: f32 = 24.0;
+
 /// 待发图片张数上限（与 Web 版 `ChatInput.tsx` 同数：4 张）。
 ///
 /// 再多既撑上下文，也会让模型抓不到重点；Web 版在选图按钮满 4 张时禁用，
@@ -436,8 +443,8 @@ impl ClientApp {
                                     .size(px(14.))
                                     .text_color(rgb(colors::TEXT_SECONDARY())),
                             )
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.start_new_session(cx);
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.start_new_session(Some(window), cx);
                             })),
                     )
                     // 「＋新目录」：新建一个绑定指定工作目录的会话（目录在
@@ -554,11 +561,19 @@ impl ClientApp {
             .flex()
             .flex_col()
             .items_center();
-        // 更早历史入口：`has_more` 为真才出现。
+        // 更早历史入口：**只在滚到列表顶部时出现**。
         //
-        // Web 版是「滚到顶自动加载」，这里给显式按钮——GPUI 的 `ListState` 没有可靠的
-        // 「滚到顶」回调，硬凑会变成轮询式试探；按钮语义明确、还能显示加载中状态。
-        if self.has_more_history {
+        // 早先是 `has_more` 为真就常驻在消息区上方——用户实测「一直出现，不符合
+        // 预期，应该在滚到顶部时再出现」。Web 版更彻底（滚到顶**自动加载**），
+        // 这里仍保留显式按钮：GPUI 的 `ListState` 没有滚动回调，自动加载要额外
+        // 造节流/防连击，而按钮语义明确、还能显示加载中状态。
+        //
+        // 怎么拿到「到顶」：`ListState` 没有事件，但 `logical_scroll_top()` 给出
+        // `ListOffset { item_ix, offset_in_item }`，`item_ix == 0` 即已滚到最前项。
+        // 缺的那半环是**滚动后重新渲染**——在列表容器上挂 `on_scroll_wheel`
+        // （见下），滚轮到达时 `cx.notify()`。它不消费事件，列表自身照常滚动。
+        let at_top = self.msg_list_state.logical_scroll_top().item_ix == 0;
+        if self.has_more_history && at_top {
             col = col.child(
                 div()
                     .w_full()
@@ -596,6 +611,13 @@ impl ClientApp {
                 .min_h_0()
                 .w_full()
                 .max_w(px(colors::CHAT_MAX_W))
+                // 滚轮到达 → 重渲染，让上面那颗「加载更早」按钮按滚动位置出现/消失。
+                // 不 stop_propagation：列表自己还要滚。
+                .on_scroll_wheel(cx.listener(
+                    |_this, _ev: &gpui_kit::ScrollWheelEvent, _window, cx| {
+                        cx.notify();
+                    },
+                ))
                 .child({
                     let items = self.messages.clone();
                     let expand = self.expand.clone();
@@ -1008,16 +1030,19 @@ impl ClientApp {
     }
 
     /// 输入卡片下方统计行：会话累计（未命中/命中/输出/命中率）+ 最近一轮性能
-    /// （TTFT / tok/s）。两路数据都为空时整行不渲染（不留空白条）。
+    /// （TTFT / tok/s）。
+    ///
+    /// **无数据时也占固定高度**（`USAGE_LINE_H`）。早先空数据直接返回 0 高元素，
+    /// 而 `open_session` 会把 `session_usage` / `request_perf` 清空等新数据回来
+    /// —— 那一瞬间整行消失，输入区矮 20 多像素、消息列表可视高度跟着变，
+    /// 表现就是「多个会话间切换时上下抖动」（用户实测）。恒定高度让切换前后
+    /// 布局不变。
     pub(crate) fn render_usage_line(&self) -> AnyElement {
-        if self.session_usage.is_none() && self.request_perf.is_none() {
-            return div().into_any_element();
-        }
         let mut line = div()
             .w_full()
             .max_w(px(colors::CHAT_MAX_W))
             .mx_auto()
-            .pt_2()
+            .h(px(USAGE_LINE_H))
             .flex()
             .flex_row()
             .items_center()
@@ -1025,6 +1050,10 @@ impl ClientApp {
             .gap_2()
             .text_size(px(11.))
             .text_color(rgb(colors::TEXT_TERTIARY()));
+        if self.session_usage.is_none() && self.request_perf.is_none() {
+            // 空内容但**等高**：占位不留白条，也不让布局跳
+            return line.into_any_element();
+        }
         let dot = || div().text_color(rgb(colors::BORDER())).child("·");
         if let Some((uncached, cached, completion)) = self.session_usage {
             let total = uncached + cached;

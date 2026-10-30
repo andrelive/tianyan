@@ -271,6 +271,15 @@ struct ClientApp {
     /// 事件本身带 `session_id`，因此在**会话过滤之前**记一份全量集合，切回时
     /// 按 id 恢复即可，不必新增查询端点。
     pub(crate) running_sessions: std::collections::HashSet<String>,
+    /// 最近一次草稿恢复走的哪条路（诊断用，进 `/state` 的 `usage.draft_restore_path`）。
+    ///
+    /// `"window"` = 真实点击路径（`on_click` 把 `&mut Window` 直接传下来）；
+    /// `"handle"` = 自动化/后台路径（经 `window_handle.update`）；
+    /// `"handle-failed: …"` = 那条路失败（同时会弹错误 toast）。
+    ///
+    /// 为什么需要它：`on_click` 里二次借用同一个窗口会失败，而自动化路径**不在**
+    /// 借用中——两条路的差异只有在这里才看得见（用户实测复现、自动化不复现）。
+    pub(crate) draft_restore_path: String,
     /// 上滚游标（`GET /sessions/{id}/messages` 的 `next_before_seq`）：
     /// 指向当前窗口**最早一条**的 seq；`None` = 已到链首，没有更早的了。
     pub(crate) oldest_seq: Option<i64>,
