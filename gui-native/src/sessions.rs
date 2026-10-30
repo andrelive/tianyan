@@ -436,7 +436,7 @@ impl ClientApp {
         // （实测 `no method named is_focused`），但它有固有的 `focus_handle()`。
         let had_focus = window
             .as_ref()
-            .map(|w| self.input.read(cx).focus_handle(cx).is_focused(&**w))
+            .map(|w| self.input.read(cx).focus_handle(cx).is_focused(w))
             .unwrap_or(false);
         let key = self.current_session.clone();
         if let Some(i) = self.inputs.iter().position(|(k, _)| k == &key) {
@@ -449,7 +449,7 @@ impl ClientApp {
             let placeholder = "输入消息 · Enter 发送 / Shift+Enter 换行";
             // 注意用 `as_mut()`（借而不是 move）：后面恢复焦点还要再用一次
             if let Some(w) = window.as_mut() {
-                let w: &mut Window = &mut **w;
+                let w: &mut Window = w;
                 self.input = cx.new(|cx| TextareaState::new(w, cx).placeholder(placeholder));
                 self.draft_restore_path = "created-window".to_string();
             } else {
@@ -469,7 +469,7 @@ impl ClientApp {
         }
         if had_focus {
             if let Some(w) = window.as_mut() {
-                let w: &mut Window = &mut **w;
+                let w: &mut Window = w;
                 self.input.update(cx, |state, cx| state.focus(w, cx));
             }
         }
