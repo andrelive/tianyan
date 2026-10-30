@@ -377,6 +377,9 @@ impl ClientApp {
                     .map(|m| {
                         serde_json::json!({
                             "role": &m.role,
+                            // 时序号：排查「切会话后消息重复/丢失」只能靠它对齐
+                            // （库里的 seq 与界面上的条数必须一一对应）
+                            "seq": m.seq,
                             // 压缩点那一行要能在这里断言出来（用户实测的
                             // 「58% → 2% 却看不到压缩点」就是这条链路断的）
                             "compression": m.compression,

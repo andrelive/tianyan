@@ -548,11 +548,29 @@ impl ClientApp {
         self.thinking_menu_open = false;
         // 会话级模型 / 思考强度的权威值在会话头里：拉回来覆盖快照里的旧值
         self.load_session_model(id.clone(), cx);
-        // 消息：**有快照就不重拉** —— `load_messages` 末尾 `scroll_to_end` 会把刚恢复
-        // 的滚动位置冲掉，而那正是这次重构要保住的东西。
-        // 唯一例外：该会话正在跑（切走期间轮没停）→ 必须重拉才能看到增量。
-        if !restored || running {
+        // 消息：三条互不重叠的路，**都不做「本地消息 ↔ 库里消息」的比对/合并**。
+        //
+        // 早先的写法是「有快照就不重拉，唯一例外是该会话正在跑 → 整页重拉」，两个
+        // 分支都有坑（用户实测「输入后切走再切回，之前的上下文渲染丢失」）：
+        // 1. 正在跑 → 整页重拉会**替换**列表，把最后一条 assistant **占位**删掉；
+        //    而流结束时的权威 `message` 事件要求「最后一条是 assistant」才落地
+        //    （`apply_authoritative_message` 的第一行就 return），于是那轮内容永远
+        //    无处落地 —— 表现为切回来只剩一条思考块；
+        // 2. 已结束 → 不重拉，本地缺切走期间的增量，内容仍是残缺的。
+        //
+        // 现在：还在跑就**什么都不做**（占位留着，等权威消息整条覆盖 —— 切走期间缺的
+        // 增量由那条全文一次性补齐）；已结束就整页重拉（库里是完整权威版，且按本地
+        // 已有条数拉，上滚加载过的历史不会被 50 条截断）。
+        if !restored {
             self.load_messages(id, cx);
+        } else if running {
+            // 占位是这一轮内容的落点，绝不能在这时候替换列表
+        } else {
+            // 重拉条数 = 本地已有（上限 200，服务端上限）；锚点 = 顶部那条的 seq
+            let limit = self.messages.len().clamp(MESSAGE_PAGE, 200);
+            let top_ix = self.msg_list_state.logical_scroll_top().item_ix;
+            let anchor_seq = self.messages.get(top_ix).map(|m| m.seq).filter(|s| *s > 0);
+            self.load_messages_with(id, limit, anchor_seq, cx);
         }
         self.load_session_usage(cx);
         self.load_todos_goals(cx);

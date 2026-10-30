@@ -255,7 +255,7 @@ Tauri 版由监督循环在进程内完成；原生端在上一次进程退出�
 
 ## MSI 打包与自动更新（已实测）
 
-### 1.1.0 修的十三处（用户实测反馈 + 顺手修）
+### 1.1.0 修的十四处（用户实测反馈 + 顺手修）
 
 | # | 症状 | 根因 / 修法 |
 |---|---|---|
@@ -272,6 +272,7 @@ Tauri 版由监督循环在进程内完成；原生端在上一次进程退出�
 | 11 | 知识库列表**全是 64 位哈希**，认不出是哪份文档（顺手修） | 条目名 `name` 是摄入时算出的内容 sha256，而给人看的 L0 摘要就在旁边没人用。`GET /knowledge/entries` 增加 `abstract_excerpt`（合并空白 + 按**字符**限长 200，不会切出半个 UTF-8；无摘录时字段省略）——数据取自同一次 `vfs.list` 已读出的 `ContextEntry`，**零额外 IO**。UI 有摘录即以它为标题，哈希退成右侧 `c45badca…  L0 L1 L2` 短标记。原始文件名暂不可得：`original_name` 只进了向量 payload，`vfs_entries` 表没有该列（存量条目也补不回，要补得加列 + 迁移） |
 | 12 | **回车发送后消息里多一个换行**（光标不在文字最后时） | `gpui_base` 处理 Enter 的方式是「先在光标处插入换行 → 再 emit `InputEvent::PressEnter`」。早先收到事件就发送，那个换行已经落进正文：光标在末尾时它跟在最后（Markdown 不显形），在**中间**时卡在语句里（用户实测）。修法 `send_on_enter`：**只把「待发送的字符串」里那个 `\n` 删掉**（`selected_range()` 是 UTF-8 字节偏移，`\n` 单字节，不会切坏多字节字符）；生成中不动（此时发送本就禁用，Enter 就该只是换行）。两条**反例**都踩过：① `capture_key_down` 拦不住（GPUI 的 keybinding→action 派发在原始 key listener **之前**，`dispatch_key_event` 先 `dispatch_key`、后才 `finish_dispatch_key_event`）；② 在 `PressEnter` 回调里 `set_value(fixed)` 把编辑器改回去 —— `set_value` 会重设选区、清空 undo 历史、打断 IME 组合态，实测后果是**回车只换行、消息发不出去**（用户报障）。任何「发送前顺手修一下输入框」的念头都要掐掉：只改 payload |
 | 13 | 停止按钮是**空心方框**；压缩点像一条空消息 | 停止图标：vite 是 `<Square className="fill-current" />`（lucide 描边矩形被填满 = 实心），GPUI 的 `svg()` 只能渲染 stroke 版，改不了 fill → 直接画 12×12 白方块（照抄 lucide `rect x=3 y=3 w=18 h=18 rx=2` 按 16px 渲染的几何，1.5px 圆角，放大截图核对过）。压缩点：正文本来就不显示（胶囊 + 分割线），但 footer 还在 → 出现「看不见内容的复制按钮 + 时间戳」，既误导又像空消息；`render_msg_body` 对 `msg.compression` 直接跳过 `render_assistant_footer` |
+| 14 | **输入后切走再切回，助手回复只剩一个思考块；更早的历史也没了** | 两个独立根因。①切回时若该轮在跑 → 整页 `load_messages` **替换**列表，把最后一条 assistant **占位**删掉；而流结束的权威 `message` 事件在 `apply_authoritative_message` 第一行就要求「最后一条是 assistant」，否则直接 return —— 于是那轮内容**永远无处落地**。②该轮已结束时反而不重拉，本地缺切走期间的增量（非当前会话的 `answer` 事件被丢弃）。修法：三条**互不重叠**的路 —— 首进拉一页 / **还在跑就什么都不做**（占位留着，等权威消息整条覆盖，切走期间缺的增量由全文一次补齐）/ 已结束则整页重拉且 `limit = 本地已有条数`（不被 50 截断），滚动位置用**顶部那条消息的 seq** 找回。⚠️ 纪律：**前端不要维护「本地消息 ↔ 库里消息」的对应关系**（不要按 seq/id 合并、不要给占位补 seq）—— 那条路要前端替服务端记账，漏一处就是错位（vite 版反复改的就是它）。`seq` 只作**服务端下发值的查询键**（分页游标 `next_before_seq`、滚动锚点） |
 
 > **第 10 条的教训（写进纪律）**：`AnyWindowHandle::update` 给的是 `&mut AnyView`，
 > 拿不到 `&mut ClientApp`，所以**自动化永远构造不出 `on_click` 的借用上下文**。

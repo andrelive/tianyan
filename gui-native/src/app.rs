@@ -1241,11 +1241,29 @@ impl ClientApp {
     }
 
     pub(crate) fn load_messages(&mut self, session_id: String, cx: &mut Context<Self>) {
+        self.load_messages_with(session_id, MESSAGE_PAGE, None, cx);
+    }
+
+    /// [`Self::load_messages`] 的完整版：自带分页条数与滚动锚点。
+    ///
+    /// `anchor_seq`：整页替换必须重建 `GpuiListState`（条数变了不重建，虚拟列表会
+    /// 越界），滚动位置随之丢失 —— 这里用「切走时顶部那条消息的 `seq`」把它找回来。
+    ///
+    /// ⚠️ `seq` 在这里只作**服务端下发值的查询键**（服务端返回的 JSON 里就有它），
+    /// **不由前端推断**。前端一旦要维护「本地这条对应库里哪一条」，就必然出现
+    /// 「本地 0 / 库里 2」这类错位 —— 那条路走到底是一堆补丁（vite 版反复改的就是它）。
+    pub(crate) fn load_messages_with(
+        &mut self,
+        session_id: String,
+        limit: usize,
+        anchor_seq: Option<i64>,
+        cx: &mut Context<Self>,
+    ) {
         let port = self.port;
-        println!("[消息] 加载会话 {session_id}");
+        println!("[消息] 加载会话 {session_id}（limit={limit}）");
         cx.spawn(async move |this, cx| {
             let url = format!(
-                "http://{SERVER_HOST}:{port}/api/v1/sessions/{session_id}/messages?limit={MESSAGE_PAGE}"
+                "http://{SERVER_HOST}:{port}/api/v1/sessions/{session_id}/messages?limit={limit}"
             );
             match fetch_json(url).await {
                 Ok(body) => {
@@ -1260,10 +1278,7 @@ impl ClientApp {
                         .get("has_more")
                         .and_then(|v| v.as_bool())
                         .unwrap_or(false);
-                    let rows: Vec<MsgRow> = arr
-                        .iter()
-                        .map(parse_msg_row)
-                        .collect();
+                    let rows: Vec<MsgRow> = arr.iter().map(parse_msg_row).collect();
                     let n = rows.len();
                     println!("[消息] 首屏 {n} 条（has_more={more}）");
                     let total = n;
@@ -1280,6 +1295,15 @@ impl ClientApp {
                                 ListAlignment::Bottom,
                                 px(120.),
                             );
+                            // 整页替换后把滚动锚点找回来（只按服务端下发的 seq 查表）
+                            if let Some(seq) = anchor_seq {
+                                if let Some(ix) = this.messages.iter().position(|m| m.seq == seq) {
+                                    this.msg_list_state.scroll_to(gpui_kit::ListOffset {
+                                        item_ix: ix,
+                                        offset_in_item: px(0.),
+                                    });
+                                }
+                            }
                             this.message_total = total;
                             this.oldest_seq = cursor;
                             this.has_more_history = more;
