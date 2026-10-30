@@ -365,6 +365,13 @@ struct ClientApp {
     pub(crate) input: Entity<TextareaState>,
     /// 是否有轮在跑（`turn_state` 驱动，同时闸住重复发送）
     pub(crate) streaming: bool,
+    /// 消息窗口的**世代号**：每次「快照 replace」与「整页加载落地」都动它。
+    ///
+    /// 用途：`load_messages` / `load_older_messages` 都是异步的。若请求在飞的时候
+    /// 快照帧（或另一路整页加载）先把更权威的内容 replace 进来，旧页随后落地就会
+    /// 把新内容冲掉 —— 表现为「进会话先看到内容、一闪又空了」。
+    /// 落地前比对世代号，变了就丢弃这一页（宁可不显示，也不要显示过期的）。
+    pub(crate) messages_epoch: u64,
     /// 当前视图
     pub(crate) view: View,
     /// 设置页：模型列表（`GET /api/v1/config/models`）

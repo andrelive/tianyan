@@ -44,8 +44,9 @@ use gpui_kit::{App, AsyncApp, Focusable as _, WeakEntity};
 use tokio::sync::{mpsc, oneshot};
 
 use crate::{
-    decode_data_url, pages::settings::fields::FIELDS, tokens_per_sec, ClientApp, Dialog,
-    FilePickPurpose, PickerTarget, Seg, SessionListRow, SettingsTab, View, SERVER_HOST,
+    decode_data_url, pages::settings::fields::FIELDS, stream_pending, thinking_chars,
+    tokens_per_sec, ClientApp, Dialog, FilePickPurpose, PickerTarget, Seg, SessionListRow,
+    SettingsTab, StreamPending, View, SERVER_HOST,
 };
 
 /// 自动化端口的环境变量名：存在且能解析成端口才监听。
@@ -319,6 +320,22 @@ impl ClientApp {
             })
         };
 
+        // 流式思考指示器的归属（同样必须在宏外算：`json!` 里不能写 `let`）。
+        // `below` = 消息区下方「思考中…」、`bubble` = 气泡内「思考中 · N 字」、
+        // `none` = 都不显示。用户报的「输入之后界面上没有思考中提示」只有这条能断言
+        // —— 截图看不出呼吸动画，也分不清「没渲染」和「渲染了但透明度低」。
+        let (stream_pending_key, stream_thinking_chars) = match self.messages.last() {
+            Some(m) => (
+                match stream_pending(m, self.streaming) {
+                    StreamPending::Bubble => "bubble",
+                    StreamPending::Below => "below",
+                    StreamPending::None => "none",
+                },
+                thinking_chars(m),
+            ),
+            None => ("none", 0usize),
+        };
+
         serde_json::json!({
             "view": self.view.key(),
             // 首次启动引导状态（断言「新装用户是否被正确拦到引导页」）
@@ -347,6 +364,11 @@ impl ClientApp {
                 .collect::<Vec<_>>(),
             "port": self.port,
             "streaming": self.streaming,
+            // 流式思考指示器的**归属**（`msg::stream_pending` 的可观测投影）
+            "stream": {
+                "pending": stream_pending_key,
+                "thinking_chars": stream_thinking_chars,
+            },
             "session": {
                 "current": &self.current_session,
                 "title": &self.current_title,
@@ -360,6 +382,21 @@ impl ClientApp {
                 // 顶部会话 Tab（浏览器式）：断言「点 × 有没有真的关掉」只能看这里
                 // —— 实测的 bug 正是「close_tab 删掉、冒泡又把 id 加回来」。
                 "tabs": self.open_tabs.clone(),
+                // Tab 上的活跃标（对齐 vite `SessionTabBar`）：运行中 / 等待回答 /
+                // 名下后台任务数。与左栏绿点**同源**（`running_sessions`）——
+                // 「顶部没有活跃提示」那条只能靠这里断言。
+                "tab_marks": self
+                    .open_tabs
+                    .iter()
+                    .map(|id| {
+                        serde_json::json!({
+                            "id": id,
+                            "running": self.running_sessions.contains(id),
+                            "awaiting": self.session_awaiting_answer(id),
+                            "tasks": self.running_tasks_of(id),
+                        })
+                    })
+                    .collect::<Vec<_>>(),
             },
             "messages": {
                 "loaded": self.messages.len(),

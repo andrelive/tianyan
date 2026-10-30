@@ -11,6 +11,10 @@
 use crate::theme::colors;
 use crate::*;
 use gpui_kit::assets::IconName;
+// 呼吸圆点（`pulse_dot`）：GPUI 的动画按 `ElementId` 记账，缓动
+// `pulsating_between` 是它内置的「呼吸」曲线（透明度来回摆）。`with_animation`
+// 由 `AnimationExt` 提供，那个 trait 已经在 `crate::*` 的 glob 里（不必重复导入）。
+use gpui_kit::{pulsating_between, Animation};
 // 摘要卡片限高后可滚动（`.overflow_y_scrollbar()` 来自这个 trait）
 use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::text::TextView;
@@ -543,6 +547,101 @@ pub(crate) fn toggle_expand(
     }
 }
 
+/// 流式思考指示器的**归属**（单点判定，对齐 vite `components/chat/streaming-indicator.ts`）。
+///
+/// 用户实测报的现象：「输入之后，界面上没有『思考中……』这种提示」——
+/// 首 token 之前模型可能静默十几秒，界面只剩一条空 assistant 气泡，
+/// 看起来就像没发出去。
+///
+/// 三态**互斥**由 [`stream_pending`] 一处保证：气泡内与消息区下方两个调用方
+/// 各自只认自己那一态，任一调用方改判据另一侧自动跟随 —— 不会双显
+/// （一个「思考中」在气泡里、另一个在列表下方），也不会都不显。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum StreamPending {
+    /// 正文还空、但已有思考内容 → 气泡内「思考中 · N 字」
+    Bubble,
+    /// 正文还空、思考也空（首 token 之前的长静默）→ 消息区下方「思考中…」
+    Below,
+    /// 已有正文 / 非流式 / 不是本轮末尾 → 都不显示
+    None,
+}
+
+/// 判定 `msg` 此刻属于哪一类思考指示（`is_tail_streaming` = 这条是当前流式轮的末尾 assistant）。
+///
+/// 判据与 vite 同口径：**正文为空**才算「还在思考」。一旦有正文，思考块自己会显示
+/// （`render_thinking`），再挂一个「思考中」就是重复。
+///
+/// 为什么还要区分「有没有思考内容」：思考块（折叠态）已经占了一行，
+/// 此时气泡内只需要补一个「· N 字」的活跃信号；而思考都没开始时，
+/// 气泡整条是空的，指示器必须放到消息区下方才看得见。
+pub(crate) fn stream_pending(msg: &MsgRow, is_tail_streaming: bool) -> StreamPending {
+    if !is_tail_streaming || msg.role != "assistant" || msg.compression {
+        return StreamPending::None;
+    }
+    if !msg.text.trim().is_empty() {
+        return StreamPending::None;
+    }
+    if thinking_chars(msg) > 0 {
+        StreamPending::Bubble
+    } else {
+        StreamPending::Below
+    }
+}
+
+/// 思考段的总字数（vite 口径 `message.thinking.length`：中文一字算 1）。
+///
+/// 按 `chars()` 而不是字节数：`"思考".len()` 是 6，显示成「思考中 · 6 字」会露馅。
+pub(crate) fn thinking_chars(msg: &MsgRow) -> usize {
+    msg.segs
+        .iter()
+        .filter_map(|s| match s {
+            Seg::Thinking(t) => Some(t.chars().count()),
+            _ => None,
+        })
+        .sum()
+}
+
+/// 呼吸圆点（vite `animate-pulse` 的等价物）：透明度 0.25 ↔ 1.0 循环。
+///
+/// 为什么不能是静态点：首 token 之前可能静默十几秒，静态点看起来就是「卡住了」——
+/// 这正是用户报的问题。框架自带 `App::reduce_motion` 支持：系统开了「减少动效」
+/// 就渲染成静态，不会有人被强制看动画。
+pub(crate) fn pulse_dot(id: impl Into<ElementId>, color: u32, size: f32) -> AnyElement {
+    div()
+        .flex_shrink_0()
+        .size(px(size))
+        .rounded_full()
+        .bg(rgb(color))
+        .with_animation(
+            id,
+            Animation::new(std::time::Duration::from_millis(1200))
+                .repeat()
+                .with_easing(pulsating_between(0.25, 1.0)),
+            |el, delta| el.opacity(delta),
+        )
+        .into_any_element()
+}
+
+/// 「思考中」指示器本体（气泡内与消息区下方**共用**，只换文案与 id）。
+///
+/// `id` 必须全局唯一：动画按 `ElementId` 记账，两处用同一个 id 会争抢帧
+/// （表现为其中一个不动）。
+pub(crate) fn render_stream_hint(id: impl Into<ElementId>, label: impl Into<String>) -> AnyElement {
+    div()
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap_2()
+        .child(pulse_dot(id, colors::TEXT_TERTIARY(), 8.0))
+        .child(
+            div()
+                .text_size(px(13.))
+                .text_color(rgb(colors::TEXT_TERTIARY()))
+                .child(label.into()),
+        )
+        .into_any_element()
+}
+
 /// 可折叠的思考块（对齐 Web 版 `ThinkingBlock`）。
 ///
 /// 收起态在 header 上单行显示思考输出的**最后一行**（流式期间实时更新）——
@@ -957,6 +1056,9 @@ pub(crate) fn render_msg_body(
     // 判据由调用方（消息列表闭包）算：往前跳过 `tool` 消息，上一条非 tool 若为
     // assistant，则本条是同轮后续。
     is_continuation: bool,
+    // 这条消息此刻的思考指示归属（`stream_pending` 单点判定）：只有本轮末尾的
+    // assistant 在正文还空时才会是 `Bubble` / `Below`，其余一律 `None`。
+    pending: StreamPending,
 ) -> AnyElement {
     let is_user = msg.role == "user" && !msg.compression;
     if is_user {
@@ -1228,6 +1330,15 @@ pub(crate) fn render_msg_body(
     // 压缩点是**分隔符**，不是一条消息：正文不显示（见上方 `if msg.compression`
     // 的胶囊 + 分割线），那么复制按钮与时间戳同样不该出现 —— 一个「能复制但看不见
     // 内容」的按钮比没有更糟，用户实测提出「压缩点不显示任何内容」。
+    // 「思考中 · N 字」：正文还空、思考已经在长 → 挂在气泡内（vite 同位置：
+    // 正文之后、时间戳之前）。思考块折叠态虽然也显示最后一行，但那是「想什么」，
+    // 这条是「还在跑」——两者语义不同，用户实测缺的正是后者。
+    if pending == StreamPending::Bubble {
+        body = body.child(render_stream_hint(
+            format!("stream-hint-{mi}"),
+            format!("思考中 · {} 字", thinking_chars(msg)),
+        ));
+    }
     if !msg.compression {
         body = body.child(render_assistant_footer(msg, mi, is_continuation));
     }
@@ -1257,6 +1368,87 @@ pub(crate) type ExpandRef = Rc<std::cell::RefCell<ExpandState>>;
 
 /// 反向弱引用（点击回调里 `update` 回 view）。
 pub(crate) type AppRef = Arc<Mutex<Option<WeakEntity<ClientApp>>>>;
+
+#[cfg(test)]
+mod stream_pending_tests {
+    //! 「思考中」指示器归属的三态判定（用户报「输入之后界面上没有思考中提示」）。
+    //!
+    //! 为什么用单测：这是**互斥**判据，两个渲染点（气泡内 / 消息区下方）各自只认
+    //! 自己那一态。判据错了的表现是「双显」或「都不显」，而这两种都需要真的等模型
+    //! 静默十几秒才看得见 —— 靠截图验太贵，靠纯函数钉住最省。
+    // ⚠️ 不写 `use super::*`（bin crate 根是 main.rs，glob 会撞 recursion_limit）。
+    use crate::msg::{stream_pending, thinking_chars, StreamPending};
+    use crate::types::{MsgRow, Seg};
+
+    fn row(role: &str, text: &str, segs: Vec<Seg>) -> MsgRow {
+        MsgRow {
+            id: String::new(),
+            seq: 0,
+            role: role.to_string(),
+            text: text.to_string().into(),
+            segs,
+            tool_calls: Vec::new(),
+            compression: false,
+            usage: None,
+            images: Vec::new(),
+            ts: None,
+        }
+    }
+
+    #[test]
+    fn empty_placeholder_shows_list_indicator() {
+        // 刚发出、首 token 还没到：正文空、思考也空 → 消息区下方「思考中…」
+        let m = row("assistant", "", Vec::new());
+        assert_eq!(stream_pending(&m, true), StreamPending::Below);
+    }
+
+    #[test]
+    fn thinking_without_body_moves_to_bubble() {
+        // 思考已经在长：气泡内接管（「思考中 · N 字」），下方不再显示
+        let m = row("assistant", "", vec![Seg::Thinking("让我想想".into())]);
+        assert_eq!(stream_pending(&m, true), StreamPending::Bubble);
+    }
+
+    #[test]
+    fn body_arrived_hides_both() {
+        // 正文一出现，思考块自己会显示 → 两个指示器都必须消失
+        let m = row(
+            "assistant",
+            "答案",
+            vec![Seg::Thinking("想".into()), Seg::Text("答案".into())],
+        );
+        assert_eq!(stream_pending(&m, true), StreamPending::None);
+    }
+
+    #[test]
+    fn non_tail_or_non_assistant_is_none() {
+        // 非本轮末尾（历史消息）→ 不显示，否则每轮历史都会挂一个「思考中」
+        let m = row("assistant", "", vec![Seg::Thinking("想".into())]);
+        assert_eq!(stream_pending(&m, false), StreamPending::None);
+        // 用户消息 → 不显示
+        let u = row("user", "", Vec::new());
+        assert_eq!(stream_pending(&u, true), StreamPending::None);
+    }
+
+    #[test]
+    fn compression_marker_never_shows_indicator() {
+        // 压缩点是分隔符（不是真消息），不该挂活跃指示
+        let mut m = row("assistant", "", Vec::new());
+        m.compression = true;
+        assert_eq!(stream_pending(&m, true), StreamPending::None);
+    }
+
+    #[test]
+    fn thinking_chars_counts_chars_not_bytes() {
+        // 中文按字算：`"思考".len()` 是 6 字节，显示成「6 字」会露馅
+        let m = row(
+            "assistant",
+            "",
+            vec![Seg::Thinking("思考".into()), Seg::Thinking("再想".into())],
+        );
+        assert_eq!(thinking_chars(&m), 4);
+    }
+}
 
 #[cfg(test)]
 mod image_mime_tests {

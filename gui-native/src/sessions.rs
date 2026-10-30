@@ -182,6 +182,43 @@ impl ClientApp {
             .count()
     }
 
+    /// 该会话此刻是否在等用户回答追问（`ask_user` 是同步工具，执行会挂起）。
+    ///
+    /// 两处来源：当前会话看 `self.clarification`；**切走过**的会话看它自己那份
+    /// 快照（`parked`）—— 追问态随 `SessionSnapshot` 走，所以切回来还在，
+    /// 顶部 Tab 上那个「等待你的回答」问号也要能看见（vite `SessionTabBar`
+    /// 的 `pendingAsk` 同语义）。
+    pub(crate) fn session_awaiting_answer(&self, id: &str) -> bool {
+        if self.current_session.as_deref() == Some(id) {
+            return self.clarification.is_some();
+        }
+        self.parked
+            .iter()
+            .any(|(k, s)| k.as_deref() == Some(id) && s.clarification.is_some())
+    }
+
+    /// 把这个会话放进顶部 Tab 条（去重 + 超上限丢最早的**非当前**项）。
+    ///
+    /// 两个调用点必须共用这一份逻辑：`open_session`（点会话）与 `send_text`
+    /// （**新会话首轮直接发消息**——它没走过 `open_session`）。早先漏了后者，
+    /// 于是新会话期间顶部只剩一行标题，「运行中」绿点无处显示 ——
+    /// 用户报的「顶部没有活跃提示」正是这条。
+    pub(crate) fn ensure_tab(&mut self, id: &str) {
+        if self.open_tabs.iter().any(|t| t == id) {
+            return;
+        }
+        self.open_tabs.push(id.to_string());
+        while self.open_tabs.len() > MAX_SESSION_TABS {
+            let victim = self
+                .open_tabs
+                .iter()
+                .find(|t| t.as_str() != id)
+                .cloned()
+                .unwrap_or_else(|| self.open_tabs[0].clone());
+            self.open_tabs.retain(|t| t != &victim);
+        }
+    }
+
     /// 折叠 / 展开一个工作区分组。
     pub(crate) fn toggle_group(&mut self, key: String, cx: &mut Context<Self>) {
         if !self.collapsed_groups.remove(&key) {
@@ -528,18 +565,7 @@ impl ClientApp {
         // 订阅用的 id 副本：下面 `load_messages(id, …)` 会把 `id` move 走
         let sid_for_subscribe = id.clone();
         // 浏览器式会话 Tab：打开过的会话留在顶部（去重；超上限丢最早且非当前的）
-        if !self.open_tabs.iter().any(|t| t == &id) {
-            self.open_tabs.push(id.clone());
-            while self.open_tabs.len() > MAX_SESSION_TABS {
-                let victim = self
-                    .open_tabs
-                    .iter()
-                    .find(|t| **t != id)
-                    .cloned()
-                    .unwrap_or_else(|| self.open_tabs[0].clone());
-                self.open_tabs.retain(|t| t != &victim);
-            }
-        }
+        self.ensure_tab(&id);
         // 恢复该会话的视图状态（滚动位置 / 消息折叠态 / 分页游标 / 上下文环 /
         // 会话面板 / 文件页目录）。**首次进入**（无快照）→ 清默认，随后由 load_* 拉。
         // 机制与「为什么必须整组搬」见 `SessionSnapshot` 的文档注释。
@@ -563,7 +589,13 @@ impl ClientApp {
         // 唯一要兜的情况：最后一条 assistant **还没有 id**（= 这一轮没以权威消息收尾，
         // 多半是切走期间 SSE 断过、事件真的丢了）。这时才拉一页对齐尾部；那一轮还在
         // 跑（`running`）则不动 —— 占位是它的落点，等权威消息整条覆盖即可。
-        if !restored {
+        // 兜底判据：**恢复出来是空的就一定要拉一页**。
+        //
+        // 用户实测报过「进会话完全是空的，点了『加载更早』才出现」—— 那是快照里
+        // 的消息被某条路径清空、而 `restored == true` 又让我们以为「不需要重拉」。
+        // 「有快照」不等于「有内容」：只要列表为空，就补一次整页加载（空会话拉到
+        // 的也是空页，无副作用）。
+        if !restored || self.messages.is_empty() {
             self.load_messages(id, cx);
         } else if !running {
             let stale_tail = self
@@ -824,7 +856,17 @@ impl ClientApp {
                 // 悬停才显示行内操作（对齐 Web 版）；容器宽度固定，
                 // 避免鼠标进出时标题区反复变宽变窄
                 let is_hovered = self.hovered_session.as_deref() == Some(id.as_str());
-                let mut head = div().flex().flex_row().items_center().gap_2().child(
+                // 运行中：呼吸绿点（vite `SessionList` 的 `session-running-<id>` 同位置）。
+                // 与顶部 Tab 用**同一份** `running_sessions`：两处显示不一致比都不显示更糟。
+                let mut head = div().flex().flex_row().items_center().gap_2();
+                if self.running_sessions.contains(&id) {
+                    head = head.child(pulse_dot(
+                        format!("session-row-pulse-{id}"),
+                        colors::SUCCESS(),
+                        6.0,
+                    ));
+                }
+                head = head.child(
                     div()
                         .flex_1()
                         .min_w_0()
@@ -1034,6 +1076,12 @@ impl ClientApp {
                 .unwrap_or_else(|| "会话".to_string());
             let id_open = id.clone();
             let id_close = id.clone();
+            // 活跃标（对齐 vite `SessionTabBar`）：等待回答 > 运行中；任务角标在标题后。
+            // 为什么放在这里而不是每帧从别处推导：`running_sessions` 是跨会话的权威集合
+            // （`turn_state` 事件 + 发送时插入 + 快照帧记账），Tab 只是它的一个读取点。
+            let running = self.running_sessions.contains(id);
+            let awaiting = self.session_awaiting_answer(id);
+            let tasks = self.running_tasks_of(id);
             row = row.child(
                 div()
                     .id(format!("session-tab-{id}"))
@@ -1057,7 +1105,48 @@ impl ClientApp {
                     } else {
                         colors::TEXT_SECONDARY()
                     }))
-                    .child(title)
+                    .child({
+                        // 状态标排在标题**前**（vite 同序：等待回答 → 运行中 → 标题 → 任务角标），
+                        // 所以先建空行再加标、最后补标题；标题必须最后 move 进去。
+                        let mut head = div().flex().flex_row().items_center().gap_1().min_w_0();
+                        if awaiting {
+                            // 等待你的回答：琥珀问号（vite `HelpCircle` + amber）
+                            head = head.child(
+                                svg()
+                                    .path(IconName::CircleQuestionMark.path())
+                                    .size(px(11.))
+                                    .flex_shrink_0()
+                                    .text_color(rgb(colors::WARNING())),
+                            );
+                        } else if running {
+                            // 运行中：呼吸绿点（vite `animate-pulse` + emerald）
+                            head = head.child(pulse_dot(
+                                format!("session-tab-pulse-{id}"),
+                                colors::SUCCESS(),
+                                6.0,
+                            ));
+                        }
+                        head = head.child(title);
+                        // 该会话名下还在跑的后台任务数（vite 红色角标）
+                        if tasks > 0 {
+                            head = head.child(
+                                div()
+                                    .flex_shrink_0()
+                                    .min_w(px(14.))
+                                    .px_1()
+                                    .rounded_full()
+                                    .bg(rgb(colors::ERROR()))
+                                    .text_size(px(9.))
+                                    .text_color(rgb(0xffffff))
+                                    .child(if tasks > 99 {
+                                        "99+".to_string()
+                                    } else {
+                                        format!("{tasks}")
+                                    }),
+                            );
+                        }
+                        head
+                    })
                     .child(
                         div()
                             .id(format!("session-tab-x-{id}"))

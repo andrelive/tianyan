@@ -235,10 +235,9 @@ impl AgentBuilderFactory {
         let agent_arc = Arc::new(agent);
         let wake_mapper: tianyan::agent::StreamEventMapper = Arc::new(
             |session_id: &str, chunk: tianyan::agent::AgentStreamChunk| {
-                serde_json::to_value(crate::api::chat::services::map_chunk_to_event(
-                    chunk, "wake", session_id, 0,
-                ))
-                .ok()
+                // 与用户轮**同一条**映射（空事件过滤也一样）：唤醒轮同样会有大批
+                // 「思考阶段 content 为空」的 chunk，不过滤同样会挤爆事件通道。
+                crate::api::chat::services::map_chunk_to_event_opt(chunk, "wake", session_id, 0)
             },
         );
         let wake_deliver: Arc<dyn tianyan::agent::StreamEventDeliver> =

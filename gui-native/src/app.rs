@@ -17,6 +17,17 @@ use gpui_kit::{ListAlignment, ListState as GpuiListState};
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 
+/// 单帧内最多花多久处理「事件流」事件（之后让出，交给渲染）。
+///
+/// 4ms 是「一帧预算的零头」：够吃掉一批 delta，又不至于把渲染饿死。
+const EVENT_BATCH_BUDGET: std::time::Duration = std::time::Duration::from_millis(4);
+
+/// 每批事件之后让出多久（≈ 半帧 60Hz）。
+///
+/// 太短（如 0）在许多平台上等于不让出，退化成「一整批一帧处理完」
+/// （就是没有打字机的那个 bug）；太长（≥16ms）会让打字机整体变慢。
+const EVENT_FRAME_YIELD: std::time::Duration = std::time::Duration::from_millis(8);
+
 impl ClientApp {
     pub(crate) fn new(
         window: &mut Window,
@@ -227,6 +238,7 @@ impl ClientApp {
             current_session: None,
             input,
             streaming: false,
+            messages_epoch: 0,
             view: View::Chat,
             models: Vec::new(),
             settings_status: "正在加载模型列表…".to_string(),
@@ -355,19 +367,56 @@ impl ClientApp {
         // 统一事件常驻订阅（ADR-028）：订阅在窗口创建时建立，与「发送」解耦
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<EventStreamMsg>();
         spawn_event_reader(port, tx);
-        cx.spawn(async move |this, cx| loop {
-            let Some(msg) = rx.recv().await else {
-                break;
-            };
-            let ok = this
-                .update(cx, |this, cx| match msg {
+        // 事件消费：**按帧攒批 + 让出**。
+        //
+        // 为什么不能一条一条同步处理（实测定位）：`tokio::mpsc::recv()` 在通道非空时
+        // **立即返回**，`await` 根本不让出 —— 于是一整批 delta 在**同一帧**里全部
+        // append 完，界面只在最后重绘一次。表现就是用户报的「流式输出和打字机效果
+        // 去哪了？现在变成了一轮一轮的输出」。
+        //
+        // 服务端是逐条发的（实测 `curl -N /api/v1/events` 抓一次回复：86 条
+        // `chunk_type=answer`、2 条 message、2 条 turn_state），所以问题完全在
+        // 客户端这一侧 —— 不要去改服务端节流。
+        //
+        // 现在的节奏：一次唤醒吃掉 ≤[`EVENT_BATCH_BUDGET`] 的事件，然后等
+        // [`EVENT_FRAME_YIELD`] 再继续 —— 等效于浏览器「每个事件一个 task、
+        // 帧间必渲染」，视觉上就是 60fps 打字机。
+        cx.spawn(async move |this, cx| {
+            // 单条事件 → 应用（批处理循环里复用；闭包不捕获环境）
+            let apply = |this: &mut ClientApp, msg: EventStreamMsg, cx: &mut Context<ClientApp>| {
+                match msg {
                     EventStreamMsg::Event(ev) => this.handle_event(&ev, cx),
                     EventStreamMsg::Connected => this.on_event_stream_connected(cx),
                     EventStreamMsg::Disconnected => this.on_event_stream_disconnected(cx),
-                })
-                .is_ok();
-            if !ok {
-                break;
+                }
+            };
+            loop {
+                let Some(first) = rx.recv().await else {
+                    break;
+                };
+                if this.update(cx, |this, cx| apply(this, first, cx)).is_err() {
+                    break;
+                }
+                let batch_start = std::time::Instant::now();
+                let mut batch_count = 1usize;
+                while batch_start.elapsed() < EVENT_BATCH_BUDGET {
+                    let Ok(msg) = rx.try_recv() else {
+                        break;
+                    };
+                    batch_count += 1;
+                    if this.update(cx, |this, cx| apply(this, msg, cx)).is_err() {
+                        return;
+                    }
+                }
+                // 只在「一批攒得异常多」时记一行：正常情况 1~3 条/批（服务端逐条下发），
+                // 一条一批时记日志反而会把日志文件刷满（实测一次回复 96 条批记录）。
+                if batch_count > 8 {
+                    tracing::info!(
+                        "[事件] 一批 {batch_count} 条 / {:?}（消费落后于到达）",
+                        batch_start.elapsed()
+                    );
+                }
+                cx.background_executor().timer(EVENT_FRAME_YIELD).await;
             }
         })
         .detach();
@@ -616,20 +665,42 @@ impl ClientApp {
             == Some("running");
         let n = rows.len();
 
+        // 轮状态是**会话级全局**事实（与 `handle_event` 里 `turn_state` 的记账同口径）：
+        // 快照帧带的是权威值，不管是不是当前会话都要落到 `running_sessions`。
+        // 漏了这一步的后果：别的会话在跑这件事只活在他自己那份 `parked` 快照里，
+        // 顶部 Tab / 左栏的活跃绿点点不亮（用户报的「顶部没有活跃提示」）。
+        if running {
+            self.running_sessions.insert(sid.clone());
+        } else {
+            self.running_sessions.remove(&sid);
+        }
+
         if self.current_session.as_deref() == Some(sid.as_str()) {
-            let streaming_now = self.streaming || self.running_sessions.contains(&sid);
-            if !streaming_now {
+            // replace 判据：**有在飞的增量要保护** 才不 replace。
+            //
+            // 「有在飞」= 本地认为在跑（`streaming` / `running_sessions`）**且**
+            // `messages` 非空（占位 + 增量真的在列表里）。
+            //
+            // 早先只判「本地认为在跑」：`turn_state(idle)` 事件一丢，`running_sessions`
+            // 就永远残留 → 快照永远不 replace → 界面停在 `open_session` 刚清空的
+            // 空白状态（只有 `has_more_history` / 游标被更新，于是「加载更早」按钮
+            // 还在）—— 用户实测「进会话完全是空的，点加载更早才出现」正是这条。
+            let protect_inflight = (self.streaming || self.running_sessions.contains(&sid))
+                && !self.messages.is_empty();
+            if !protect_inflight {
                 self.messages = Rc::new(rows);
                 self.msg_list_state =
                     GpuiListState::new(self.messages.len(), ListAlignment::Bottom, px(120.));
                 self.message_total = self.messages.len();
+                // 世代号 +1：让**在飞的** `load_messages` 结果作废（见 `messages_epoch`）
+                self.messages_epoch = self.messages_epoch.wrapping_add(1);
             }
             self.oldest_seq = next_before;
             self.has_more_history = has_more;
             self.streaming = running;
             println!(
                 "[事件] 快照 {sid}：{n} 条（replace={} running={running}）",
-                !streaming_now
+                !protect_inflight
             );
         } else if let Some(pos) = self
             .parked
@@ -1342,7 +1413,10 @@ impl ClientApp {
             );
             return;
         }
-        let text = self.input.read(cx).value().to_string();
+        let (text, cursor) = {
+            let state = self.input.read(cx);
+            (state.value().to_string(), state.cursor())
+        };
         if text.trim().is_empty() {
             // 全是空白也要把输入框清掉：多行 Textarea 会把 Enter 插入成换行，
             // 而 Enter 的发送拦截若走了兜底路径（见 `PressEnter` 订阅），此刻框里
@@ -1353,11 +1427,24 @@ impl ClientApp {
             }
             return;
         }
-        // 只削掉**末尾**的换行：多行 `Textarea` 的 Enter 是「先在光标处插入换行、
-        // 再 emit `InputEvent::PressEnter`」，光标在末尾时那个 `\n` 就落在正文最后。
-        // 消息不应以空行结尾，而正文中间的换行是用户 Shift+Enter 主动排的版 —— 一律不动。
-        // 这是**唯一**的换行处理点：不写编辑器、不判断光标，零副作用。
-        let text = text.trim_end_matches(['\n', '\r']).to_string();
+        // 删掉 Enter 自己插进去的那个换行。
+        //
+        // 多行 `Textarea` 的 Enter 是「**先在光标处插入换行、再 emit
+        // `InputEvent::PressEnter`**」（`InputBaseState::enter` 的固有顺序，改不了）。
+        // 于是回调里拿到的文本必然比用户想发的多一个 `\n`，位置就在**光标前一位**。
+        //
+        // 早先只 `trim_end` 末尾：光标停在末尾时够用，但**光标停在正文中间**按回车
+        // 就会在句子里留一个换行（用户截图报的那条「回车先换行再发送」）。
+        // 现在按光标定位：`cursor - 1` 就是那个换行，删它一个字节，别处一律不动
+        // （正文中间的换行若来自 Shift+Enter，光标此刻在别处，不会被误删）。
+        //
+        // 兜底：光标为 0 / 该位不是 `\n`（说明 PressEnter 不是从编辑器来的，比如
+        // 自动化动作直接调 `send_text`）→ 什么都不做。
+        let mut text = text;
+        let at = cursor.saturating_sub(1);
+        if cursor > 0 && text.as_bytes().get(at) == Some(&b'\n') {
+            text.remove(at);
+        }
         self.input
             .update(cx, |state, cx| state.set_value("", window, cx));
         // 发送后输入框已清空（上面 set_value("")），不再需要删草稿条目：
@@ -1382,6 +1469,9 @@ impl ClientApp {
                 sid
             }
         };
+        // 顶部 Tab 与「运行中」绿点：新会话首轮**没走过** `open_session`，
+        // 不在这里补 Tab 的话顶部只剩一行标题，活跃提示无处显示。
+        self.ensure_tab(&session_id);
         // 这一轮所属的会话立即订阅：服务端收到订阅会推一帧快照，断线后重连时
         // `on_event_stream_connected` 重放订阅 → 快照 replace 窗口，把丢掉的增量
         // 补齐。新会话在第一次 `open_session` 之前就走这条，否则这段窗口没有兜底。
@@ -1520,6 +1610,8 @@ impl ClientApp {
     ) {
         let port = self.port;
         println!("[消息] 加载会话 {session_id}（limit={limit}）");
+        // 发起时的世代号：落地前必须没变过（期间若快照 replace 过，这一页就是旧的）
+        let epoch_at_request = self.messages_epoch;
         cx.spawn(async move |this, cx| {
             let url = format!(
                 "http://{SERVER_HOST}:{port}/api/v1/sessions/{session_id}/messages?limit={limit}"
@@ -1547,6 +1639,13 @@ impl ClientApp {
                             if this.is_stale_for(&session_id) {
                                 return;
                             }
+                            // 请求期间快照帧已经 replace 过 → 这一页是旧的，丢弃。
+                            // 不丢的话会出现「快照先到（新） → 旧页后到（旧）」的覆盖，
+                            // 表现是内容闪一下又变少/变旧。
+                            if this.messages_epoch != epoch_at_request {
+                                println!("[消息] 首屏 {n} 条作废（期间快照已对齐）");
+                                return;
+                            }
                             this.messages = Rc::new(rows);
                             // 条数变了必须重建 list state（item_count 在构造时固定）
                             this.msg_list_state = GpuiListState::new(
@@ -1567,6 +1666,8 @@ impl ClientApp {
                             this.oldest_seq = cursor;
                             this.has_more_history = more;
                             this.loading_older = false;
+                            // 这一页成为新的基线：之后的整页加载都要以它为基准比对
+                            this.messages_epoch = this.messages_epoch.wrapping_add(1);
                             // 标题要如实说明「只是已加载的一段」：分页后 total 是当前
                             // 窗口条数，不是会话总条数（早先写「会话消息（50 条）」会
                             // 让人以为整个会话只有 50 条）

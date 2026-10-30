@@ -178,13 +178,7 @@ impl ChatService {
         let stream_id = stream_id.to_string();
         let context_window = self.context_window;
         Arc::new(move |session_id, chunk| {
-            serde_json::to_value(map_chunk_to_event(
-                chunk,
-                &stream_id,
-                session_id,
-                context_window,
-            ))
-            .ok()
+            map_chunk_to_event_opt(chunk, &stream_id, session_id, context_window)
         })
     }
 
@@ -314,6 +308,30 @@ fn map_finish_reason(finish_reason: Option<String>) -> Option<String> {
     finish_reason.or_else(|| Some("stop".to_string()))
 }
 
+/// [`map_chunk_to_event`] + **丢弃不带任何载荷的空事件**（统一转发器的 mapper 单点）。
+///
+/// 为什么必须丢（实测数据）：一次 100 字回复的流式事件里 **874 条中有 789 条**是
+/// 「`chunk_type=answer` 且 `delta` 为空、别的字段也全空」—— 它们是 provider 在
+/// **思考阶段**持续返回的 `content` 为空 chunk，被逐条转发下来。
+///
+/// 危害不止是流量：
+/// - 统一事件通道是**有界 broadcast（256）**，一轮 789 条空事件足以把窗口挤爆，
+///   挤掉真正有用的增量（`Lagged` → 前端只能靠快照兜底，表现为「卡在中间」）；
+/// - 每个空事件仍要在 UI 线程走一遍 `handle_event`（本轮实测：96 条空事件在同一批
+///   里被消费），纯属让渲染排队。
+pub(crate) fn map_chunk_to_event_opt(
+    chunk: tianyan::agent::AgentStreamChunk,
+    stream_id: &str,
+    session_id: &str,
+    context_window: u64,
+) -> Option<serde_json::Value> {
+    let event = map_chunk_to_event(chunk, stream_id, session_id, context_window);
+    if event.is_noop() {
+        return None;
+    }
+    serde_json::to_value(event).ok()
+}
+
 /// 将核心 SkillCallInfo 转换为 API 层 SkillCallInfo
 fn convert_skill_calls(calls: Vec<tianyan::agent::SkillCallInfo>) -> Vec<SkillCallInfo> {
     calls
@@ -421,6 +439,59 @@ mod tests {
         // 无 finish_reason 时回退 "stop"（保持缺省线上行为）
         let fr = map_finish_reason(None);
         assert_eq!(fr.as_deref(), Some("stop"));
+    }
+
+    /// 空 answer chunk（正文增量为空、其它载荷全空）必须被丢弃。
+    ///
+    /// 实测数据：一次 100 字回复的流式事件里 **874 条中有 789 条**是它
+    /// （provider 在**思考阶段**持续返回 `content` 为空的 chunk）。统一事件通道是
+    /// 有界 broadcast（256），不丢就会把真正有用的增量挤出去（`Lagged`）。
+    #[test]
+    fn test_empty_answer_chunk_is_dropped() {
+        let chunk = tianyan::agent::AgentStreamChunk {
+            chunk_type: tianyan::agent::StreamChunkType::Answer,
+            ..Default::default()
+        };
+        assert!(
+            map_chunk_to_event_opt(chunk, "s", "sess", 0).is_none(),
+            "空 answer 事件必须被丢弃（否则一轮几百条挤爆事件通道）"
+        );
+    }
+
+    /// 反过来：真正带载荷的事件一条都不能丢。
+    ///
+    /// 这条是**穷尽判据的守卫**：`is_noop` 万一漏掉某个字段（例如
+    /// `user_message_id`），乐观渲染的用户消息就永远拿不到真实 id（回退入口消失）；
+    /// 漏 `turn_state` 则输入框永远停在「停止」。
+    #[test]
+    fn test_payload_chunks_are_kept() {
+        // ① 正文增量
+        let answer = tianyan::agent::AgentStreamChunk {
+            chunk_type: tianyan::agent::StreamChunkType::Answer,
+            delta: "你好".to_string(),
+            ..Default::default()
+        };
+        assert!(map_chunk_to_event_opt(answer, "s", "sess", 0).is_some());
+
+        // ② 空正文但带「用户消息落库确认」（ADR-031 乐观渲染定位键）
+        let confirmed = tianyan::agent::AgentStreamChunk {
+            chunk_type: tianyan::agent::StreamChunkType::Answer,
+            user_message_id: Some("umid_1".to_string()),
+            ..Default::default()
+        };
+        assert!(
+            map_chunk_to_event_opt(confirmed, "s", "sess", 0).is_some(),
+            "带 user_message_id 的空正文事件不能丢"
+        );
+
+        // ③ 完成块（finish_reason 收尾语义）
+        let done = tianyan::agent::AgentStreamChunk {
+            chunk_type: tianyan::agent::StreamChunkType::Answer,
+            is_complete: true,
+            finish_reason: Some("stop".to_string()),
+            ..Default::default()
+        };
+        assert!(map_chunk_to_event_opt(done, "s", "sess", 0).is_some());
     }
 
     /// 请求性能字段必须原样透传到前端事件（否则底部统计条的

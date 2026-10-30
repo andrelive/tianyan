@@ -624,6 +624,11 @@ impl ClientApp {
                     let app = self.app_ref.clone();
                     // 回退需要会话 id（消息操作按钮用）
                     let sid = self.current_session.clone().unwrap_or_default();
+                    // 「思考中」指示器的两个输入：本轮是否在跑、哪条是末尾。
+                    // 判定本身在 `msg::stream_pending` 一处（与下方
+                    // `render_stream_below` 共用），这里只负责把「是不是末尾」喂进去。
+                    let streaming = self.streaming;
+                    let tail_ix = self.messages.len().saturating_sub(1);
                     gpui_list(self.msg_list_state.clone(), move |ix, _window, _cx| {
                         let Some(m) = items.get(ix) else {
                             return div().into_any_element();
@@ -650,7 +655,15 @@ impl ClientApp {
                         };
                         // 段渲染口径见 `render_msg_body`（思考块 / 工具卡可折叠，
                         // 结果按 `tool_calls` 的 id 关联）
-                        render_msg_body(m, ix, &expand, &app, &sid, is_continuation)
+                        render_msg_body(
+                            m,
+                            ix,
+                            &expand,
+                            &app,
+                            &sid,
+                            is_continuation,
+                            stream_pending(m, streaming && ix == tail_ix),
+                        )
                     })
                     .size_full()
                 }),
@@ -716,6 +729,35 @@ impl ClientApp {
                     .max_w(px(colors::CHAT_MAX_W))
                     .child(self.render_todo_bar(cx)),
             )
+            .child(
+                div()
+                    .w_full()
+                    .max_w(px(colors::CHAT_MAX_W))
+                    .child(self.render_stream_below()),
+            )
+            .into_any_element()
+    }
+
+    /// 消息区下方的「思考中…」指示器（vite `ChatPanel` 的状态提示带同位置：
+    /// 消息区与输入区之间，不随列表滚动）。
+    ///
+    /// 只在**首 token 之前**出现：正文还空、思考也还没开始 —— 这是用户最容易
+    /// 误判成「没发出去」的那一段静默。一旦思考开始，指示器移到气泡内
+    /// （`stream_pending` 单点判定，见 `msg::StreamPending`），这里自动消失。
+    pub(crate) fn render_stream_below(&self) -> AnyElement {
+        if !self.streaming {
+            return div().into_any_element();
+        }
+        let Some(last) = self.messages.last() else {
+            return div().into_any_element();
+        };
+        if stream_pending(last, true) != StreamPending::Below {
+            return div().into_any_element();
+        }
+        div()
+            .px_4()
+            .py_2()
+            .child(render_stream_hint("stream-hint-below", "思考中…"))
             .into_any_element()
     }
 

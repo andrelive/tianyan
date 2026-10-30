@@ -213,6 +213,32 @@ pub struct ChatStreamEvent {
 }
 
 impl ChatStreamEvent {
+    /// 「什么都没带」的空事件：`chunk_type=answer` 但正文增量为空，且其他载荷全空。
+    ///
+    /// 这些是 provider 在**思考阶段**返回的 `content` 为空 chunk（正文增量一个字都
+    /// 没有），逐条转发只会挤爆有界事件通道 —— 过滤点见
+    /// [`crate::api::chat::services::map_chunk_to_event_opt`]。
+    ///
+    /// 判据必须**穷尽**所有非空字段：漏一个就会把「只带 usage / 只带 turn_state」
+    /// 的关键事件当成空事件丢掉（那会让上下文环停更、按钮卡在「停止」）。
+    pub fn is_noop(&self) -> bool {
+        self.chunk_type == tianyan::agent::StreamChunkType::Answer
+            && self.delta.is_empty()
+            && self.message.is_none()
+            && self.usage.is_none()
+            && self.finish_reason.is_none()
+            && self.thinking.is_none()
+            && self.skill_calls.is_none()
+            && self.tool_call.is_none()
+            && self.tool_result.is_none()
+            && self.user_message_id.is_none()
+            && self.message_id.is_none()
+            && self.turn_state.is_none()
+            && self.ttft_ms.is_none()
+            && self.duration_ms.is_none()
+            && self.perf_completion_tokens.is_none()
+    }
+
     /// 错误事件（校验失败/处理失败）：chunk_type=Error，delta 为人类可读消息，
     /// finish_reason=error。前端据此清理占位消息并提示；session_id 为空串时
     /// 由前端按流归属会话处理。
