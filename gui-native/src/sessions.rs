@@ -200,7 +200,13 @@ impl ClientApp {
     ///
     /// 切换会话 / 新建会话**之前**调用。空正文且无图片时不占位（顺手清掉空条目）。
     pub(crate) fn save_composer_draft(&mut self, cx: &App) {
-        let key = self.current_session.clone().unwrap_or_default();
+        // 新会话（首条消息还没发，`current_session == None`）没有归属会话。
+        // 存进空串键会让**所有新建会话共用一个草稿桶**，而且 `start_new_session`
+        // 是「先存本会话、再按新键恢复」——两次都用同一个空键，等于自存自读，
+        // 于是「点新建会话，输入框里还是上一段文字」（用户实测）。直接不存。
+        let Some(key) = self.current_session.clone() else {
+            return;
+        };
         let text = self.input.read(cx).value().to_string();
         if text.trim().is_empty() && self.composer_images.is_empty() {
             self.drafts.remove(&key);
@@ -216,8 +222,13 @@ impl ClientApp {
     /// `TextareaState::set_value` 需要它（与 `backfill_settings_fields` 同一手法，
     /// 不依赖 render —— 隐藏窗口下也必须生效）。
     pub(crate) fn restore_composer_draft(&mut self, cx: &mut Context<Self>) {
-        let key = self.current_session.clone().unwrap_or_default();
-        let (text, images) = self.drafts.get(&key).cloned().unwrap_or_default();
+        // 新会话没有草稿可恢复：**必须清空**（不查任何桶）。早先这里用空串键兜底，
+        // 于是新建会话读到的是上一个新建会话残留的文字 —— 用户看到的「文字跟着
+        // 会话过去了」。
+        let (text, images) = match self.current_session.clone() {
+            Some(key) => self.drafts.get(&key).cloned().unwrap_or_default(),
+            None => (String::new(), Vec::new()),
+        };
         self.composer_images = images;
         let handle = self.window_handle;
         let input = self.input.clone();
@@ -272,8 +283,12 @@ impl ClientApp {
                 self.open_tabs.retain(|t| t != &victim);
             }
         }
-        // 切会话即放弃上一会话的流式状态（本客户端只渲染当前会话的增量）
-        self.streaming = false;
+        // 切会话时上一会话的渲染态要丢掉（本客户端只渲染当前会话的增量），但
+        // **这一会话**若仍在跑（切走期间轮次没停），按钮必须回到「停止」——
+        // 权威信息来自 `turn_state` 事件维护的集合（见 `App::handle_event`），
+        // 不是本地 `streaming`。早先这里无条件置 false，于是切回来按钮变「发送」，
+        // 而服务端还在生成，用户既看不到停止入口、也不知道它在跑。
+        self.streaming = self.running_sessions.contains(&id);
         // 会话级模型 / 上下文进度都是**按会话**的：切走即回落（模型回到 preferences.chat）
         self.session_model = None;
         self.model_menu_open = false;
@@ -382,10 +397,13 @@ impl ClientApp {
                         // 该会话的输入草稿随会话一起清掉（否则会话列表里删了、
                         // 草稿还挂在 HashMap 里，长期不退出会缓涨）
                         this.drafts.remove(&id);
+                        // 轮状态记账同理：会话没了，那个 id 不该再占集合
+                        this.running_sessions.remove(&id);
                         // 打开过的 Tab 也一并移除（否则 Tab 条上留一个点不开的幽灵）
                         this.open_tabs.retain(|t| t != &id);
                         if this.current_session.as_deref() == Some(id.as_str()) {
                             this.current_session = None;
+                            this.streaming = false;
                             this.messages = Rc::new(Vec::new());
                             this.msg_list_state =
                                 GpuiListState::new(0, ListAlignment::Bottom, px(120.));

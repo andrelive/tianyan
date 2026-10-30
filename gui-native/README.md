@@ -255,15 +255,22 @@ Tauri 版由监督循环在进程内完成；原生端在上一次进程退出�
 
 ## MSI 打包与自动更新（已实测）
 
-### 1.1.0 修的三处（用户实测反馈）
+### 1.1.0 修的五处（用户实测反馈）
 
 | # | 症状 | 根因 / 修法 |
 |---|---|---|
 | 1 | 输入框没法**粘贴截图** | 只有「附件→翻文件夹」。新增 **「粘贴图片」按钮**（`IconName::ClipboardPaste`，在附件图标右边）：读剪贴板 `ClipboardEntry::Image` 的原始字节 → data URL（8MB 上限），不落盘、不进 VFS |
 | 2 | **流式时工具渲染不对** | `tool_call` 事件曾被塞成正文文本 `` `🔧 name` ``（没有参数/结果/耗时，还和正文混在同一个 Markdown 段里）。改为结构化 `Seg::Tool` + `ToolCall` 占位，渲染走与历史消息**同一条** `render_tool_card` |
 | 3 | **流式结束后前面的工具调用全不见** | 一轮是**多步**（LLM→工具→LLM…），库里每步一条 assistant 消息，而前端把整轮堆在一条占位里 → 任何一次「用权威消息替换最后一条」都会把前面几步抹掉。改为**步边界新开消息**（判据 `step_closed`），并让 `observation` 按 `tool_call_id` 回填结果（此前是空实现，结果永不显示） |
+| 4 | **新建会话后输入框还留着上一段文字**（"在别的会话输入的字跟着过去了"） | 草稿的键取 `current_session.unwrap_or_default()`：新会话（首条消息未发）的键是**空串**，于是所有「新建会话」共用一个桶；而 `start_new_session` 是「先存本会话草稿（空键）→ 再按新键恢复（同一个空键）」= **自存自读**，内容原地不动。改为：`save` 在 `current_session == None` 时直接不存，`restore` 此时**必须清空**（不查任何桶）。实测（隔离实例 + `/state` 的 `usage.composer_text`）：输入 `AAA`→点新建→仍是 `AAA`；输入 `BBB`→再点新建→仍是 `BBB`；修后两次都为空 |
+| 5 | **轮次进行中切走再切回，"停止"按钮退回"发送"** | `open_session` 里无条件 `self.streaming = false`（"本客户端只渲染当前会话的增量"），而服务端这一轮**还在跑**——切回后既没有停止入口，也看不出它在生成。新增 `running_sessions: HashSet<String>`：`turn_state` 事件带 `session_id`，因此在 `handle_event` 的**会话过滤之前**记账（非当前会话也记），`open_session` 改为 `streaming = running_sessions.contains(&id)`；发送时乐观 insert、失败/删会话时 remove。实测：发送后 `streaming=true` → 切到新会话（false）→ 切回（**修前 false，修后 true**） |
 
 回归：`step_boundary_tests` 5 个单测（空占位/只有思考/已有正文/工具未回结果/工具已回结果）+ 77 项界面断言全绿。
+第 4/5 条的复现与回归都用**隔离实例**（`TIANYAN_CONFIG` 指独立配置、`storage.data_dir` 指临时目录、
+`TIANYAN_GUI_AUTOMATION_PORT` 指独立端口），全程 `/act` + `/state` 断言，不碰 `D:\tianyan`。
+⚠️ 教训：隔离实例与已装实例**进程同名**（都叫 `tianyan-gui-native`），收尾**禁止**
+`Get-Process tianyan-gui-native | Stop-Process`——那会把用户正在用的实例一起杀掉
+（实测踩过）。只按 `Start-Process -PassThru` 拿到的 **PID**（或按 `Path`）精确操作。
 
 ### 出包一条链（产品级，已实测 1.1.0）
 

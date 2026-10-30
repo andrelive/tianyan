@@ -214,6 +214,7 @@ impl ClientApp {
             zoomed_image: None,
             composer_images: Vec::new(),
             drafts: std::collections::HashMap::new(),
+            running_sessions: std::collections::HashSet::new(),
             oldest_seq: None,
             has_more_history: false,
             loading_older: false,
@@ -532,6 +533,21 @@ impl ClientApp {
             .get("session_id")
             .and_then(|v| v.as_str())
             .unwrap_or_default();
+        // 轮状态是**会话级全局**事实：即使不是当前会话也要记账，否则「切走时
+        // 轮还在跑、切回后按钮却回到发送」——按钮态不能只活在当前会话的渲染里。
+        // 这里只维护集合（不刷新界面），当前会话的渲染仍走下面 match 的分支。
+        if ev.get("chunk_type").and_then(|v| v.as_str()) == Some("turn_state") {
+            let running = ev
+                .get("turn_state")
+                .and_then(|t| t.get("state"))
+                .and_then(|v| v.as_str())
+                == Some("running");
+            if running {
+                self.running_sessions.insert(sid.to_string());
+            } else {
+                self.running_sessions.remove(sid);
+            }
+        }
         if Some(sid) != self.current_session.as_deref() {
             return;
         }
@@ -1049,6 +1065,11 @@ impl ClientApp {
         self.msg_list_state.scroll_to_end();
         self.message_total = self.messages.len();
         self.streaming = true;
+        // 与 `turn_state` 事件同一份记账：服务端的 running 事件到达前按钮就该是
+        // 「停止」（否则这一小段窗口里用户点按钮会重复发送）
+        self.running_sessions.insert(session_id.clone());
+        // `body` 会把 `session_id` move 走，失败分支清理集合需要自己留一份
+        let sid_for_cleanup = session_id.clone();
         self.set_status(format!("生成中… · {session_id}"));
 
         let port = self.port;
@@ -1096,6 +1117,7 @@ impl ClientApp {
                 Err(e) => {
                     let _ = this.update(cx, |this, cx| {
                         this.streaming = false;
+                        this.running_sessions.remove(&sid_for_cleanup);
                         this.set_error(format!("发送失败：{e}"));
                         this.append_delta(&format!("\n\n> ⚠️ 发送失败：{e}\n"));
                         cx.notify();

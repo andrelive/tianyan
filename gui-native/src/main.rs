@@ -272,6 +272,14 @@ struct ClientApp {
     /// 写了一半的内容还在；原生早先切会话直接丢（输入框与图片都清空）——写长 prompt
     /// 时最容易踩，且丢了就找不回来。
     pub(crate) drafts: std::collections::HashMap<String, (String, Vec<String>)>,
+    /// 哪些会话**当前有轮在跑**（`turn_state` 事件驱动，含非当前会话）。
+    ///
+    /// 为什么需要它：`streaming` 只是「**当前**会话在跑」的渲染态，切走时会被
+    /// 重置。切回时若只看它，按钮就从「停止」退回「发送」——即使服务端这一轮
+    /// 还在生成（用户实测：会话进行中切走再切回，按钮不再是停止）。`turn_state`
+    /// 事件本身带 `session_id`，因此在**会话过滤之前**记一份全量集合，切回时
+    /// 按 id 恢复即可，不必新增查询端点。
+    pub(crate) running_sessions: std::collections::HashSet<String>,
     /// 上滚游标（`GET /sessions/{id}/messages` 的 `next_before_seq`）：
     /// 指向当前窗口**最早一条**的 seq；`None` = 已到链首，没有更早的了。
     pub(crate) oldest_seq: Option<i64>,
