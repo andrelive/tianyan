@@ -21,7 +21,7 @@ pub(crate) fn group_thousands(n: u64) -> String {
     let s = n.to_string();
     let mut out = String::with_capacity(s.len() + s.len() / 3);
     for (i, ch) in s.chars().enumerate() {
-        if i > 0 && (s.len() - i) % 3 == 0 {
+        if i > 0 && (s.len() - i).is_multiple_of(3) {
             out.push(',');
         }
         out.push(ch);
@@ -135,8 +135,9 @@ pub(crate) fn group_label(workdir: &str) -> String {
     }
     workdir
         .split(['\\', '/'])
-        .filter(|s| !s.is_empty())
-        .last()
+        // `rfind` 而不是 `filter().last()`：`last()` 会把整条迭代器跑完，
+        // `rfind` 从尾部找第一个满足条件的立刻返回
+        .rfind(|s| !s.is_empty())
         .map(|s| s.to_string())
         .unwrap_or_else(|| workdir.to_string())
 }

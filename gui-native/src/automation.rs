@@ -322,6 +322,16 @@ impl ClientApp {
             "theme": crate::current_theme().key(),
             "themes": crate::ThemeKind::ALL.iter().map(|t| t.key()).collect::<Vec<_>>(),
             "status": &self.status,
+            // 瞬时提示栈（断言「错误不再被状态行覆盖」看这里）
+            "notices": self
+                .notices
+                .iter()
+                .map(|n| serde_json::json!({
+                    "text": n.text,
+                    "is_err": n.is_err,
+                    "age_ms": n.at.elapsed().as_millis() as u64,
+                }))
+                .collect::<Vec<_>>(),
             "port": self.port,
             "streaming": self.streaming,
             "session": {

@@ -1130,7 +1130,7 @@ mod image_mime_tests {
     /// 2×2 / 24bpp 的最小 BMP（Windows 截图走的就是这条路：剪贴板给 `CF_DIB`）。
     fn tiny_bmp() -> Vec<u8> {
         let (w, h) = (2i32, 2i32);
-        let row = ((w as usize * 3) + 3) / 4 * 4;
+        let row = (w as usize * 3).div_ceil(4) * 4;
         let pixel_bytes = (row * h as usize) as u32;
         let file_size = 54 + pixel_bytes;
         let mut b = Vec::with_capacity(file_size as usize);

@@ -284,6 +284,8 @@ struct ClientApp {
     pub(crate) needs_setup: bool,
     /// 用户点过「仍然进入应用」—— 不再拦（配置误判时的逃生舱）
     pub(crate) setup_dismissed: bool,
+    /// 右上角瞬时提示栈（错误粘住 10s、普通 4s；同文本去重、最多 5 条）
+    pub(crate) notices: Vec<Notice>,
     /// 打开的会话 Tab（浏览器式；按打开顺序，最多 [`MAX_SESSION_TABS`] 个）
     pub(crate) open_tabs: Vec<String>,
     /// 新会话待绑定的工作目录（「＋新目录」设置）：随首条消息以
@@ -482,6 +484,45 @@ struct ClientApp {
 
 
 
+impl ClientApp {
+    /// 右上角瞬时提示栈（错误不再被状态行覆盖 —— 早先只有 `status` 单行，
+    /// 一次失败提示常在下一次 3s 轮询时被抹掉，用户来不及看）。
+    ///
+    /// 挂在根 `relative` 容器上、模态对话框**之前**：提示始终可见，但对话框更上层。
+    pub(crate) fn render_notices(&self) -> AnyElement {
+        if self.notices.is_empty() {
+            return div().into_any_element();
+        }
+        div()
+            .absolute()
+            .top(px(12.))
+            .right(px(12.))
+            .flex()
+            .flex_col()
+            .gap_1()
+            .children(self.notices.iter().map(|n| {
+                let (border, fg) = if n.is_err {
+                    (colors::ERROR(), colors::ERROR())
+                } else {
+                    (colors::BORDER(), colors::TEXT_PRIMARY())
+                };
+                div()
+                    .max_w(px(420.))
+                    .rounded_lg()
+                    .border_1()
+                    .border_color(rgb(border))
+                    .bg(rgb(colors::BG_SECONDARY()))
+                    .px_3()
+                    .py_2()
+                    .text_size(px(12.))
+                    .text_color(rgb(fg))
+                    .child(n.text.clone())
+                    .into_any_element()
+            }))
+            .into_any_element()
+    }
+}
+
 impl Render for ClientApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         // 说明：设置页/人设的编辑器回填**不在这里做**——窗口隐藏时不会触发渲染，
@@ -517,6 +558,8 @@ impl Render for ClientApp {
             } else {
                 div().into_any_element()
             });
+        // 瞬时提示栈：最后挂（最上层）。它在右上角、对话框居中，两者不重叠
+        root = root.child(self.render_notices());
         // 图片放大遮罩（对齐 vite `ZoomableImage`）：铺满整窗、点击任意处关闭
         if let Some(img) = self.zoomed_image.clone() {
             root = root.child(

@@ -261,10 +261,13 @@ impl ClientApp {
             }
             let res = put_json(url, body).await;
             let _ = this.update(cx, |this, cx| {
-                this.status = match res {
-                    Ok(_) => format!("思考强度已设置：{}", this.thinking_label()),
-                    Err(e) => format!("设置思考强度失败：{e}"),
-                };
+                match res {
+                    Ok(_) => {
+                        let label = this.thinking_label();
+                        this.set_status(format!("思考强度已设置：{label}"));
+                    }
+                    Err(e) => this.set_error(format!("设置思考强度失败：{e}")),
+                }
                 cx.notify();
             });
         })
@@ -335,13 +338,13 @@ impl ClientApp {
             }
         }
         let Some(sid) = self.current_session.clone() else {
-            self.status = format!("新会话将使用 {model} · {provider}");
+            self.set_status(format!("新会话将使用 {model} · {provider}"));
             cx.notify();
             return;
         };
         let thinking = self.thinking.clone();
         let port = self.port;
-        self.status = format!("正在为会话切换模型到 {model}…");
+        self.set_status(format!("正在为会话切换模型到 {model}…"));
         cx.spawn(async move |this, cx| {
             let url = format!("http://{SERVER_HOST}:{port}/api/v1/sessions/{sid}/model");
             let mut body = serde_json::json!({ "provider": provider, "model": model });
@@ -350,10 +353,10 @@ impl ClientApp {
             }
             let res = put_json(url, body).await;
             let _ = this.update(cx, |this, cx| {
-                this.status = match res {
-                    Ok(_) => format!("会话模型已切换：{model}"),
-                    Err(e) => format!("设置会话模型失败：{e}"),
-                };
+                match res {
+                    Ok(_) => this.set_status(format!("会话模型已切换：{model}")),
+                    Err(e) => this.set_error(format!("设置会话模型失败：{e}")),
+                }
                 cx.notify();
             });
         })
@@ -655,6 +658,9 @@ impl ClientApp {
         const COLS: f32 = 58.0;
         const LINE_H: f32 = 21.0;
         const PAD: f32 = 26.0;
+        // 封顶所需行数：到这就不再往下数。长文本每帧全扫纯属浪费（输入一万字时
+        // 每帧一万次字符判断，60fps 就是 60 万次/秒，全为算一个恒定 200px）。
+        const MAX_ROWS: f32 = (200.0 - PAD) / LINE_H;
         let text = self.input.read(cx).value().to_string();
         let mut rows = 0.0f32;
         for line in text.split('\n') {
@@ -668,8 +674,15 @@ impl ClientApp {
                 } else {
                     2.0
                 };
+                // 单行内也提前停：这一行自己就够了
+                if w > COLS * MAX_ROWS {
+                    break;
+                }
             }
             rows += (w / COLS).ceil().max(1.0);
+            if rows >= MAX_ROWS {
+                break;
+            }
         }
         let rows = rows.max(2.0);
         (rows * LINE_H + PAD).clamp(64.0, 200.0)
@@ -1496,12 +1509,12 @@ impl ClientApp {
                 _ => "image/png",
             };
             let Some((mime, bytes)) = normalize_image_for_api(mime, &img.bytes) else {
-                self.status = "剪贴板图片无法解码（格式不支持），未贴上".to_string();
+                self.set_status("剪贴板图片无法解码（格式不支持），未贴上".to_string());
                 cx.notify();
                 return false;
             };
             let Some(url) = bytes_to_data_url(&mime, &bytes) else {
-                self.status = "剪贴板图片超过 8MB，未贴上".to_string();
+                self.set_status("剪贴板图片超过 8MB，未贴上".to_string());
                 cx.notify();
                 return false;
             };
@@ -1512,16 +1525,16 @@ impl ClientApp {
             }
             // 张数上限与 Web 版一致（4 张）：再多既撑上下文，也会让模型抓不到重点
             if self.composer_images.len() >= MAX_COMPOSER_IMAGES {
-                self.status = format!(
+                self.set_status(format!(
                     "最多 {} 张图片（先删掉一些再贴）",
                     MAX_COMPOSER_IMAGES
-                );
+                ));
                 cx.notify();
                 // 返回 true：这次粘贴算「已处理」，不让文本通道再插一遍
                 return true;
             }
             self.composer_images.push(url);
-            self.status = "已从剪贴板贴上图片".to_string();
+            self.set_status("已从剪贴板贴上图片".to_string());
             cx.notify();
             return true;
         }
@@ -1558,7 +1571,7 @@ impl ClientApp {
         }
         let n = snippet.matches("@file:").count();
         self.insert_into_composer(snippet, window, cx);
-        self.status = format!("已引用 {n} 个文件");
+        self.set_status(format!("已引用 {n} 个文件"));
         cx.notify();
         true
     }

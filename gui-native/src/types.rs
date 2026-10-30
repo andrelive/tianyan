@@ -822,6 +822,19 @@ pub(crate) fn parse_ask_user(args: &serde_json::Value) -> Vec<(String, Vec<Strin
     out
 }
 
+/// 瞬时提示（右上角 toast）。
+///
+/// 为什么需要它：早先只有 `status` 一行状态文本，**每次轮询/操作都会覆盖**——
+/// 一次失败提示常常在下一次 3s 轮询到达时就被抹掉，用户根本来不及看（Web 版用
+/// toast 解决同一问题）。这里保留「状态行仍在」的兼容性，同时让错误**粘住一会**。
+#[derive(Clone, Debug)]
+pub(crate) struct Notice {
+    pub(crate) text: String,
+    /// 错误提示（红框、粘 10s）；普通提示 4s 淡出
+    pub(crate) is_err: bool,
+    pub(crate) at: std::time::Instant,
+}
+
 /// 待审批操作（对齐 `GET /api/v1/approval/status` 的 `pending_approvals[]`）。
 #[derive(Clone, Debug)]
 pub(crate) struct ApprovalRow {
@@ -890,6 +903,12 @@ pub(crate) struct MsgRow {
     /// 消息 id（服务端稳定键）：回退/删除按它定位。
     /// 本地刚发出、还没落库的占位消息是空串（此时不提供回退入口）。
     pub(crate) id: String,
+    /// 链上位置（服务端 `seq`，ADR-035 §4）。本地占位为 0。
+    ///
+    /// 为什么要留在行上：上滚分页的游标 `oldest_seq` 必须与**数据同源**——
+    /// 头部被 `MAX_LOADED_MESSAGES` 裁掉后要能就地算出新游标，否则「加载更早」
+    /// 会用失效的老游标白拉一页（早先只能靠响应里的 `next_before_seq`，裁完就失准）。
+    pub(crate) seq: i64,
     pub(crate) role: String,
     /// SharedString（Arc 语义）：clone 是 O(1)，避免每帧复制正文
     pub(crate) text: gpui_kit::SharedString,

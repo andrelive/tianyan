@@ -219,6 +219,7 @@ impl ClientApp {
             loading_older: false,
             needs_setup: false,
             setup_dismissed: false,
+            notices: Vec::new(),
             open_tabs: Vec::new(),
             new_session_workspace: None,
             dialog_input: None,
@@ -380,6 +381,8 @@ impl ClientApp {
                 // 任务列表**无条件**轮询：左栏会话角标要按 `parent_session_id`
                 // 聚合所有会话，未选中会话时也得更新；面板那三个只在有会话时拉。
                 this.load_tasks(cx);
+                // 顺手做过期提示清理（同一个 3s tick，不额外起定时器）
+                this.expire_notices();
                 if this.current_session.is_some() {
                     this.load_todos_goals(cx);
                     this.load_approvals(cx);
@@ -670,7 +673,8 @@ impl ClientApp {
                     .and_then(|v| v.as_str())
                     .unwrap_or("未知错误");
                 self.streaming = false;
-                self.status = format!("出错：{msg}");
+                // 流式错误必须进 toast：否则下一次轮询写状态行就把它盖掉了
+                self.set_error(format!("出错：{msg}"));
                 self.append_delta(&format!("\n\n> ⚠️ {msg}\n"));
             }
             // ADR-031：用户消息落库确认 —— 把服务端真实 id 补到本地那条乐观行上。
@@ -703,7 +707,7 @@ impl ClientApp {
                     .unwrap_or_default();
                 self.streaming = state == "running";
                 if !self.streaming {
-                    self.status = format!("空闲 · {sid}");
+                    self.set_status(format!("空闲 · {sid}"));
                     // 本轮结束：刷新底部统计行（token 汇总 + 最近一次请求性能）
                     self.load_session_usage(cx);
                 }
@@ -732,11 +736,9 @@ impl ClientApp {
             images: Vec::new(),
             ts: Some(now_clock()),
             id: String::new(),
+            seq: 0,
         });
-        if next.len() > crate::MAX_LOADED_MESSAGES {
-            let drop_n = next.len() - crate::MAX_LOADED_MESSAGES;
-            next.drain(..drop_n);
-        }
+        self.trim_loaded_front(&mut next);
         let idx = next.len() - 1;
         self.messages = Rc::new(next);
         self.msg_list_state.reset(self.messages.len());
@@ -759,6 +761,7 @@ impl ClientApp {
     /// 判据（对齐 vite `chat-stream.ts` 的 `hasPrevTurn`，并补上「工具都已出结果」）：
     /// - 已有正文段 → 这一步的产出完成了；
     /// - 工具调用全部拿到结果 → 工具步收尾了（下一步 LLM 响应属于新消息）。
+    ///
     /// 只有思考段、或有未出结果的工具 → 仍属当前步，继续往这条上追加。
     fn step_closed(m: &MsgRow) -> bool {
         if m.segs
@@ -970,10 +973,7 @@ impl ClientApp {
         let mut next: Vec<MsgRow> = (*self.messages).clone();
         next.push(row);
         // 与流式追加同一口径：超窗口丢最早的（压缩点的补齐由 `render_window` 负责）
-        if next.len() > crate::MAX_LOADED_MESSAGES {
-            let cut = next.len() - crate::MAX_LOADED_MESSAGES;
-            next.drain(..cut);
-        }
+        self.trim_loaded_front(&mut next);
         self.messages = Rc::new(next);
         self.msg_list_state.reset(self.messages.len());
         self.msg_list_state.scroll_to_end();
@@ -1028,6 +1028,7 @@ impl ClientApp {
             ts: Some(now_clock()),
             // 本地占位：尚未落库，无服务端 id（回退入口据此隐藏）
             id: String::new(),
+            seq: 0,
         });
         next.push(MsgRow {
             role: "assistant".to_string(),
@@ -1040,17 +1041,15 @@ impl ClientApp {
             // 与 vite `startNewAssistantTurn` 同口径：本轮 assistant 开始时打点
             ts: Some(now_clock()),
             id: String::new(),
+            seq: 0,
         });
-        if next.len() > crate::MAX_LOADED_MESSAGES {
-            let drop_n = next.len() - crate::MAX_LOADED_MESSAGES;
-            next.drain(..drop_n);
-        }
+        self.trim_loaded_front(&mut next);
         self.messages = Rc::new(next);
         self.msg_list_state.reset(self.messages.len());
         self.msg_list_state.scroll_to_end();
         self.message_total = self.messages.len();
         self.streaming = true;
-        self.status = format!("生成中… · {session_id}");
+        self.set_status(format!("生成中… · {session_id}"));
 
         let port = self.port;
         // 图片走 `message.images`（data URL 数组；后端 `CoreMessage::user_with_images`）
@@ -1097,7 +1096,7 @@ impl ClientApp {
                 Err(e) => {
                     let _ = this.update(cx, |this, cx| {
                         this.streaming = false;
-                        this.status = format!("发送失败：{e}");
+                        this.set_error(format!("发送失败：{e}"));
                         this.append_delta(&format!("\n\n> ⚠️ 发送失败：{e}\n"));
                         cx.notify();
                     });
@@ -1165,7 +1164,14 @@ impl ClientApp {
                             this.oldest_seq = cursor;
                             this.has_more_history = more;
                             this.loading_older = false;
-                            this.current_title = format!("会话消息（{total} 条）");
+                            // 标题要如实说明「只是已加载的一段」：分页后 total 是当前
+                            // 窗口条数，不是会话总条数（早先写「会话消息（50 条）」会
+                            // 让人以为整个会话只有 50 条）
+                            this.current_title = if more {
+                                format!("会话消息（已加载 {total} 条 · 还有更早）")
+                            } else {
+                                format!("会话消息（{total} 条）")
+                            };
                             cx.notify();
                         });
                     });
@@ -1201,13 +1207,13 @@ impl ClientApp {
             return;
         };
         if self.messages.len() >= MAX_LOADED_MESSAGES {
-            self.status = format!("已加载 {MAX_LOADED_MESSAGES} 条，不再往前加载");
+            self.set_status(format!("已加载 {MAX_LOADED_MESSAGES} 条，不再往前加载"));
             cx.notify();
             return;
         }
         self.loading_older = true;
         let port = self.port;
-        self.status = "正在加载更早的消息…".to_string();
+        self.set_status("正在加载更早的消息…".to_string());
         cx.spawn(async move |this, cx| {
             let url = format!(
                 "http://{SERVER_HOST}:{port}/api/v1/sessions/{sid}/messages?limit={MESSAGE_PAGE}&before_seq={cursor}"
@@ -1222,7 +1228,7 @@ impl ClientApp {
                 let body = match res {
                     Ok(b) => b,
                     Err(e) => {
-                        this.status = format!("加载更早的消息失败：{e}");
+                        this.set_error(format!("加载更早的消息失败：{e}"));
                         cx.notify();
                         return;
                     }
@@ -1263,11 +1269,20 @@ impl ClientApp {
                     });
                 }
                 this.message_total = this.messages.len();
-                this.status = if added > 0 {
+                // 标题跟着走（「还有更早」随 has_more 出现/消失）
+                this.current_title = if this.has_more_history {
+                    format!(
+                        "会话消息（已加载 {} 条 · 还有更早）",
+                        this.messages.len()
+                    )
+                } else {
+                    format!("会话消息（{} 条）", this.messages.len())
+                };
+                this.set_status(if added > 0 {
                     format!("已加载 {added} 条更早的消息")
                 } else {
                     "没有更早的消息了".to_string()
-                };
+                });
                 cx.notify();
             });
         })
@@ -1281,15 +1296,15 @@ impl ClientApp {
             return;
         };
         let port = self.port;
-        self.status = "正在停止…".to_string();
+        self.set_status("正在停止…".to_string());
         cx.spawn(async move |this, cx| {
             let url = format!("http://{SERVER_HOST}:{port}/api/v1/chat/streams/{sid}/cancel");
             let res = post_json(url, serde_json::json!({})).await;
             let _ = this.update(cx, |this, cx| {
-                this.status = match res {
-                    Ok(_) => format!("已请求停止 · {sid}"),
-                    Err(e) => format!("停止失败：{e}"),
-                };
+                match res {
+                    Ok(_) => this.set_status(format!("已请求停止 · {sid}")),
+                    Err(e) => this.set_error(format!("停止失败：{e}")),
+                }
                 cx.notify();
             });
         })
@@ -1364,6 +1379,80 @@ impl ClientApp {
     /// 只认 `current_session`，不看 `open_tabs`：Tab 里留着不等于「还看着它」。
     pub(crate) fn is_stale_for(&self, session: &str) -> bool {
         self.current_session.as_deref() != Some(session)
+    }
+
+    /// 写状态行（**唯一入口**）。
+    ///
+    /// 为什么收成一个方法：早先 28 处直接 `self.status = …` 散落各处，其中错误路径
+    /// 常被下一次轮询覆盖掉。收敛之后语义清晰——**普通状态走这里**，
+    /// **错误走 [`Self::set_error`]**（同时进 toast，粘住 10s）。
+    pub(crate) fn set_status(&mut self, msg: impl Into<String>) {
+        self.status = msg.into();
+    }
+
+    /// 推一条瞬时提示（右上角 toast）。
+    ///
+    /// 同文本去重：3s 轮询会把同一个错误反复写进来，不去重就是刷屏。
+    /// 最多留 5 条（超出丢最早的）。
+    pub(crate) fn push_notice(&mut self, text: impl Into<String>, is_err: bool) {
+        let text = text.into();
+        if text.trim().is_empty() {
+            return;
+        }
+        if self
+            .notices
+            .iter()
+            .any(|n| n.text == text && n.is_err == is_err)
+        {
+            return;
+        }
+        self.notices.push(Notice {
+            text,
+            is_err,
+            at: std::time::Instant::now(),
+        });
+        if self.notices.len() > 5 {
+            self.notices.remove(0);
+        }
+    }
+
+    /// 错误：状态行**照旧更新**（既有断言/状态栏兼容）+ 进 toast 粘住 10s。
+    ///
+    /// 为什么两者都要：状态行会被下一次轮询覆盖，toast 不会——错误必须留得住。
+    pub(crate) fn set_error(&mut self, msg: impl Into<String>) {
+        let m = msg.into();
+        self.set_status(m.clone());
+        self.push_notice(m, true);
+    }
+
+    /// 清掉过期提示（由 3s 轮询 tick 调用）。
+    pub(crate) fn expire_notices(&mut self) {
+        self.notices.retain(|n| {
+            let ttl = if n.is_err { 10 } else { 4 };
+            n.at.elapsed() < std::time::Duration::from_secs(ttl)
+        });
+    }
+
+    /// 裁掉超上限的**最早**消息，并把上滚游标同步到新的首条。
+    ///
+    /// 为什么必须同步游标：`oldest_seq` 是「加载更早」的 `before_seq`。头部被裁掉
+    /// 后若不更新，下一次加载会用失效的老游标再拉一遍**已经被丢掉**的那段（被 id
+    /// 去重挡住，但白跑一次请求，用户点「加载更早」看起来没反应）。
+    /// 游标取 `MsgRow.seq`（与数据同源），而不是响应里的 `next_before_seq`
+    /// —— 后者在裁剪之后就失准了。
+    fn trim_loaded_front(&mut self, next: &mut Vec<MsgRow>) {
+        if next.len() <= crate::MAX_LOADED_MESSAGES {
+            return;
+        }
+        let drop_n = next.len() - crate::MAX_LOADED_MESSAGES;
+        next.drain(..drop_n);
+        if let Some(first) = next.first() {
+            if first.seq > 0 {
+                self.oldest_seq = Some(first.seq);
+                // 前面确实还有（我们刚把它裁掉了），上滚入口保持可见
+                self.has_more_history = true;
+            }
+        }
     }
 
     pub(crate) fn load_session_usage(&self, cx: &mut Context<Self>) {
@@ -1460,6 +1549,7 @@ pub(crate) fn parse_msg_row(m: &serde_json::Value) -> MsgRow {
             .and_then(|v| v.as_str())
             .unwrap_or_default()
             .to_string(),
+        seq: m.get("seq").and_then(|v| v.as_i64()).unwrap_or(0),
         role: m
             .get("role")
             .and_then(|v| v.as_str())
@@ -1532,6 +1622,7 @@ mod step_boundary_tests {
     fn row(segs: Vec<Seg>, tools: Vec<ToolCall>) -> MsgRow {
         MsgRow {
             id: String::new(),
+            seq: 0,
             role: "assistant".to_string(),
             text: "".into(),
             segs,

@@ -112,6 +112,11 @@ impl ClientApp {
                 let _ = this.update(cx, |this, cx| {
                     this.tasks = rows;
                     this.all_tasks = all;
+                    // 子代理活动流缓存按 task_id 存：任务从列表消失（3 天 TTL / 会话
+                    // 删除）后就该丢掉，否则缓存只增不减（长跑客户端缓涨）
+                    let alive: std::collections::HashSet<String> =
+                        this.all_tasks.iter().map(|t| t.id.clone()).collect();
+                    this.task_messages.retain(|k, _| alive.contains(k));
                     this.rebuild_session_rows(cx);
                 });
             }
@@ -367,7 +372,7 @@ impl ClientApp {
                 } else {
                     this.expanded_task = Some(id.clone());
                     // 委托任务的子代理消息按需拉一次并缓存（task_id 即子会话 id）
-                    if this.task_messages.get(&id).is_none() {
+                    if !this.task_messages.contains_key(&id) {
                         this.load_task_messages(id.clone(), cx);
                     }
                 }
@@ -507,28 +512,10 @@ impl ClientApp {
                 // 思考 / 输出 / 工具，纯文本摊平后这些结构就没了（此前正是如此）
                 let rows: Vec<MsgRow> = arr
                     .iter()
-                    .map(|m| {
-                        let (segs, tool_calls) = parse_segments(m);
-                        MsgRow {
-                            id: m
-                                .get("id")
-                                .and_then(|v| v.as_str())
-                                .unwrap_or_default()
-                                .to_string(),
-                            role: m
-                                .get("role")
-                                .and_then(|v| v.as_str())
-                                .unwrap_or("?")
-                                .to_string(),
-                            text: segments_body_text(m).into(),
-                            segs,
-                            tool_calls,
-                            compression: false,
-                            usage: parse_msg_usage(m),
-                            images: parse_msg_images(m),
-                            ts: parse_msg_ts(m),
-                        }
-                    })
+                    // 与主对话历史**同一份**字段映射（`parse_msg_row`）：子代理活动流
+                    // 早先自己写了一遍，漏了 `compression`/`seq` 这类后加字段——
+                    // 两处实现必然漂移，直接用单点。
+                    .map(crate::app::parse_msg_row)
                     .collect();
                 let _ = this.update(cx, |this, cx| {
                     this.task_messages.insert(task_id, rows);
@@ -562,7 +549,7 @@ impl ClientApp {
             })
             .collect();
         let port = self.port;
-        self.status = "正在提交回答…".to_string();
+        self.set_status("正在提交回答…".to_string());
         cx.spawn(async move |this, cx| {
             let url = format!("http://{SERVER_HOST}:{port}/api/v1/chat/answer");
             let body = serde_json::json!({
@@ -573,11 +560,11 @@ impl ClientApp {
             let _ = this.update(cx, |this, cx| {
                 match res {
                     Ok(_) => {
-                        this.status = "回答已提交".to_string();
+                        this.set_status("回答已提交".to_string());
                         this.clarification = None;
                         this.clarify_answers.clear();
                     }
-                    Err(e) => this.status = format!("提交回答失败：{e}"),
+                    Err(e) => this.set_error(format!("提交回答失败：{e}")),
                 }
                 cx.notify();
             });
@@ -803,7 +790,7 @@ impl ClientApp {
         cx: &mut Context<Self>,
     ) {
         let port = self.port;
-        self.status = format!("正在提交审批：{decision}");
+        self.set_status(format!("正在提交审批：{decision}"));
         cx.spawn(async move |this, cx| {
             let url = format!("http://{SERVER_HOST}:{port}/api/v1/approval/respond");
             let mut body = serde_json::json!({ "request_id": request_id, "decision": decision });
@@ -815,10 +802,10 @@ impl ClientApp {
             }
             let res = post_json(url, body).await;
             let _ = this.update(cx, |this, cx| {
-                this.status = match res {
-                    Ok(_) => format!("审批已提交（{decision}）"),
-                    Err(e) => format!("提交审批失败：{e}"),
-                };
+                match res {
+                    Ok(_) => this.set_status(format!("审批已提交（{decision}）")),
+                    Err(e) => this.set_error(format!("提交审批失败：{e}")),
+                }
                 this.load_approvals(cx);
                 cx.notify();
             });

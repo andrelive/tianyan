@@ -57,7 +57,7 @@ impl ClientApp {
                         let _ = this.update(app, |this, cx| {
                             this.sessions_data = rows;
                             this.session_count = n;
-                            this.status = format!("127.0.0.1:{port} · 会话 {n} 条");
+                            this.set_status(format!("127.0.0.1:{port} · 会话 {n} 条"));
                             this.rebuild_session_rows(cx);
                         });
                     });
@@ -66,7 +66,7 @@ impl ClientApp {
                     println!("[会话] 拉取失败: {e}");
                     cx.update(|app| {
                         let _ = this.update(app, |this, cx| {
-                            this.status = format!("拉取会话失败：{e}");
+                            this.set_error(format!("拉取会话失败：{e}"));
                             cx.notify();
                         });
                     });
@@ -110,7 +110,8 @@ impl ClientApp {
             .filter(|(k, l)| !k.is_empty() && last_activity(l) >= now - ACTIVE_GROUP_WINDOW_SECS)
             .map(|(k, l)| (k.clone(), l.clone()))
             .collect();
-        active.sort_by(|a, b| last_activity(&b.1).cmp(&last_activity(&a.1)));
+        // sort_by_key + Reverse：比较键只算一次（sort_by 的闭包会被反复调用）
+        active.sort_by_key(|a| std::cmp::Reverse(last_activity(&a.1)));
         active.truncate(ACTIVE_GROUP_LIMIT);
         let active_keys: HashSet<&str> = active.iter().map(|(k, _)| k.as_str()).collect();
         let mut rest: Vec<(String, Vec<&SessionRow>)> = groups
@@ -354,7 +355,7 @@ impl ClientApp {
                 }
                 Err(e) => {
                     let _ = this.update(cx, |this, cx| {
-                        this.status = format!("重命名失败：{e}");
+                        this.set_error(format!("重命名失败：{e}"));
                         cx.notify();
                     });
                 }
@@ -378,6 +379,11 @@ impl ClientApp {
                 Ok(()) => {
                     let _ = this.update(cx, |this, cx| {
                         this.sessions_data.retain(|s| s.id != id);
+                        // 该会话的输入草稿随会话一起清掉（否则会话列表里删了、
+                        // 草稿还挂在 HashMap 里，长期不退出会缓涨）
+                        this.drafts.remove(&id);
+                        // 打开过的 Tab 也一并移除（否则 Tab 条上留一个点不开的幽灵）
+                        this.open_tabs.retain(|t| t != &id);
                         if this.current_session.as_deref() == Some(id.as_str()) {
                             this.current_session = None;
                             this.messages = Rc::new(Vec::new());
@@ -395,7 +401,7 @@ impl ClientApp {
                 }
                 Err(e) => {
                     let _ = this.update(cx, |this, cx| {
-                        this.status = format!("删除失败：{e}");
+                        this.set_error(format!("删除失败：{e}"));
                         cx.notify();
                     });
                 }
@@ -432,12 +438,12 @@ impl ClientApp {
             let _ = this.update(cx, |this, cx| {
                 match res {
                     Ok(_) => {
-                        this.status = "已回退".to_string();
+                        this.set_status("已回退".to_string());
                         this.load_messages(session_id.clone(), cx);
                         this.load_session_usage(cx);
                         this.load_sessions(cx);
                     }
-                    Err(e) => this.status = format!("回退失败：{e}"),
+                    Err(e) => this.set_error(format!("回退失败：{e}")),
                 }
                 cx.notify();
             });

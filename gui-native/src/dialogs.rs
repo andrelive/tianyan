@@ -976,7 +976,7 @@ impl ClientApp {
             PickerTarget::NewSession => {
                 self.new_session_workspace = Some(path.clone());
                 self.start_new_session(cx);
-                self.status = format!("新会话将绑定目录：{path}");
+                self.set_status(format!("新会话将绑定目录：{path}"));
                 cx.notify();
             }
             PickerTarget::Session => {

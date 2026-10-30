@@ -112,7 +112,11 @@ pub(crate) fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
 /// （`server/src/api/chat/handlers.rs`），所以订阅必须**独立于发送**常驻。
 /// 断线（server 未起 / 重启）按 1s 间隔重连；`tx` 关闭即退出（窗口销毁）。
 pub(crate) fn spawn_event_reader(port: u16, tx: tokio::sync::mpsc::UnboundedSender<serde_json::Value>) {
-    let _ = runtime().spawn(async move {
+    // `spawn` 返回的是 `JoinHandle`（任务**已经**开始调度，不是惰性 Future）；
+    // 我们不需要 join，也不关心它何时结束——退出条件是 `tx.is_closed()`（窗口销毁）。
+    // 这里显式 `drop` 掉句柄（= detach），顺带说明为什么不是 `let _ =`：
+    // clippy 的 `let_underscore_future` 会把 `JoinHandle` 误判成「没 await 的 Future」。
+    drop(runtime().spawn(async move {
         let client = reqwest::Client::new();
         let url = format!("http://{SERVER_HOST}:{port}/api/v1/events");
         loop {
@@ -168,5 +172,5 @@ pub(crate) fn spawn_event_reader(port: u16, tx: tokio::sync::mpsc::UnboundedSend
             println!("[事件] 连接结束，1s 后重连");
             tokio::time::sleep(Duration::from_secs(1)).await;
         }
-    });
+    }));
 }

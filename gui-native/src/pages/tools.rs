@@ -304,7 +304,7 @@ impl ClientApp {
                 }
                 Err(e) => {
                     let _ = this.update(cx, |this, cx| {
-                        this.status = format!("加载工具失败：{e}");
+                        this.set_error(format!("加载工具失败：{e}"));
                         cx.notify();
                     });
                 }
