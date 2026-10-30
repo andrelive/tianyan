@@ -288,10 +288,18 @@ Tauri 版由监督循环在进程内完成；原生端在上一次进程退出�
 cd gui-native
 cargo build --release                 # build.rs 会把 tauri/icons/icon.ico 嵌进 exe 资源
 pwsh -NoProfile -File ..\scripts\verify-gui-native.ps1 -Release   # 77 项断言（验的是要发的那份）
-cd installer
-wix build -o tianyan-native-1.1.0-x64.msi tianyan.wxs
-msiexec /i tianyan-native-1.1.0-x64.msi /qn      # perUser：2.8 秒，无 UAC
+# 打包：**不要直接调 wix**，走脚本（版本从 Cargo.toml 读出后注入，产物名同源）
+pwsh -NoProfile -File installer\build-msi.ps1        # 默认会先 cargo build --release
+msiexec /i installer\tianyan-native-<ver>-x64.msi /qn   # perUser：2.8 秒，无 UAC
 ```
+> **版本单源**：`gui-native/Cargo.toml` 的 `version` 是 exe 属性与 MSI `ProductVersion`
+> 的来源；`installer/tianyan.wxs` 里**不得**写版本号（用 `$(var.ProductVersion)`，
+> 由 `build-msi.ps1` 注入 4 段形式）。它与主 workspace 的
+> `[workspace.package] version` 必须一致 —— `scripts/check-version.ps1`（进
+> `scripts/test.ps1 lint`）会校验，不一致 lint 直接红。`/health` 报的是
+> **主 workspace** 版本（`server` 的 `CARGO_PKG_VERSION`），两边一致才不会再出现
+> 「关于页说 A、`/health` 说 B」。
+
 
 `tianyan.wxs` 是**产品级**清单，与 `main.wxs` / `peruser.wxs`（早期验证用，Source 指向 `target\debug`）
 的区别：

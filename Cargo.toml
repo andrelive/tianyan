@@ -28,9 +28,18 @@ members = [
 resolver = "2"
 
 [workspace.package]
-# 产品版本：与 tauri/tauri.conf.json 保持一致（后者决定 MSI 名与 ProductVersion；
-# 此处决定各 crate 版本与 exe 文件属性 FileVersion/ProductVersion）。
-version = "1.0.1"
+# 产品版本 —— **内核侧唯一源**。
+#
+# 这里决定各 crate 版本、exe 的 FileVersion/ProductVersion，以及 `/health` 报的
+# version（`server/src/lib.rs` 用 `env!("CARGO_PKG_VERSION")`）。
+#
+# ⚠️ 还有两处同源副本，改版本时**必须一起改**（`scripts/check-version.ps1` 会校验，
+# 不一致则 `scripts/test.ps1 lint` 直接红）：
+#   1. `gui-native/Cargo.toml`      —— 独立 workspace，无法 `version.workspace = true`
+#   2. `tauri/tauri.conf.json`      —— tauri 壳的 MSI 名与 ProductVersion（退役后消失）
+# MSI 的 `ProductVersion`（4 段，如 1.1.0.0）由 `gui-native/installer/build-msi.ps1`
+# 从 `gui-native/Cargo.toml` 读出后补 `.0` 注入，不手工写。
+version = "1.1.0"
 edition = "2021"
 authors = ["Tianyan Team"]
 license = "MIT"

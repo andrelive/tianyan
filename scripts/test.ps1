@@ -32,6 +32,12 @@ function Test-Lint {
     Write-Host "  - 工具目录 freshness 校验 (A3)..."
     & "$PSScriptRoot\gen-tool-catalog.ps1" -Check
     if ($LASTEXITCODE -ne 0) { throw "工具目录已漂移，请运行 scripts/gen-tool-catalog.ps1" }
+    # 产品版本多处副本的钉死点：主 workspace / gui-native / tauri 壳 / MSI 清单。
+    # 实测漂过一次（主 workspace 1.0.1 与 GUI 1.1.0 并存 →「关于」页与 /health 各报一个号）。
+    Write-Host "  - 产品版本一致性校验..."
+    & "$PSScriptRoot\check-version.ps1"
+    if ($LASTEXITCODE -ne 0) { throw "版本不一致，请按根 Cargo.toml 的注释同步各处版本" }
+
 
     Write-Host "  - 前端 ESLint + Prettier..."
     Push-Location gui-vite

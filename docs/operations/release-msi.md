@@ -5,6 +5,26 @@
 > 全部结论取自脚本/配置/日志实读，未核实项标注 **待核实**。
 > CI 流水线（quality/release）**自身**的排障（挂死、日志丢失、包集合编译指纹）见 [`ci-pipeline.md`](ci-pipeline.md)。
 
+> ## ⚠️ 2026-10 现状更新（读本文前先看这段）
+>
+> **native（GPUI）MSI 已是主发布渠道，本文 §1/§2 描述的 `tauri build` 链只适用于
+> tauri 壳（已列入退役计划）**。版本权威与打包命令都已改变：
+>
+> | 事项 | 现在的答案 |
+> | --- | --- |
+> | 产品版本单源 | 根 `Cargo.toml` 的 `[workspace.package] version`（决定各 crate 版本、exe 属性）|
+> | `/health` 报的版本 | 就是上面这个值（`server` 用 `env!("CARGO_PKG_VERSION")`）|
+> | native exe 属性 | `gui-native/Cargo.toml` 的 `version`（独立 workspace，**必须手改**，须与单源一致）|
+> | native MSI `ProductVersion` | `gui-native/installer/tianyan.wxs` 里写 `$(var.ProductVersion)`，由 `build-msi.ps1` 从 `gui-native/Cargo.toml` 读版本补 `.0` 后注入（**不得硬编码**）|
+> | 打包命令 | `pwsh -File gui-native\installer\build-msi.ps1`（**不要直接调 `wix build`**）|
+> | 一致性门禁 | `scripts/check-version.ps1`（已进 `scripts/test.ps1 lint`，不一致则 lint 红）|
+> | 产物名 | `tianyan-native-<ver>-x64.msi`（perUser，装到 `%LOCALAPPDATA%\Programs\Tianyan`）|
+>
+> **实测过的漂移**：主 workspace 停在 `1.0.1`、native 已到 `1.1.0`，于是「关于」页显示
+> 1.1.0 而 `/health` 报 1.0.1 —— 同一个产品两个号。成因就是本文 §1 那张表的模型
+> （"tauri.conf.json 是唯一权威"）在 native 成为主渠道后不再成立。
+> 修法见 `scripts/check-version.ps1` 的文件头注释。
+
 ---
 
 ## 1. 版本号落点（**哪一处决定 MSI 文件名与版本**）

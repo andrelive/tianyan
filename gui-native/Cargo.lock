@@ -10994,7 +10994,7 @@ dependencies = [
 
 [[package]]
 name = "tianyan-assembly"
-version = "1.0.1"
+version = "1.1.0"
 dependencies = [
  "tianyan-core",
  "tianyan-policy-approval",
@@ -11016,7 +11016,7 @@ dependencies = [
 
 [[package]]
 name = "tianyan-core"
-version = "1.0.1"
+version = "1.1.0"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -11052,7 +11052,7 @@ dependencies = [
 
 [[package]]
 name = "tianyan-desktop"
-version = "1.0.1"
+version = "1.1.0"
 dependencies = [
  "reqwest",
  "serde",
@@ -11093,7 +11093,7 @@ dependencies = [
 
 [[package]]
 name = "tianyan-mcp"
-version = "1.0.1"
+version = "1.1.0"
 dependencies = [
  "futures",
  "rust-mcp-sdk",
@@ -11107,7 +11107,7 @@ dependencies = [
 
 [[package]]
 name = "tianyan-policy-approval"
-version = "1.0.1"
+version = "1.1.0"
 dependencies = [
  "async-trait",
  "chrono",
@@ -11119,7 +11119,7 @@ dependencies = [
 
 [[package]]
 name = "tianyan-policy-context"
-version = "1.0.1"
+version = "1.1.0"
 dependencies = [
  "async-trait",
  "chrono",
@@ -11131,7 +11131,7 @@ dependencies = [
 
 [[package]]
 name = "tianyan-policy-review"
-version = "1.0.1"
+version = "1.1.0"
 dependencies = [
  "async-trait",
  "serde",
@@ -11143,7 +11143,7 @@ dependencies = [
 
 [[package]]
 name = "tianyan-provider-client"
-version = "1.0.1"
+version = "1.1.0"
 dependencies = [
  "reqwest",
  "serde_json",
@@ -11152,7 +11152,7 @@ dependencies = [
 
 [[package]]
 name = "tianyan-provider-embed"
-version = "1.0.1"
+version = "1.1.0"
 dependencies = [
  "async-trait",
  "reqwest",
@@ -11166,7 +11166,7 @@ dependencies = [
 
 [[package]]
 name = "tianyan-provider-llm"
-version = "1.0.1"
+version = "1.1.0"
 dependencies = [
  "async-trait",
  "futures",
@@ -11181,7 +11181,7 @@ dependencies = [
 
 [[package]]
 name = "tianyan-server"
-version = "1.0.1"
+version = "1.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -11207,7 +11207,7 @@ dependencies = [
 
 [[package]]
 name = "tianyan-service-config"
-version = "1.0.1"
+version = "1.1.0"
 dependencies = [
  "chrono",
  "config",
@@ -11221,7 +11221,7 @@ dependencies = [
 
 [[package]]
 name = "tianyan-storage-sqlite"
-version = "1.0.1"
+version = "1.1.0"
 dependencies = [
  "async-trait",
  "chrono",
@@ -11233,7 +11233,7 @@ dependencies = [
 
 [[package]]
 name = "tianyan-storage-vector"
-version = "1.0.1"
+version = "1.1.0"
 dependencies = [
  "arrow-array",
  "arrow-schema",
@@ -11248,7 +11248,7 @@ dependencies = [
 
 [[package]]
 name = "tianyan-task-builtin"
-version = "1.0.1"
+version = "1.1.0"
 dependencies = [
  "async-trait",
  "chrono",
@@ -11259,7 +11259,7 @@ dependencies = [
 
 [[package]]
 name = "tianyan-task-evolution"
-version = "1.0.1"
+version = "1.1.0"
 dependencies = [
  "async-trait",
  "chrono",
@@ -11272,7 +11272,7 @@ dependencies = [
 
 [[package]]
 name = "tianyan-tool-pipeline"
-version = "1.0.1"
+version = "1.1.0"
 dependencies = [
  "async-trait",
  "serde_json",
@@ -11283,7 +11283,7 @@ dependencies = [
 
 [[package]]
 name = "tianyan-tools-code"
-version = "1.0.1"
+version = "1.1.0"
 dependencies = [
  "async-trait",
  "ignore",
@@ -11302,7 +11302,7 @@ dependencies = [
 
 [[package]]
 name = "tianyan-tools-fs"
-version = "1.0.1"
+version = "1.1.0"
 dependencies = [
  "async-trait",
  "serde",
@@ -11313,7 +11313,7 @@ dependencies = [
 
 [[package]]
 name = "tianyan-tools-todo"
-version = "1.0.1"
+version = "1.1.0"
 dependencies = [
  "async-trait",
  "schemars 1.2.3",
@@ -11325,7 +11325,7 @@ dependencies = [
 
 [[package]]
 name = "tianyan-tools-web"
-version = "1.0.1"
+version = "1.1.0"
 dependencies = [
  "async-trait",
  "dashmap",
