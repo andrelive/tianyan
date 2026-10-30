@@ -112,8 +112,10 @@ public class W {
     $ws = New-Object -ComObject WScript.Shell
     $ws.SendKeys("^v")
     Start-Sleep -Milliseconds 700
+    # ⚠️ `/state` 的返回是 `{ ok, state }` 包装（`/act` 同此形），字段在 `.state` 下 ——
+    # 直接读 `$st.input` 永远是空串（实测踩过，差点误判成「粘贴没进去」）。
     $st = Invoke-RestMethod "$base/state" -TimeoutSec 5
-    Write-Host "[$Tag] input_after_paste = '$($st.input)'" -ForegroundColor Cyan
+    Write-Host "[$Tag] input_after_paste = '$($st.state.input)'" -ForegroundColor Cyan
 
     # 光标移到正文中间（末尾 3 个字符之后），再按 Enter —— 这是 bug 的触发条件
     1..3 | ForEach-Object { $ws.SendKeys("{LEFT}"); Start-Sleep -Milliseconds 90 }
@@ -122,8 +124,8 @@ public class W {
 
     try {
         $st = Invoke-RestMethod "$base/state" -TimeoutSec 5
-        Write-Host "[$Tag] input_after_enter = '$($st.input)'" -ForegroundColor Cyan
-        $last = @($st.messages.recent)[-1]
+        Write-Host "[$Tag] input_after_enter = '$($st.state.input)'" -ForegroundColor Cyan
+        $last = @($st.state.messages.recent)[-1]
         if ($null -ne $last -and $null -ne $last.PSObject.Properties["newlines"]) {
             Write-Host "[$Tag] state_last_newlines = $($last.newlines)" -ForegroundColor Cyan
         }

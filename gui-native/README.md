@@ -438,8 +438,11 @@ pwsh -NoProfile -File .\scripts\verify-enter-send.ps1 -Exe gui-native\target\deb
 ```
 
 权威判据是 SQLite（ADR-018，会话消息的真相在那里）；`/state` 的
-`messages.recent[].newlines` 是配套的快速断言字段。⚠️ 收尾只按 PID 杀
-（`Start-Process -PassThru` 那一个）—— 按进程名会连用户正在用的实例一起杀掉。
+`state.messages.recent[].newlines` 是配套的快速断言字段。
+> ⚠️ `/state` 与 `/act` 的响应都是 `{ ok, state }` **包装**（字段全在 `.state` 下）。
+> 直接读 `$st.streaming` / `$st.input` 永远是空 —— 实测踩过，差点误判成「粘贴没进去」。
+> ⚠️ 收尾只按 PID 杀（`Start-Process -PassThru` 那一个）—— 按进程名会连用户正在用的
+> 实例一起杀掉。
 
 ### 像素级核对：内建截图优先，抓屏兜底
 
