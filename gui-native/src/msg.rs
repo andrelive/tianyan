@@ -8,12 +8,20 @@
 //! `FnMut(usize, &mut Window, &mut App)`，**拿不到** `&ClientApp`；而点击回调又必须
 //! 能把状态写回并触发重绘——共享句柄 + `AppRef` 是这套框架下不引入第二份真相的写法。
 
-use crate::*;
 use crate::theme::colors;
+use crate::*;
 use gpui_kit::assets::IconName;
 use gpui_kit::component::text::TextView;
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
+
+/// 用户消息里图片的显示上限（对齐 vite `max-w-[240px] max-h-[240px]`）。
+///
+/// 宽度取**气泡内宽**：气泡上限 640 − `px_4` 两侧各 16 = 608。宽度上限比高度
+/// 宽松是有意的——横截图（1024×640）按高度 240 缩放后是 384×240，正是 vite 的
+/// 观感；窄窗口下再由气泡自身收窄。
+const BUBBLE_IMG_MAX_W: f32 = 608.0;
+const BUBBLE_IMG_MAX_H: f32 = 240.0;
 
 /// 从消息 JSON 取 `usage`；`prompt_tokens == 0` 视为没有（老消息 / 提供商未上报）。
 pub(crate) fn parse_msg_usage(msg: &serde_json::Value) -> Option<MsgUsage> {
@@ -155,6 +163,35 @@ pub(crate) fn decode_data_url(src: &str) -> Option<(gpui_kit::ImageFormat, Vec<u
         .decode(payload)
         .ok()?;
     Some((format, bytes))
+}
+
+/// 读一张编码图片的**原始像素尺寸**（只解头部，不解全图）。
+///
+/// 为什么不用 `image::load_from_memory`：那个要整张解码（大截图 ~10ms），而这里
+/// 是**渲染期**按需调用，每条消息每帧都可能命中，必须只读 header。
+pub(crate) fn image_dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
+    let reader = image::ImageReader::new(std::io::Cursor::new(bytes))
+        .with_guessed_format()
+        .ok()?;
+    reader.into_dimensions().ok()
+}
+
+/// 按「宽高都不超过上限」等比缩放，返回**要显式设置的** `(w, h)`（px）。
+///
+/// 为什么必须自己算，而不是交给 `.max_w()/.max_h()`：
+/// GPUI 的 `img()` 在 `size` 为 Auto 时会把元素尺寸设成**图片原始像素**
+/// （实测算过：1024×640 的截图 → `style.size = 1024×640`），随后 `max_w` 与
+/// `max_h` 是**两次独立钳制**（各自取 min），并不等比。于是
+/// `max_w(240) + max_h(240)` 得到的是 **240×240 的正方框**，图片再按
+/// `ObjectFit::Contain` 居中画成 240×150 —— 上下各 45px 空白（用户实测
+/// 「图片上下有大量空白」）。显式 `w`/`h` 才是真正的等比缩放。
+///
+/// 小图不放大（`scale` 上限 1.0），与 vite 的 `max-w/max-h` 同语义。
+pub(crate) fn fit_image_size(w: u32, h: u32, max_w: f32, max_h: f32) -> (f32, f32) {
+    let w = w.max(1) as f32;
+    let h = h.max(1) as f32;
+    let scale = (max_w / w).min(max_h / h).min(1.0);
+    ((w * scale).max(1.0).round(), (h * scale).max(1.0).round())
 }
 
 /// 只拼 `text` 段（**不含**思考与工具）——`MsgRow.text` 的取值口径。
@@ -790,7 +827,12 @@ pub(crate) fn render_tool_card(
 /// 单独成函数是为了**控制 `render_msg_body` 的栈帧大小**——GPUI 的
 /// prepaint/paint 是递归的，每层帧都计入栈；这段内联回去会让单帧翻倍
 /// （实测：内联版在启动首帧就 `has overflowed its stack`）。
-pub(crate) fn render_user_footer(msg: &MsgRow, mi: usize, app: &AppRef, session_id: &str) -> AnyElement {
+pub(crate) fn render_user_footer(
+    msg: &MsgRow,
+    mi: usize,
+    app: &AppRef,
+    session_id: &str,
+) -> AnyElement {
     let mut footer = div().w_full().flex().flex_row().items_center().gap_2();
     let copy_text = msg.text.to_string();
     footer = footer.child(
@@ -934,6 +976,13 @@ pub(crate) fn render_msg_body(
                         let Some((format, bytes)) = decode_data_url(src) else {
                             continue;
                         };
+                        // 尺寸必须在 `from_bytes` **之前**读：它把 bytes move 走
+                        // 显式等比尺寸（见 `fit_image_size` 的注释：只给
+                        // `max_w`+`max_h` 会被 GPUI 钳成正方框，上下留白）。
+                        // 宽度上限取气泡内宽（气泡 640 − `px_4` 两侧 32 = 608），
+                        // 高度上限 240 对齐 vite 的 `max-h-[240px]`。
+                        let sized = image_dimensions(&bytes)
+                            .map(|(w, h)| fit_image_size(w, h, BUBBLE_IMG_MAX_W, BUBBLE_IMG_MAX_H));
                         let arc = std::sync::Arc::new(gpui_kit::Image::from_bytes(format, bytes));
                         // 点击放大（对齐 vite `ZoomableImage`）：把 Arc 交给
                         // ClientApp，根层渲染全屏遮罩 + 大图
@@ -943,12 +992,20 @@ pub(crate) fn render_msg_body(
                             div()
                                 .id(("msg-img", mi * 100 + k))
                                 .cursor_pointer()
-                                .child(
-                                    gpui_kit::img(gpui_kit::ImageSource::Image(arc))
-                                        .max_w(px(240.))
-                                        .max_h(px(240.))
+                                .child(match sized {
+                                    Some((w, h)) => {
+                                        gpui_kit::img(gpui_kit::ImageSource::Image(arc))
+                                            .w(px(w))
+                                            .h(px(h))
+                                            .rounded_lg()
+                                    }
+                                    // 尺寸读不出来（未知编码）时退回旧写法：
+                                    // 会有留白，但至少图还在
+                                    None => gpui_kit::img(gpui_kit::ImageSource::Image(arc))
+                                        .max_w(px(BUBBLE_IMG_MAX_W))
+                                        .max_h(px(BUBBLE_IMG_MAX_H))
                                         .rounded_lg(),
-                                )
+                                })
                                 .on_click(move |_, _, cx| {
                                     if let Some(w) = app_for_img.lock().ok().and_then(|g| g.clone())
                                     {
@@ -1181,5 +1238,59 @@ mod image_mime_tests {
             normalize_image_for_api("image/bmp", b"not an image at all").is_none(),
             "解码失败必须返回 None，不能把原始字节当图片发出去"
         );
+    }
+}
+
+#[cfg(test)]
+mod image_layout_tests {
+    //! 消息图片尺寸的回归（用户报的「图片上下大量空白」）。
+    //!
+    //! 为什么用单测：真因是 **GPUI 的布局算术**（`img()` 把 size 设成原始像素，
+    //! `max_w`/`max_h` 各自独立钳制 → 正方框 + Contain 居中），这个结论无法靠
+    //! 界面断言稳定表达；判据本身是纯函数，单测能钉住「等比、不放大、不超上限」。
+    //! ⚠️ 不写 `use super::*`（bin crate 根是 main.rs，glob 会撞 recursion_limit）。
+    use crate::msg::{fit_image_size, image_dimensions};
+
+    #[test]
+    fn wide_screenshot_scales_by_height() {
+        // 1024×640 的截图：高 240 是约束边 → 384×240（正是 vite 的观感）
+        assert_eq!(fit_image_size(1024, 640, 608.0, 240.0), (384.0, 240.0));
+    }
+
+    #[test]
+    fn tall_image_scales_by_height_too() {
+        // 640×1024 竖图：仍按 240 高 → 150×240
+        assert_eq!(fit_image_size(640, 1024, 608.0, 240.0), (150.0, 240.0));
+    }
+
+    #[test]
+    fn small_image_is_not_upscaled() {
+        // 比上限小的图保持原尺寸（vite `max-w/max-h` 同语义，小图不该被拉糊）
+        assert_eq!(fit_image_size(100, 80, 608.0, 240.0), (100.0, 80.0));
+    }
+
+    #[test]
+    fn ultra_wide_scales_by_width() {
+        // 3000×500：宽度先到上限 → 608×101（不会因高度约束被拉高）
+        let (w, h) = fit_image_size(3000, 500, 608.0, 240.0);
+        assert_eq!(w, 608.0);
+        assert!((h - 101.0).abs() <= 1.0, "高度应约为 101，实际 {h}");
+    }
+
+    #[test]
+    fn degenerate_input_never_yields_zero() {
+        let (w, h) = fit_image_size(0, 0, 608.0, 240.0);
+        assert!(w >= 1.0 && h >= 1.0, "零尺寸必须兜成 1px，否则布局会 panic");
+    }
+
+    #[test]
+    fn png_dimensions_are_read_from_header() {
+        // 只读 header：2×3 的红点图
+        let img = image::RgbaImage::from_pixel(2, 3, image::Rgba([255, 0, 0, 255]));
+        let mut buf = Vec::new();
+        img.write_to(&mut std::io::Cursor::new(&mut buf), image::ImageFormat::Png)
+            .expect("编码 PNG");
+        assert_eq!(image_dimensions(&buf), Some((2, 3)));
+        assert_eq!(image_dimensions(b"not an image"), None);
     }
 }

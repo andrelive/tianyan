@@ -7,14 +7,14 @@ use crate::*;
 // 滚动扩展方法（.overflow_y_scrollbar()）来自这个 trait，必须 in scope
 use gpui_kit::component::scroll::ScrollableElement as _;
 // 显式导入：gpui 也导出 `View`（trait）与 `AppRef`，glob 会与我们的同名枚举/别名歧义
-use crate::types::View;
+use crate::format::*;
 use crate::theme::colors;
+use crate::types::View;
+use crate::types::*;
 use gpui_kit::assets::IconName;
 use gpui_kit::component::input::Textarea;
 use gpui_kit::component::progress::ProgressCircle;
 use gpui_kit::list as gpui_list;
-use crate::types::*;
-use crate::format::*;
 
 /// 待发图片张数上限（与 Web 版 `ChatInput.tsx` 同数：4 张）。
 ///
@@ -319,7 +319,12 @@ impl ClientApp {
     /// （全局默认由设置页的 `POST /config/models/switch` 负责）。
     /// 未创建会话时先记在本地：首条消息的 `ChatRequest` 会带上 `model`/`provider`，
     /// 服务端建会话时即固化，不必等会话 id 生成后再补一次 PUT。
-    pub(crate) fn select_chat_model(&mut self, provider: String, model: String, cx: &mut Context<Self>) {
+    pub(crate) fn select_chat_model(
+        &mut self,
+        provider: String,
+        model: String,
+        cx: &mut Context<Self>,
+    ) {
         self.model_menu_open = false;
         self.thinking_menu_open = false;
         self.ctx_panel_open = false;
@@ -532,7 +537,7 @@ impl ClientApp {
                     .child(self.render_message_column(cx))
                     .child(self.render_banners(cx))
                     .child(self.render_composer(cx))
-                    .child(self.render_usage_line())
+                    .child(self.render_usage_line()),
             )
             .into_any_element()
     }
@@ -579,42 +584,36 @@ impl ClientApp {
                             } else {
                                 "↑ 加载更早的消息".to_string()
                             })
-                            .on_click(cx.listener(|this, _, _window, cx| {
-                                this.load_older_messages(cx)
-                            })),
+                            .on_click(
+                                cx.listener(|this, _, _window, cx| this.load_older_messages(cx)),
+                            ),
                     ),
             );
         }
         col.child(
-                div()
-                    .flex_1()
-                    .min_h_0()
-                    .w_full()
-                    .max_w(px(colors::CHAT_MAX_W))
-                    .child({
-                        let items = self.messages.clone();
-                        let expand = self.expand.clone();
-                        let app = self.app_ref.clone();
-                        // 回退需要会话 id（消息操作按钮用）
-                        let sid = self
-                            .current_session
-                            .clone()
-                            .unwrap_or_default();
-                        gpui_list(
-                            self.msg_list_state.clone(),
-                            move |ix, _window, _cx| {
-                                let Some(m) = items.get(ix) else {
-                                    return div().into_any_element();
-                                };
-                                // 段渲染口径见 `render_msg_body`（思考块 / 工具卡可折叠，
-                                // 结果按 `tool_calls` 的 id 关联）
-                                render_msg_body(m, ix, &expand, &app, &sid)
-                            },
-                        )
-                        .size_full()
-                    }),
-            )
-            .into_any_element()
+            div()
+                .flex_1()
+                .min_h_0()
+                .w_full()
+                .max_w(px(colors::CHAT_MAX_W))
+                .child({
+                    let items = self.messages.clone();
+                    let expand = self.expand.clone();
+                    let app = self.app_ref.clone();
+                    // 回退需要会话 id（消息操作按钮用）
+                    let sid = self.current_session.clone().unwrap_or_default();
+                    gpui_list(self.msg_list_state.clone(), move |ix, _window, _cx| {
+                        let Some(m) = items.get(ix) else {
+                            return div().into_any_element();
+                        };
+                        // 段渲染口径见 `render_msg_body`（思考块 / 工具卡可折叠，
+                        // 结果按 `tool_calls` 的 id 关联）
+                        render_msg_body(m, ix, &expand, &app, &sid)
+                    })
+                    .size_full()
+                }),
+        )
+        .into_any_element()
     }
 
     /// 审批横幅 / 追问卡片 / 待办窄条：与消息列、输入卡片同宽居中。
@@ -740,6 +739,21 @@ impl ClientApp {
                     // 两块（上面一个输入框 + 下面一排按钮），与 Tauri
                     // 版「按钮在输入框内」的形态不符。
                     .child({
+                    // 待发送图片缩略图：**在输入框上方**（对齐 vite `ChatInput`：
+                    // `{images.length > 0 && ...}` 渲染在 `<ComposerEditor>` 之前）。
+                    // 早先放在 Textarea 之后（= 下方），用户实测指出与 vite 不同。
+                    // 单独成函数：压 render_chat 栈帧。
+                    let attachments = if self.composer_images.is_empty() {
+                        None
+                    } else {
+                        Some(self.render_composer_attachments(cx))
+                    };
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap_2()
+                        .children(attachments)
+                        .child({
                         // Ctrl+V 的正解是 Textarea 自己的 `on_paste` 钩子（gpui-component
                         // 专门为「粘贴图片 / 文件」留的，等价于 Web 的 `onPaste`），
                         // **不是**外层 `on_key_down`：后者在冒泡阶段根本拿不到事件
@@ -764,12 +778,7 @@ impl ClientApp {
                                 })
                                 .unwrap_or(false)
                             })
-                    })
-                    // 待发送图片缩略图（单独成函数：压 render_chat 栈帧）
-                    .children(if self.composer_images.is_empty() {
-                        None
-                    } else {
-                        Some(self.render_composer_attachments(cx))
+                        })
                     })
                     .child(
                         div()
@@ -1016,58 +1025,33 @@ impl ClientApp {
             .gap_2()
             .text_size(px(11.))
             .text_color(rgb(colors::TEXT_TERTIARY()));
-        let dot = || {
-            div().text_color(rgb(colors::BORDER())).child("·")
-        };
-        if let Some((uncached, cached, completion)) =
-            self.session_usage
-        {
+        let dot = || div().text_color(rgb(colors::BORDER())).child("·");
+        if let Some((uncached, cached, completion)) = self.session_usage {
             let total = uncached + cached;
             let hit_rate = if total > 0 {
-                (cached as f64 / total as f64 * 100.0).round()
-                    as u64
+                (cached as f64 / total as f64 * 100.0).round() as u64
             } else {
                 0
             };
             line = line
-                .child(div().child(format!(
-                    "未命中输入 {}",
-                    group_thousands(uncached)
-                )))
+                .child(div().child(format!("未命中输入 {}", group_thousands(uncached))))
                 .child(dot())
-                .child(div().child(format!(
-                    "缓存命中输入 {}",
-                    group_thousands(cached)
-                )))
+                .child(div().child(format!("缓存命中输入 {}", group_thousands(cached))))
                 .child(dot())
-                .child(div().child(format!(
-                    "输出 {}",
-                    group_thousands(completion)
-                )))
+                .child(div().child(format!("输出 {}", group_thousands(completion))))
                 .child(dot())
-                .child(
-                    div().child(format!(
-                        "缓存命中率 {hit_rate}%"
-                    )),
-                );
+                .child(div().child(format!("缓存命中率 {hit_rate}%")));
         }
-        if let Some((ttft, duration, completion)) =
-            self.request_perf
-        {
+        if let Some((ttft, duration, completion)) = self.request_perf {
             if self.session_usage.is_some() {
                 line = line.child(dot());
             }
             line = line.child(div().child(format!(
-            "TTFT {}",
-            ttft.map(format_ms)
-                .unwrap_or_else(|| "—".to_string())
-        )));
-            if let Some(tps) =
-                tokens_per_sec(ttft, duration, completion)
-            {
-                line = line
-                    .child(dot())
-                    .child(div().child(format!("{tps} tok/s")));
+                "TTFT {}",
+                ttft.map(format_ms).unwrap_or_else(|| "—".to_string())
+            )));
+            if let Some(tps) = tokens_per_sec(ttft, duration, completion) {
+                line = line.child(dot()).child(div().child(format!("{tps} tok/s")));
             }
         }
         line.into_any_element()
@@ -1443,8 +1427,13 @@ impl ClientApp {
                     .gap_1()
                     .child(
                         gpui_kit::img(gpui_kit::ImageSource::Image(arc))
-                            .max_w(px(64.))
-                            .max_h(px(64.))
+                            // 对齐 vite `ChatInput` 的 `w-16 h-16 rounded-lg object-cover`：
+                            // **定尺寸 + Cover 裁剪**，不是 `max_w/max_h` 的
+                            // Contain —— 后者元素框是 64×64 而图非正方形时会
+                            // 上下/左右留白（用户实测的「缩略图上下有白条」）。
+                            .w(px(64.))
+                            .h(px(64.))
+                            .object_fit(gpui_kit::ObjectFit::Cover)
                             .rounded_md(),
                     )
                     .child(
@@ -1646,7 +1635,12 @@ impl ClientApp {
     /// - 跨端复制粘贴、草稿恢复都只是纯文本。
     ///
     /// 末尾补一个空格：连续引用两个文件时 chip 之间不会粘在一起。
-    pub(crate) fn mention_file(&mut self, path: String, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn mention_file(
+        &mut self,
+        path: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let snippet = format!("`@file:\"{path}\"` ");
         self.insert_into_composer(snippet, window, cx);
         self.dialog = None;
@@ -1657,7 +1651,11 @@ impl ClientApp {
     ///
     /// `Context` 里拿不到 window，就用保存的窗口句柄现取；**最终仍调
     /// `TextareaState::insert`**（与真实点击路径同一个 API），不复制插入逻辑。
-    pub(crate) fn mention_file_auto(&mut self, path: String, cx: &mut Context<Self>) -> Result<(), String> {
+    pub(crate) fn mention_file_auto(
+        &mut self,
+        path: String,
+        cx: &mut Context<Self>,
+    ) -> Result<(), String> {
         let handle = self.window_handle;
         let input = self.input.clone();
         let snippet = format!("`@file:\"{path}\"` ");

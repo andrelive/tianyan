@@ -255,7 +255,7 @@ Tauri 版由监督循环在进程内完成；原生端在上一次进程退出�
 
 ## MSI 打包与自动更新（已实测）
 
-### 1.1.0 修的五处（用户实测反馈）
+### 1.1.0 修的七处（用户实测反馈）
 
 | # | 症状 | 根因 / 修法 |
 |---|---|---|
@@ -264,6 +264,8 @@ Tauri 版由监督循环在进程内完成；原生端在上一次进程退出�
 | 3 | **流式结束后前面的工具调用全不见** | 一轮是**多步**（LLM→工具→LLM…），库里每步一条 assistant 消息，而前端把整轮堆在一条占位里 → 任何一次「用权威消息替换最后一条」都会把前面几步抹掉。改为**步边界新开消息**（判据 `step_closed`），并让 `observation` 按 `tool_call_id` 回填结果（此前是空实现，结果永不显示） |
 | 4 | **新建会话后输入框还留着上一段文字**（"在别的会话输入的字跟着过去了"） | 草稿的键取 `current_session.unwrap_or_default()`：新会话（首条消息未发）的键是**空串**，于是所有「新建会话」共用一个桶；而 `start_new_session` 是「先存本会话草稿（空键）→ 再按新键恢复（同一个空键）」= **自存自读**，内容原地不动。改为：`save` 在 `current_session == None` 时直接不存，`restore` 此时**必须清空**（不查任何桶）。实测（隔离实例 + `/state` 的 `usage.composer_text`）：输入 `AAA`→点新建→仍是 `AAA`；输入 `BBB`→再点新建→仍是 `BBB`；修后两次都为空 |
 | 5 | **轮次进行中切走再切回，"停止"按钮退回"发送"** | `open_session` 里无条件 `self.streaming = false`（"本客户端只渲染当前会话的增量"），而服务端这一轮**还在跑**——切回后既没有停止入口，也看不出它在生成。新增 `running_sessions: HashSet<String>`：`turn_state` 事件带 `session_id`，因此在 `handle_event` 的**会话过滤之前**记账（非当前会话也记），`open_session` 改为 `streaming = running_sessions.contains(&id)`；发送时乐观 insert、失败/删会话时 remove。实测：发送后 `streaming=true` → 切到新会话（false）→ 切回（**修前 false，修后 true**） |
+| 6 | **会话里图片上下有大片空白** | 只写了 `.max_w(240).max_h(240)`。GPUI 的 `img()` 在 `size` 为 Auto 时会把元素尺寸设成**图片原始像素**（`img.rs:352-376`：`style.size = image_size`），随后 `max_w`/`max_h` 是**两次独立钳制**（各自取 min，不是等比）→ 得到 **240×240 的正方框**，图片再 `ObjectFit::Contain` 居中画成 240×150，上下各留 45px 空白。修法：新增 `image_dimensions`（`ImageReader::into_dimensions`，只读 header 不解全图）+ `fit_image_size`（等比缩放、小图不放大），渲染时显式 `w`/`h`。1024×640 → **384×240**（与 vite 的 `max-h-[240px]` 观感一致），6 个单测锁住 |
+| 7 | **待发送图片缩略图在输入框下方**（vite 在上方） | `render_composer` 里 `.child(Textarea)` 之后才 `.children(attachments)`。修法：附件挪到 Textarea **之前**；缩略图同时对齐 vite 的 `w-16 h-16 object-cover`（原来 `.max_w(64).max_h(64)` + Contain，非正方形图同样有白边）→ `.w(64).h(64)` + `ObjectFit::Cover` |
 
 回归：`step_boundary_tests` 5 个单测（空占位/只有思考/已有正文/工具未回结果/工具已回结果）+ 77 项界面断言全绿。
 第 4/5 条的复现与回归都用**隔离实例**（`TIANYAN_CONFIG` 指独立配置、`storage.data_dir` 指临时目录、
