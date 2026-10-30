@@ -255,7 +255,7 @@ Tauri 版由监督循环在进程内完成；原生端在上一次进程退出�
 
 ## MSI 打包与自动更新（已实测）
 
-### 1.1.0 修的七处（用户实测反馈）
+### 1.1.0 修的十处（用户实测反馈）
 
 | # | 症状 | 根因 / 修法 |
 |---|---|---|
@@ -266,6 +266,14 @@ Tauri 版由监督循环在进程内完成；原生端在上一次进程退出�
 | 5 | **轮次进行中切走再切回，"停止"按钮退回"发送"** | `open_session` 里无条件 `self.streaming = false`（"本客户端只渲染当前会话的增量"），而服务端这一轮**还在跑**——切回后既没有停止入口，也看不出它在生成。新增 `running_sessions: HashSet<String>`：`turn_state` 事件带 `session_id`，因此在 `handle_event` 的**会话过滤之前**记账（非当前会话也记），`open_session` 改为 `streaming = running_sessions.contains(&id)`；发送时乐观 insert、失败/删会话时 remove。实测：发送后 `streaming=true` → 切到新会话（false）→ 切回（**修前 false，修后 true**） |
 | 6 | **会话里图片上下有大片空白** | 只写了 `.max_w(240).max_h(240)`。GPUI 的 `img()` 在 `size` 为 Auto 时会把元素尺寸设成**图片原始像素**（`img.rs:352-376`：`style.size = image_size`），随后 `max_w`/`max_h` 是**两次独立钳制**（各自取 min，不是等比）→ 得到 **240×240 的正方框**，图片再 `ObjectFit::Contain` 居中画成 240×150，上下各留 45px 空白。修法：新增 `image_dimensions`（`ImageReader::into_dimensions`，只读 header 不解全图）+ `fit_image_size`（等比缩放、小图不放大），渲染时显式 `w`/`h`。1024×640 → **384×240**（与 vite 的 `max-h-[240px]` 观感一致），6 个单测锁住 |
 | 7 | **待发送图片缩略图在输入框下方**（vite 在上方） | `render_composer` 里 `.child(Textarea)` 之后才 `.children(attachments)`。修法：附件挪到 Textarea **之前**；缩略图同时对齐 vite 的 `w-16 h-16 object-cover`（原来 `.max_w(64).max_h(64)` + Contain，非正方形图同样有白边）→ `.w(64).h(64)` + `ObjectFit::Cover` |
+| 8 | **「↑ 加载更早的消息」常驻在消息区上方** | 早先判据只有 `has_more_history`（库里有更早的）。改为**滚到列表顶部才出现**：列表容器挂 `on_scroll_wheel` → `cx.notify()` 重渲染，渲染时读 `logical_scroll_top().item_ix == 0`（不消费事件，列表照常滚）。state 加 `messages.older_button_visible` 可断言 |
+| 9 | **多会话切换时上下抖动** | `render_usage_line` 无数据时返回 0 高元素；而 `open_session` 会清空 `session_usage`/`request_perf` 等新数据 → 整行消失、输入区矮 24px → 消息列表可视高度跟着变。改为恒定高度 `USAGE_LINE_H = 24`（空数据也占位） |
+| 10 | **输入框文字跨会话残留（第一次"修"了但没修好）** | ⚠️ 这是全项目最容易重犯的一类：上一轮用 `window_handle.update(...)` 写输入框。真实点击（切会话/新建会话/关 Tab/目录选择器）发生在 `on_click` 里，**窗口已在借用中** → 对同一窗口二次借用返回 `Err`，而代码写的是 `let _ =`（静默吞掉）→ 输入框根本没被改写。自动化路径（HTTP handler）不在借用中，所以上一轮自动化实测全绿、用户照样踩坑。修法：`open_session`/`start_new_session`/`close_tab`/`confirm_workspace_picker` 收 `Option<&mut Window>`，`on_click` 传 `Some(window)` 直接写（先例 `insert_into_composer`）；自动化传 `None` 走 handle 且失败 `set_error`。诊断字段 `messages.draft_restore_path`（window/handle/handle-failed） |
+
+> **第 10 条的教训（写进纪律）**：`AnyWindowHandle::update` 给的是 `&mut AnyView`，
+> 拿不到 `&mut ClientApp`，所以**自动化永远构造不出 `on_click` 的借用上下文**。
+> 凡是「on_click 里改 entity 状态」的写路径，自动化只验证了**另一半**——必须
+> ①有 window 就直接用、②失败不静默、③state 里留诊断分支，三者缺一不可。
 
 回归：`step_boundary_tests` 5 个单测（空占位/只有思考/已有正文/工具未回结果/工具已回结果）+ 77 项界面断言全绿。
 第 4/5 条的复现与回归都用**隔离实例**（`TIANYAN_CONFIG` 指独立配置、`storage.data_dir` 指临时目录、
