@@ -398,10 +398,33 @@ impl ClientApp {
             return false;
         };
         let (_, snap) = self.parked.remove(i);
-        self.messages = snap.messages;
-        self.msg_list_state = snap
+        // ⚠️ **不信任快照里的 `ListState`**（这是一个会让内容「凭空消失」的坑）：
+        //
+        // 它的 `item_count` 是 **park 那一刻**的条数，而切走期间
+        // `apply_event_offline` 会往这份 `messages` 里继续追加消息 —— 条数变了、
+        // `item_count` 没变，虚拟列表就只渲染旧条数那么多项：**新内容明明在数据里，
+        // 界面上却看不见**。用户实测的现象正是「输出完了又丢数据，新输入一条消息
+        // 之后就恢复正常」（发送路径会 `reset()` 重建列表，所以一输入就好了）。
+        //
+        // 因此这里一律按当前条数**重建**（重建不丢阅读位置：下面用 park 时视线
+        // 所在那条的 `seq` 找回来）。
+        let anchor_seq = snap
             .msg_list_state
-            .unwrap_or_else(|| GpuiListState::new(0, ListAlignment::Bottom, px(120.)));
+            .as_ref()
+            .and_then(|ls| snap.messages.get(ls.logical_scroll_top().item_ix))
+            .map(|m| m.seq)
+            .filter(|s| *s > 0);
+        self.messages = snap.messages;
+        self.msg_list_state =
+            GpuiListState::new(self.messages.len(), ListAlignment::Bottom, px(120.));
+        if let Some(seq) = anchor_seq {
+            if let Some(ix) = self.messages.iter().position(|m| m.seq == seq) {
+                self.msg_list_state.scroll_to(gpui_kit::ListOffset {
+                    item_ix: ix,
+                    offset_in_item: px(0.),
+                });
+            }
+        }
         self.expand = snap.expand.unwrap_or_else(|| {
             Rc::new(std::cell::RefCell::new(crate::msg::ExpandState::default()))
         });

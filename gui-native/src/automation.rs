@@ -422,6 +422,10 @@ impl ClientApp {
                 // 拖回底部。判据见 `ClientApp::follows_tail`（不能只用
                 // `is_scrolled_to_end()`：虚拟列表滚到顶部/中部时它返回 None）。
                 "following_tail": self.follows_tail(),
+                // 虚拟列表的元素数与消息条数是否一致 —— 不一致就是**渲染跟不上数据**
+                // （`ListState` 的 element_count 落后：新内容在 `messages` 里、界面上
+                // 渲染不出来，用户看到「输出完又丢数据」）。这两个数必须恒等。
+                "list_count": self.msg_list_state.item_count(),
                 // 视图快照槽位占用（LRU 上限 `MAX_PARKED_SESSIONS`）
                 "parked_views": self.parked.len(),
                 "last": last_msg,

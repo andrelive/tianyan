@@ -793,7 +793,30 @@ impl ClientApp {
             return;
         }
         self.apply_stream_event(ev, &sid, cx);
+        // 单点对齐列表元素数（见 `sync_list_count`）。
+        //
+        // 流式路径会**反复 push 新消息**（一轮多步，每步一条 assistant，ADR-002），
+        // 而 `ListState` 的 `item_count` 只在构造 / `reset` / `splice` 时变。只要有一条
+        // 路径漏了同步，后续 `remeasure_items` 就作用在越界索引上 —— **新内容留在
+        // 数据里、界面上渲染不出来**。用户实测现象：「输出完了又丢数据，新输入一条
+        // 消息之后就恢复正常」（发送路径会 `reset()`，所以一输入就"好了"）。
+        self.sync_list_count();
         cx.notify();
+    }
+    /// 让 `ListState` 的元素数与 `messages.len()` 对齐。
+    ///
+    /// 用 `splice` 而不是 `reset`：前者**保持滚动位置**（`54b04c6` 那条「流式上滚
+    /// 被拖回」的教训 —— `reset()` 会清掉滚动锚点），后者只在整表替换时用。
+    fn sync_list_count(&mut self) {
+        let want = self.messages.len();
+        let have = self.msg_list_state.item_count();
+        if want > have {
+            // 末尾新增：把「尾后」的空区间替换成新增的项
+            self.msg_list_state.splice(have..have, want - have);
+        } else if want < have {
+            // 变少（裁头/替换）：把尾部多出来的删掉，保留前 want 项
+            self.msg_list_state.splice(want..have, 0);
+        }
     }
 
     /// 把一条事件写回**非当前会话**自己的那份消息快照（per-session store）。
@@ -834,6 +857,10 @@ impl ClientApp {
         self.message_total = saved.1;
         self.oldest_seq = saved.2;
         self.has_more_history = saved.3;
+        // `snap.msg_list_state` **故意保留**：它现在唯一的用途是给
+        // `restore_view_state` 提供「阅读位置锚点」（取其中 `logical_scroll_top()
+        // .item_ix` 对应消息的 seq）。元素计数**不再**信任它 —— 离线期间 push 会
+        // 让它的 item_count 落后于 messages，而那正是「新内容渲染不出来」的根源。
         self.parked.insert(pos, (key, snap));
     }
 
