@@ -356,6 +356,10 @@ impl ClientApp {
                 // 切走再切回必须保持原位置，而不是被 `load_messages` 的
                 // `scroll_to_end` 冲到底部。0 = 在顶部，`loaded-1` ≈ 在底部。
                 "scroll_item": self.msg_list_state.logical_scroll_top().item_ix,
+                // 是否处于「跟随尾部」：`false` = 用户已上滚，流式增量**不会**再把他
+                // 拖回底部。判据见 `ClientApp::follows_tail`（不能只用
+                // `is_scrolled_to_end()`：虚拟列表滚到顶部/中部时它返回 None）。
+                "following_tail": self.follows_tail(),
                 // 视图快照槽位占用（LRU 上限 `MAX_PARKED_SESSIONS`）
                 "parked_views": self.parked.len(),
                 "last": last_msg,

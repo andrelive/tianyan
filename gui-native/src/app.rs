@@ -760,8 +760,15 @@ impl ClientApp {
         self.trim_loaded_front(&mut next);
         let idx = next.len() - 1;
         self.messages = Rc::new(next);
-        self.msg_list_state.reset(self.messages.len());
-        self.msg_list_state.scroll_to_end();
+        // ⚠️ 这里**不能用 `reset()`**：`ListState::reset` 会把
+        // `logical_scroll_top` 清成 `None`，而它的「默认值」是**最后一项**
+        // （`StateInner::logical_scroll_top` 的 `unwrap_or_else`）—— 等于把
+        // 用户的滚动锚点悄悄挪到底部。于是即便随后不调 `scroll_to_end`，
+        // 流式新开一步时用户的上滚位置也已经被抹掉了。
+        // 改用 `splice` 在末尾**插入一项**：项数变了、现有锚点保持。
+        let n = self.messages.len();
+        self.msg_list_state.splice(n.saturating_sub(1)..n.saturating_sub(1), 1);
+        self.scroll_to_end_if_following();
         self.message_total = self.messages.len();
         idx
     }
@@ -854,7 +861,7 @@ impl ClientApp {
         });
         self.messages = Rc::new(next);
         self.msg_list_state.remeasure_items(idx..idx + 1);
-        self.msg_list_state.scroll_to_end();
+        self.scroll_to_end_if_following();
     }
 
     /// 填充工具执行结果（`observation` / `tool_result` 事件）：按 id 回填卡片状态。
@@ -897,6 +904,39 @@ impl ClientApp {
     /// - `segs` 末尾的 `Seg::Text`：**渲染真相源**——只更新 `text` 的话，
     ///   一旦 `segs` 里已经有思考段（`thought` 增量建的），渲染就走 segs 分支，
     ///   正文根本不显示。
+    /// 流式更新时「跟随尾部」：**只有视图本来就在底部**才滚到底。
+    ///
+    /// 为什么：早先每个流式增量都无条件 `scroll_to_end()` —— 用户往上看历史时，
+    /// 下一个 delta 就把他拖回底部，输出过程中根本没法上滚（用户实测）。
+    ///
+    /// 有意**不**在这里做「回到底部」按钮：用户上滚后新内容还在长，先保证不打扰；
+    /// 需要提示时再加（那是纯增量）。
+    pub(crate) fn scroll_to_end_if_following(&self) {
+        if self.follows_tail() {
+            self.msg_list_state.scroll_to_end();
+        }
+    }
+
+    /// 视图此刻是否「跟着尾部」。
+    ///
+    /// ⚠️ **不能只用 `is_scrolled_to_end()`**（实测踩过）：它依赖
+    /// `last_layout_bounds` + `summary.has_unknown_height` —— 虚拟列表在
+    /// 滚到顶部/中部时，下方未渲染项的高度是未知的，于是它返回 `None`；
+    /// 隐藏窗口（无布局）同样返回 `None`。把它当「在底部」处理，结果就是
+    /// **永远跟随、上滚立刻被拖回**（正是用户报的现象）。
+    ///
+    /// 所以用两条判据：
+    /// 1. `is_scrolled_to_end() == Some(true)` → 明确在底部；
+    /// 2. 兜底：`logical_scroll_top().item_ix` 已经是最后一条（或更后）。
+    ///    `item_ix` 只反映滚动锚点、**不依赖测量**，任何状态下都有效。
+    pub(crate) fn follows_tail(&self) -> bool {
+        if self.msg_list_state.is_scrolled_to_end() == Some(true) {
+            return true;
+        }
+        let top = self.msg_list_state.logical_scroll_top().item_ix;
+        top + 1 >= self.messages.len()
+    }
+
     pub(crate) fn append_delta(&mut self, delta: &str) {
         if delta.is_empty() {
             return;
@@ -913,7 +953,7 @@ impl ClientApp {
         push_seg_delta(&mut next[idx].segs, delta, false);
         self.messages = Rc::new(next);
         self.msg_list_state.remeasure_items(idx..idx + 1);
-        self.msg_list_state.scroll_to_end();
+        self.scroll_to_end_if_following();
     }
 
     /// 往最后一条 assistant 消息追加**思考**增量（实时渲染可折叠思考块）。
@@ -932,7 +972,7 @@ impl ClientApp {
         push_seg_delta(&mut next[idx].segs, delta, true);
         self.messages = Rc::new(next);
         self.msg_list_state.remeasure_items(idx..idx + 1);
-        self.msg_list_state.scroll_to_end();
+        self.scroll_to_end_if_following();
     }
 
     /// 用流末尾的**权威消息**替换占位（ADR-002：正文真相源是 `segments`）。
@@ -967,7 +1007,7 @@ impl ClientApp {
         }
         self.messages = Rc::new(next);
         self.msg_list_state.remeasure_items(idx..idx + 1);
-        self.msg_list_state.scroll_to_end();
+        self.scroll_to_end_if_following();
     }
 
     /// 边界消息（压缩点 / System 通知）→ **追加成新行**（按 id 幂等）。
@@ -993,7 +1033,7 @@ impl ClientApp {
         self.trim_loaded_front(&mut next);
         self.messages = Rc::new(next);
         self.msg_list_state.reset(self.messages.len());
-        self.msg_list_state.scroll_to_end();
+        self.scroll_to_end_if_following();
         self.message_total = self.messages.len();
     }
 
