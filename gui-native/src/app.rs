@@ -104,18 +104,26 @@ impl ClientApp {
         let endpoint_input =
             cx.new(|cx| TextareaState::new(window, cx).placeholder("API 端点（http(s)://…）"));
         let key_input = cx.new(|cx| TextareaState::new(window, cx).placeholder("API 密钥"));
-        // Enter 发送（Shift+Enter 由 Textarea 换行，不走这里）。
-        // 注意别改成 `capture_key_down` 拦截：GPUI 的 keybinding → action 派发发生在
-        // 原始 key listener **之前**（`Window::dispatch_key_event` 先 `dispatch_key`，
-        // 之后才 `finish_dispatch_key_event`），capture 阶段追不上 Textarea 的
-        // InsertNewline，拦不住那个换行 —— 只能在这里事后撤掉（见 `send_on_enter`）。
+        // Enter 发送（Shift+Enter 由 Textarea 换行，不走这里）。直接走
+        // `send_current_input` —— 与「点发送按钮」**完全同一条路**。
+        //
+        // 这一行曾经被换成过两个"更聪明"的版本，都失败并回退了：
+        // ① 在这里 `set_value(fixed)` 把 Enter 插进去的换行从编辑器里删掉 → 打断
+        //    IME 组合态/清空 undo 历史，用户实测「回车只换行、发不出去」；
+        // ② 只在**待发送字符串**上删那个换行（不碰编辑器）→ 用户实测**仍然发不出去**，
+        //    而同样的二进制在隔离实例里用「粘贴 + Enter」能发 —— 说明真凶在「手打进
+        //    输入法」这条路上，不是字符串处理。结论：Enter 路径必须与原版逐字节一致，
+        //    换行问题只在**末尾**（`trim_end`）兜一下，绝不在这里做别的。
+        // 另：也别改 `capture_key_down` 拦截 —— GPUI 的 keybinding → action 派发发生在
+        // 原始 key listener 之前（`Window::dispatch_key_event` 先 `dispatch_key`），
+        // capture 追不上 Textarea 的 InsertNewline。
         cx.subscribe_in(
             &input,
             window,
             |this, _input, event: &InputEvent, window, cx| {
                 if let InputEvent::PressEnter { shift, .. } = event {
                     if !shift {
-                        this.send_on_enter(window, cx);
+                        this.send_current_input(window, cx);
                     }
                 }
             },
@@ -1044,52 +1052,15 @@ impl ClientApp {
     }
 
     /// 发送输入框内容（Enter 或「发送」按钮）
-    /// Enter 发送。
-    ///
-    /// 与 [`Self::send_current_input`] 的唯一差别：**待发送的字符串**去掉「Enter 自己
-    /// 刚插进去的那个换行」，其余一律走同一条路。
-    ///
-    /// 背景：`gpui_base` 处理 Enter 是「先在光标处插入换行 → 再 emit
-    /// `InputEvent::PressEnter`」，所以事件到手时文本里已经多了一个 `\n`。光标在末尾
-    /// 时它跟在最后（Markdown 渲染不显形），在中间时卡在语句里（用户实测）。
-    ///
-    /// ⚠️ **绝不能在这个回调里 `set_value(fixed)` 把编辑器改回去**（早先那样做过，是
-    /// 错的）：`set_value` 会重设选区、清空 undo 历史，还会打断 IME 的组合态 —— 实测
-    /// 后果是「回车只换行、消息发不出去」（用户反馈）。这里只动**待发送的字符串**，
-    /// 编辑器状态只在最后被清空一次（与按钮发送完全相同的那一次）。
-    ///
-    /// `selected_range()` 是 **UTF-8 字节**偏移（`gpui_base` 文档明示），`\n` 单字节
-    /// ASCII，`remove` 不会切坏多字节字符。
-    fn send_on_enter(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.streaming {
-            // 生成中发送是被禁的：此时把 Enter 留给 Textarea（它就只是个换行），
-            // 否则「生成长文时想排版」会什么都不发生
-            return;
-        }
-        let (cursor, text) = {
-            let state = self.input.read(cx);
-            (state.selected_range().end, state.value().to_string())
-        };
-        if text.trim().is_empty() {
-            // 只有空白（空输入框里按 Enter）：把刚插进去的换行清掉，别留一个空行
-            if !text.is_empty() {
-                self.input
-                    .update(cx, |state, cx| state.set_value("", window, cx));
-            }
-            return;
-        }
-        let mut payload = text;
-        if cursor > 0 && payload.as_bytes().get(cursor - 1) == Some(&b'\n') {
-            payload.remove(cursor - 1);
-        }
-        // 清空输入框（与按钮发送同一处逻辑），再把清理后的正文发出去
-        self.input
-            .update(cx, |state, cx| state.set_value("", window, cx));
-        self.send_text(payload, cx);
-    }
-
     pub(crate) fn send_current_input(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.streaming {
+            // 生成中发送被禁（与 vite `ChatInput` 的 `if (isStreaming) return` 同口径）。
+            // 但必须**说话**：静默 return 时 Enter 只会让 Textarea 插一个换行，用户看到
+            // 的现象就是「按回车没反应 / 发不出去」（实测就是这条被当成 bug 报上来的）。
+            self.push_notice(
+                "正在生成本轮回复，等它结束再发送（Enter 现在只换行）",
+                false,
+            );
             return;
         }
         let text = self.input.read(cx).value().to_string();
@@ -1103,6 +1074,11 @@ impl ClientApp {
             }
             return;
         }
+        // 只削掉**末尾**的换行：多行 `Textarea` 的 Enter 是「先在光标处插入换行、
+        // 再 emit `InputEvent::PressEnter`」，光标在末尾时那个 `\n` 就落在正文最后。
+        // 消息不应以空行结尾，而正文中间的换行是用户 Shift+Enter 主动排的版 —— 一律不动。
+        // 这是**唯一**的换行处理点：不写编辑器、不判断光标，零副作用。
+        let text = text.trim_end_matches(['\n', '\r']).to_string();
         self.input
             .update(cx, |state, cx| state.set_value("", window, cx));
         // 发送后输入框已清空（上面 set_value("")），不再需要删草稿条目：

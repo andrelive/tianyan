@@ -566,10 +566,19 @@ impl ClientApp {
         } else if running {
             // 占位是这一轮内容的落点，绝不能在这时候替换列表
         } else {
-            // 重拉条数 = 本地已有（上限 200，服务端上限）；锚点 = 顶部那条的 seq
+            // 重拉条数 = 本地已有（上限 200，服务端上限）
             let limit = self.messages.len().clamp(MESSAGE_PAGE, 200);
-            let top_ix = self.msg_list_state.logical_scroll_top().item_ix;
-            let anchor_seq = self.messages.get(top_ix).map(|m| m.seq).filter(|s| *s > 0);
+            // 滚动位置按**切走时的意图**分两种（用户实测指出过这一条）：
+            // - 切走时在底部（跟着最新看）→ 重拉后回到底部，看最新的对话；
+            // - 切走时主动上滚在中间/顶部 → 保住原位置，别把人拽走。
+            // 早先无条件按「顶部那条的 seq」恢复，于是「在底部」的情况也被钉在旧位置，
+            // 切回来看到的是几条旧消息，而不是刚才的对话（用户实测）。
+            let anchor_seq = if self.follows_tail() {
+                None // 新建的 ListState 本来就对齐 Bottom → 自然在底部
+            } else {
+                let top_ix = self.msg_list_state.logical_scroll_top().item_ix;
+                self.messages.get(top_ix).map(|m| m.seq).filter(|s| *s > 0)
+            };
             self.load_messages_with(id, limit, anchor_seq, cx);
         }
         self.load_session_usage(cx);
