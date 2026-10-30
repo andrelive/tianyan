@@ -457,8 +457,7 @@ impl ClientApp {
                 let handle = self.window_handle;
                 let mut created: Option<Entity<TextareaState>> = None;
                 if let Err(e) = handle.update(cx, |_, w, cx| {
-                    created =
-                        Some(cx.new(|cx| TextareaState::new(w, cx).placeholder(placeholder)));
+                    created = Some(cx.new(|cx| TextareaState::new(w, cx).placeholder(placeholder)));
                 }) {
                     self.set_error(format!("输入框创建失败（窗口不可用）：{e}"));
                 }
@@ -636,12 +635,14 @@ impl ClientApp {
                         // 该会话的输入草稿随会话一起清掉（否则会话列表里删了、
                         // 草稿还挂在 HashMap 里，长期不退出会缓涨）
                         // 该会话的输入框实体也不能留着（否则删掉的会话还能靠它"复活"输入内容）
-                        this.inputs.retain(|(k, _)| k.as_deref() != Some(id.as_str()));
+                        this.inputs
+                            .retain(|(k, _)| k.as_deref() != Some(id.as_str()));
                         // 轮状态记账同理：会话没了，那个 id 不该再占集合
                         this.running_sessions.remove(&id);
                         // 视图快照也要清：否则删掉的会话还能靠快照"复活"一份幽灵状态，
                         // 且白占 LRU 槽位
-                        this.parked.retain(|(k, _)| k.as_deref() != Some(id.as_str()));
+                        this.parked
+                            .retain(|(k, _)| k.as_deref() != Some(id.as_str()));
                         // 打开过的 Tab 也一并移除（否则 Tab 条上留一个点不开的幽灵）
                         this.open_tabs.retain(|t| t != &id);
                         if this.current_session.as_deref() == Some(id.as_str()) {

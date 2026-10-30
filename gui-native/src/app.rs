@@ -767,7 +767,8 @@ impl ClientApp {
         // 流式新开一步时用户的上滚位置也已经被抹掉了。
         // 改用 `splice` 在末尾**插入一项**：项数变了、现有锚点保持。
         let n = self.messages.len();
-        self.msg_list_state.splice(n.saturating_sub(1)..n.saturating_sub(1), 1);
+        self.msg_list_state
+            .splice(n.saturating_sub(1)..n.saturating_sub(1), 1);
         self.scroll_to_end_if_following();
         self.message_total = self.messages.len();
         idx

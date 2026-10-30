@@ -925,12 +925,12 @@ pub(crate) fn render_assistant_footer(
     footer = footer.child(div().flex_1());
     if !is_continuation {
         if let Some(ts) = &msg.ts {
-        footer = footer.child(
-            div()
-                .text_size(px(11.))
-                .text_color(rgb(colors::TEXT_TERTIARY()))
-                .child(ts.clone()),
-        );
+            footer = footer.child(
+                div()
+                    .text_size(px(11.))
+                    .text_color(rgb(colors::TEXT_TERTIARY()))
+                    .child(ts.clone()),
+            );
         }
     }
     footer.into_any_element()
