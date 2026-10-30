@@ -768,6 +768,7 @@ impl ClientApp {
             session_id,
             message_id,
             preview: ellipsis(text.trim(), 16),
+            text,
         });
         cx.notify();
     }
@@ -778,6 +779,7 @@ impl ClientApp {
         &mut self,
         session_id: String,
         message_id: String,
+        text: String,
         cx: &mut Context<Self>,
     ) {
         self.dialog = None;
@@ -790,6 +792,13 @@ impl ClientApp {
                 match res {
                     Ok(_) => {
                         this.set_status("已回退".to_string());
+                        // 把被回退的那条用户输入**放回输入框**（用户实测指出
+                        // 「回退后没有回到输入框中，导致要重新输入」）。
+                        // 异步回调拿不到 `&mut Window`，所以写进待回填槽位，
+                        // 由下一次 `render` 落进编辑器（那里一定有窗口）。
+                        if !text.trim().is_empty() {
+                            this.pending_composer_text = Some(text);
+                        }
                         this.load_messages(session_id.clone(), cx);
                         this.load_session_usage(cx);
                         this.load_sessions(cx);

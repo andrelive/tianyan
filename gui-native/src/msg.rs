@@ -27,7 +27,29 @@ use std::sync::{Arc, Mutex};
 /// 宽松是有意的——横截图（1024×640）按高度 240 缩放后是 384×240，正是 vite 的
 /// 观感；窄窗口下再由气泡自身收窄。
 const BUBBLE_IMG_MAX_W: f32 = 608.0;
-const BUBBLE_IMG_MAX_H: f32 = 240.0;
+/// 会话内图片的**统一高度**（不是上限，是锁定值）。
+///
+/// 用户实测提出两条：①「图片还保持原有大小，太影响视野」②「应该缩小并保持同一
+/// 高度」。所以这里不再是 `max_h`（每张图按自己比例缩，小图还维持原高），而是
+/// **锁高**：所有图高度一致、宽度按比例（见 [`fit_image_size_locked_h`]），
+/// 连续多张图并排时视觉整齐。
+const BUBBLE_IMG_LOCK_H: f32 = 160.0;
+
+/// 按**锁定高度**等比缩放：高度恒为 `lock_h`，宽度按原比例；超宽图（全景/长截图）
+/// 再按 `max_w` 二次收缩，避免一张超宽图把整列撑满。
+pub(crate) fn fit_image_size_locked_h(w: u32, h: u32, max_w: f32, lock_h: f32) -> (f32, f32) {
+    if w == 0 || h == 0 {
+        return (lock_h.max(1.0), lock_h.max(1.0));
+    }
+    let mut sw = w as f32 * (lock_h / h as f32);
+    let mut sh = lock_h;
+    if sw > max_w {
+        let k = max_w / sw;
+        sw *= k;
+        sh *= k;
+    }
+    (sw.max(1.0), sh.max(1.0))
+}
 
 /// 从消息 JSON 取 `usage`；`prompt_tokens == 0` 视为没有（老消息 / 提供商未上报）。
 pub(crate) fn parse_msg_usage(msg: &serde_json::Value) -> Option<MsgUsage> {
@@ -180,24 +202,6 @@ pub(crate) fn image_dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
         .with_guessed_format()
         .ok()?;
     reader.into_dimensions().ok()
-}
-
-/// 按「宽高都不超过上限」等比缩放，返回**要显式设置的** `(w, h)`（px）。
-///
-/// 为什么必须自己算，而不是交给 `.max_w()/.max_h()`：
-/// GPUI 的 `img()` 在 `size` 为 Auto 时会把元素尺寸设成**图片原始像素**
-/// （实测算过：1024×640 的截图 → `style.size = 1024×640`），随后 `max_w` 与
-/// `max_h` 是**两次独立钳制**（各自取 min），并不等比。于是
-/// `max_w(240) + max_h(240)` 得到的是 **240×240 的正方框**，图片再按
-/// `ObjectFit::Contain` 居中画成 240×150 —— 上下各 45px 空白（用户实测
-/// 「图片上下有大量空白」）。显式 `w`/`h` 才是真正的等比缩放。
-///
-/// 小图不放大（`scale` 上限 1.0），与 vite 的 `max-w/max-h` 同语义。
-pub(crate) fn fit_image_size(w: u32, h: u32, max_w: f32, max_h: f32) -> (f32, f32) {
-    let w = w.max(1) as f32;
-    let h = h.max(1) as f32;
-    let scale = (max_w / w).min(max_h / h).min(1.0);
-    ((w * scale).max(1.0).round(), (h * scale).max(1.0).round())
 }
 
 /// 只拼 `text` 段（**不含**思考与工具）——`MsgRow.text` 的取值口径。
@@ -1105,8 +1109,9 @@ pub(crate) fn render_msg_body(
                         // `max_w`+`max_h` 会被 GPUI 钳成正方框，上下留白）。
                         // 宽度上限取气泡内宽（气泡 640 − `px_4` 两侧 32 = 608），
                         // 高度上限 240 对齐 vite 的 `max-h-[240px]`。
-                        let sized = image_dimensions(&bytes)
-                            .map(|(w, h)| fit_image_size(w, h, BUBBLE_IMG_MAX_W, BUBBLE_IMG_MAX_H));
+                        let sized = image_dimensions(&bytes).map(|(w, h)| {
+                            fit_image_size_locked_h(w, h, BUBBLE_IMG_MAX_W, BUBBLE_IMG_LOCK_H)
+                        });
                         let arc = std::sync::Arc::new(gpui_kit::Image::from_bytes(format, bytes));
                         // 点击放大（对齐 vite `ZoomableImage`）：把 Arc 交给
                         // ClientApp，根层渲染全屏遮罩 + 大图
@@ -1127,7 +1132,7 @@ pub(crate) fn render_msg_body(
                                     // 会有留白，但至少图还在
                                     None => gpui_kit::img(gpui_kit::ImageSource::Image(arc))
                                         .max_w(px(BUBBLE_IMG_MAX_W))
-                                        .max_h(px(BUBBLE_IMG_MAX_H))
+                                        .max_h(px(BUBBLE_IMG_LOCK_H))
                                         .rounded_lg(),
                                 })
                                 .on_click(move |_, _, cx| {
@@ -1342,7 +1347,18 @@ pub(crate) fn render_msg_body(
     if !msg.compression {
         body = body.child(render_assistant_footer(msg, mi, is_continuation));
     }
-    div().px_4().py_2().w_full().child(body).into_any_element()
+    // 同一轮的**后续步骤**（工具步）压紧上下留白。
+    //
+    // 一轮多工具时每一步都是一条独立 `MsgRow`，若都用 `py_2`，卡片之间会堆出
+    // 16px（上下 padding）+ 8px（body gap）的空白 —— 用户实测「同一轮次的工具调用
+    // 之间间隔过大，建议参考思考过程和工具的间隔」。轮与轮之间仍保留 `py_2`。
+    let pad_y = if is_continuation { 1.0 } else { 8.0 };
+    div()
+        .px_4()
+        .py(px(pad_y))
+        .w_full()
+        .child(body)
+        .into_any_element()
 }
 /// 消息区里可折叠块的展开状态（思考块 / 工具参数 / 工具结果）。
 ///
@@ -1525,37 +1541,48 @@ mod image_layout_tests {
     //! `max_w`/`max_h` 各自独立钳制 → 正方框 + Contain 居中），这个结论无法靠
     //! 界面断言稳定表达；判据本身是纯函数，单测能钉住「等比、不放大、不超上限」。
     //! ⚠️ 不写 `use super::*`（bin crate 根是 main.rs，glob 会撞 recursion_limit）。
-    use crate::msg::{fit_image_size, image_dimensions};
+    use crate::msg::{fit_image_size_locked_h, image_dimensions};
 
+    /// 会话内图片的**锁高**语义（用户实测提出的两条：`太影响视野` + `保持同一高度`）：
+    /// 高度恒为锁定值，宽度按原比例；超宽图再按宽度二次收缩。
     #[test]
-    fn wide_screenshot_scales_by_height() {
-        // 1024×640 的截图：高 240 是约束边 → 384×240（正是 vite 的观感）
-        assert_eq!(fit_image_size(1024, 640, 608.0, 240.0), (384.0, 240.0));
+    fn wide_screenshot_keeps_locked_height() {
+        // 1024×640 → 高 160 → 宽 256
+        assert_eq!(
+            fit_image_size_locked_h(1024, 640, 608.0, 160.0),
+            (256.0, 160.0)
+        );
     }
 
     #[test]
-    fn tall_image_scales_by_height_too() {
-        // 640×1024 竖图：仍按 240 高 → 150×240
-        assert_eq!(fit_image_size(640, 1024, 608.0, 240.0), (150.0, 240.0));
+    fn tall_image_also_locked_height() {
+        // 640×1024 竖图 → 高仍 160 → 宽 100（**同一高度**，这正是用户要的整齐观感）
+        assert_eq!(
+            fit_image_size_locked_h(640, 1024, 608.0, 160.0),
+            (100.0, 160.0)
+        );
     }
 
     #[test]
-    fn small_image_is_not_upscaled() {
-        // 比上限小的图保持原尺寸（vite `max-w/max-h` 同语义，小图不该被拉糊）
-        assert_eq!(fit_image_size(100, 80, 608.0, 240.0), (100.0, 80.0));
+    fn small_image_is_upscaled_to_locked_height() {
+        // 小图也拉到锁高（否则多图并排时高矮不齐）；100×80 → 200×160
+        assert_eq!(
+            fit_image_size_locked_h(100, 80, 608.0, 160.0),
+            (200.0, 160.0)
+        );
     }
 
     #[test]
-    fn ultra_wide_scales_by_width() {
-        // 3000×500：宽度先到上限 → 608×101（不会因高度约束被拉高）
-        let (w, h) = fit_image_size(3000, 500, 608.0, 240.0);
+    fn ultra_wide_is_capped_by_width() {
+        // 3000×500 全景：先按锁高得 960 宽 → 超 608 → 二次收缩到 608×101
+        let (w, h) = fit_image_size_locked_h(3000, 500, 608.0, 160.0);
         assert_eq!(w, 608.0);
-        assert!((h - 101.0).abs() <= 1.0, "高度应约为 101，实际 {h}");
+        assert!((h - 101.33).abs() <= 1.0, "高度应约为 101，实际 {h}");
     }
 
     #[test]
     fn degenerate_input_never_yields_zero() {
-        let (w, h) = fit_image_size(0, 0, 608.0, 240.0);
+        let (w, h) = fit_image_size_locked_h(0, 0, 608.0, 160.0);
         assert!(w >= 1.0 && h >= 1.0, "零尺寸必须兜成 1px，否则布局会 panic");
     }
 

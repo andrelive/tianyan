@@ -240,6 +240,7 @@ impl ClientApp {
             streaming: false,
             turn_running: false,
             messages_epoch: 0,
+            pending_composer_text: None,
             view: View::Chat,
             models: Vec::new(),
             settings_status: "正在加载模型列表…".to_string(),

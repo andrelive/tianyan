@@ -396,6 +396,12 @@ struct ClientApp {
     /// 把新内容冲掉 —— 表现为「进会话先看到内容、一闪又空了」。
     /// 落地前比对世代号，变了就丢弃这一页（宁可不显示，也不要显示过期的）。
     pub(crate) messages_epoch: u64,
+    /// 待回填到输入框的文本（异步结果 → 编辑器）。
+    ///
+    /// 为什么需要这样一个槽位：`set_value` 需要 `&mut Window`，而回退等异步回调里
+    /// 只有 `&mut App`。写进这里，由下一次 `render`（一定有窗口）落进编辑器。
+    /// 首个用例：回退后把被回退的用户输入放回输入框。
+    pub(crate) pending_composer_text: Option<String>,
     /// 当前视图
     pub(crate) view: View,
     /// 设置页：模型列表（`GET /api/v1/config/models`）
@@ -700,6 +706,12 @@ impl Render for ClientApp {
         // 输入框是新建的实体，旧订阅留在弃用的那个上 —— 那时回车只换行、不发送。
         // 这里每帧比一次 `EntityId`（不同才重挂），兜住"拿不到 `&mut Window` 的换实体路径"。
         self.ensure_composer_submit(window, cx);
+        // 待回填文本（异步结果 → 编辑器）：只在**当前**输入框实体上落一次。
+        // 首个用例 = 回退后把被回退的用户输入放回输入框（用户实测指出该缺）。
+        if let Some(text) = self.pending_composer_text.take() {
+            self.input
+                .update(cx, |state, cx| state.set_value(text, window, cx));
+        }
         // 说明：设置页/人设的编辑器回填**不在这里做**——窗口隐藏时不会触发渲染，
         // 而自动化验收正是隐藏窗口跑的。回填统一走 `window_handle.update` 现取窗口
         // （见 `backfill_settings_fields` / `set_soul_text`）。

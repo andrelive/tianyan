@@ -206,8 +206,9 @@ impl ClientApp {
                                 Some(Dialog::RollbackMessage {
                                     session_id,
                                     message_id,
+                                    text,
                                     ..
-                                }) => this.confirm_rollback(session_id, message_id, cx),
+                                }) => this.confirm_rollback(session_id, message_id, text, cx),
                                 Some(Dialog::EditApproval { request_id, .. }) => {
                                     this.confirm_edit_approval(request_id, cx)
                                 }

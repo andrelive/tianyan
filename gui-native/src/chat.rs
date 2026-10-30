@@ -799,8 +799,11 @@ impl ClientApp {
                 break;
             }
         }
-        let rows = rows.max(2.0);
-        (rows * LINE_H + PAD).clamp(64.0, 200.0)
+        // 最少**一行**（早先是 2 行 = 68px，用户实测指出「输入框文字下面一直留着
+        // 这么高的高度」——那不是图片残留，就是这条 `max(2.0)` 撑出来的）。
+        // 单行 = 21 + 26 ≈ 47px，与 vite `min-h-[3.5rem]` 的观感一致。
+        let rows = rows.max(1.0);
+        (rows * LINE_H + PAD).clamp(44.0, 200.0)
     }
 
     /// 输入卡片 = **一体式卡片**（对齐 Tauri 版 `ChatInput`）：
@@ -1568,6 +1571,10 @@ impl ClientApp {
                 continue;
             };
             let arc = std::sync::Arc::new(gpui_kit::Image::from_bytes(fmt, bytes));
+            // 缩略图点击放大（对齐会话内图片的行为）：与消息里的图片走**同一个**
+            // 全屏遮罩（`ClientApp::zoomed_image`），不再出现「会话里的图能放大、
+            // 输入框里的不能」（用户实测指出）。
+            let arc_for_click = arc.clone();
             strip = strip.child(
                 div()
                     .flex()
@@ -1575,15 +1582,24 @@ impl ClientApp {
                     .items_start()
                     .gap_1()
                     .child(
-                        gpui_kit::img(gpui_kit::ImageSource::Image(arc))
-                            // 对齐 vite `ChatInput` 的 `w-16 h-16 rounded-lg object-cover`：
-                            // **定尺寸 + Cover 裁剪**，不是 `max_w/max_h` 的
-                            // Contain —— 后者元素框是 64×64 而图非正方形时会
-                            // 上下/左右留白（用户实测的「缩略图上下有白条」）。
-                            .w(px(64.))
-                            .h(px(64.))
-                            .object_fit(gpui_kit::ObjectFit::Cover)
-                            .rounded_md(),
+                        div()
+                            .id(("attach-img", i))
+                            .cursor_pointer()
+                            .child(
+                                gpui_kit::img(gpui_kit::ImageSource::Image(arc))
+                                    // 对齐 vite `ChatInput` 的 `w-16 h-16 rounded-lg object-cover`：
+                                    // **定尺寸 + Cover 裁剪**，不是 `max_w/max_h` 的
+                                    // Contain —— 后者元素框是 64×64 而图非正方形时会
+                                    // 上下/左右留白（用户实测的「缩略图上下有白条」）。
+                                    .w(px(64.))
+                                    .h(px(64.))
+                                    .object_fit(gpui_kit::ObjectFit::Cover)
+                                    .rounded_md(),
+                            )
+                            .on_click(cx.listener(move |this, _, _w, cx| {
+                                this.zoomed_image = Some(arc_for_click.clone());
+                                cx.notify();
+                            })),
                     )
                     .child(
                         div()
