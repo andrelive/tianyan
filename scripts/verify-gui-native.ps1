@@ -139,7 +139,21 @@ if ($running -and $Restart) {
     # --release` 报「拒绝访问」，而且每跑一次验收就攒一个隐形实例。
     try { Act @{ action = "quit" } 200 | Out-Null } catch { }
     Start-Sleep -Milliseconds 1500
-    Get-Process tianyan-gui-native -ErrorAction SilentlyContinue | Stop-Process -Force
+    # ⚠️ **只杀本脚本用的那份 exe**（按 Path 精确匹配，不是按进程名）。
+    # 已安装版与开发版**进程同名**（都叫 tianyan-gui-native.exe），按名字杀会把
+    # 用户正在用的实例一起带走 —— 实测踩过：一次 `Get-Process tianyan-gui-native
+    # | Stop-Process` 把用户桌面上跑着的 `%LOCALAPPDATA%\Programs\Tianyan\` 那个
+    # 杀了，而脚本要清的只是 `gui-native\target\release\` 这份。
+    $exeFull = [System.IO.Path]::GetFullPath($exe)
+    Get-Process tianyan-gui-native -ErrorAction SilentlyContinue | ForEach-Object {
+        $p = $_
+        # 受保护/已退出进程读 `.Path` 会抛，逐进程兜住而不是让整段失败
+        $path = $null
+        try { $path = $p.Path } catch { }
+        if ($path -and ([System.IO.Path]::GetFullPath($path) -ieq $exeFull)) {
+            Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
+        }
+    }
     Start-Sleep -Milliseconds 500
     $running = $false
 }

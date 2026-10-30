@@ -255,7 +255,7 @@ Tauri 版由监督循环在进程内完成；原生端在上一次进程退出�
 
 ## MSI 打包与自动更新（已实测）
 
-### 1.1.0 修的十处（用户实测反馈）
+### 1.1.0 修的十一处（用户实测反馈 + 顺手修）
 
 | # | 症状 | 根因 / 修法 |
 |---|---|---|
@@ -269,6 +269,7 @@ Tauri 版由监督循环在进程内完成；原生端在上一次进程退出�
 | 8 | **「↑ 加载更早的消息」常驻在消息区上方** | 早先判据只有 `has_more_history`（库里有更早的）。改为**滚到列表顶部才出现**：列表容器挂 `on_scroll_wheel` → `cx.notify()` 重渲染，渲染时读 `logical_scroll_top().item_ix == 0`（不消费事件，列表照常滚）。state 加 `messages.older_button_visible` 可断言 |
 | 9 | **多会话切换时上下抖动** | `render_usage_line` 无数据时返回 0 高元素；而 `open_session` 会清空 `session_usage`/`request_perf` 等新数据 → 整行消失、输入区矮 24px → 消息列表可视高度跟着变。改为恒定高度 `USAGE_LINE_H = 24`（空数据也占位） |
 | 10 | **输入框文字跨会话残留（第一次"修"了但没修好）** | ⚠️ 这是全项目最容易重犯的一类：上一轮用 `window_handle.update(...)` 写输入框。真实点击（切会话/新建会话/关 Tab/目录选择器）发生在 `on_click` 里，**窗口已在借用中** → 对同一窗口二次借用返回 `Err`，而代码写的是 `let _ =`（静默吞掉）→ 输入框根本没被改写。自动化路径（HTTP handler）不在借用中，所以上一轮自动化实测全绿、用户照样踩坑。修法：`open_session`/`start_new_session`/`close_tab`/`confirm_workspace_picker` 收 `Option<&mut Window>`，`on_click` 传 `Some(window)` 直接写（先例 `insert_into_composer`）；自动化传 `None` 走 handle 且失败 `set_error`。诊断字段 `messages.draft_restore_path`（window/handle/handle-failed） |
+| 11 | 知识库列表**全是 64 位哈希**，认不出是哪份文档（顺手修） | 条目名 `name` 是摄入时算出的内容 sha256，而给人看的 L0 摘要就在旁边没人用。`GET /knowledge/entries` 增加 `abstract_excerpt`（合并空白 + 按**字符**限长 200，不会切出半个 UTF-8；无摘录时字段省略）——数据取自同一次 `vfs.list` 已读出的 `ContextEntry`，**零额外 IO**。UI 有摘录即以它为标题，哈希退成右侧 `c45badca…  L0 L1 L2` 短标记。原始文件名暂不可得：`original_name` 只进了向量 payload，`vfs_entries` 表没有该列（存量条目也补不回，要补得加列 + 迁移） |
 
 > **第 10 条的教训（写进纪律）**：`AnyWindowHandle::update` 给的是 `&mut AnyView`，
 > 拿不到 `&mut ClientApp`，所以**自动化永远构造不出 `on_click` 的借用上下文**。
@@ -286,7 +287,7 @@ Tauri 版由监督循环在进程内完成；原生端在上一次进程退出�
 
 ```powershell
 cd gui-native
-cargo build --release                 # build.rs 会把 tauri/icons/icon.ico 嵌进 exe 资源
+cargo build --release                 # build.rs 会把 assets/icon.ico 嵌进 exe 资源
 pwsh -NoProfile -File ..\scripts\verify-gui-native.ps1 -Release   # 77 项断言（验的是要发的那份）
 # 打包：**不要直接调 wix**，走脚本（版本从 Cargo.toml 读出后注入，产物名同源）
 pwsh -NoProfile -File installer\build-msi.ps1        # 默认会先 cargo build --release
@@ -308,7 +309,7 @@ msiexec /i installer\tianyan-native-<ver>-x64.msi /qn   # perUser：2.8 秒，�
 |---|---|---|
 | 名称/版本 | 「天演原生客户端（验证）」0.1.3.0 | 「天演」1.0.1.0（与 server / tauri 版对齐，ARP 里看起来是同一个产品） |
 | 二进制 | `target\debug` | `target\release`（PE `Subsystem=2`，无控制台窗口） |
-| 图标 | 无 | `build.rs` 嵌 exe 图标（复用 `tauri/icons/icon.ico`）+ ARP/快捷方式图标 |
+| 图标 | 无 | `build.rs` 嵌 exe 图标（取自本 crate 的 `assets/icon.ico`）+ ARP/快捷方式图标 |
 | 安装位置 | `%LOCALAPPDATA%\Programs\TianyanGuiNative` | `%LOCALAPPDATA%\Programs\Tianyan`（**不碰** tauri 的 `D:\Program Files\Tianyan`——那里已被历史产物污染） |
 | 快捷方式 | 无 | 开始菜单「天演」 |
 | 数据目录 | 不动 | 不动（`D:\tianyan` 由配置决定，卸载不删） |
