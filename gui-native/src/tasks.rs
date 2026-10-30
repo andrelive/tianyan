@@ -781,6 +781,11 @@ impl ClientApp {
                     }
                 }
                 let _ = this.update(cx, |this, cx| {
+                    // 审批是会话内的：请求期间切走就丢弃（否则会把上一个会话的待审批
+                    // 挂到当前会话上，诱导用户给不相干的命令授权）
+                    if this.current_session != session {
+                        return;
+                    }
                     this.pending_approvals = rows;
                     cx.notify();
                 });
@@ -1012,6 +1017,10 @@ impl ClientApp {
                 }
             }
             let _ = this.update(cx, |this, cx| {
+                // 切走了就丢弃（否则上一个会话的待办 / 目标写进当前会话）
+                if this.is_stale_for(&sid) {
+                    return;
+                }
                 this.todos = todos;
                 this.goals = goals;
                 cx.notify();

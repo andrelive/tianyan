@@ -1586,7 +1586,21 @@ impl ClientApp {
                 return;
             }
             let _ = this.update(cx, |this, cx| {
-                this.composer_images.extend(urls);
+                // 与粘贴通道**同一个**上限（Web 版 4 张）。选图走的是 OS 多选，一次
+                // 可能带回来十几个——早先只有粘贴通道拦了，选图可以无限加（不一致，
+                // 实测：选 8 张就真进了 8 张）。
+                let mut dropped = 0usize;
+                for u in urls {
+                    if this.composer_images.len() < MAX_COMPOSER_IMAGES {
+                        this.composer_images.push(u);
+                    } else {
+                        dropped += 1;
+                    }
+                }
+                if dropped > 0 {
+                    this.status =
+                        format!("超出上限的 {dropped} 张未加入（最多 {MAX_COMPOSER_IMAGES} 张）");
+                }
                 cx.notify();
             });
         })

@@ -673,6 +673,28 @@ impl ClientApp {
                 self.status = format!("出错：{msg}");
                 self.append_delta(&format!("\n\n> ⚠️ {msg}\n"));
             }
+            // ADR-031：用户消息落库确认 —— 把服务端真实 id 补到本地那条乐观行上。
+            // 这个 chunk_type 早先没处理（落进 `_ => {}`），于是用户消息的 id 永远
+            // 是空，`msg.rs` 里「仅已落库消息才给回退入口」的判断一直为假：
+            // 发完消息想「回退到此」得重开会话才行。
+            "user_message_id" => {
+                let real = ev
+                    .get("message_id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default();
+                if !real.is_empty() {
+                    let mut next: Vec<MsgRow> = (*self.messages).clone();
+                    // 从末尾找第一条还没 id 的 user 行（就是那条乐观渲染的占位）
+                    if let Some(m) = next
+                        .iter_mut()
+                        .rev()
+                        .find(|m| m.role == "user" && m.id.is_empty())
+                    {
+                        m.id = real.to_string();
+                        self.messages = Rc::new(next);
+                    }
+                }
+            }
             "turn_state" => {
                 let state = ev
                     .get("turn_state")
@@ -1032,7 +1054,16 @@ impl ClientApp {
 
         let port = self.port;
         // 图片走 `message.images`（data URL 数组；后端 `CoreMessage::user_with_images`）
-        let mut message = serde_json::json!({ "role": "user", "content": text });
+        // ADR-031 乐观渲染定位键：后端落库后经 `user_message_id` 确认事件回显**真实
+        // id**（回退/删除按它定位）。早先没带这个字段，后端就不发确认事件 →
+        // 用户消息的 id 永远是空 → 「回退到此」要重开会话才出现（实测：发完消息
+        // 想立刻撤销做不到）。
+        let local_umid = format!("umid_{}", chrono::Utc::now().timestamp_millis());
+        let mut message = serde_json::json!({
+            "role": "user",
+            "content": text,
+            "user_message_id": local_umid,
+        });
         if !pending_images.is_empty() {
             message["images"] = serde_json::json!(pending_images);
         }
@@ -1119,6 +1150,10 @@ impl ClientApp {
                     let total = n;
                     cx.update(|app| {
                         let _ = this.update(app, |this, cx| {
+                            // 请求期间切走了 → 丢弃（否则上一个会话的消息会顶掉当前会话的）
+                            if this.is_stale_for(&session_id) {
+                                return;
+                            }
                             this.messages = Rc::new(rows);
                             // 条数变了必须重建 list state（item_count 在构造时固定）
                             this.msg_list_state = GpuiListState::new(
@@ -1180,6 +1215,10 @@ impl ClientApp {
             let res = fetch_json(url).await;
             let _ = this.update(cx, |this, cx| {
                 this.loading_older = false;
+                // 加载期间切走了 → 丢弃这一页（否则会把上一个会话的更早消息前插进来）
+                if this.is_stale_for(&sid) {
+                    return;
+                }
                 let body = match res {
                     Ok(b) => b,
                     Err(e) => {
@@ -1317,6 +1356,16 @@ impl ClientApp {
     /// - `/usage/recent?limit=1&session_id=` 最近一条样本（ttft / 时长 / 输出 token）
     ///
     /// 失败**静默保留旧值**：统计条是观测面，不能因一次抖动把已有数字清空。
+    /// 异步回调落地前的会话守卫。
+    ///
+    /// 请求发出后用户可能已经切走——此时**必须丢弃**这份结果，否则上一个会话的
+    /// 数据会写进当前会话（实测场景：快速连点两个会话，第一个的响应后到，
+    /// 消息列表 / 待办 / 审批 / 用量就会短暂串台，看到的是别人的内容）。
+    /// 只认 `current_session`，不看 `open_tabs`：Tab 里留着不等于「还看着它」。
+    pub(crate) fn is_stale_for(&self, session: &str) -> bool {
+        self.current_session.as_deref() != Some(session)
+    }
+
     pub(crate) fn load_session_usage(&self, cx: &mut Context<Self>) {
         let Some(sid) = self.current_session.clone() else {
             return;
@@ -1369,6 +1418,10 @@ impl ClientApp {
                     Some((ttft, duration, completion))
                 });
             let _ = this.update(cx, |this, cx| {
+                // 切走了就丢弃（否则上一个会话的用量 / 性能写进当前会话）
+                if this.is_stale_for(&sid) {
+                    return;
+                }
                 this.session_usage = usage;
                 this.request_perf = perf;
                 cx.notify();
