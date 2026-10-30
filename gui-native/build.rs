@@ -4,19 +4,21 @@
 //! 图标），不嵌就是白板图标——做成 MSI 发给用户后，任务栏、开始菜单、Alt+Tab 里
 //! 都认不出是天演，观感比 tauri 版差一大截。
 //!
-//! 图标**复用 tauri 版那一套**（`tauri/icons/icon.ico`，内含 16~256 多尺寸），
-//! 这样两个客户端在系统里长得一模一样：替换安装时用户不会觉得「换了个软件」。
+//! 图标放在本 crate 自己的 `assets/icon.ico`（内含 16~256 多尺寸，原样取自 tauri
+//! 版那一套——这样替换安装时用户不会觉得「换了个软件」）。**不要**再指向
+//! `../tauri/icons/`：tauri 壳已冻结、目录迟早要删，指向它会让打包在删目录那天
+//! 突然断掉（`winres` 找不到图标 → exe 变白板图标，MSI 更是直接打包失败）。
 //!
 //! 失败不致命：嵌不进去只影响观感，构建照常继续（`cargo:warning` 会提示）。
 
 fn main() {
     // 图标或版本变了要重新跑本脚本（否则 cargo 认为 exe 无需重链）
-    println!("cargo:rerun-if-changed=../tauri/icons/icon.ico");
+    println!("cargo:rerun-if-changed=assets/icon.ico");
     println!("cargo:rerun-if-changed=build.rs");
 
     #[cfg(windows)]
     {
-        let ico = std::path::Path::new("../tauri/icons/icon.ico");
+        let ico = std::path::Path::new("assets/icon.ico");
         if !ico.exists() {
             println!("cargo:warning=找不到图标 {ico:?}，跳过嵌入（exe 将使用系统默认图标）");
             return;

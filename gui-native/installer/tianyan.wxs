@@ -40,8 +40,9 @@
                   DowngradeErrorMessage="已安装更新版本的天演，无需降级安装。" />
     <MediaTemplate EmbedCab="yes" CompressionLevel="high" />
 
-    <!-- ARP（控制面板）里的图标 -->
-    <Icon Id="AppIcon" SourceFile="..\..\tauri\icons\icon.ico" />
+    <!-- ARP（控制面板）里的图标。取自本 crate 的 `assets/icon.ico`（与 build.rs 嵌进
+         exe 的是同一份文件）——不再引用 `tauri/icons/`，否则删 tauri 目录时打包会断。 -->
+    <Icon Id="AppIcon" SourceFile="..\assets\icon.ico" />
     <Property Id="ARPPRODUCTICON" Value="AppIcon" />
 
     <!-- 「设置 → 应用」里显示的版本。
