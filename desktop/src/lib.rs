@@ -1,9 +1,9 @@
 //! 天演桌面端共享启动编排：内嵌 server 的**单实例发现与复用**。
 //!
 //! `tauri/`（Tauri + React）与 `gui-native/`（GPUI）是同一产品的两个桌面壳，
-//! 各有自己的内嵌 axum server。此前两者的启动编排各写一遍（`find_available_port`
-//! + `start_axum_server` 逐字两份），而**端口探测只能避免端口冲突，不能避免
-//! 数据目录双写**：
+//! 各有自己的内嵌 axum server。此前两者的启动编排各写一遍
+//! （`find_available_port` 与 `start_axum_server` 逐字两份），而**端口探测只能
+//! 避免端口冲突，不能避免数据目录双写**：
 //!
 //! ```text
 //! desktop 版先起 → 占 3000、跑定时任务、写 D:\tianyan
@@ -31,6 +31,11 @@
 //!
 //! 本 crate 通过 `tianyan_assembly::full()` 取插件清单，**不直接认识任何插件 crate**，
 //! 因此没有引入第二份装配清单；它只是「装配器的启动编排段」。
+
+// 与全仓其余 crate 一致：测试里 `unwrap`/`expect` 是断言手段，不是生产代码的
+// 错误处理方式。缺了这一行，`cargo clippy --all-targets -- -D warnings`
+// （`scripts/test.ps1 lint` 与 CI 的同一道门）会把 9 处测试断言升成 error。
+#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
 use std::path::Path;
 use std::time::Duration;

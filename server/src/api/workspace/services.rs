@@ -333,8 +333,9 @@ impl WorkspaceService {
     ///   其余平台返回家目录下的子目录（parent = None）。
     /// - 指定路径 → 列出该目录的子目录（parent = 上级目录，根目录时 None）。
     /// - 与 [`Self::tree`] 不同：这是**任意路径浏览**（工作区选择器用），
-    ///   不限于当前 working_directory；只列目录不列文件；目录不存在 → 404。
-    /// 列某一级目录的内容（`include_files` 决定是否同时列文件）。
+    ///   不限于当前 working_directory；目录不存在 → 404。
+    ///
+    /// `include_files` 为真时同时列出文件（默认只列目录）。
     pub async fn list_dirs(
         &self,
         path: Option<&str>,
