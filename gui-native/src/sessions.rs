@@ -9,7 +9,7 @@ use crate::format::*;
 use crate::theme::colors;
 use crate::types::*;
 use gpui_kit::assets::IconName;
-use gpui_kit::component::input::InputState;
+use gpui_kit::component::input::{InputState, TextareaState};
 
 impl ClientApp {
     pub(crate) fn load_sessions(&self, cx: &mut Context<Self>) {
@@ -196,6 +196,27 @@ impl ClientApp {
         self.rebuild_session_rows(cx);
     }
 
+    /// 切会话时收起**与会话/输入框绑定**的弹窗。
+    ///
+    /// 为什么必须收：`DeleteSession` / `RenameSession` / `RollbackMessage` 都带具体的
+    /// `session_id`，留在界面上会让用户以为在操作当前会话——**点确认删的却是上一个**
+    /// （实测过的坑：开着「删除会话 A」的框切到 B，框还在）。`WorkspacePicker` 与
+    /// `FilePicker` 的目标是「当前会话 / 当前输入框」，切完会话语义已变，同样要收。
+    /// `ResetRole` / `DeleteRole` 是角色页的，与会话无关，**不清**。
+    fn dismiss_session_scoped_dialogs(&mut self) {
+        if matches!(
+            self.dialog,
+            Some(Dialog::DeleteSession { .. })
+                | Some(Dialog::RenameSession { .. })
+                | Some(Dialog::RollbackMessage { .. })
+                | Some(Dialog::WorkspacePicker { .. })
+                | Some(Dialog::FilePicker { .. })
+        ) {
+            self.dialog = None;
+            self.dialog_input = None;
+        }
+    }
+
     // ────────────────────────────────────────────────────────────────────
     // 会话视图状态：park / restore（机制与理由见 `SessionSnapshot` 的文档注释）
     // ────────────────────────────────────────────────────────────────────
@@ -205,7 +226,15 @@ impl ClientApp {
     /// 必须在**切走之前**调用。键 = `current_session`（`None` = 还没发首条消息的
     /// 新会话——它同样有主屏/面板状态，不能因为没 id 就丢）。
     pub(crate) fn park_view_state(&mut self) {
-        let key = self.current_session.clone();
+        // ⚠️ 新会话（`current_session == None`）**不 park**。
+        // `start_new_session` 是「先 park 本会话、再按新键 restore」：两次都命中
+        // `None` 键就等于自存自读，界面还是上一份内容。旧 `drafts` 方案栽过同一个
+        // 坑（「点新建会话，输入框里还是上一段文字」），换实现时这条结论**必须**
+        // 跟着搬过来——实测：实体化后忘搬，同一 bug 立刻复现。
+        let Some(key) = self.current_session.clone() else {
+            self.reset_view_state();
+            return;
+        };
         // 完全空的会话不值得占 LRU 槽位（空白会话之间来回切时别把有用的挤掉）
         let empty = self.messages.is_empty()
             && self.message_total == 0
@@ -267,8 +296,9 @@ impl ClientApp {
             new_session_workspace: self.new_session_workspace.take(),
         };
         // LRU：同键先丢弃旧快照，最近使用的排到末尾
-        self.parked.retain(|(k, _)| k != &key);
-        self.parked.push((key, snap));
+        self.parked
+            .retain(|(k, _)| k.as_deref() != Some(key.as_str()));
+        self.parked.push((Some(key), snap));
         if self.parked.len() > MAX_PARKED_SESSIONS {
             self.parked.remove(0);
         }
@@ -374,70 +404,74 @@ impl ClientApp {
         true
     }
 
-    /// 保存当前输入草稿（按会话键；新会话用空串）。
+    /// 把当前输入框实体存进 `inputs`（`Entity` 是句柄，拷贝不复制状态）。
     ///
-    /// 切换会话 / 新建会话**之前**调用。空正文且无图片时不占位（顺手清掉空条目）。
-    pub(crate) fn save_composer_draft(&mut self, cx: &App) {
-        // 新会话（首条消息还没发，`current_session == None`）没有归属会话。
-        // 存进空串键会让**所有新建会话共用一个草稿桶**，而且 `start_new_session`
-        // 是「先存本会话、再按新键恢复」——两次都用同一个空键，等于自存自读，
-        // 于是「点新建会话，输入框里还是上一段文字」（用户实测）。直接不存。
+    /// 必须在**切走之前**调用。键 = `current_session`（`None` = 未落库的新会话，
+    /// 它同样有自己的输入框）。
+    pub(crate) fn park_input(&mut self) {
+        // 同上：新会话不 park（否则「新建会话 → 输入 → 再点新建」会读回自己）。
         let Some(key) = self.current_session.clone() else {
             return;
         };
-        let text = self.input.read(cx).value().to_string();
-        if text.trim().is_empty() && self.composer_images.is_empty() {
-            self.drafts.remove(&key);
-            return;
+        self.inputs
+            .retain(|(k, _)| k.as_deref() != Some(key.as_str()));
+        self.inputs.push((Some(key), self.input.clone()));
+        if self.inputs.len() > MAX_PARKED_SESSIONS {
+            self.inputs.remove(0);
         }
-        self.drafts
-            .insert(key, (text, self.composer_images.clone()));
     }
 
-    /// 恢复目标会话的草稿（`open_session` / `start_new_session` 设好键之后调用）。
+    /// 换到目标会话的输入框实体。
     ///
-    /// 经窗口句柄现取 `&mut Window`：`Context` 里没有 window，而
-    /// `TextareaState::set_value` 需要它（与 `backfill_settings_fields` 同一手法，
-    /// 不依赖 render —— 隐藏窗口下也必须生效）。
-    pub(crate) fn restore_composer_draft(
+    /// **没有就新建** —— 不能复用当前实体，否则两个会话共享同一份文本（那正是旧
+    /// `drafts` 方案要绕开的坑）。新建后若切换前焦点在输入框，把焦点还回去，
+    /// 否则用户切一次会话就得重新点一下输入框。
+    pub(crate) fn restore_input(
         &mut self,
-        window: Option<&mut Window>,
+        mut window: Option<&mut Window>,
         cx: &mut Context<Self>,
     ) {
-        // 新会话没有草稿可恢复：**必须清空**（不查任何桶）。早先这里用空串键兜底，
-        // 于是新建会话读到的是上一个新建会话残留的文字 —— 用户看到的「文字跟着
-        // 会话过去了」。
-        let (text, images) = match self.current_session.clone() {
-            Some(key) => self.drafts.get(&key).cloned().unwrap_or_default(),
-            None => (String::new(), Vec::new()),
-        };
-        self.composer_images = images;
-        // ⚠️ 两条路径的差别是**实测出来的 bug 根因**，别再合并回去：
-        //
-        // 真实点击（切会话 / 新建会话 / 关 Tab）发生在 `on_click` 回调里，那里
-        // 窗口已经在借用中；若再去 `window_handle.update(...)` 等于对同一个窗口
-        // 二次借用 → GPUI 返回 Err，而早先写的是 `let _ =`（静默吞掉）→ 输入框
-        // 根本没被改写，看起来就是「切换会话后上一个会话的文字还在」。
-        // 自动化路径（HTTP handler）不在窗口借用中，所以那条路一直成功——
-        // 这也是上一轮单测/自动化实测「全过」却仍被用户体验到的原因。
-        match window {
-            Some(window) => {
-                self.draft_restore_path = "window".to_string();
-                self.input
-                    .update(cx, |state, cx| state.set_value(text, window, cx));
-            }
-            None => {
+        // 切换前焦点是否在输入框。
+        // 走 `FocusHandle::is_focused(&Window)`：`InputBaseState` 本身没有 `is_focused`
+        // （实测 `no method named is_focused`），但它有固有的 `focus_handle()`。
+        let had_focus = window
+            .as_ref()
+            .map(|w| self.input.read(cx).focus_handle(cx).is_focused(&**w))
+            .unwrap_or(false);
+        let key = self.current_session.clone();
+        if let Some(i) = self.inputs.iter().position(|(k, _)| k == &key) {
+            // 有现成实体：换句柄（文本 / 光标 / undo 历史都在里面）
+            let (_, entity) = self.inputs.remove(i);
+            self.input = entity;
+            self.draft_restore_path = "restored".to_string();
+        } else {
+            // 新建：每个会话必须有自己的实体
+            let placeholder = "输入消息 · Enter 发送 / Shift+Enter 换行";
+            // 注意用 `as_mut()`（借而不是 move）：后面恢复焦点还要再用一次
+            if let Some(w) = window.as_mut() {
+                let w: &mut Window = &mut **w;
+                self.input = cx.new(|cx| TextareaState::new(w, cx).placeholder(placeholder));
+                self.draft_restore_path = "created-window".to_string();
+            } else {
+                // 自动化/后台路径没有 `&mut Window`（也不在窗口借用中）→ 现取
                 let handle = self.window_handle;
-                let input = self.input.clone();
-                // 这条路径只来自自动化/后台：失败要**可见**，不再静默
-                if let Err(e) = handle.update(cx, move |_, window, cx| {
-                    input.update(cx, |state, cx| state.set_value(text, window, cx));
+                let mut created: Option<Entity<TextareaState>> = None;
+                if let Err(e) = handle.update(cx, |_, w, cx| {
+                    created =
+                        Some(cx.new(|cx| TextareaState::new(w, cx).placeholder(placeholder)));
                 }) {
-                    self.draft_restore_path = format!("handle-failed: {e}");
-                    self.set_error(format!("草稿恢复失败（窗口不可用）：{e}"));
-                } else {
-                    self.draft_restore_path = "handle".to_string();
+                    self.set_error(format!("输入框创建失败（窗口不可用）：{e}"));
                 }
+                if let Some(e) = created {
+                    self.input = e;
+                    self.draft_restore_path = "created-handle".to_string();
+                }
+            }
+        }
+        if had_focus {
+            if let Some(w) = window.as_mut() {
+                let w: &mut Window = &mut **w;
+                self.input.update(cx, |state, cx| state.focus(w, cx));
             }
         }
     }
@@ -450,9 +484,10 @@ impl ClientApp {
         cx: &mut Context<Self>,
     ) {
         // 先存草稿：切走再切回写了一半的内容还在（与 Web 版 ChatInput 同语义）
-        self.save_composer_draft(cx);
+        self.park_input();
         // park 旧会话的视图状态（键 = 旧的 current_session），再切到「新会话」
         self.park_view_state();
+        self.dismiss_session_scoped_dialogs();
         self.current_session = None;
         // 「新会话」也有一份自己的视图状态（键 = None）：之前 park 过就恢复，
         // 首次则清默认。这样「新建会话 → 输入 → 切走 → 再点新建」不会带着上一次
@@ -468,7 +503,7 @@ impl ClientApp {
         // 附件也按会话存草稿（上面已 save），这里清空后由 restore 填回本档的草稿
         // ——不会把上一会话的附件误发到新会话，也不会丢掉自己写了一半的内容
         self.composer_images.clear();
-        self.restore_composer_draft(window, cx);
+        self.restore_input(window, cx);
         self.rebuild_session_rows(cx);
     }
 
@@ -482,8 +517,10 @@ impl ClientApp {
         // 切换前先存当前会话的草稿（写了一半的 prompt 不能因为点另一个会话就没了）
         // + park 视图状态（滚动位置 / 折叠 / 分页游标 / 面板）
         if self.current_session.as_deref() != Some(id.as_str()) {
-            self.save_composer_draft(cx);
+            self.park_input();
             self.park_view_state();
+            // 针对具体会话的弹窗不能跟着切过去（否则会误删上一个会话）
+            self.dismiss_session_scoped_dialogs();
         }
         self.current_session = Some(id.clone());
         // 浏览器式会话 Tab：打开过的会话留在顶部（去重；超上限丢最早且非当前的）
@@ -522,7 +559,7 @@ impl ClientApp {
         self.load_todos_goals(cx);
         self.load_approvals(cx);
         // 选中态与「当前会话始终可见」都体现在左栏行上
-        self.restore_composer_draft(window, cx);
+        self.restore_input(window, cx);
         self.rebuild_session_rows(cx);
     }
 
@@ -598,7 +635,8 @@ impl ClientApp {
                         this.sessions_data.retain(|s| s.id != id);
                         // 该会话的输入草稿随会话一起清掉（否则会话列表里删了、
                         // 草稿还挂在 HashMap 里，长期不退出会缓涨）
-                        this.drafts.remove(&id);
+                        // 该会话的输入框实体也不能留着（否则删掉的会话还能靠它"复活"输入内容）
+                        this.inputs.retain(|(k, _)| k.as_deref() != Some(id.as_str()));
                         // 轮状态记账同理：会话没了，那个 id 不该再占集合
                         this.running_sessions.remove(&id);
                         // 视图快照也要清：否则删掉的会话还能靠快照"复活"一份幽灵状态，

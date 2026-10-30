@@ -257,12 +257,18 @@ struct ClientApp {
     pub(crate) zoomed_image: Option<std::sync::Arc<gpui_kit::Image>>,
     /// 待发送的图片（data URL 列表）：控件行「图片」按钮选入，发送后清空
     pub(crate) composer_images: Vec<String>,
-    /// 按会话保存的输入草稿：`会话 id → (正文, 待发图片)`；新会话用空串当键。
+    /// 每会话一个**输入框实体**（`Entity<TextareaState>`）：光标位置、选区、undo
+    /// 历史、IME 状态都随会话独立。
     ///
-    /// 为什么要它：Web 版 `ChatInput` 按 `sessionId ?? PENDING` 存草稿，切走再切回
-    /// 写了一半的内容还在；原生早先切会话直接丢（输入框与图片都清空）——写长 prompt
-    /// 时最容易踩，且丢了就找不回来。
-    pub(crate) drafts: std::collections::HashMap<String, (String, Vec<String>)>,
+    /// 演进：早先切会话直接丢内容（写长 prompt 最容易踩），后来用
+    /// `drafts: HashMap<id, (文本, 图片)>` 手工存/取**文本**——功能是对的，但光标/
+    /// 选区/undo 仍然共享（因为底下只有一个 `self.input` 实体），而且「先存旧键、
+    /// 再读新键」那套手工搬运最容易写错（实测踩过自存自读、空键桶两个 bug）。
+    /// 现在改成「每会话一个实体」：切走时把句柄存进 `inputs`，切回时换回来——
+    /// 文本/光标/undo 一次到位，不再手工搬运。
+    ///
+    /// 与 `parked` 同构：最近使用的在末尾（LRU），上限 [`MAX_PARKED_SESSIONS`]。
+    pub(crate) inputs: Vec<(Option<String>, Entity<TextareaState>)>,
     /// 哪些会话**当前有轮在跑**（`turn_state` 事件驱动，含非当前会话）。
     ///
     /// 为什么需要它：`streaming` 只是「**当前**会话在跑」的渲染态，切走时会被

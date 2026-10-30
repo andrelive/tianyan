@@ -213,7 +213,7 @@ impl ClientApp {
             dialog: None,
             zoomed_image: None,
             composer_images: Vec::new(),
-            drafts: std::collections::HashMap::new(),
+            inputs: Vec::new(),
             running_sessions: std::collections::HashSet::new(),
             draft_restore_path: String::new(),
             parked: Vec::new(),
@@ -1008,9 +1008,9 @@ impl ClientApp {
         }
         self.input
             .update(cx, |state, cx| state.set_value("", window, cx));
-        // 发送即清该会话的草稿（连同图片一起，send_text 已 take 走）
-        let key = self.current_session.clone().unwrap_or_default();
-        self.drafts.remove(&key);
+        // 发送后输入框已清空（上面 set_value("")），不再需要删草稿条目：
+        // 文本随实体走（每会话一个 `Entity<TextareaState>`），图片被 `send_text`
+        // 里的 `mem::take(&mut self.composer_images)` 取走。
         self.send_text(text, cx);
     }
 
