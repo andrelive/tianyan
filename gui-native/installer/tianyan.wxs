@@ -44,6 +44,15 @@
     <Icon Id="AppIcon" SourceFile="..\..\tauri\icons\icon.ico" />
     <Property Id="ARPPRODUCTICON" Value="AppIcon" />
 
+    <!-- 「设置 → 应用」里显示的版本。
+         Windows Installer 的 `ProductVersion` **按规范必须是 4 段**（`x.y.z.w`，
+         用于升级比较），所以本包的 ProductVersion 是 `1.1.0.0`；但**产品版本是
+         3 段的「1.1.0」**（与「关于」页、`/health`、exe 文件属性一致）。
+         这里显式覆盖 ARP 的 `DisplayVersion`，让用户看到的每一处都是 1.1.0
+         ——由 `build-msi.ps1` 从 `gui-native/Cargo.toml` 读出后经
+         `-d DisplayVersion=` 注入。 -->
+    <Property Id="DisplayVersion" Value="$(var.DisplayVersion)" />
+
     <StandardDirectory Id="LocalAppDataFolder">
       <Directory Id="ProgramsFolder" Name="Programs">
         <Directory Id="INSTALLFOLDER" Name="Tianyan" />

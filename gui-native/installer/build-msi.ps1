@@ -50,7 +50,9 @@ if ($ver3 -notmatch '^\d+\.\d+\.\d+$') { throw "版本格式应为 x.y.z，实�
 $ver4 = "$ver3.0"
 
 Write-Host "版本（Cargo.toml）: $ver3" -ForegroundColor Cyan
-Write-Host "版本（MSI，4 段） : $ver4" -ForegroundColor Cyan
+# 面向用户报「产品版本」（3 段）；4 段只用于 MSI 内部的 ProductVersion。
+Write-Host "MSI ProductVersion: $ver4（Windows Installer 规范要求 4 段，仅用于升级比较）" -ForegroundColor DarkGray
+Write-Host "ARP DisplayVersion: $ver3（「设置→应用」里显示这个）" -ForegroundColor DarkGray
 
 # ── 2. wxs 必须用注入变量，不能自己硬编码版本 ────────────────────────────────
 $wxsText = Get-Content $wxs -Raw -Encoding utf8
@@ -96,7 +98,10 @@ $t0 = Get-Date
 Push-Location $here
 try {
     # `-d ProductVersion=` 注入 wxs 里的 `$(var.ProductVersion)`
-    wix build -d "ProductVersion=$ver4" -o $msiName tianyan.wxs 2>&1 | Out-String | Write-Host
+    # 两个变量各管一处：
+    #   ProductVersion → MSI 内部版本（规范上必须 4 段，升级比较用）
+    #   DisplayVersion → ARP 里显示的版本（产品版本，3 段）
+    wix build -d "ProductVersion=$ver4" -d "DisplayVersion=$ver3" -o $msiName tianyan.wxs 2>&1 | Out-String | Write-Host
     if ($LASTEXITCODE -ne 0) { throw "wix build 失败（exit $LASTEXITCODE）" }
 }
 finally { Pop-Location }
@@ -108,7 +113,8 @@ $elapsed = [math]::Round(((Get-Date) - $t0).TotalSeconds, 1)
 Write-Host ""
 Write-Host "✅ 打包完成" -ForegroundColor Green
 Write-Host ("   MSI      : " + $msi.FullName)
-Write-Host ("   ProductV : " + $ver4 + "   （来自 " + $cargoToml + "）")
+Write-Host ("   版本     : " + $ver3 + "   （来自 " + $cargoToml + "；ARP 显示同此）")
+Write-Host ("   内部     : ProductVersion " + $ver4 + "（规范要求 4 段，仅用于升级比较）") -ForegroundColor DarkGray
 Write-Host ("   体积     : " + [math]::Round($msi.Length / 1MB, 2) + " MB   耗时 " + $elapsed + "s")
 Write-Host ("   SHA256   : " + $sha)
 Write-Host ("   安装     : msiexec /i `"" + $msi.FullName + "`" /qn /norestart")

@@ -98,6 +98,15 @@ else {
         Write-Host "  [FAIL] tianyan.wxs 的 Package/@Version 必须是 `$(var.ProductVersion)，不得硬编码版本号" -ForegroundColor Red
         $fail++
     }
+    # ARP 显示的是 DisplayVersion（产品版本，3 段），也必须注入 —— 否则「设置→应用」
+    # 会退回 ProductVersion 的 4 段形式（1.1.0.0），与「关于」页/`/health` 不一致。
+    if ($wxsText -match 'Id="DisplayVersion"\s+Value="\$\(var\.DisplayVersion\)"') {
+        Write-Host "  [PASS] tianyan.wxs 的 DisplayVersion = `$(var.DisplayVersion)（ARP 显示 3 段产品版本）" -ForegroundColor DarkGreen
+    }
+    else {
+        Write-Host "  [FAIL] tianyan.wxs 必须显式设置 <Property Id=`"DisplayVersion`" Value=`"`$(var.DisplayVersion)`" />，否则 ARP 显示 4 段版本" -ForegroundColor Red
+        $fail++
+    }
     # 兜底：wxs 里任何形如 Version="1.2.3" 的硬编码都算漂移风险
     if ($wxsText -match 'Version="\d+\.\d+\.\d+(\.\d+)?"') {
         Write-Host '  [FAIL] tianyan.wxs 里仍有硬编码版本号（形如 Version="x.y.z"）' -ForegroundColor Red
