@@ -5,7 +5,10 @@ import reactRefresh from 'eslint-plugin-react-refresh';
 import prettierConfig from 'eslint-config-prettier';
 
 export default tseslint.config(
-  { ignores: ['dist', 'node_modules'] },
+  // `coverage/` 是 vitest 生成的覆盖率报告（内含 vendor 风格 js）：扫它只会
+  // 得到「Unused eslint-disable directive」这类噪音警告，而 `npm run lint`
+  // 是 `scripts/test.ps1 lint` 的一环，噪音会一直挂在门禁输出里。
+  { ignores: ['dist', 'node_modules', 'coverage'] },
   {
     extends: [js.configs.recommended, ...tseslint.configs.recommended],
     files: ['**/*.{ts,tsx}'],
