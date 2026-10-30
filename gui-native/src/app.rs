@@ -584,11 +584,20 @@ impl ClientApp {
         }
         self.subscribed_sessions.insert(sid.clone());
         let port = self.port;
-        cx.spawn(async move |_this, _cx| {
+        let sid_on_fail = sid.clone();
+        cx.spawn(async move |this, cx| {
             let url = format!("http://{SERVER_HOST}:{port}/api/v1/events/subscribe");
             let body = serde_json::json!({ "session_id": sid });
             if let Err(e) = post_json(url, body).await {
-                println!("[事件] 订阅 {sid} 失败：{e}");
+                println!("[事件] 订阅 {sid} 失败（打开会话时会重试）：{e}");
+                // 失败**必须把 id 从集合里撤掉**：resident 幂等会挡掉后续所有
+                // `subscribe_session(sid, force=false)`，于是这个会话**永远**收不到
+                // 快照（而快照是断线丢事件后的唯一兜底）。
+                // 实测场景：新会话首轮发送时订阅 —— 会话还没落库，服务端 404；
+                // 早先把 id 留在集合里，结果该会话此后一直没有快照。
+                let _ = this.update(cx, |this, _cx| {
+                    this.subscribed_sessions.remove(&sid_on_fail);
+                });
             }
         })
         .detach();
@@ -998,6 +1007,11 @@ impl ClientApp {
                     {
                         m.id = real.to_string();
                         self.messages = Rc::new(next);
+                    }
+                    // 会话**此刻才落库**：首轮 `send_text` 里的订阅必然 404（会话不存在），
+                    // 这里补一次。订阅成功 → 服务端推快照 → 断线自愈/权威对齐有兜底。
+                    if !self.offline {
+                        self.subscribe_session(sid.to_string(), false, cx);
                     }
                 }
             }
