@@ -199,16 +199,11 @@ pub async fn ensure_server(
             data_dir = %data_dir.display(),
             "本机已有天演 server 服务同一数据目录，复用之（本进程不启动第二个 server）"
         );
-        return Ok(ServerEndpoint {
-            port,
-            reused: true,
-        });
+        return Ok(ServerEndpoint { port, reused: true });
     }
 
     let listener = find_available_port(preferred).ok_or_else(|| {
-        format!(
-            "{preferred} 起 {PORT_SCAN_SPAN} 个端口均被占用，请释放部分端口后重试"
-        )
+        format!("{preferred} 起 {PORT_SCAN_SPAN} 个端口均被占用，请释放部分端口后重试")
     })?;
     let port = listener
         .local_addr()
