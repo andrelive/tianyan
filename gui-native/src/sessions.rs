@@ -196,6 +196,184 @@ impl ClientApp {
         self.rebuild_session_rows(cx);
     }
 
+    // ────────────────────────────────────────────────────────────────────
+    // 会话视图状态：park / restore（机制与理由见 `SessionSnapshot` 的文档注释）
+    // ────────────────────────────────────────────────────────────────────
+
+    /// 把当前会话的视图状态搬进 `parked`，并把这些字段清回默认。
+    ///
+    /// 必须在**切走之前**调用。键 = `current_session`（`None` = 还没发首条消息的
+    /// 新会话——它同样有主屏/面板状态，不能因为没 id 就丢）。
+    pub(crate) fn park_view_state(&mut self) {
+        let key = self.current_session.clone();
+        // 完全空的会话不值得占 LRU 槽位（空白会话之间来回切时别把有用的挤掉）
+        let empty = self.messages.is_empty()
+            && self.message_total == 0
+            && self.todos.is_empty()
+            && self.goals.is_empty()
+            && self.pending_approvals.is_empty()
+            && self.ws_root.is_empty();
+        if empty {
+            self.reset_view_state();
+            return;
+        }
+        // ⚠️ 穷尽构造：新增 per-session 字段若不加进 `SessionSnapshot`，这里编译报错
+        // ——这是「漏一个补一个」的机制性防线，**不要**改成 `..Default::default()`。
+        let snap = SessionSnapshot {
+            messages: std::mem::replace(&mut self.messages, Rc::new(Vec::new())),
+            // `ListState` 内部是 `Rc<RefCell<..>>`：clone 会共享滚动位置，必须换走
+            msg_list_state: Some(std::mem::replace(
+                &mut self.msg_list_state,
+                GpuiListState::new(0, ListAlignment::Bottom, px(120.)),
+            )),
+            // 同上：`ExpandRef` 也是 `Rc` 共享语义
+            expand: Some(std::mem::replace(
+                &mut self.expand,
+                Rc::new(std::cell::RefCell::new(crate::msg::ExpandState::default())),
+            )),
+            message_total: std::mem::take(&mut self.message_total),
+            oldest_seq: self.oldest_seq.take(),
+            has_more_history: std::mem::take(&mut self.has_more_history),
+            loading_older: std::mem::take(&mut self.loading_older),
+            composer_images: std::mem::take(&mut self.composer_images),
+            session_model: self.session_model.take(),
+            thinking: self.thinking.take(),
+            ctx_live: self.ctx_live.take(),
+            ctx_window_live: std::mem::take(&mut self.ctx_window_live),
+            ctx_panel_open: std::mem::take(&mut self.ctx_panel_open),
+            ctx_compress: self.ctx_compress.take(),
+            session_usage: self.session_usage.take(),
+            request_perf: self.request_perf.take(),
+            todos: std::mem::take(&mut self.todos),
+            goals: std::mem::take(&mut self.goals),
+            todo_bar_collapsed: std::mem::take(&mut self.todo_bar_collapsed),
+            tasks: std::mem::take(&mut self.tasks),
+            tasks_collapsed: std::mem::take(&mut self.tasks_collapsed),
+            expanded_task: self.expanded_task.take(),
+            task_messages: std::mem::take(&mut self.task_messages),
+            pending_approvals: std::mem::take(&mut self.pending_approvals),
+            clarification: self.clarification.take(),
+            clarify_answers: std::mem::take(&mut self.clarify_answers),
+            ws_root: std::mem::take(&mut self.ws_root),
+            ws_path: std::mem::take(&mut self.ws_path),
+            ws_entries: std::mem::take(&mut self.ws_entries),
+            ws_file: self.ws_file.take(),
+            ws_status: std::mem::take(&mut self.ws_status),
+            ws_diff_open: std::mem::take(&mut self.ws_diff_open),
+            ws_diff_files: std::mem::take(&mut self.ws_diff_files),
+            ws_diff: self.ws_diff.take(),
+            ws_diff_status: std::mem::take(&mut self.ws_diff_status),
+            current_title: std::mem::take(&mut self.current_title),
+            new_session_workspace: self.new_session_workspace.take(),
+        };
+        // LRU：同键先丢弃旧快照，最近使用的排到末尾
+        self.parked.retain(|(k, _)| k != &key);
+        self.parked.push((key, snap));
+        if self.parked.len() > MAX_PARKED_SESSIONS {
+            self.parked.remove(0);
+        }
+        self.streaming = false;
+    }
+
+    /// 把视图状态清回默认（首次进入某会话 / park 完一个空会话）。
+    pub(crate) fn reset_view_state(&mut self) {
+        self.messages = Rc::new(Vec::new());
+        self.msg_list_state = GpuiListState::new(0, ListAlignment::Bottom, px(120.));
+        self.expand = Rc::new(std::cell::RefCell::new(crate::msg::ExpandState::default()));
+        self.message_total = 0;
+        self.oldest_seq = None;
+        self.has_more_history = false;
+        self.loading_older = false;
+        self.composer_images.clear();
+        self.session_model = None;
+        self.thinking = None;
+        self.ctx_live = None;
+        self.ctx_window_live = 0;
+        self.ctx_panel_open = false;
+        self.ctx_compress = None;
+        self.session_usage = None;
+        self.request_perf = None;
+        self.todos.clear();
+        self.goals.clear();
+        self.todo_bar_collapsed = false;
+        self.tasks.clear();
+        self.tasks_collapsed = false;
+        self.expanded_task = None;
+        self.task_messages.clear();
+        self.pending_approvals.clear();
+        self.clarification = None;
+        self.clarify_answers.clear();
+        self.ws_root.clear();
+        self.ws_path.clear();
+        self.ws_entries.clear();
+        self.ws_file = None;
+        self.ws_status.clear();
+        self.ws_diff_open = false;
+        self.ws_diff_files.clear();
+        self.ws_diff = None;
+        self.ws_diff_status.clear();
+        self.current_title = "选择左侧会话查看消息".to_string();
+        self.new_session_workspace = None;
+        self.streaming = false;
+    }
+
+    /// 取回目标会话的快照并填入 `self`。
+    ///
+    /// 返回是否**命中**：`false` = 首次进入该会话（调用方需要去拉消息）；
+    /// `true` = 状态已恢复（调用方**不应**再 `load_messages`，否则 `scroll_to_end`
+    /// 会把刚恢复的滚动位置冲掉）。
+    pub(crate) fn restore_view_state(&mut self) -> bool {
+        let key = self.current_session.clone();
+        let Some(i) = self.parked.iter().position(|(k, _)| k == &key) else {
+            self.reset_view_state();
+            return false;
+        };
+        let (_, snap) = self.parked.remove(i);
+        self.messages = snap.messages;
+        self.msg_list_state = snap
+            .msg_list_state
+            .unwrap_or_else(|| GpuiListState::new(0, ListAlignment::Bottom, px(120.)));
+        self.expand = snap.expand.unwrap_or_else(|| {
+            Rc::new(std::cell::RefCell::new(crate::msg::ExpandState::default()))
+        });
+        self.message_total = snap.message_total;
+        self.oldest_seq = snap.oldest_seq;
+        self.has_more_history = snap.has_more_history;
+        self.loading_older = snap.loading_older;
+        self.composer_images = snap.composer_images;
+        self.session_model = snap.session_model;
+        self.thinking = snap.thinking;
+        self.ctx_live = snap.ctx_live;
+        self.ctx_window_live = snap.ctx_window_live;
+        self.ctx_panel_open = snap.ctx_panel_open;
+        self.ctx_compress = snap.ctx_compress;
+        self.session_usage = snap.session_usage;
+        self.request_perf = snap.request_perf;
+        self.todos = snap.todos;
+        self.goals = snap.goals;
+        self.todo_bar_collapsed = snap.todo_bar_collapsed;
+        self.tasks = snap.tasks;
+        self.tasks_collapsed = snap.tasks_collapsed;
+        self.expanded_task = snap.expanded_task;
+        self.task_messages = snap.task_messages;
+        self.pending_approvals = snap.pending_approvals;
+        self.clarification = snap.clarification;
+        self.clarify_answers = snap.clarify_answers;
+        self.ws_root = snap.ws_root;
+        self.ws_path = snap.ws_path;
+        self.ws_entries = snap.ws_entries;
+        self.ws_file = snap.ws_file;
+        self.ws_status = snap.ws_status;
+        self.ws_diff_open = snap.ws_diff_open;
+        self.ws_diff_files = snap.ws_diff_files;
+        self.ws_diff = snap.ws_diff;
+        self.ws_diff_status = snap.ws_diff_status;
+        self.current_title = snap.current_title;
+        self.new_session_workspace = snap.new_session_workspace;
+        // `streaming` 不随快照走：它由全局 `running_sessions` 决定，调用方设置
+        true
+    }
+
     /// 保存当前输入草稿（按会话键；新会话用空串）。
     ///
     /// 切换会话 / 新建会话**之前**调用。空正文且无图片时不占位（顺手清掉空条目）。
@@ -273,24 +451,24 @@ impl ClientApp {
     ) {
         // 先存草稿：切走再切回写了一半的内容还在（与 Web 版 ChatInput 同语义）
         self.save_composer_draft(cx);
+        // park 旧会话的视图状态（键 = 旧的 current_session），再切到「新会话」
+        self.park_view_state();
         self.current_session = None;
+        // 「新会话」也有一份自己的视图状态（键 = None）：之前 park 过就恢复，
+        // 首次则清默认。这样「新建会话 → 输入 → 切走 → 再点新建」不会带着上一次
+        // 新建会话的面板/折叠状态。
+        let restored = self.restore_view_state();
+        if !restored || self.current_title.trim().is_empty() {
+            self.current_title = "新会话（发送首条消息后创建）".to_string();
+        }
         self.streaming = false;
-        self.session_model = None;
+        // 弹层是 UI 瞬态，不随会话恢复
         self.model_menu_open = false;
-        self.thinking = None;
         self.thinking_menu_open = false;
-        self.ctx_live = None;
-        self.ctx_window_live = 0;
-        self.ctx_panel_open = false;
-        self.ctx_compress = None;
         // 附件也按会话存草稿（上面已 save），这里清空后由 restore 填回本档的草稿
         // ——不会把上一会话的附件误发到新会话，也不会丢掉自己写了一半的内容
         self.composer_images.clear();
         self.restore_composer_draft(window, cx);
-        self.messages = Rc::new(Vec::new());
-        self.msg_list_state = GpuiListState::new(0, ListAlignment::Bottom, px(120.));
-        self.message_total = 0;
-        self.current_title = "新会话（发送首条消息后创建）".to_string();
         self.rebuild_session_rows(cx);
     }
 
@@ -302,8 +480,10 @@ impl ClientApp {
         cx: &mut Context<Self>,
     ) {
         // 切换前先存当前会话的草稿（写了一半的 prompt 不能因为点另一个会话就没了）
+        // + park 视图状态（滚动位置 / 折叠 / 分页游标 / 面板）
         if self.current_session.as_deref() != Some(id.as_str()) {
             self.save_composer_draft(cx);
+            self.park_view_state();
         }
         self.current_session = Some(id.clone());
         // 浏览器式会话 Tab：打开过的会话留在顶部（去重；超上限丢最早且非当前的）
@@ -319,39 +499,25 @@ impl ClientApp {
                 self.open_tabs.retain(|t| t != &victim);
             }
         }
-        // 切会话时上一会话的渲染态要丢掉（本客户端只渲染当前会话的增量），但
-        // **这一会话**若仍在跑（切走期间轮次没停），按钮必须回到「停止」——
-        // 权威信息来自 `turn_state` 事件维护的集合（见 `App::handle_event`），
-        // 不是本地 `streaming`。早先这里无条件置 false，于是切回来按钮变「发送」，
-        // 而服务端还在生成，用户既看不到停止入口、也不知道它在跑。
-        self.streaming = self.running_sessions.contains(&id);
-        // 会话级模型 / 上下文进度都是**按会话**的：切走即回落（模型回到 preferences.chat）
-        self.session_model = None;
+        // 恢复该会话的视图状态（滚动位置 / 消息折叠态 / 分页游标 / 上下文环 /
+        // 会话面板 / 文件页目录）。**首次进入**（无快照）→ 清默认，随后由 load_* 拉。
+        // 机制与「为什么必须整组搬」见 `SessionSnapshot` 的文档注释。
+        let restored = self.restore_view_state();
+        // 轮状态来自**全局**集合（跨会话语义），不随快照走：切走期间轮没停，
+        // 切回来按钮必须还是「停止」（用户实测过它退回「发送」）
+        let running = self.running_sessions.contains(&id);
+        self.streaming = running;
+        // 弹层（模型 / 思考选择器）是 UI 瞬态，切会话一律收起
         self.model_menu_open = false;
-        self.thinking = None;
         self.thinking_menu_open = false;
-        // 实时用量与面板状态按会话重置；占用本身由新会话的消息 usage 恢复
-        self.ctx_live = None;
-        self.ctx_window_live = 0;
-        self.ctx_panel_open = false;
-        self.ctx_compress = None;
-        // 统计行是按会话的：切走即清空，由新会话的两次 GET 重新填
-        self.session_usage = None;
-        self.request_perf = None;
-        // 会话语义的面板数据先清空（避免看着新会话却显示上一条的待办/审批），
-        // 再**立即**拉一次 —— 否则要等 3s 轮询窗口，体感就是"切过去慢一拍"
-        self.todos.clear();
-        self.goals.clear();
-        self.pending_approvals.clear();
-        // 文件页目录树按会话绑定目录解析：切会话必须作废，否则会继续显示
-        // 上一条会话（或全局默认）的目录
-        self.ws_root.clear();
-        self.ws_entries.clear();
-        self.ws_file = None;
-        self.ws_path.clear();
-        // 会话级模型 / 思考强度的权威值在会话头里：拉回来覆盖上面对默认值的回落
+        // 会话级模型 / 思考强度的权威值在会话头里：拉回来覆盖快照里的旧值
         self.load_session_model(id.clone(), cx);
-        self.load_messages(id, cx);
+        // 消息：**有快照就不重拉** —— `load_messages` 末尾 `scroll_to_end` 会把刚恢复
+        // 的滚动位置冲掉，而那正是这次重构要保住的东西。
+        // 唯一例外：该会话正在跑（切走期间轮没停）→ 必须重拉才能看到增量。
+        if !restored || running {
+            self.load_messages(id, cx);
+        }
         self.load_session_usage(cx);
         self.load_todos_goals(cx);
         self.load_approvals(cx);
@@ -435,6 +601,9 @@ impl ClientApp {
                         this.drafts.remove(&id);
                         // 轮状态记账同理：会话没了，那个 id 不该再占集合
                         this.running_sessions.remove(&id);
+                        // 视图快照也要清：否则删掉的会话还能靠快照"复活"一份幽灵状态，
+                        // 且白占 LRU 槽位
+                        this.parked.retain(|(k, _)| k.as_deref() != Some(id.as_str()));
                         // 打开过的 Tab 也一并移除（否则 Tab 条上留一个点不开的幽灵）
                         this.open_tabs.retain(|t| t != &id);
                         if this.current_session.as_deref() == Some(id.as_str()) {

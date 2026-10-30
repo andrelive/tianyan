@@ -280,6 +280,13 @@ struct ClientApp {
     /// 为什么需要它：`on_click` 里二次借用同一个窗口会失败，而自动化路径**不在**
     /// 借用中——两条路的差异只有在这里才看得见（用户实测复现、自动化不复现）。
     pub(crate) draft_restore_path: String,
+    /// 切走会话时 park 下来的视图状态（**最近使用的在末尾**，天然 LRU）。
+    ///
+    /// 键 = `Option<String>`：`Some(id)` 是已落库会话，`None` 是还没发首条消息的
+    /// 「新会话」——后者同样有主屏/输入/面板状态，不能因为没 id 就丢掉。
+    /// 上限 [`MAX_PARKED_SESSIONS`]，超出丢最久未用的（丢了只是退回「重拉 + 滚到底」
+    /// 的旧行为，不会错）。
+    pub(crate) parked: Vec<(Option<String>, SessionSnapshot)>,
     /// 上滚游标（`GET /sessions/{id}/messages` 的 `next_before_seq`）：
     /// 指向当前窗口**最早一条**的 seq；`None` = 已到链首，没有更早的了。
     pub(crate) oldest_seq: Option<i64>,
@@ -487,6 +494,95 @@ struct ClientApp {
     /// 只在 `--features screenshot` 构建里有意义（该构建下动作会写它）；
     /// 生产构建恒为 `None`，字段本身零开销。
     pub(crate) last_screenshot: Option<(String, u32, u32)>,
+}
+
+/// 最多为几个会话保留视图状态快照（LRU）。
+///
+/// 每个快照持有一份消息 `Rc` + 一份 `ListState`（含每项测量缓存），12 个会话在
+/// 实测规模下约几 MB 量级；再多就丢掉最久未用的——丢了只是退回「重拉 + 滚到底」，
+/// 不会出错。
+pub(crate) const MAX_PARKED_SESSIONS: usize = 12;
+
+/// 一个会话的**视图状态快照**（切走时 park、切回时 restore）。
+///
+/// ## 为什么需要它
+///
+/// `ClientApp` 上这些字段是**全局单份**的：切会话就被下一份覆盖，于是滚动位置、
+/// 消息折叠态、分页游标、上下文环、会话面板全部丢失。此前是**逐字段打补丁**，
+/// 已经补过四轮（草稿 / streaming / 滚动 / 折叠），每轮都是「用户报一个、加一个」
+/// —— 这类 bug 的共同根因就是本节这个「单份」前提。
+///
+/// ## 机制上的保证（重点）
+///
+/// `park_view_state` 用**穷尽构造**（`SessionSnapshot { ... }` 一个字段都不省）。
+/// 因此**新增 per-session 字段时如果不加进本 struct，编译直接报错** —— 这是把
+/// 「漏一个补一个」关掉的机制，别图省事改成 `..Default::default()`。
+/// `#[derive(Default)]` 只是给「首次进入某会话」提供空状态，不承担完整性保证。
+///
+/// ## 两个必须 `mem::replace` 的字段
+///
+/// `msg_list_state`（`ListState(Rc<RefCell<..>>)`）与 `expand`（`Rc<RefCell<..>>`）
+/// 都是 **`Rc` 共享语义**：`clone` 出来的是同一个内部状态，第二个会话会跟着第一个
+/// 滚。所以 park 时用 `mem::replace` 把整个 `Rc` 换走、restore 时换回来。
+/// 用 `Option` 包一层只是为了 `Default` 能 derive（`ListState` 没有 `Default`）。
+///
+/// ## 刻意不包含
+///
+/// - `streaming`：由全局 `running_sessions` 集合推导（那是**跨会话**的事实，
+///   不属于单个会话的视图状态）；
+/// - 输入框文本：仍在 `drafts`（按会话的 HashMap）；输入框**实体**（光标/选区/IME）
+///   留到期 2 一起搬，因为要按会话管理多个 `Entity<TextareaState>`。
+#[derive(Default)]
+pub(crate) struct SessionSnapshot {
+    // ── 会话语义：消息主屏（期 1 的核心收益）──
+    /// 消息列表
+    pub(crate) messages: Rc<Vec<MsgRow>>,
+    /// 虚拟列表状态：滚动位置 + 每项测量缓存（见上面的 `mem::replace` 说明）
+    pub(crate) msg_list_state: Option<GpuiListState>,
+    pub(crate) message_total: usize,
+    pub(crate) oldest_seq: Option<i64>,
+    pub(crate) has_more_history: bool,
+    pub(crate) loading_older: bool,
+    /// 消息内折叠块状态（思考 / 工具参数 / 工具结果）
+    pub(crate) expand: Option<ExpandRef>,
+    // ── 输入区 ──
+    /// 待发送图片（文本草稿在 `drafts`）
+    pub(crate) composer_images: Vec<String>,
+    /// 会话级模型 / 思考强度（服务端权威，restore 后仍会被 `load_session_model` 刷新）
+    pub(crate) session_model: Option<(String, String)>,
+    pub(crate) thinking: Option<String>,
+    // ── 上下文环 ──
+    pub(crate) ctx_live: Option<MsgUsage>,
+    pub(crate) ctx_window_live: u64,
+    pub(crate) ctx_panel_open: bool,
+    pub(crate) ctx_compress: Option<(bool, String)>,
+    // ── 输入卡片下方统计行（restore 后 `load_session_usage` 会刷新为权威值）──
+    pub(crate) session_usage: Option<(u64, u64, u64)>,
+    pub(crate) request_perf: Option<(Option<i64>, i64, u64)>,
+    // ── 会话绑定面板 ──
+    pub(crate) todos: Vec<(String, String)>,
+    pub(crate) goals: Vec<GoalRow>,
+    pub(crate) todo_bar_collapsed: bool,
+    pub(crate) tasks: Vec<TaskRow>,
+    pub(crate) tasks_collapsed: bool,
+    pub(crate) expanded_task: Option<String>,
+    pub(crate) task_messages: std::collections::HashMap<String, Vec<MsgRow>>,
+    pub(crate) pending_approvals: Vec<ApprovalRow>,
+    pub(crate) clarification: Option<Vec<(String, Vec<String>)>>,
+    pub(crate) clarify_answers: Vec<String>,
+    // ── 文件页（按会话绑定的工作目录解析）──
+    pub(crate) ws_root: String,
+    pub(crate) ws_path: String,
+    pub(crate) ws_entries: Vec<WsEntry>,
+    pub(crate) ws_file: Option<(String, String)>,
+    pub(crate) ws_status: String,
+    pub(crate) ws_diff_open: bool,
+    pub(crate) ws_diff_files: Vec<WsDiffFile>,
+    pub(crate) ws_diff: Option<(String, String)>,
+    pub(crate) ws_diff_status: String,
+    // ── 头部与「未落库会话」的待绑定目录 ──
+    pub(crate) current_title: String,
+    pub(crate) new_session_workspace: Option<String>,
 }
 
 impl ClientApp {

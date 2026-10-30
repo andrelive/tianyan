@@ -352,6 +352,12 @@ impl ClientApp {
                     && self.msg_list_state.logical_scroll_top().item_ix == 0,
                 // 草稿恢复走了哪条路（真实点击=window / 自动化=handle / 失败=handle-failed）
                 "draft_restore_path": self.draft_restore_path,
+                // 滚动锚点（列表最前项的索引）。per-session 重构的核心收益就是它：
+                // 切走再切回必须保持原位置，而不是被 `load_messages` 的
+                // `scroll_to_end` 冲到底部。0 = 在顶部，`loaded-1` ≈ 在底部。
+                "scroll_item": self.msg_list_state.logical_scroll_top().item_ix,
+                // 视图快照槽位占用（LRU 上限 `MAX_PARKED_SESSIONS`）
+                "parked_views": self.parked.len(),
                 "last": last_msg,
                 // 最近几段的「骨架」：断言「一轮多步是否分成多条消息」「工具卡有没有
                 // 拿到结果」只能看这里（截图看不出边界，`text` 又是拍平后的正文）。
