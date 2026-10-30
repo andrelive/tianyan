@@ -390,6 +390,13 @@ impl ClientApp {
             "与 Web 版关系",
             "同一内嵌 server、同一套 HTTP/SSE 协议".to_string(),
         ));
+        // 两条版本线是**预期**的：不解释就会被当成「装错了版本」
+        col = col.child(kv_line(
+            "版本说明",
+            "客户端独立发版（gui-native 自带 workspace）；内嵌服务跟主 workspace \
+            （tianyan-core / server 同一条版本线）。两者不一致是正常的。"
+                .to_string(),
+        ));
         col.into_any_element()
     }
 
