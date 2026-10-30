@@ -65,17 +65,42 @@
       <Directory Id="AppMenuFolder" Name="天演" />
     </StandardDirectory>
 
+    <!-- 桌面快捷方式：perUser 上下文的 `DesktopFolder` 解析到**当前用户**桌面
+         （`CommonDesktopFolder` 才是「所有人」桌面，不要混用）。 -->
+    <StandardDirectory Id="DesktopFolder" />
+
     <Feature Id="Main" Title="天演（GPUI 原生端）" Level="1">
       <Component Id="MainExe" Directory="INSTALLFOLDER" Guid="*">
         <File Id="MainExeFile"
               Source="..\target\release\tianyan-gui-native.exe"
               KeyPath="yes">
-          <!-- advertised shortcut：图标直接取 exe 资源（build.rs 已嵌入） -->
+          <!-- ⚠️ 快捷方式必须用**常规**（非 advertised）方式，`Advertise="yes"` 是
+               白板图标的真凶：
+
+               advertised shortcut 的 .lnk 里**不写目标路径** —— 只写 MSI 的
+               advertise 数据（Feature/Component 描述），由 shell 在点击时通过
+               Windows Installer 解析。实测装完读 .lnk：
+                   TargetPath   : （空）
+                   IconLocation : ',0'      ← 空路径 + 索引 0 = 白板
+               「开始菜单搜索里显示 天演 / 应用 + 白板图标」正是这个（用户截图）。
+
+               常规快捷方式会把 TargetPath 与 IconLocation 都写实
+               （`<exe>,0`），图标直接取 exe 资源（build.rs 用 winres 嵌入，
+               已实测 exe 的 32×32 图标正常），不依赖 Installer 的图标缓存，
+               也不依赖 shell 去解析 advertise 数据。
+
+               `WorkingDirectory` 必给：应用内若有相对路径（资源 / 日志）需要它。 -->
           <Shortcut Id="StartMenuShortcut"
                     Directory="AppMenuFolder"
                     Name="天演"
                     Description="天演 · GPUI 原生端"
-                    Advertise="yes" />
+                    WorkingDirectory="INSTALLFOLDER" />
+          <!-- 桌面快捷方式（与开始菜单同一个 exe、同一套图标） -->
+          <Shortcut Id="DesktopShortcut"
+                    Directory="DesktopFolder"
+                    Name="天演"
+                    Description="天演 · GPUI 原生端"
+                    WorkingDirectory="INSTALLFOLDER" />
         </File>
       </Component>
     </Feature>
