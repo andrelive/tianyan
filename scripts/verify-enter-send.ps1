@@ -42,7 +42,14 @@ param(
     # 用**鼠标点击**把焦点放进输入框（模拟真实用户），而不是 `composer_focus` 动作。
     # 两条路要分别验：动作走 `FocusHandle::focus`，点击走 `on_mouse_down`，焦点落在
     # 谁身上不一定相同 —— 用户报「回车只换行不发送」时，先分清是哪条路。
-    [switch]$Click
+    [switch]$Click,
+    # 逐字符**打字**而不是剪贴板粘贴（仍走 `SendKeys`，不经过 IME）。用户是手打的，
+    # 两条路的 `InputEvent::Change` 次数不同 —— 若「打字后 Enter 不发送、粘贴后能发」，
+    # 差异就在这里。
+    [switch]$TypeText,
+    # 用 `keybd_event` 合成 VK（而不是 `SendKeys`）发方向键与 Enter。SendKeys 在
+    # 「刚打完字」之后会失效（字符进得去、`{LEFT}`/`{ENTER}` 全无效果）—— 那是工具问题。
+    [switch]$UseVkKeys
 )
 
 $ErrorActionPreference = "Continue"
@@ -67,6 +74,18 @@ $dataToml = ($data -replace '\\', '/')
 $env:TIANYAN_CONFIG = $cfg
 $env:TIANYAN_GUI_AUTOMATION_PORT = "$Port"
 $base = "http://127.0.0.1:$Port"
+# 直接合成 VK 事件（`keybd_event`）。`WScript.Shell.SendKeys` 在「刚打完字」之后
+# 有概率被 GPUI 的文本输入通道吞掉（实测：字符进去了，`{LEFT}`/`{ENTER}` 全无效果），
+# 那是**测试工具**的毛病，真实键盘不走那条路。
+Add-Type @"
+using System;
+using System.Runtime.InteropServices;
+public class VK {
+  [DllImport("user32.dll")] public static extern void keybd_event(byte bVk, byte bScan, uint dwFlags, UIntPtr dwExtraInfo);
+  public static void Press(byte vk) { keybd_event(vk, 0, 0, UIntPtr.Zero); keybd_event(vk, 0, 2, UIntPtr.Zero); }
+}
+"@
+
 
 Write-Host "[$Tag] 启动隔离实例（可见窗口，键盘事件需要前台焦点）…" -ForegroundColor Yellow
 $proc = Start-Process -FilePath $exePath -PassThru
@@ -127,8 +146,18 @@ public class W {
     $ws = New-Object -ComObject WScript.Shell
     for ($r = 1; $r -le $Rounds; $r++) {
         $payload = if ($Rounds -gt 1) { "$Text$r" } else { $Text }
-        Set-Clipboard -Value $payload
-        $ws.SendKeys("^v")
+        if ($TypeText) {
+            # 逐字符 + 间隔：一次性 `SendKeys("abcdef")` 会把 6 个按键在几十毫秒内塞进
+            # GPUI 的 pending keystroke 队列，紧跟的 Enter 有概率被并进组合序列 ——
+            # 那是**测试自己造出来的**失败，真人手打不会那样（实测踩过这个假阳性）。
+            foreach ($ch in $payload.ToCharArray()) {
+                $ws.SendKeys([string]$ch)
+                Start-Sleep -Milliseconds 90
+            }
+        } else {
+            Set-Clipboard -Value $payload
+            $ws.SendKeys("^v")
+        }
         Start-Sleep -Milliseconds 700
         # ⚠️ `/state` 的返回是 `{ ok, state }` 包装（`/act` 同此形），字段在 `.state` 下 ——
         # 直接读 `$st.input` 永远是空串（实测踩过，差点误判成「粘贴没进去」）。
@@ -137,10 +166,10 @@ public class W {
 
         # 光标左移若干格，再按 Enter —— `-Left 0` 即「光标在末尾」，>0 即「在中间」
         for ($k = 0; $k -lt $Left; $k++) {
-            $ws.SendKeys("{LEFT}")
+            if ($UseVkKeys) { [VK]::Press(0x25) } else { $ws.SendKeys("{LEFT}") }
             Start-Sleep -Milliseconds 90
         }
-        $ws.SendKeys("{ENTER}")
+        if ($UseVkKeys) { [VK]::Press(0x0D) } else { $ws.SendKeys("{ENTER}") }
         Start-Sleep -Milliseconds 2000
 
         try {
