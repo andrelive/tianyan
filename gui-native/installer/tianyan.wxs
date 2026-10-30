@@ -29,7 +29,13 @@
       Language="2052"
       Codepage="65001">
 
-    <MajorUpgrade DowngradeErrorMessage="已安装更新版本的天演，无需降级安装。" />
+    <!-- AllowSameVersionUpgrades：同版本号的重新构建（改了 bug 但版本仍是 1.1.0）也要能覆盖安装。
+         原因：WiX 未显式指定 ProductCode 时每次 build 生成新 GUID，而 MSI 把「同版本 + 不同
+         ProductCode」判为另一个产品 → 默认直接报 1638（已安装此产品的另一个版本）。
+         开了这个开关，同版本走 MajorUpgrade 序（先卸旧版、再装新版），用户数据在
+         D:\tianyan 不受影响。不同版本号的行为不变。 -->
+    <MajorUpgrade AllowSameVersionUpgrades="yes"
+                  DowngradeErrorMessage="已安装更新版本的天演，无需降级安装。" />
     <MediaTemplate EmbedCab="yes" CompressionLevel="high" />
 
     <!-- ARP（控制面板）里的图标 -->

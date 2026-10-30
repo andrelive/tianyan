@@ -310,10 +310,20 @@ tree-sitter 语法），不是符号表——strip 只省 13MB。
 | perMachine（现状，`ALLUSERS=1`） | 需管理员提权 → 更新必弹 UAC |
 | **perUser（`Scope="perUser"`，装到 `%LOCALAPPDATA%\Programs\`）** | ✅ **`msiexec /i /qn` 静默安装成功，1.3 秒，无 UAC** |
 | MajorUpgrade（0.1.1 → 0.1.2 → 0.1.3） | ✅ 正确替换，注册表恒为单条目，**无新旧并存** |
+| **同版本号重新构建**（1.1.0.0 → 1.1.0.0 的新 build） | ✅ 开了 `AllowSameVersionUpgrades="yes"` 后走 MajorUpgrade 序（先卸旧、再装新），ARP 恒单条目，实测 3.3 秒；**不开则报 1638**（已安装此产品的另一个版本） |
 | 查询已安装版本 | ✅ `WindowsInstaller.Installer` COM 的 `ProductInfo(..,'VersionString')` |
 | **应用运行中升级** | ⚠️ msiexec 退出码 0、版本已升，**但进程被 Restart Manager 直接杀掉**（无提示，也不帮你重启） |
 
 > 现状：生产版 `Tianyan 1.0.1` 是 perMachine，装在 `D:\Program Files\Tianyan\`。
+>
+> **为什么需要 `AllowSameVersionUpgrades`**：WiX 未显式指定 `ProductCode` 时
+> **每次 `wix build` 都生成新 GUID**（实测同一份 `tianyan.wxs` 连续三次构建 =
+> `{CDCA811D…}` / `{632C1702…}` / `{ADBD5FD1…}`），而 MSI 把「同版本 + 不同
+> ProductCode」判成**另一个产品** → 默认直接拒绝（错误 1638）。改 bug 但版本号
+> 仍保持 1.1.0（不擅自升版本）就会踩到，因此 `tianyan.wxs` 里**固定开着**它。
+> 不同版本号的升级行为不受影响：`Upgrade` 表的同版本行是
+> `VersionMax=当前版本`、`Attributes=513`，降级检测行是 `VersionMin=当前版本`、
+> `Attributes=2`。
 > 改 perUser 可换来「更新零 UAC」，代价是多用户机器上需各自安装。
 
 ### 自研 updater 必须做的编排（约 200–400 行）
