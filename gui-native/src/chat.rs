@@ -1015,16 +1015,28 @@ impl ClientApp {
                                     .text_color(rgb(0xffffff))
                                     .cursor_pointer()
                                     // 与 Tauri 版 `ChatInput` 同形：图标 + 文案
-                                    // （发送 = lucide `Send`，停止 = `Square`）
+                                    // （发送 = lucide `Send`，停止 = 实心方块）
                                     .child(
-                                        svg()
-                                            .path(if stopping {
-                                                IconName::Square.path()
-                                            } else {
-                                                IconName::Send.path()
-                                            })
-                                            .size(px(14.))
-                                            .text_color(rgb(0xffffff)),
+                                        if stopping {
+                                            // vite 版是 `<Square className="fill-current" />`
+                                            // —— lucide 的描边矩形被 `fill-current` 填满，
+                                            // 看起来是**实心**方块。GPUI 这边 `svg()` 渲染的是
+                                            // lucide 原始 stroke 版（空心方框），改不了 fill，
+                                            // 所以直接画一个白方块：尺寸对齐 16px 图标里
+                                            // 3/24 内缩后约 11px 的实心区域。
+                                            div()
+                                                .w(px(11.))
+                                                .h(px(11.))
+                                                .rounded_sm()
+                                                .bg(rgb(0xffffff))
+                                                .into_any_element()
+                                        } else {
+                                            svg()
+                                                .path(IconName::Send.path())
+                                                .size(px(14.))
+                                                .text_color(rgb(0xffffff))
+                                                .into_any_element()
+                                        },
                                     )
                                     .child(if stopping {
                                         "停止"

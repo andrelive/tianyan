@@ -1171,7 +1171,12 @@ pub(crate) fn render_msg_body(
             }
         }
     }
-    body = body.child(render_assistant_footer(msg, mi, is_continuation));
+    // 压缩点是**分隔符**，不是一条消息：正文不显示（见上方 `if msg.compression`
+    // 的胶囊 + 分割线），那么复制按钮与时间戳同样不该出现 —— 一个「能复制但看不见
+    // 内容」的按钮比没有更糟，用户实测提出「压缩点不显示任何内容」。
+    if !msg.compression {
+        body = body.child(render_assistant_footer(msg, mi, is_continuation));
+    }
     div().px_4().py_2().w_full().child(body).into_any_element()
 }
 /// 消息区里可折叠块的展开状态（思考块 / 工具参数 / 工具结果）。
