@@ -55,6 +55,16 @@
 ---
 
 ## 2. 本地打包流程（`scripts/build.ps1` 实读）
+> ⛔ **本节已退役（2026-10）**：`scripts/build.ps1` 现在进入即 `exit 1`——tauri 壳已
+> 移出 workspace `members`，`tauri/Cargo.toml` 的 `version.workspace = true` 无法解析，
+> `cargo tauri build` 必然失败。下面保留原文作历史记录：§4「已知坑」里与 tauri 无关的
+> 条目（前端重复构建、产物路径不符）仍有参考价值。
+> **native 的本地打包**走：
+> ```powershell
+> pwsh -File gui-native\installer\build-msi.ps1   # 默认先 cargo build --release
+> ```
+> 产物：`gui-native/installer/tianyan-native-<ver>-x64.msi`（perUser）。
+
 
 `.\scripts\build.ps1`（默认构建模式）步骤：
 

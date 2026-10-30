@@ -2,7 +2,13 @@
 members = [
     "core",
     "server",
-    "tauri",
+    # tauri 壳已**冻结**（退役计划第 3 步）：native（GPUI）是主发布渠道。
+    # 移出 members 后 `cargo --workspace` 不再编它 —— CI 少一个需要桌面依赖的
+    # crate，clippy/test 也不必再写 `--exclude tianyan-tauri`。
+    # **目录保留**（不删），等新功能确认 native 全覆盖后再删。
+    # 解冻：把下面这行的注释去掉即可（`tauri/Cargo.toml` 用 `version.workspace
+    # = true`，依赖本文件 [workspace.package]，所以必须先回 members 才能编译）。
+    # "tauri",
     "mcp",
     "app",
     "assembly",

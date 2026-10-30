@@ -6,7 +6,7 @@ name: Quality
 # 本工作流覆盖当前已达标的三类门禁：
 #   1. Rust fmt
 #   2. Rust clippy（`-D warnings`；存量告警已于 0.3.15 清零）
-#   3. Rust 单元测试（core/server/mcp；tauri 需桌面依赖，排除）
+#   3. Rust 单元测试（core/server/mcp；tauri 壳已冻结并移出 workspace）
 #   4. 工具目录 freshness（运行时注册 = schema 唯一真相源）
 #   5. 前端 lint（eslint + prettier）/ typecheck / vitest
 #
@@ -73,7 +73,11 @@ jobs:
       - name: Rust fmt check
         run: cargo fmt --all -- --check
       - name: Rust clippy (deny warnings)
-        run: cargo clippy --workspace --exclude tianyan-tauri --all-targets -- -D warnings
+        # tauri 壳已移出 workspace（冻结），不再需要 --exclude：包集合回到
+        # 「全部 workspace 成员」一种形态，与下面 integration 步骤、本地
+        # `test.ps1 lint` 完全一致（包集合不同 → 编译指纹不同 → 前一步白作废，
+        # 见下一段「包集合纪律」）。
+        run: cargo clippy --workspace --all-targets -- -D warnings
 
       # ────────────────────────────────────────────────────────────────────
       # ⚠️ 包集合纪律（0.6.3 实发事故）：cargo 的 feature 统一范围取决于
@@ -214,7 +218,7 @@ jobs:
       # `test.ps1 integration` 跑，CI 从未覆盖；0.5.8 记录"三处 e2e 断言失效
       # 长期未被察觉"即该缺口所致。
       - name: Rust integration tests (incl. e2e)
-        run: cargo test --workspace --exclude tianyan-tauri --test "*"
+        run: cargo test --workspace --test "*"
 
       # 工具目录 freshness：命令来自仓库 `.cargo/config.toml` 的 alias
       # （`catalog-check`）——**命令单一来源**，CI 不再内联 cargo 命令行，

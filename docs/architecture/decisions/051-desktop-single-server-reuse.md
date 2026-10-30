@@ -5,6 +5,13 @@
 **影响范围**: 新 crate `desktop/`（`tianyan-desktop`）、`core/src/common/path.rs`（新增）、
 `server/src/lib.rs` 的 `/health`、`tauri/src/{lib,server}.rs`、`gui-native/src/main.rs`
 
+> **后续状态（2026-10，不改本 ADR 的决策内容）**：tauri 壳已**冻结**并移出 workspace
+> `members`（native/GPUI 成为主发布渠道）。因此本 ADR 的"两个桌面壳"前提只剩一个壳，
+> 但**机制与结论完全不变**——`desktop/` 防的从来不是"两个壳"，而是「同一数据目录上
+> 跑两个 server」（双击两次快捷方式、GUI + CLI server 并存，都会触发；且 tauri 版
+> `/health` 缺 `service`/`data_dir` 字段正说明判据必须严格）。`desktop/` 现在是
+> gui-native 的启动编排段，**不可删**。
+
 ---
 
 ## 背景

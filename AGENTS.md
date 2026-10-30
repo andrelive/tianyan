@@ -61,12 +61,12 @@ cargo test -p tianyan-core vfs::backend::local -- --nocapture  # 指定测试模
 | `server/` | `tianyan-server` | Axum HTTP 服务（**不认识任何具体插件 crate**） |
 | `app/` | `tianyan-app` (bin: `tianyan-server`) | **装配器**：唯一 `use` 插件类型之处，装配清单住这里 |
 | `gui-vite/` | - | React TypeScript 前端（非 crate） |
-| `tauri/` | `tianyan-tauri` | Tauri 桌面包装（第二个装配器） |
+| `tauri/` | `tianyan-tauri` | Tauri 桌面包装（第二个装配器）| ⛔ **已冻结（2026-10）**：移出 workspace `members`，native（GPUI）是主发布渠道。代码目录保留、待 native 全覆盖后删除；`scripts/build.ps1` 同步退役 |
 | `mcp/` | `tianyan-mcp` | MCP 协议客户端 |
 | `service/config/` | `tianyan-service-config` | **服务层**：配置加载 / 持久化（段保全）/ 数据目录迁移 / 校验编排 / 向导 DTO（ADR-049 期 3-T4，753 生产行从 core 搬出）；**不含配置结构**（`TianyanConfig` 留 core——内核与插件的共同构造参数） |
 | `assembly/` | `tianyan-assembly` | **装配清单**：11 个插件工厂 + 两份清单（`full()` = 生产 11 插槽 / `policies()` = 集成测试的 9 插槽前缀）+ 跨插件顺序断言的**单一实现**（ADR-049 期 4）；全仓唯一 `use` 全部插件 crate 之处（改造前同一份清单在 `app` / `tauri` / `server/tests` / `app/tests` / `app/examples` 共 5 处副本） |
 | `tools-ops/` | `tianyan-tools-ops` | **运维工具**（ADR-049 期 4d）：服务停止后直接修数据的终端脚本（`skill_import` / `rebuild_overviews`），**不被任何 crate 依赖**；插件 crate 因此零 dev 边 |
-| `desktop/` | `tianyan-desktop` | **桌面启动编排（单 server 发现与复用）**：`ensure_server` / `discover_existing`（扫 `3000..=3100` + 校验 `/health` 的 `service` **与** `data_dir`）+ `find_available_port` / `start_axum_server`；`tauri/` 与 `gui-native/` 共用这一份。**端口探测只避免端口冲突，不能避免数据目录双写**——实测撞上过「桌面版占 3000、gui-native 顺延 3001，两个 server 同写 `D:\tianyan`」（定时任务各跑一遍 + SQLite 并发写）。只经 `tianyan-assembly::full()` 取插件清单，**不直接认识插件 crate**（不是第二份装配清单） |
+| `desktop/` | `tianyan-desktop` | **桌面启动编排（单 server 发现与复用）**：`ensure_server` / `discover_existing`（扫 `3000..=3100` + 校验 `/health` 的 `service` **与** `data_dir`）+ `find_available_port` / `start_axum_server`；`tauri/`（已冻结）与 `gui-native/` 共用这一份。**端口探测只避免端口冲突，不能避免数据目录双写**——实测撞上过「桌面版占 3000、gui-native 顺延 3001，两个 server 同写 `D:\tianyan`」（定时任务各跑一遍 + SQLite 并发写）。只经 `tianyan-assembly::full()` 取插件清单，**不直接认识插件 crate**（不是第二份装配清单） |
 | `plugins/tools-fs/` | `tianyan-tools-fs` | 插件：glob / list_dir / read_file / write_file / apply_edit / apply_patch / **view_image**（定义/门控/审批；实现暂留 core） |
 | `plugins/tools-code/` | `tianyan-tools-code` | 插件：symbol_outline / repo_map / grep（**含实现**，tree-sitter ×6 在此） |
 | `plugins/tools-todo/` | `tianyan-tools-todo` | 插件：todo / goal（含实现） |
@@ -82,11 +82,11 @@ cargo test -p tianyan-core vfs::backend::local -- --nocapture  # 指定测试模
 | `plugins/provider-llm/` | `tianyan-provider-llm` | 插件：**聊天 + 视觉 provider**（`chat` / `vision` / `discovery` / 日志装饰，约 2,450 行 + 39 个迁移测试）+ 连通性探针（配置页「测试连接」）；`async-openai` 随之离开 core（ADR-049 期 2 序 6） |
 | `plugins/provider-embed/` | `tianyan-provider-embed` | 插件：**文本嵌入 provider**（宽容 usage 解析 / 用量上报 / 查询缓存 FIFO 256，约 700 行 + 10 个迁移测试）；用量上报**契约** `EmbeddingUsageSink` 留 core（实现方在通道层）（期 2 序 6） |
 | `plugins/tool-pipeline/` | `tianyan-tool-pipeline` | 插件：**工具管线出口侧**——观测监听器（统计 / Trace / GEPA 执行记录 / 失败规则学习，213 生产行）+ 超预算输出落盘（ADR-047，181 生产行）+ 工具目录渲染（96 生产行），394 生产行搬出 core + 14 个迁移测试 + 2 个新增；契约 `ToolPostExecuteListener` / `ToolPipelineWiring` / `ToolPipelineFactory` 留 core（`agent::tool_registry::pipeline`，期 3-T5） |
-| `gui-native/` | `tianyan-gui-native` | **GPUI 原生客户端（第二个桌面壳，独立 workspace）**：自带 `[workspace]`，**不进主 workspace**（零脚本改动、零 IDE 索引污染、零 CI 风险；代价 = `core`/`server` 编两份）。与 `gui-vite` + `tauri/` 并存，连同一个内嵌 server、走同一套 HTTP/SSE 协议。验证结论与实测数据见 `gui-native/README.md`（含 GPUI 内存对比、IME/Markdown/虚拟列表实测、MSI perUser 静默升级） |
+| `gui-native/` | `tianyan-gui-native` | **GPUI 原生客户端（第二个桌面壳，独立 workspace）**：自带 `[workspace]`，**不进主 workspace**（零脚本改动、零 IDE 索引污染、零 CI 风险；代价 = `core`/`server` 编两份）。与 `gui-vite` 并存（`tauri/` 已冻结），连同一个内嵌 server、走同一套 HTTP/SSE 协议。验证结论与实测数据见 `gui-native/README.md`（含 GPUI 内存对比、IME/Markdown/虚拟列表实测、MSI perUser 静默升级） |
 
 **依赖铁律**（破一条拆包收益全部回吐）：插件只依赖 `core`（kernel-api）；插件之间零互赖；
 `core`/`server` 不认识任何插件 crate。**认识具体插件 crate 的只有三处**：`assembly/`
-（清单与其唯一实现，ADR-049 期 4）+ `app/`、`tauri/`（两个装配器，只写启动编排）；
+（清单与其唯一实现，ADR-049 期 4）+ `app/`（装配器，只写启动编排）——`tauri/` 原本是第二个装配器，**已冻结移出 workspace**（2026-10，解冻需加回 `members`）；
 `desktop/`（桌面启动编排）**不在此列**——它只调 `tianyan_assembly::full()`，不直接
 `use` 任何插件 crate，因此铁律不因它从三处变四处；
 另有一个**终端消费者** `tools-ops/`（运维脚本，依赖插件但**不被任何 crate 依赖**，
@@ -233,7 +233,7 @@ Harness 工程 → [`docs/harness核心思路/harness-engineering-overview.md`](
 | `events` | `core/src/events/` | 事件驱动触发（T1 路线：文件监听 + webhook → 事件总线 → 规则动作） | — |
 | `goals` | `core/src/goals/` | 长期目标 + 进度跟踪（与待办联动；运行期 `goals.json` 持久化） | ⚠️ 例外：运行期结构化产物 |
 | `todos` | `core/src/todos/` | 待办清单（会话绑定；运行期 `todos.json` 持久化） | ⚠️ 例外：运行期结构化产物 |
-| `notification` | `core/src/notification.rs` | 通知通道抽象（`NotificationSink`；桌面实现由 tauri 注入） | — |
+| `notification` | `core/src/notification.rs` | 通知通道抽象（`NotificationSink`）；桌面实现 = gui-native 的 `notify.rs`（WinRT + AUMID 注册），tauri 版曾由插件注入（已冻结） | — |
 
 > **注**：MCP 桥接（`server/src/mcp_bridge.rs`）返回的图片（浏览器截图等）落盘于 `{data_dir}/mcp_images/`，与 snapshot 同级运行时产物例外，不经 VFS（ADR-010）。
 >
@@ -265,7 +265,7 @@ Harness 工程 → [`docs/harness核心思路/harness-engineering-overview.md`](
 - 工具不做自主多轮决策，决策权在 LLM
 - 已有链路不叠加抽象（不额外封装 Manager/Coordinator）
 - `server/main.rs` 不解析 `--host/--port` 命令行参数——独立启动默认监听 `127.0.0.1:3000`（`TIANYAN_PORT` 可覆盖，走 `ServerConfig::from_env`），QA 时直接测 3000
-- **GUI e2e 后端刻意不用 3000**：`gui-vite/playwright.config.ts` 的 `E2E_PORT`（默认 3099，`TIANYAN_E2E_PORT` 可覆盖），vite 经 `TIANYAN_API_TARGET` 代理到该端口——本地 3000 常被运行中的桌面应用（tianyan-tauri）占用，若共用则「跑 e2e」与「用应用」互斥（后端条目 `reuseExistingServer: false` 会因端口冲突响亮失败）
+- **GUI e2e 后端刻意不用 3000**：`gui-vite/playwright.config.ts` 的 `E2E_PORT`（默认 3099，`TIANYAN_E2E_PORT` 可覆盖），vite 经 `TIANYAN_API_TARGET` 代理到该端口——本地 3000 常被运行中的桌面应用（`tianyan-gui-native`）占用，若共用则「跑 e2e」与「用应用」互斥（后端条目 `reuseExistingServer: false` 会因端口冲突响亮失败）
 - 配置热更新 API（`PUT /api/v1/config`）会持久化写入 `tianyan.toml`——QA/测试改动配置后必须恢复，别留污染
 - **PowerShell + cargo 陷阱（会伪造"编译失败"）**：PowerShell 5.1 下 `cargo ... 2>&1 | Select-String` / `Out-String` 会把 cargo 写到 **stderr** 的内容（warning 列表、`Blocking waiting for file lock`）当作错误抛出（`NativeCommandError`，exit 1）——即使编译实际成功。判据是输出里是否出现 `Finished` / `test result:`。脚本内用 `$ErrorActionPreference="Continue"`，交互排查可用 `cmd /c "cargo ..."`
 - 事件总线为**有界通道**（4096）：订阅者（事件处理器/SSE）积压时丢弃事件并计数（`EventBus::dropped_events()`）——实时通知尽力而为，权威数据在 SQLite/日志文件；不要把"事件必达"当作完整性契约

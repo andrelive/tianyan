@@ -1,11 +1,27 @@
 # Tianyan Build Script for Windows PowerShell
 # Builds GUI and Tauri desktop application
+#
+# ⛔ **已退役（2026-10）**：本脚本构建 tauri 壳（`gui-vite` → `cargo tauri build`）。
+# tauri 已从 workspace 移出（根 `Cargo.toml` 的 members 注释掉 "tauri"），
+# 而 `tauri/Cargo.toml` 用 `version.workspace = true` —— 因此现在跑到
+# `cargo tauri build` 必然解析失败。**保留文件只为将来解冻时有据可查。**
+#
+# native（GPUI，当前主发布渠道）的打包走：
+#   pwsh -File gui-native\installer\build-msi.ps1
+# 解冻 tauri：把 members 里的 "tauri" 加回，本脚本即可照旧使用。
 
 param(
     [switch]$Dev = $false,
     [switch]$SkipGui = $false,
     [switch]$Verbose = $false
 )
+
+Write-Host ""
+Write-Host "⛔ scripts/build.ps1 已退役（tauri 壳冻结，已移出 workspace）" -ForegroundColor Red
+Write-Host "   native 打包: pwsh -File gui-native\installer\build-msi.ps1" -ForegroundColor Yellow
+Write-Host '   解冻: 把根 Cargo.toml members 里的 "tauri" 加回' -ForegroundColor Yellow
+Write-Host ""
+exit 1
 
 # native 命令的 stderr 不是错误（PowerShell 5.1 会把 cargo 的 warning 当
 # NativeCommandError 抛出 → 打包脚本误判失败）；成败以 `$LASTEXITCODE` 为准。
