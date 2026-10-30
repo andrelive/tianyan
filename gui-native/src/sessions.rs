@@ -584,37 +584,39 @@ impl ClientApp {
         self.thinking_menu_open = false;
         // 会话级模型 / 思考强度的权威值在会话头里：拉回来覆盖快照里的旧值
         self.load_session_model(id.clone(), cx);
-        // 消息：**有快照就不重拉** —— 这份快照现在真的是完整的。
+        // 消息：**每次都从库里拉一页权威内容**，快照只提供 UI 态（折叠 / 面板 /
+        // 输入框 / 滚动锚点）。
         //
-        // 关键前提是 `apply_event_offline`：切走期间该会话的流式事件会按 `session_id`
-        // 写回它自己那份快照（对齐 vite 的 per-session store），所以 restore 出来就是
-        // 最新状态，不需要再用「整页重拉 + 按 seq 对齐」去猜 —— 那套猜测正是此前
-        // 「切回来内容只剩思考块 / 上滚的历史被 50 条截断 / 位置被钉在旧处」的来源。
+        // 为什么不沿用「有快照就不重拉」（(63) 那条）：它的前提是「快照一定完整」，
+        // 而被实测打破 —— 切回会话只看到**部分**工具步骤，同一时刻库里一条不少
+        // （直接查 `/messages` 对照）。缺口来源是 `apply_event_offline`：切走期间的
+        // 事件只有在「该会话仍在 `parked` 里」时才写得回去，一旦快照被 LRU 挤掉或
+        // 某条事件丢了，快照就永久停在旧位置，而「不重拉」会让它一直显示下去。
         //
-        // 唯一要兜的情况：最后一条 assistant **还没有 id**（= 这一轮没以权威消息收尾，
-        // 多半是切走期间 SSE 断过、事件真的丢了）。这时才拉一页对齐尾部；那一轮还在
-        // 跑（`running`）则不动 —— 占位是它的落点，等权威消息整条覆盖即可。
-        // **每次都从库里拉一页权威内容**，快照只提供 UI 态（折叠 / 面板 / 输入框）。
+        // 页边界不靠前端兜：服务端 `get_messages_page` 会把页首对齐到 user 消息
+        // （整轮不会被切开，见 [`MESSAGE_PAGE`] 的注释），前端只要按
+        // `next_before_seq` 游标走。
         //
-        // 为什么推翻「有快照就不重拉」（(63) 那条）：那个策略的前提是「快照一定
-        // 完整」，而用户实测把它打破了 —— 切回会话只看到**部分**工具步骤，可库里
-        // 同一时刻 68 条消息一条不少（我直接查了 `/messages` 对照）。缺口的来源是
-        // `apply_event_offline`：切走期间的事件只有在「该会话仍在 `parked` 里」时才
-        // 写得回去，一旦快照被 LRU 挤掉 / 某条事件丢了，快照就永久停在旧位置，
-        // 而「不重拉」让这个旧位置一直显示下去。
-        //
-        // 正确的分工：**内容权威性归库，滚动位置/折叠态归快照**。页长 [`MESSAGE_PAGE`]
-        // （200）是为了让「最近一轮」的多步消息整轮落在窗口里 —— 库里是一步一条
-        // assistant 消息，一轮几十条，50 条一页会切在轮中间，看起来就像内容被吞了。
+        // `anchor_seq` = 恢复出来的窗口**顶部**那条消息的 seq：重拉后按它找回
+        // 阅读位置，否则每次切回都会被 `ListAlignment::Bottom` 钉到底部
+        // （vite 靠 store 里保留的 Virtuoso 实例天然保位，native 得显式给锚点）。
+        let anchor_seq = {
+            let ix = self.msg_list_state.logical_scroll_top().item_ix;
+            self.messages.get(ix).map(|m| m.seq).filter(|s| *s > 0)
+        };
+        // 历史窗口是否为空：为空说明「有订阅但没有内容」——下面要**强制重订阅**，
+        // 因为 resident 幂等会把正常重发挡掉，而这个会话可能从来没拿到过快照
+        // （vite `useSessionHistory` 的 `needForce` 同口径）。
+        let history_empty = self.messages.is_empty();
         let _ = restored;
-        self.load_messages(id, cx);
+        self.load_messages_with(id, MESSAGE_PAGE, anchor_seq, cx);
         self.load_session_usage(cx);
         self.load_todos_goals(cx);
         self.load_approvals(cx);
         // 订阅该会话（ADR-029 resident）：服务端收到订阅后推一帧快照，前端 replace
         // 窗口 —— 幂等（已订阅直接返回），断线重连时由 `on_event_stream_connected`
         // 整集重放。**这行是"打开/切回就有权威内容"的触发点**，缺了它快照永远不会来。
-        self.subscribe_session(sid_for_subscribe, false, cx);
+        self.subscribe_session(sid_for_subscribe, history_empty, cx);
         // 选中态与「当前会话始终可见」都体现在左栏行上
         self.restore_input(window, cx);
         self.rebuild_session_rows(cx);

@@ -1690,6 +1690,13 @@ impl ClientApp {
                                 println!("[消息] 首屏 {n} 条作废（期间快照已对齐）");
                                 return;
                             }
+                            // 该会话正在流式：历史页 replace 会把**未落库**的占位与
+                            // 增量冲掉（vite `loadSessionHistory` 的
+                            // `if (streamStatus === 'streaming') return` 同口径）。
+                            if this.busy() {
+                                println!("[消息] 首屏 {n} 条作废（该会话正在流式）");
+                                return;
+                            }
                             this.messages = Rc::new(rows);
                             // 条数变了必须重建 list state（item_count 在构造时固定）
                             this.msg_list_state = GpuiListState::new(
@@ -1729,6 +1736,11 @@ impl ClientApp {
                     cx.update(|app| {
                         let _ = this.update(app, |this, cx| {
                             this.current_title = format!("加载失败：{e}");
+                            // 失败时把分页元信息清掉（vite `reloadSession` 的失败
+                            // 回退同口径）：否则「加载更早」会拿着作废的游标反复请求。
+                            this.oldest_seq = None;
+                            this.has_more_history = false;
+                            this.set_error(format!("加载会话失败：{e}"));
                             cx.notify();
                         });
                     });
@@ -1751,7 +1763,10 @@ impl ClientApp {
         let Some(sid) = self.current_session.clone() else {
             return;
         };
-        let Some(cursor) = self.oldest_seq else {
+        // 到链首（游标 ≤ 0）不再请求（vite `loadOlder` 的
+        // `hasMore && oldestSeq > 0` 同口径）——否则会拿着 0 当 before_seq
+        // 反复拉同一页。
+        let Some(cursor) = self.oldest_seq.filter(|s| *s > 0) else {
             return;
         };
         if self.messages.len() >= MAX_LOADED_MESSAGES {
@@ -1764,7 +1779,7 @@ impl ClientApp {
         self.set_status("正在加载更早的消息…".to_string());
         cx.spawn(async move |this, cx| {
             let url = format!(
-                "http://{SERVER_HOST}:{port}/api/v1/sessions/{sid}/messages?limit={MESSAGE_PAGE_OLDER}&before_seq={cursor}"
+                "http://{SERVER_HOST}:{port}/api/v1/sessions/{sid}/messages?limit={MESSAGE_PAGE}&before_seq={cursor}"
             );
             let res = fetch_json(url).await;
             let _ = this.update(cx, |this, cx| {

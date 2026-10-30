@@ -65,20 +65,20 @@ pub(crate) use types::*;
 
 pub(crate) const SERVER_HOST: &str = "127.0.0.1";
 pub(crate) const PREFERRED_PORT: u16 = 3000;
-/// 消息分页页长（`?limit=`）。
+/// 消息分页页长（`?limit=`）—— 与 vite `use-session-history.ts` 的 `PAGE_SIZE`
+/// 同值，**不要为了「一轮消息多」而加大它**。
 ///
-/// ⚠️ 与 Web 版**有意不同**（vite 是 50）：库里的粒度是「**一步一条** assistant
-/// 消息」（ADR-002 步边界），一轮多工具对话就能堆出几十条。实测这个会话的一轮
-/// 里有 **68 条**消息 —— 50 条一页的首载会**切在轮中间**：界面从某条 assistant
-/// 开始，那轮的 user 起点与前半段工具卡都不在窗口里，看起来就像「内容丢了/
-/// 跳了一段」（用户实报：切回会话只看到部分工具步骤）。
+/// 为什么 50 就够（这条是 vite 版积累的关键细节）：页边界**不由前端保证**，
+/// 而是**服务端对齐到 user 消息**——`SessionService::get_messages_page` 取完
+/// 窗口后会从「窗口内由远及近第一条 `user`」起截；窗口内没有 user 时向前找最近
+/// 一条更早的 user 并**重新取完整一段**（不是补一条）。所以：
+/// - 页首恒为 user 消息 → 工具调用与结果**不会被分页切开**（没有孤儿工具卡）；
+/// - 一轮即使有 68 条（一步一条 assistant，ADR-002），也会整轮落在同一页里
+///   （返回条数可以 > 50，`limit` 只是基准窗口）；
+/// - 同时避免「user 消息太近、一页占不满屏」。
 ///
-/// 200 条足够覆盖常见长轮次；再加一层「首条不是 user 就再补一页」的兜底见
-/// `load_messages_with`。上滚仍按 [`MESSAGE_PAGE`] 分页，不受影响。
-pub(crate) const MESSAGE_PAGE: usize = 200;
-
-/// 上滚「加载更早」的步长（仍按 50 条一页，避免一次拉太多）。
-pub(crate) const MESSAGE_PAGE_OLDER: usize = 50;
+/// 前端要做的只有一件事：**永远按 `next_before_seq` 当游标**，别自己数条数。
+pub(crate) const MESSAGE_PAGE: usize = 50;
 
 /// 前插累积的硬上限：超过就不再往上加载（提示已到上限）。
 ///
