@@ -1022,12 +1022,14 @@ impl ClientApp {
                                             // —— lucide 的描边矩形被 `fill-current` 填满，
                                             // 看起来是**实心**方块。GPUI 这边 `svg()` 渲染的是
                                             // lucide 原始 stroke 版（空心方框），改不了 fill，
-                                            // 所以直接画一个白方块：尺寸对齐 16px 图标里
-                                            // 3/24 内缩后约 11px 的实心区域。
+                                            // 所以直接画一个白方块。尺寸照抄 lucide 的几何：
+                                            // 24 视口里 `rect x=3 y=3 w=18 h=18 rx=2`，按 16px
+                                            // 渲染即 12×12 的实心块、1.3px 圆角（用 12px 与
+                                            // 1.5px 的圆角，放大截图核对过形状）。
                                             div()
-                                                .w(px(11.))
-                                                .h(px(11.))
-                                                .rounded_sm()
+                                                .w(px(12.))
+                                                .h(px(12.))
+                                                .rounded(px(1.5))
                                                 .bg(rgb(0xffffff))
                                                 .into_any_element()
                                         } else {
