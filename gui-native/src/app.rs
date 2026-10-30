@@ -1052,14 +1052,20 @@ impl ClientApp {
                     // 别的会话的轮状态：`running_sessions` 已在 `handle_event` 里记过账，
                     // 这里不碰当前会话的 `streaming` / 状态行 / 统计行
                 } else {
-                    // ⚠️ 只更新**服务端权威**那一半，不碰本地 `streaming`。
+                    // **轮状态的唯一权威**（ADR-045）：`running` 置真、`idle` 收尾。
                     //
-                    // 为什么（实测）：收尾时 `turn_state(idle)` 与 assistant 消息边界
-                    // 走两条不同的投递路径，顺序不保证 —— 抓包实测 idle 先到、message
-                    // 边界后到（#130 vs #131）。若这里直接 `self.streaming = false`，
-                    // 界面就会在正文还在路上时先回成「发送」，用户误判本轮结束。
-                    // 本地收尾只认 assistant 权威消息（见 `apply_authoritative_message`）。
+                    // 为什么 `idle` 要**同时**清本地 `streaming`：一轮多步里的每一步
+                    // 都会推 assistant 消息边界，那条**不能**当作本轮结束（会让按钮在
+                    // 轮中间回成「发送」，实测切回长轮后第 4 秒就被清、而内容一直追加
+                    // 到第 30 秒）。反过来，`turn_state(idle)` 只在**整轮**结束时发，
+                    // 它是"这轮真结束了"的唯一可靠信号 —— 两条都清，`busy()` 才会在
+                    // 该结束的时候结束。
+                    //
+                    // 残留保护：万一 `idle` 事件丢了（有界通道可能挤掉），`busy()` 会
+                    // 停在 true（按钮常驻「停止」）。兜底是断线重连后的**快照帧** ——
+                    // `apply_snapshot` 用服务端权威 `turn.state` 覆盖这两路。
                     self.turn_running = state == "running";
+                    self.streaming = state == "running";
                     if !self.turn_running && !self.streaming {
                         self.set_status(format!("空闲 · {sid}"));
                         // 本轮结束：刷新底部统计行（token 汇总 + 最近一次请求性能）
@@ -1199,14 +1205,13 @@ impl ClientApp {
         });
         self.messages = Rc::new(next);
         if !self.offline {
-            // **本地流的收尾单点**：本轮 assistant 的权威消息到了 = 这一轮结束
-            // （ADR-031「增量即终版」，服务端只在本轮末尾发这一条边界）。
+            // ⚠️ **不清 `streaming`**。这里是「某一步的 assistant 权威消息」落地，
+            // 不是「本轮结束」的信号：一轮多步（工具调用）里每一步都会推边界，
+            // 清掉本地流状态会让按钮在**轮中间**回成「发送」——实测：切走后长轮
+            // 回来，`streaming` 在第 4 秒就被这里清成 false，而消息一直追加到第
+            // 30 秒（用户看到「输出完了/没在跑」但内容还在长）。
             //
-            // 不再由 `turn_state(idle)` 决定按钮：那条与消息边界走**不同的投递
-            // 路径**（转发器 vs 直投广播），顺序不保证 —— 抓包实测 idle 先到、
-            // 本消息后到。让 idle 直接翻按钮就是「正文还在路上、界面已经回到
-            // 发送态」的那个 bug。
-            self.streaming = false;
+            // 本轮结束只认 `turn_state(idle)`（服务端权威，见该分支）与 `error`。
             self.msg_list_state.remeasure_items(idx..idx + 1);
             self.scroll_to_end_if_following();
         }
