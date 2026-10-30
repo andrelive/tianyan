@@ -287,6 +287,20 @@ struct ClientApp {
     /// **没有落点只能丢**，切回只能整页重拉（丢历史、丢位置、丢未落库内容）。
     /// 对齐 vite 的做法是每会话一份 store，事件按 `session_id` 写进各自那份。
     pub(crate) offline: bool,
+    /// 「Enter 发送」的 `InputEvent::PressEnter` 订阅句柄。
+    ///
+    /// ⚠️ **必须跟着 `self.input` 走**：输入框是**每会话一个实体**（期 2 实体化），
+    /// `restore_input` 在找不到该会话的实体时会新建一个 —— 早先订阅只在
+    /// `ClientApp::new` 里挂一次、挂在启动时那一个实体上，于是「重启天演」或
+    /// 「打开一个从没打开过的会话」之后，`PressEnter` 照常 emit（所以回车照样换行）
+    /// 却**没有任何订阅者**（所以不发送）。用户实测「重启后回车只换行、发不出去」
+    /// 就是这个，而所有自动化测试都是"空库冷启动、不换实体"，因此一路全绿。
+    pub(crate) submit_sub: Option<gpui_kit::Subscription>,
+    /// 上面那份订阅挂在**哪个**输入框实体上（`None` = 待补挂）。
+    ///
+    /// 用于每帧兜底：`self.input` 换了实体（新建）而没走到有窗口的重绑路径时，
+    /// `render` 里的 `ensure_composer_submit` 靠这个比较来补挂。
+    pub(crate) submit_for: Option<gpui_kit::EntityId>,
     /// 最近一次草稿恢复走的哪条路（诊断用，进 `/state` 的 `usage.draft_restore_path`）。
     ///
     /// `"window"` = 真实点击路径（`on_click` 把 `&mut Window` 直接传下来）；
@@ -642,6 +656,10 @@ impl ClientApp {
 
 impl Render for ClientApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // Enter 发送的订阅必须挂在**当前**输入框实体上：换会话 / 重启恢复会话时
+        // 输入框是新建的实体，旧订阅留在弃用的那个上 —— 那时回车只换行、不发送。
+        // 这里每帧比一次 `EntityId`（不同才重挂），兜住"拿不到 `&mut Window` 的换实体路径"。
+        self.ensure_composer_submit(window, cx);
         // 说明：设置页/人设的编辑器回填**不在这里做**——窗口隐藏时不会触发渲染，
         // 而自动化验收正是隐藏窗口跑的。回填统一走 `window_handle.update` 现取窗口
         // （见 `backfill_settings_fields` / `set_soul_text`）。

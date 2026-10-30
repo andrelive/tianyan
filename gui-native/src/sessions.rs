@@ -473,6 +473,9 @@ impl ClientApp {
                 self.input.update(cx, |state, cx| state.focus(w, cx));
             }
         }
+        // 订阅必须跟着**当前**这个实体走：上面可能刚换了实体（取回或新建），
+        // 旧订阅挂在被弃用的那个上，Enter 就会只换行、不发送（见 `bind_composer_submit`）。
+        self.bind_composer_submit(window, cx);
     }
 
     /// 新建会话：清空选中与消息。真正的会话记录由服务端在首条消息时按本地

@@ -104,33 +104,7 @@ impl ClientApp {
         let endpoint_input =
             cx.new(|cx| TextareaState::new(window, cx).placeholder("API 端点（http(s)://…）"));
         let key_input = cx.new(|cx| TextareaState::new(window, cx).placeholder("API 密钥"));
-        // Enter 发送（Shift+Enter 由 Textarea 换行，不走这里）。直接走
-        // `send_current_input` —— 与「点发送按钮」**完全同一条路**。
-        //
-        // 这一行曾经被换成过两个"更聪明"的版本，都失败并回退了：
-        // ① 在这里 `set_value(fixed)` 把 Enter 插进去的换行从编辑器里删掉 → 打断
-        //    IME 组合态/清空 undo 历史，用户实测「回车只换行、发不出去」；
-        // ② 只在**待发送字符串**上删那个换行（不碰编辑器）→ 用户实测**仍然发不出去**，
-        //    而同样的二进制在隔离实例里用「粘贴 + Enter」能发 —— 说明真凶在「手打进
-        //    输入法」这条路上，不是字符串处理。结论：Enter 路径必须与原版逐字节一致，
-        //    换行问题只在**末尾**（`trim_end`）兜一下，绝不在这里做别的。
-        // 另：也别改 `capture_key_down` 拦截 —— GPUI 的 keybinding → action 派发发生在
-        // 原始 key listener 之前（`Window::dispatch_key_event` 先 `dispatch_key`），
-        // capture 追不上 Textarea 的 InsertNewline。
-        cx.subscribe_in(
-            &input,
-            window,
-            |this, _input, event: &InputEvent, window, cx| {
-                if let InputEvent::PressEnter { shift, .. } = event {
-                    if !shift {
-                        this.send_current_input(window, cx);
-                    }
-                }
-            },
-        )
-        .detach();
-
-        let app = Self {
+        let mut app = Self {
             session_rows: Vec::new(),
             sessions_data: Vec::new(),
             collapsed_groups: std::collections::HashSet::new(),
@@ -228,6 +202,8 @@ impl ClientApp {
             inputs: Vec::new(),
             running_sessions: std::collections::HashSet::new(),
             offline: false,
+            submit_sub: None,
+            submit_for: None,
             draft_restore_path: String::new(),
             parked: Vec::new(),
             oldest_seq: None,
@@ -339,6 +315,10 @@ impl ClientApp {
         if let Ok(mut g) = app_ref.lock() {
             *g = Some(cx.entity().downgrade());
         }
+        // Enter 发送的订阅：挂到**当前**这个输入框实体上。
+        // 必须在这里（而不是内联一句 `subscribe_in`）走同一个入口 —— 因为输入框
+        // 是每会话一个实体，`restore_input` 换实体后要**重新**订阅（见方法文档）。
+        app.bind_composer_submit(Some(&mut *window), cx);
         // 关闭按钮 → 藏到托盘（不是退出）。托盘「退出天演」会先 `begin_quit()`
         // 置位，这里的回调据此放行——否则用户永远关不掉这个程序。
         window.on_window_should_close(cx, |_window, _cx| {
@@ -1130,6 +1110,78 @@ impl ClientApp {
         if !self.offline {
             self.msg_list_state.reset(self.messages.len());
             self.scroll_to_end_if_following();
+        }
+    }
+
+    /// 把「Enter 发送」的订阅挂到**当前**输入框实体上（换实体后必须重挂）。
+    ///
+    /// 输入框是**每会话一个 `Entity<TextareaState>`**（期 2 实体化）：`restore_input`
+    /// 找不到该会话的实体时会新建一个，`self.input` 随之换人。而 `subscribe_in` 的
+    /// 订阅是**绑在某个具体实体**上的 —— 早先只在 `ClientApp::new` 里挂一次，于是
+    /// 「重启天演」或「打开一个从没打开过的会话」之后：`PressEnter` 照常 emit（所以
+    /// 回车照样换行），但**没有订阅者在听**（所以消息不发送）。用户实测的
+    /// 「重启后回车只换行、发不出去」就是这个；而所有自动化测试都是"空库冷启动、
+    /// 不换实体"，用的正好是启动时那个有订阅的实体，因此一路全绿。
+    ///
+    /// 纪律：**任何给 `self.input` 赋值的路径，末尾都要调这里**（目前是 `new` 与
+    /// `restore_input`），保证只有这一处订阅逻辑。
+    pub(crate) fn bind_composer_submit(
+        &mut self,
+        mut window: Option<&mut Window>,
+        cx: &mut Context<Self>,
+    ) {
+        // 先丢掉旧订阅：它挂在即将被弃用的实体上，留着只会造成"看起来挂了"的假象
+        self.submit_sub = None;
+        self.submit_for = None;
+        if let Some(w) = window.as_mut() {
+            let sub = cx.subscribe_in(
+                &self.input,
+                w,
+                |this, _input, event: &InputEvent, window, cx| {
+                    Self::on_composer_event(this, event, window, cx);
+                },
+            );
+            self.submit_sub = Some(sub);
+            self.submit_for = Some(self.input.entity_id());
+        }
+        // 没有 `&mut Window` 的路径（自动化动作 / `restore_input` 的 handle 分支）
+        // 在这里挂不了订阅（`subscribe_in` 是 `Context` 的方法，`handle.update` 只给
+        // `&mut App`）—— 所以把标记清成 `None`，交给下一帧 `render`（那里一定有窗口）
+        // 通过 `ensure_composer_submit` 补挂。**不能静默跳过**：跳过就等于这个会话的
+        // Enter 永远不发送，正是这次的 bug。
+    }
+
+    /// 每帧确认「Enter 发送」的订阅挂在**当前**输入框实体上（换了就补挂）。
+    ///
+    /// 兜底用途：有些换实体路径拿不到 `&mut Window`，那里只能把 `submit_for` 清空；
+    /// 渲染时一定有窗口，所以在这里补上。代价是一次 `EntityId` 比较。
+    pub(crate) fn ensure_composer_submit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.submit_for != Some(self.input.entity_id()) {
+            self.bind_composer_submit(Some(window), cx);
+        }
+    }
+
+    /// 「Enter 发送」的订阅体（与「点发送按钮」走**完全同一条路**）。
+    ///
+    /// 曾经试过两个"更聪明"的版本，都失败并回退：
+    /// ① 在这里 `set_value(fixed)` 把 Enter 插进去的换行从编辑器删掉 → 打断 IME
+    ///    组合态 / 清空 undo 历史（用户实测「回车只换行、发不出去」）；
+    /// ② 只在**待发送字符串**上删那个换行（不碰编辑器）→ 症状依旧 —— 因为真凶不是
+    ///    字符串处理，而是**订阅根本没挂上**（见 `bind_composer_submit`）。
+    /// 换行问题只在 `send_current_input` 里对**末尾**做 `trim_end`，其余一律不动。
+    /// 另：也别改 `capture_key_down` 拦截 —— GPUI 的 keybinding → action 派发发生在
+    /// 原始 key listener 之前（`Window::dispatch_key_event` 先 `dispatch_key`），
+    /// capture 追不上 Textarea 的 InsertNewline。
+    fn on_composer_event(
+        &mut self,
+        event: &InputEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let InputEvent::PressEnter { shift, .. } = event {
+            if !shift {
+                self.send_current_input(window, cx);
+            }
         }
     }
 
