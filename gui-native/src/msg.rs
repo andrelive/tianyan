@@ -11,6 +11,8 @@
 use crate::theme::colors;
 use crate::*;
 use gpui_kit::assets::IconName;
+// 摘要卡片限高后可滚动（`.overflow_y_scrollbar()` 来自这个 trait）
+use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::text::TextView;
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
@@ -1072,31 +1074,83 @@ pub(crate) fn render_msg_body(
     }
     let mut body = div().flex().flex_col().gap_2();
     if msg.compression {
-        body = body.child(
-            div()
-                .flex()
-                .flex_row()
-                .items_center()
-                .gap_2()
-                .child(
-                    div()
-                        .rounded_full()
-                        .border_1()
-                        .border_color(rgb(colors::BORDER()))
-                        .bg(rgb(colors::BG_HOVER()))
-                        .px_2()
-                        .py_1()
-                        .text_size(px(11.))
-                        .text_color(rgb(colors::TEXT_SECONDARY()))
-                        .child("压缩点"),
-                )
-                .child(div().flex_1().h(px(1.)).bg(rgb(colors::BORDER()))),
-        );
-    }
-    if msg.compression {
-        // 压缩点只做**分隔符**：摘要正文是给模型看的，界面上不铺开（与 Web 版
-        // `MessageBubble.tsx` 的「压缩点」胶囊同口径）——几百字摘要会把窗口占满，
-        // 反而更难看清「压缩点到底在哪」。
+        // 压缩点 = 分隔符 + **可展开的摘要卡片**（默认收起）。胶囊与分割线保持
+        // 原口径（一眼看出上下文在这儿被压过），摘要正文按需展开 —— 几百字铺开
+        // 会把窗口占满，反而更难看清压缩点在哪。
+        let key = format!("c:{mi}");
+        let open = expand.borrow().compression.contains(&key);
+        let has_text = !msg.text.trim().is_empty();
+        let chevron = if open {
+            IconName::ChevronDown
+        } else {
+            IconName::ChevronRight
+        };
+        let mut head = div()
+            .id(("compress-head", mi))
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_2()
+            .child(
+                div()
+                    .flex_shrink_0()
+                    .rounded_full()
+                    .border_1()
+                    .border_color(rgb(colors::BORDER()))
+                    .bg(rgb(colors::BG_HOVER()))
+                    .px_2()
+                    .py_1()
+                    .text_size(px(11.))
+                    .text_color(rgb(colors::TEXT_SECONDARY()))
+                    .child("压缩点"),
+            )
+            .child(div().flex_1().h(px(1.)).bg(rgb(colors::BORDER())));
+        if has_text {
+            head = head.child(
+                div()
+                    .flex_shrink_0()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_1()
+                    .child(
+                        svg()
+                            .path(chevron.path())
+                            .size(px(12.))
+                            .text_color(rgb(colors::TEXT_TERTIARY())),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(11.))
+                            .text_color(rgb(colors::TEXT_TERTIARY()))
+                            .child("摘要"),
+                    ),
+            );
+        }
+        body = body.child(if has_text {
+            let app2 = app.clone();
+            let key2 = key.clone();
+            head.cursor_pointer().on_click(move |_, _, cx| {
+                toggle_expand(&app2, key2.clone(), |s| &mut s.compression, cx);
+            })
+        } else {
+            head
+        });
+        if open && has_text {
+            body = body.child(
+                div()
+                    .rounded_lg()
+                    .border_1()
+                    .border_color(rgb(colors::BORDER()))
+                    .bg(rgb(colors::BG_SECONDARY()))
+                    .px_3()
+                    .py_2()
+                    .max_h(px(320.))
+                    .overflow_y_scrollbar()
+                    .child(TextView::markdown(("compress-body", mi), msg.text.clone())),
+            );
+        }
+        // 摘要已在上面按卡片画过，正文分支不再走
     } else if msg.segs.is_empty() {
         if !msg.text.is_empty() {
             body = body.child(TextView::markdown(("msg", mi), msg.text.clone()));
@@ -1192,6 +1246,11 @@ pub(crate) struct ExpandState {
     pub(crate) tool_result: std::collections::HashSet<String>,
     /// 子代理活动流里展开的那一行（Web 版同口径：同时只展开一个）
     pub(crate) activity: Option<String>,
+    /// 压缩点摘要卡片（默认收起）：key = `c:{mi}`
+    ///
+    /// 摘要正文是给模型看的压缩结果（几百字），平时不该铺开占满窗口；但用户需要能
+    /// 查证「这里到底压了什么」，所以给一个「摘要」入口，点开才显示。
+    pub(crate) compression: std::collections::HashSet<String>,
 }
 
 pub(crate) type ExpandRef = Rc<std::cell::RefCell<ExpandState>>;

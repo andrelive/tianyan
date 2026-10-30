@@ -308,6 +308,17 @@ impl ClientApp {
             })
         });
 
+        // 折叠态快照（在宏外先算：`json!` 里不能写 `let` 语句）
+        let expanded_json = {
+            let ex = self.expand.borrow();
+            serde_json::json!({
+                "thinking": ex.thinking.len(),
+                "tool_args": ex.tool_args.len(),
+                "tool_result": ex.tool_result.len(),
+                "compression": ex.compression.iter().cloned().collect::<Vec<_>>(),
+            })
+        };
+
         serde_json::json!({
             "view": self.view.key(),
             // 首次启动引导状态（断言「新装用户是否被正确拦到引导页」）
@@ -358,6 +369,9 @@ impl ClientApp {
                 // 切走再切回必须保持原位置，而不是被 `load_messages` 的
                 // `scroll_to_end` 冲到底部。0 = 在顶部，`loaded-1` ≈ 在底部。
                 "scroll_item": self.msg_list_state.logical_scroll_top().item_ix,
+                // 折叠态快照：断言「点一下摘要/思考有没有真的切过去」只能看这里
+                // （截图能看出结果，但分不清「没点中」还是「点了没重绘」）
+                "expanded": expanded_json,
                 // 是否处于「跟随尾部」：`false` = 用户已上滚，流式增量**不会**再把他
                 // 拖回底部。判据见 `ClientApp::follows_tail`（不能只用
                 // `is_scrolled_to_end()`：虚拟列表滚到顶部/中部时它返回 None）。
