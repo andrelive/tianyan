@@ -38,7 +38,9 @@ use axum::{
 };
 use gpui_kit::component::input::InputState;
 use gpui_kit::Entity;
-use gpui_kit::{App, AsyncApp, WeakEntity};
+// `Focusable` 提供 `focus_handle(cx)`（`InputBaseState` **没有**同名固有方法，
+// 实测过）：键盘类回归要把焦点放进输入框，必须先拿到焦点句柄。
+use gpui_kit::{App, AsyncApp, Focusable as _, WeakEntity};
 use tokio::sync::{mpsc, oneshot};
 
 use crate::{
@@ -386,6 +388,10 @@ impl ClientApp {
                             "tool_calls": m.tool_calls.len(),
                             "tools_done": m.tool_calls.iter().filter(|t| t.result.is_some()).count(),
                             "id_empty": m.id.is_empty(),
+                            // 正文里的换行个数。Enter 发送的「凭空多一个换行」只能靠它
+                            // 断言：光标在末尾时那个换行跟在最后（渲染上不显形），光标在
+                            // 中间时它卡在句子里（用户实测一眼可见）—— 两种都要能回归。
+                            "newlines": m.text.matches('\n').count(),
                         })
                     })
                     .collect::<Vec<_>>(),
@@ -863,6 +869,25 @@ impl ClientApp {
         }
     }
 
+    /// 把键盘焦点放进输入框。
+    ///
+    /// 键盘类回归（Enter 发送 / Shift+Enter 换行 / Ctrl+V 贴图）必须真的按键，而
+    /// 按键只送到**有焦点**的窗口与控件；早先这类测试只能靠「点屏幕坐标」，布局一
+    /// 改就假失败。这里转手调用 `FocusHandle::focus`（与真实点击同一条路径）。
+    fn composer_focus(&mut self, cx: &mut gpui_kit::Context<Self>) -> Result<(), String> {
+        let handle = self.window_handle;
+        let input = self.input.clone();
+        handle
+            .update(cx, move |_, window, cx| {
+                let focus = input.read(cx).focus_handle(cx);
+                // 句柄在 `cx` 借用期间先算出来，再交给 `focus`（它同时要 window 与 cx）
+                focus.focus(window, cx);
+            })
+            .map_err(|e| format!("窗口已关闭：{e}"))?;
+        cx.notify();
+        Ok(())
+    }
+
     /// 往单行输入框写值（自动化动作共用；写值要 `&mut Window`，经窗口句柄现取）。
     fn set_input_text(
         &mut self,
@@ -917,6 +942,10 @@ impl ClientApp {
             // ---- 对话 ----
             "send_message" => self.send_text(arg_str(cmd, "text")?, cx),
             "stop_turn" => self.stop_current_turn(cx),
+            // 把焦点放进输入框。键盘类回归（Enter 发送、Shift+Enter 换行、Ctrl+V 贴图）
+            // 必须真的按键，而按键只送到有焦点的窗口 —— 没有这个动作，脚本只能靠
+            // 「点屏幕坐标」，一改布局就假失败。
+            "composer_focus" => self.composer_focus(cx)?,
             // 上滚加载更早一页（与顶部「↑ 加载更早的消息」按钮同一个方法）
             "load_older" => self.load_older_messages(cx),
             // ---- 左栏 ----

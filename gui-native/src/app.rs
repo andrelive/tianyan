@@ -104,14 +104,18 @@ impl ClientApp {
         let endpoint_input =
             cx.new(|cx| TextareaState::new(window, cx).placeholder("API 端点（http(s)://…）"));
         let key_input = cx.new(|cx| TextareaState::new(window, cx).placeholder("API 密钥"));
-        // Enter 发送：Textarea 已按多行语义插入换行，发送成功后再清空即无残留
+        // Enter 发送（Shift+Enter 由 Textarea 换行，不走这里）。
+        // 注意别改成 `capture_key_down` 拦截：GPUI 的 keybinding → action 派发发生在
+        // 原始 key listener **之前**（`Window::dispatch_key_event` 先 `dispatch_key`，
+        // 之后才 `finish_dispatch_key_event`），capture 阶段追不上 Textarea 的
+        // InsertNewline，拦不住那个换行 —— 只能在这里事后撤掉（见 `send_on_enter`）。
         cx.subscribe_in(
             &input,
             window,
             |this, _input, event: &InputEvent, window, cx| {
                 if let InputEvent::PressEnter { shift, .. } = event {
                     if !shift {
-                        this.send_current_input(window, cx);
+                        this.send_on_enter(window, cx);
                     }
                 }
             },
@@ -905,6 +909,7 @@ impl ClientApp {
     /// - `segs` 末尾的 `Seg::Text`：**渲染真相源**——只更新 `text` 的话，
     ///   一旦 `segs` 里已经有思考段（`thought` 增量建的），渲染就走 segs 分支，
     ///   正文根本不显示。
+    ///
     /// 流式更新时「跟随尾部」：**只有视图本来就在底部**才滚到底。
     ///
     /// 为什么：早先每个流式增量都无条件 `scroll_to_end()` —— 用户往上看历史时，
@@ -1039,12 +1044,52 @@ impl ClientApp {
     }
 
     /// 发送输入框内容（Enter 或「发送」按钮）
+    /// Enter 发送：先撤掉多行 `Textarea` 刚插入的那个换行，再发。
+    ///
+    /// `gpui_base` 处理 Enter 的方式是「在光标处插入换行 → emit `InputEvent::PressEnter`」，
+    /// 所以事件到手时文本里已经多了一个 `\n`：光标在末尾时它跟在最后（Markdown 渲染时
+    /// 不显形，看不出问题），光标在中间时它就卡在句子中间 —— 用户实测的现象是
+    /// 「光标不在文字最后，发出去的消息会有换行」。
+    ///
+    /// 发送语义下这个换行一定是多余的：真正的多行输入靠 Shift+Enter，不走本路径。
+    /// `cursor()` 是 **UTF-8 字节**偏移（`gpui_base` 的 `InputBaseState` 文档明示），
+    /// `\n` 是单字节 ASCII，删它不会切坏多字节字符。
+    fn send_on_enter(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.streaming {
+            // 生成中发送是被禁的：此时把 Enter 留给 Textarea（它就只是个换行），
+            // 否则「生成长文时想排版」会什么都不发生
+            return;
+        }
+        let input = self.input.clone();
+        input.update(cx, |state, cx| {
+            let cursor = state.selected_range().end;
+            if cursor == 0 {
+                return;
+            }
+            let text = state.value().to_string();
+            if text.as_bytes().get(cursor - 1) != Some(&b'\n') {
+                return;
+            }
+            let mut fixed = text;
+            fixed.remove(cursor - 1);
+            state.set_value(fixed, window, cx);
+        });
+        self.send_current_input(window, cx);
+    }
+
     pub(crate) fn send_current_input(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.streaming {
             return;
         }
         let text = self.input.read(cx).value().to_string();
         if text.trim().is_empty() {
+            // 全是空白也要把输入框清掉：多行 Textarea 会把 Enter 插入成换行，
+            // 而 Enter 的发送拦截若走了兜底路径（见 `PressEnter` 订阅），此刻框里
+            // 就只剩那个换行 —— 不清掉用户会看到一个凭空的空行。
+            if !text.is_empty() {
+                self.input
+                    .update(cx, |state, cx| state.set_value("", window, cx));
+            }
             return;
         }
         self.input
