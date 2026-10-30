@@ -1168,6 +1168,10 @@ impl ClientApp {
                 cx.notify();
             }
             "reload_skills" => self.load_skills(cx),
+            // 选中技能 / 记忆（与列表点击同一个方法）：详情到底能不能看到，
+            // 只有走完整链路才验得出来
+            "skill_select" => self.select_skill(arg_str(cmd, "id")?, cx),
+            "memory_select" => self.select_memory(arg_str(cmd, "uri")?, cx),
             // ---- 定时任务 ----
             "sched_form" => {
                 self.sched_form_open = cmd

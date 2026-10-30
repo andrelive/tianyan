@@ -888,18 +888,10 @@ impl ClientApp {
                 );
             }
             let url = format!("http://{SERVER_HOST}:{port}/api/v1/knowledge/ingest");
-            let res = reqwest::Client::new()
-                .post(&url)
-                .multipart(form)
-                .send()
-                .await;
-            let parsed = match res {
-                Ok(resp) => match resp.json::<serde_json::Value>().await {
-                    Ok(body) => Ok(body),
-                    Err(e) => Err(format!("响应解析失败：{e}")),
-                },
-                Err(e) => Err(format!("请求失败：{e}")),
-            };
+            // 必须走 `post_multipart`（内部 `runtime().spawn`）：裸 reqwest 在 GPUI
+            // 的 smol executor 里没有 tokio reactor，建连即 panic（实测：一点导入
+            // 整个进程 abort —— `there is no reactor running`）。
+            let parsed = post_multipart(url, form).await;
             let _ = this.update(cx, |this, cx| {
                 match parsed {
                     Ok(body) => {

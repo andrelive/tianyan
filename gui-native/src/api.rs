@@ -48,6 +48,35 @@ pub(crate) async fn post_json(url: String, body: serde_json::Value) -> Result<se
         .unwrap_or_else(|e| Err(format!("join: {e}")))
 }
 
+/// POST 一份 multipart（知识导入）并取回 JSON。
+///
+/// **必须**跑在 `runtime()` 上，不能用裸 `reqwest::Client::send().await`：
+/// GPUI 的 executor 是 smol 系、**没有 tokio reactor**，裸 reqwest 在 `cx.spawn`
+/// 里 poll 到 TCP 建连时会 panic（实测：知识导入一点，整个进程 abort ——
+/// `there is no reactor running, must be called from the context of a Tokio 1.x runtime`）。
+pub(crate) async fn post_multipart(
+    url: String,
+    form: reqwest::multipart::Form,
+) -> Result<serde_json::Value, String> {
+    runtime()
+        .spawn(async move {
+            let resp = reqwest::Client::new()
+                .post(&url)
+                .multipart(form)
+                .send()
+                .await
+                .map_err(|e| e.to_string())?;
+            let status = resp.status();
+            let text = resp.text().await.map_err(|e| e.to_string())?;
+            if !status.is_success() {
+                return Err(format!("HTTP {status}: {text}"));
+            }
+            serde_json::from_str::<serde_json::Value>(&text).map_err(|e| e.to_string())
+        })
+        .await
+        .unwrap_or_else(|e| Err(format!("join: {e}")))
+}
+
 /// DELETE 一个资源（只看状态码，不解析响应体）：删会话用。
 pub(crate) async fn delete_json(url: String) -> Result<(), String> {
     runtime()

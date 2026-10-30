@@ -148,9 +148,7 @@ impl ClientApp {
                                 ),
                         )
                         .on_click(cx.listener(move |this, _, _, cx| {
-                            this.memory_selected = Some(uri.clone());
-                            this.memory_detail_open = false;
-                            cx.notify();
+                            this.select_memory(uri.clone(), cx);
                         })),
                 );
             }
@@ -358,6 +356,16 @@ impl ClientApp {
     /// 后端已聚合三类来源（`memory/` 事实与决策、`user/` 画像、`agent/patterns` 模式）
     /// 并且只返回叶子：目录只是导航中间节点，内容为空、importance 是默认值，
     /// 直接展示只会误导（这是后端注释里的原话，界面不再二次筛选）。
+    ///
+    /// 选中一条记忆（**列表点击与自动化共用这一份**，ADR-052 D8）：详情不需要
+    /// 额外请求 —— `GET /memory` 一次就带回 L0/L1/L2 三层（`detail` 几百到上千字），
+    /// 这里只切选中并把 L2 折叠复位。
+    pub(crate) fn select_memory(&mut self, uri: String, cx: &mut Context<Self>) {
+        self.memory_selected = Some(uri);
+        self.memory_detail_open = false;
+        cx.notify();
+    }
+
     pub(crate) fn load_memories(&self, cx: &mut Context<Self>) {
         let port = self.port;
         cx.spawn(async move |this, cx| {

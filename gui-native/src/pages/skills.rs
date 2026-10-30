@@ -175,11 +175,7 @@ impl ClientApp {
                 );
             }
             list = list.child(row.on_click(cx.listener(move |this, _, _, cx| {
-                this.skills_selected = Some(id.clone());
-                this.skill_content = None;
-                this.skills_status = "正在加载技能内容…".to_string();
-                this.load_skill_detail(id.clone(), cx);
-                cx.notify();
+                this.select_skill(id.clone(), cx);
             })));
         }
 
@@ -464,6 +460,16 @@ impl ClientApp {
     }
 
     /// 拉选中技能的完整 markdown 内容（`GET /skills/{id}`）。
+    /// 选中一个技能并拉详情（**列表点击与自动化共用这一份**，ADR-052 D8）：
+    /// 两条路径各写一遍，就会出现「点得到、自动化验不到」或反向的分叉。
+    pub(crate) fn select_skill(&mut self, id: String, cx: &mut Context<Self>) {
+        self.skills_selected = Some(id.clone());
+        self.skill_content = None;
+        self.skills_status = "正在加载技能内容…".to_string();
+        self.load_skill_detail(id, cx);
+        cx.notify();
+    }
+
     pub(crate) fn load_skill_detail(&self, id: String, cx: &mut Context<Self>) {
         let port = self.port;
         cx.spawn(async move |this, cx| {
