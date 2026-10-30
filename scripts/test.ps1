@@ -25,6 +25,20 @@ function Test-Lint {
     cargo fmt --check
     if ($LASTEXITCODE -ne 0) { throw "fmt 检查失败" }
 
+    # gui-native 是**独立 workspace**（ADR-049 后自带 `[workspace]`，不进主 workspace），
+    # 上面的 `cargo fmt --check` / `cargo clippy` 都覆盖不到它。实测漏过一次：
+    # 54b04c6/5d08ab1 两次改动留下 3 文件 13 行格式漂移，本地门禁全绿而 `cargo fmt`
+    # 一跑就变（只在下次谁顺手格式化时才发现）。这里只查 fmt——clippy 要重编 GPUI
+    # 全链（增量也要数分钟），收益不足以塞进"每次提交都跑"的 lint 层；fmt 是秒级。
+    Write-Host "  - gui-native 格式化检查（独立 workspace，上面覆盖不到）..."
+    Push-Location gui-native
+    try {
+        cargo fmt -- --check
+        if ($LASTEXITCODE -ne 0) { throw "gui-native fmt 检查失败（进 gui-native 目录跑 cargo fmt 后重试）" }
+    } finally {
+        Pop-Location
+    }
+
     Write-Host "  - Rust Clippy 检查（--all-targets：与 CI 同范围，避免「本地绿 / CI 红」）..."
     cargo clippy --workspace --all-targets -- -D warnings
     if ($LASTEXITCODE -ne 0) { throw "clippy 检查失败" }
