@@ -739,6 +739,11 @@ pub(crate) struct KbEntryRow {
     pub(crate) has_abstract: bool,
     pub(crate) has_overview: bool,
     pub(crate) has_detail: bool,
+    /// L0 摘要的一行摘录（后端已合并空白、限长 200 字符）。
+    ///
+    /// `name` 是摄入时算出的内容 sha256，列表里连成一片哈希没有信息量；
+    /// 有摘录时用它当标题，`name` 退成第二行的短标记。
+    pub(crate) abstract_excerpt: Option<String>,
 }
 
 /// 知识检索结果（`GET /knowledge/search` 的 `results[]`）。

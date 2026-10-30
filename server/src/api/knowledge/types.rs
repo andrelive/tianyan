@@ -191,6 +191,17 @@ pub struct KnowledgeEntryItem {
     pub has_overview: bool,
     /// 是否包含 L2 详情。
     pub has_detail: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    /// L0 摘要的一行摘录（已合并空白、限长 200 字符）。
+    ///
+    /// 存在的理由是「条目名对人没有信息量」：知识条目的 `name` 是摄入时算出的
+    /// 内容 sha256（64 位十六进制），列表里连成一片哈希谁也认不出。L0 摘要本来
+    /// 就是给人看的一句话概括（ADR-001 双层摘要），直接随列表带出来即可 ——
+    /// 数据来自同一次 `list` 已读出的内存对象，**不产生额外 IO**。
+    ///
+    /// 原始文件名（`EntryMetadata::original_name`）不在此回落：它只写进了向量
+    /// payload，`vfs_entries` 表没有对应列，存量条目也补不回来。
+    pub abstract_excerpt: Option<String>,
 }
 
 /// 知识库条目列表响应。
@@ -282,5 +293,28 @@ mod tests {
     #[test]
     fn test_default_limit() {
         assert_eq!(default_limit(), 10);
+    }
+
+    #[test]
+    fn test_knowledge_entry_serializes_abstract_excerpt() {
+        let item = KnowledgeEntryItem {
+            uri: "tianyan://knowledge/projects/abc".to_string(),
+            name: "abc".to_string(),
+            is_directory: false,
+            has_abstract: true,
+            has_overview: true,
+            has_detail: true,
+            abstract_excerpt: Some("A股策略基线：纪律先行".to_string()),
+        };
+        let json = serde_json::to_value(&item).unwrap();
+        assert_eq!(json["abstract_excerpt"], "A股策略基线：纪律先行");
+
+        // 无摘录时整个字段省略（空条目 / 未生成 L0 时不产生 `null` 噪音）
+        let bare = KnowledgeEntryItem {
+            abstract_excerpt: None,
+            ..item
+        };
+        let json = serde_json::to_value(&bare).unwrap();
+        assert!(json.get("abstract_excerpt").is_none());
     }
 }

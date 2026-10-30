@@ -18,6 +18,25 @@ use crate::api::shared::error::ApiError;
 /// 知识库命名空间前缀。
 const KNOWLEDGE_NAMESPACE: &str = "tianyan://knowledge";
 
+/// 列表里 L0 摘录的最大字符数（按字符而非字节计，中文不会被切成半个字）。
+///
+/// 200 字符 ≈ 列表项一行半到两行；再长前端也只能靠 `ellipsis` 截断，
+/// 徒增响应体积。整段 L0 仍可经 `/entries/read?level=abstract` 取全文。
+const EXCERPT_MAX_CHARS: usize = 200;
+
+/// 把 L0 摘要压成列表能直接显示的一行：合并所有空白（换行 / 多空格）后限长。
+fn collapse_excerpt(text: &str) -> String {
+    let one_line = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if one_line.chars().count() <= EXCERPT_MAX_CHARS {
+        one_line
+    } else {
+        // 按字符边界截断：`&text[..200]` 会在多字节字符中间切断并 panic
+        let mut out: String = one_line.chars().take(EXCERPT_MAX_CHARS).collect();
+        out.push('…');
+        out
+    }
+}
+
 /// 知识服务，管理文件摄入和检索
 pub struct KnowledgeService {
     ingestor: Arc<KnowledgeIngestor>,
@@ -200,6 +219,12 @@ impl KnowledgeService {
                     .last()
                     .cloned()
                     .unwrap_or_else(|| entry.uri().to_string());
+                // 摘要来自同一次 `list` 已读出的内存对象（`vfs.list` 返回完整
+                // `ContextEntry`），因此带出 L0 摘录不增加任何存储往返。
+                let abstract_excerpt = entry
+                    .get_content(ContentLevel::Abstract)
+                    .map(collapse_excerpt)
+                    .filter(|s| !s.is_empty());
                 KnowledgeEntryItem {
                     uri: entry.uri().to_string(),
                     name,
@@ -207,6 +232,7 @@ impl KnowledgeService {
                     has_abstract: entry.has_content(ContentLevel::Abstract),
                     has_overview: entry.has_content(ContentLevel::Overview),
                     has_detail: entry.has_content(ContentLevel::Detail),
+                    abstract_excerpt,
                 }
             })
             .collect();
@@ -286,9 +312,30 @@ impl KnowledgeService {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
     #[test]
     #[ignore = "needs mock KnowledgeIngestor and VFS setup"]
     fn test_knowledge_service_creation() {
         // KnowledgeService::new(ingestor, vfs) requires full app state to construct
+    }
+
+    #[test]
+    fn test_collapse_excerpt_merges_whitespace_and_truncates_on_char_boundary() {
+        // 多行 + 连续空格的 L0 摘要压成一行（列表项只显示一行）
+        assert_eq!(
+            collapse_excerpt("A股策略基线：\n  纪律先行\n\n已验证 D4 为正"),
+            "A股策略基线： 纪律先行 已验证 D4 为正"
+        );
+
+        // 超长按「字符」截断：`chars().take` 不会切出半个 UTF-8 字符
+        let long = "中".repeat(EXCERPT_MAX_CHARS + 50);
+        let out = collapse_excerpt(&long);
+        assert_eq!(out.chars().count(), EXCERPT_MAX_CHARS + 1); // +1 = 省略号
+        assert!(out.ends_with('…'));
+
+        // 未超长不加省略号（避免"短摘要也带…"的视觉噪音）
+        let short = collapse_excerpt("短摘要");
+        assert_eq!(short, "短摘要");
     }
 }

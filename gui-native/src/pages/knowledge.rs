@@ -180,6 +180,20 @@ impl ClientApp {
                 if e.has_overview { "L1 " } else { "" },
                 if e.has_detail { "L2" } else { "" }
             );
+            // 条目名是摄入时算出的内容 sha256（64 位十六进制），一屏十几条全是哈希
+            // 谁也认不出。有 L0 摘录就以它为标题，哈希退成右侧的短标记（前 8 位，
+            // 足够在同一目录内区分）；没有摘录时标题本身就是短哈希，不重复一遍。
+            let short = short_digest(&e.name);
+            let title = if is_dir {
+                format!("[D] {}", e.name)
+            } else {
+                e.abstract_excerpt.clone().unwrap_or_else(|| short.clone())
+            };
+            let meta = if !is_dir && e.abstract_excerpt.is_some() {
+                format!("{layers}  {short}")
+            } else {
+                layers.clone()
+            };
             list = list.child(
                 div()
                     .id(("kb", ix))
@@ -215,17 +229,13 @@ impl ClientApp {
                                     .whitespace_nowrap()
                                     .text_ellipsis()
                                     .overflow_hidden()
-                                    .child(format!(
-                                        "{}{}",
-                                        if is_dir { "[D] " } else { "" },
-                                        e.name
-                                    )),
+                                    .child(title),
                             )
                             .child(
                                 div()
                                     .text_size(px(9.))
                                     .text_color(rgb(colors::TEXT_TERTIARY()))
-                                    .child(layers),
+                                    .child(meta),
                             ),
                     )
                     .on_click(cx.listener(move |this, _, _, cx| {
@@ -683,6 +693,11 @@ impl ClientApp {
                                             .get("has_detail")
                                             .and_then(|v| v.as_bool())
                                             .unwrap_or(false),
+                                        abstract_excerpt: e
+                                            .get("abstract_excerpt")
+                                            .and_then(|v| v.as_str())
+                                            .map(|s| s.to_string())
+                                            .filter(|s| !s.is_empty()),
                                     })
                                 })
                                 .collect()
@@ -931,5 +946,20 @@ impl ClientApp {
             });
         })
         .detach();
+    }
+}
+
+/// 把「内容哈希当条目名」压成能塞进第二行的小标记。
+///
+/// 知识条目的 `name` 是摄入时算出的 sha256（64 位十六进制）。前 8 位足以在
+/// 同一目录内区分，其余对人不提供任何信息 —— 列表要回答的是「这是哪份文档」，
+/// 那由 L0 摘录负责；哈希只作为稳定可对照的标记留在第二行。
+fn short_digest(name: &str) -> String {
+    let is_hash = name.len() > 16 && name.chars().all(|c| c.is_ascii_hexdigit());
+    if is_hash {
+        // 只切 ASCII 十六进制，不会落在多字节字符中间
+        format!("{}…", &name[..8])
+    } else {
+        name.to_string()
     }
 }
