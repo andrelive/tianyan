@@ -351,6 +351,9 @@ impl ClientApp {
                 "current": &self.current_session,
                 "title": &self.current_title,
                 "count": self.session_count,
+                // 顶部会话 Tab（浏览器式）：断言「点 × 有没有真的关掉」只能看这里
+                // —— 实测的 bug 正是「close_tab 删掉、冒泡又把 id 加回来」。
+                "tabs": self.open_tabs.clone(),
             },
             "messages": {
                 "loaded": self.messages.len(),
@@ -947,6 +950,9 @@ impl ClientApp {
             // （`usage.draft_restore_path`），复现时能直接看出是哪条。
             "select_session" => self.open_session(arg_str(cmd, "id")?, None, cx),
             "new_session" => self.start_new_session(None, cx),
+            // 关掉一个会话 Tab（与点 × 同一条路径：`close_tab`）。带 `window` 的那条
+            // 路径在真实点击里走 `Some(window)`，自动化走 `None`（同其它动作口径）。
+            "close_tab" => self.close_tab(arg_str(cmd, "id")?, None, cx),
             "reload" => {
                 self.load_sessions(cx);
                 self.load_tasks(cx);

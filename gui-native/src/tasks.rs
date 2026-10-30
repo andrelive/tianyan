@@ -580,26 +580,26 @@ impl ClientApp {
                 .iter()
                 .take(questions.len())
                 .all(|a| !a.trim().is_empty());
-        let mut card = div().px_4().pb_2().child(
-            div()
-                .w_full()
-                .max_w(px(896.))
-                .mx_auto()
-                .rounded_lg()
-                .border_1()
-                .border_color(rgb(colors::ACCENT()))
-                .bg(rgb(colors::BG_SECONDARY()))
-                .p_3()
-                .flex()
-                .flex_col()
-                .gap_2()
-                .child(
-                    div()
-                        .text_sm()
-                        .text_color(rgb(colors::ACCENT()))
-                        .child("模型在向你确认（回答后它继续执行）"),
-                ),
-        );
+        // 卡片本体（**不带外层 padding**）：它现在替换输入框，边距由
+        // `render_composer` 的容器统一给 —— 两处都加会出现双份留白。
+        let mut card = div()
+            .w_full()
+            .max_w(px(896.))
+            .mx_auto()
+            .rounded_2xl()
+            .border_1()
+            .border_color(rgb(colors::ACCENT()))
+            .bg(rgb(colors::BG_SECONDARY()))
+            .p_3()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .child(
+                div()
+                    .text_sm()
+                    .text_color(rgb(colors::ACCENT()))
+                    .child("模型在向你确认（回答后它继续执行）"),
+            );
         for (qi, (question, options)) in questions.iter().enumerate() {
             let answered = self
                 .clarify_answers

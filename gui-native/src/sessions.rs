@@ -1063,6 +1063,10 @@ impl ClientApp {
                                     .text_color(rgb(colors::TEXT_TERTIARY())),
                             )
                             .on_click(cx.listener(move |this, _, window, cx| {
+                                // ⚠️ 必须吞掉冒泡：外层 tab 的 on_click 是「打开会话」，
+                                // 它会把这个 id 重新 push 回 `open_tabs` —— 于是 close_tab
+                                // 删掉、紧接着又被加回来，表现就是「点 × 关不掉」（实测）。
+                                cx.stop_propagation();
                                 this.close_tab(id_close.clone(), Some(window), cx);
                             })),
                     )

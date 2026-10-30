@@ -672,12 +672,8 @@ impl ClientApp {
                     .max_w(px(colors::CHAT_MAX_W))
                     .child(self.render_approval_banner(cx)),
             )
-            .child(
-                div()
-                    .w_full()
-                    .max_w(px(colors::CHAT_MAX_W))
-                    .child(self.render_clarification(cx)),
-            )
+            // 追问面板**不在这里**：它替换输入框（见 `render_composer` 开头），
+            // 与 vite `ChatInput` 同位置。
             .child(
                 div()
                     .w_full()
@@ -732,6 +728,20 @@ impl ClientApp {
     /// 输入卡片 = **一体式卡片**（对齐 Tauri 版 `ChatInput`）：
     /// 外框限宽 896 居中、bg-secondary、rounded-2xl；卡片内 = 编辑器 + 底部控件行。
     pub(crate) fn render_composer(&self, cx: &mut Context<Self>) -> AnyElement {
+        // 模型在追问时，问询面板**替换输入框**（对齐 vite `ChatInput` 的位置）：
+        // 这一刻用户唯一该做的动作是回答问题，两个面板并排会让人不知道该点哪边。
+        // 早先它挂在消息列下方当横幅（与 vite 不同形），用户实测指出「不如 vite 好看」。
+        if self.clarification.is_some() {
+            return div()
+                .border_t_1()
+                .border_color(rgb(colors::BORDER()))
+                .bg(rgb(colors::BG_PRIMARY()))
+                .px_4()
+                .pt_3()
+                .pb_3()
+                .child(self.render_clarification(cx))
+                .into_any_element();
+        }
         let ctx_pct = self.ctx_pct();
         let ctx_color = self.ctx_color();
         let ctx_has_usage = self.ctx_usage().is_some() && self.ctx_window() > 0;
