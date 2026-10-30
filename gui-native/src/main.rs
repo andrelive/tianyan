@@ -277,6 +277,16 @@ struct ClientApp {
     /// 事件本身带 `session_id`，因此在**会话过滤之前**记一份全量集合，切回时
     /// 按 id 恢复即可，不必新增查询端点。
     pub(crate) running_sessions: std::collections::HashSet<String>,
+    /// 是否正在把一个**非当前会话**的事件写回它自己的快照（per-session 消息存储）。
+    ///
+    /// 这个标志存在的唯一理由是：事件处理逻辑只有**一份**（`apply_stream_event`），
+    /// 离线应用时要把里面所有「改动当前视图」的副作用关掉 —— 列表状态、滚动、
+    /// 测量缓存、状态行、上下文环都属于当前会话这一个视图，别的会话的事件不该动它们。
+    ///
+    /// 为什么要有离线应用：前端只保留「当前会话」一份消息时，切走期间的流式增量
+    /// **没有落点只能丢**，切回只能整页重拉（丢历史、丢位置、丢未落库内容）。
+    /// 对齐 vite 的做法是每会话一份 store，事件按 `session_id` 写进各自那份。
+    pub(crate) offline: bool,
     /// 最近一次草稿恢复走的哪条路（诊断用，进 `/state` 的 `usage.draft_restore_path`）。
     ///
     /// `"window"` = 真实点击路径（`on_click` 把 `&mut Window` 直接传下来）；

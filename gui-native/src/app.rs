@@ -227,6 +227,7 @@ impl ClientApp {
             composer_images: Vec::new(),
             inputs: Vec::new(),
             running_sessions: std::collections::HashSet::new(),
+            offline: false,
             draft_restore_path: String::new(),
             parked: Vec::new(),
             oldest_seq: None,
@@ -537,9 +538,17 @@ impl ClientApp {
 
     /// 处理一条统一事件。
     ///
-    /// 只认 `type=chat_stream` 且只认当前会话（子代理事件的 `session_id` 是
-    /// `task_id`，属于任务面板，后续接入）。`chunk_type` 语义见
-    /// `docs/architecture/event-protocol.md` §4。
+    /// 只认 `type=chat_stream`（子代理事件的 `session_id` 是 `task_id`，属于任务面板，
+    /// 后续接入）。`chunk_type` 语义见 `docs/architecture/event-protocol.md` §4。
+    ///
+    /// **两种落点**（对齐 vite 的 per-session store，这是"切走再切回"整套问题的根）：
+    /// - 事件的 `session_id` == 当前会话 → 走 [`Self::apply_stream_event`] 并刷新界面；
+    /// - 否则 → 走 [`Self::apply_event_offline`]，写回**它自己**那份快照消息。
+    ///
+    /// 早先第二种情况是直接 `return` 丢弃，于是切走期间的增量没有落点，切回只能整页
+    /// 重拉 —— 重拉会丢上滚加载过的更早历史、丢滚动位置，还会把未落库的 assistant
+    /// 占位删掉（流结束的权威消息要求"最后一条是 assistant"才落地，于是那轮内容
+    /// 永远无处落地）。用户实测的两条现象（内容只剩思考块 / 历史没了）都源于此。
     pub(crate) fn handle_event(&mut self, ev: &serde_json::Value, cx: &mut Context<Self>) {
         if ev.get("type").and_then(|v| v.as_str()) != Some("chat_stream") {
             return;
@@ -547,10 +556,11 @@ impl ClientApp {
         let sid = ev
             .get("session_id")
             .and_then(|v| v.as_str())
-            .unwrap_or_default();
+            .unwrap_or_default()
+            .to_string();
         // 轮状态是**会话级全局**事实：即使不是当前会话也要记账，否则「切走时
         // 轮还在跑、切回后按钮却回到发送」——按钮态不能只活在当前会话的渲染里。
-        // 这里只维护集合（不刷新界面），当前会话的渲染仍走下面 match 的分支。
+        // 这里只维护集合（不刷新界面），当前会话的渲染仍走 `apply_stream_event`。
         if ev.get("chunk_type").and_then(|v| v.as_str()) == Some("turn_state") {
             let running = ev
                 .get("turn_state")
@@ -558,14 +568,64 @@ impl ClientApp {
                 .and_then(|v| v.as_str())
                 == Some("running");
             if running {
-                self.running_sessions.insert(sid.to_string());
+                self.running_sessions.insert(sid.clone());
             } else {
-                self.running_sessions.remove(sid);
+                self.running_sessions.remove(&sid);
             }
         }
-        if Some(sid) != self.current_session.as_deref() {
+        if self.current_session.as_deref() != Some(sid.as_str()) {
+            self.apply_event_offline(&sid, ev, cx);
             return;
         }
+        self.apply_stream_event(ev, &sid, cx);
+        cx.notify();
+    }
+
+    /// 把一条事件写回**非当前会话**自己的那份消息快照（per-session store）。
+    ///
+    /// 做法：把该会话的会话态（消息 / 分页游标 / 追问态）临时换到 `self.*` 上，跑
+    /// **同一套**事件处理（`apply_stream_event`，靠 `offline` 关掉所有 UI 副作用），
+    /// 再换回去。为什么不另写一套"纯消息变换"：那会变成两份实现，迟早漂移 ——
+    /// 「思考段/工具段的追加顺序」这类细节漂一次就是渲染错乱。
+    ///
+    /// 没有快照的会话（从没打开过）直接忽略：它的消息在切回时由 `load_messages` 拉，
+    /// 不需要为了它常驻内存。
+    fn apply_event_offline(&mut self, sid: &str, ev: &serde_json::Value, cx: &mut Context<Self>) {
+        let Some(pos) = self
+            .parked
+            .iter()
+            .position(|(k, _)| k.as_deref() == Some(sid))
+        else {
+            return;
+        };
+        let (key, mut snap) = self.parked.remove(pos);
+        let saved = (
+            std::mem::replace(&mut self.messages, snap.messages),
+            snap.message_total,
+            snap.oldest_seq,
+            snap.has_more_history,
+            std::mem::replace(&mut self.clarification, snap.clarification),
+            std::mem::take(&mut self.clarify_answers),
+        );
+        self.offline = true;
+        self.apply_stream_event(ev, sid, cx);
+        self.offline = false;
+        snap.messages = std::mem::replace(&mut self.messages, saved.0);
+        snap.message_total = self.message_total.max(saved.1);
+        snap.oldest_seq = self.oldest_seq.or(saved.2);
+        snap.has_more_history = self.has_more_history;
+        snap.clarification = std::mem::replace(&mut self.clarification, saved.4);
+        snap.clarify_answers = std::mem::replace(&mut self.clarify_answers, saved.5);
+        self.message_total = saved.1;
+        self.oldest_seq = saved.2;
+        self.has_more_history = saved.3;
+        self.parked.insert(pos, (key, snap));
+    }
+
+    /// 把一条事件应用到「当前正在处理的那个会话」的消息上。
+    ///
+    /// `offline` 为真时（[`Self::apply_event_offline`] 调用）跳过所有 UI 副作用。
+    fn apply_stream_event(&mut self, ev: &serde_json::Value, sid: &str, cx: &mut Context<Self>) {
         match ev
             .get("chunk_type")
             .and_then(|v| v.as_str())
@@ -579,7 +639,8 @@ impl ClientApp {
                 // 上下文占用（`ContextRing` 的数据源）：usage 随 answer 块下发。
                 // 分子取 `prompt_tokens`（本轮上下文）——`total_tokens` 含输出，
                 // 当占用会偏高；分母优先用模型声明的窗口，这里只记流式兜底值。
-                if let Some(u) = ev.get("usage") {
+                // 离线应用（别的会话）时跳过：上下文环属于**当前会话**这一个视图。
+                if let Some(u) = ev.get("usage").filter(|_| !self.offline) {
                     let prompt = u.get("prompt_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
                     if prompt > 0 {
                         self.ctx_live = Some(MsgUsage {
@@ -703,9 +764,12 @@ impl ClientApp {
                     .get("delta")
                     .and_then(|v| v.as_str())
                     .unwrap_or("未知错误");
-                self.streaming = false;
-                // 流式错误必须进 toast：否则下一次轮询写状态行就把它盖掉了
-                self.set_error(format!("出错：{msg}"));
+                if !self.offline {
+                    // 离线（别的会话）时不动当前会话的轮状态与提示条
+                    self.streaming = false;
+                    // 流式错误必须进 toast：否则下一次轮询写状态行就把它盖掉了
+                    self.set_error(format!("出错：{msg}"));
+                }
                 self.append_delta(&format!("\n\n> ⚠️ {msg}\n"));
             }
             // ADR-031：用户消息落库确认 —— 把服务端真实 id 补到本地那条乐观行上。
@@ -736,16 +800,20 @@ impl ClientApp {
                     .and_then(|v| v.get("state"))
                     .and_then(|v| v.as_str())
                     .unwrap_or_default();
-                self.streaming = state == "running";
-                if !self.streaming {
-                    self.set_status(format!("空闲 · {sid}"));
-                    // 本轮结束：刷新底部统计行（token 汇总 + 最近一次请求性能）
-                    self.load_session_usage(cx);
+                if self.offline {
+                    // 别的会话的轮状态：`running_sessions` 已在 `handle_event` 里记过账，
+                    // 这里不碰当前会话的 `streaming` / 状态行 / 统计行
+                } else {
+                    self.streaming = state == "running";
+                    if !self.streaming {
+                        self.set_status(format!("空闲 · {sid}"));
+                        // 本轮结束：刷新底部统计行（token 汇总 + 最近一次请求性能）
+                        self.load_session_usage(cx);
+                    }
                 }
             }
             _ => {}
         }
-        cx.notify();
     }
 
     /// 推入一条空的 assistant 占位（本步骤的开始）。
@@ -779,10 +847,12 @@ impl ClientApp {
         // 流式新开一步时用户的上滚位置也已经被抹掉了。
         // 改用 `splice` 在末尾**插入一项**：项数变了、现有锚点保持。
         let n = self.messages.len();
-        self.msg_list_state
-            .splice(n.saturating_sub(1)..n.saturating_sub(1), 1);
-        self.scroll_to_end_if_following();
         self.message_total = self.messages.len();
+        if !self.offline {
+            self.msg_list_state
+                .splice(n.saturating_sub(1)..n.saturating_sub(1), 1);
+            self.scroll_to_end_if_following();
+        }
         idx
     }
 
@@ -873,8 +943,10 @@ impl ClientApp {
             error: None,
         });
         self.messages = Rc::new(next);
-        self.msg_list_state.remeasure_items(idx..idx + 1);
-        self.scroll_to_end_if_following();
+        if !self.offline {
+            self.msg_list_state.remeasure_items(idx..idx + 1);
+            self.scroll_to_end_if_following();
+        }
     }
 
     /// 填充工具执行结果（`observation` / `tool_result` 事件）：按 id 回填卡片状态。
@@ -906,7 +978,9 @@ impl ClientApp {
         }
         if let Some(mi) = hit {
             self.messages = Rc::new(next);
-            self.msg_list_state.remeasure_items(mi..mi + 1);
+            if !self.offline {
+                self.msg_list_state.remeasure_items(mi..mi + 1);
+            }
         }
     }
 
@@ -966,8 +1040,10 @@ impl ClientApp {
         next[idx].text = format!("{}{}", next[idx].text, delta).into();
         push_seg_delta(&mut next[idx].segs, delta, false);
         self.messages = Rc::new(next);
-        self.msg_list_state.remeasure_items(idx..idx + 1);
-        self.scroll_to_end_if_following();
+        if !self.offline {
+            self.msg_list_state.remeasure_items(idx..idx + 1);
+            self.scroll_to_end_if_following();
+        }
     }
 
     /// 往最后一条 assistant 消息追加**思考**增量（实时渲染可折叠思考块）。
@@ -985,8 +1061,10 @@ impl ClientApp {
         let idx = next.len() - 1;
         push_seg_delta(&mut next[idx].segs, delta, true);
         self.messages = Rc::new(next);
-        self.msg_list_state.remeasure_items(idx..idx + 1);
-        self.scroll_to_end_if_following();
+        if !self.offline {
+            self.msg_list_state.remeasure_items(idx..idx + 1);
+            self.scroll_to_end_if_following();
+        }
     }
 
     /// 用流末尾的**权威消息**替换占位（ADR-002：正文真相源是 `segments`）。
@@ -1020,8 +1098,10 @@ impl ClientApp {
             next[idx].ts = Some(ts);
         }
         self.messages = Rc::new(next);
-        self.msg_list_state.remeasure_items(idx..idx + 1);
-        self.scroll_to_end_if_following();
+        if !self.offline {
+            self.msg_list_state.remeasure_items(idx..idx + 1);
+            self.scroll_to_end_if_following();
+        }
     }
 
     /// 边界消息（压缩点 / System 通知）→ **追加成新行**（按 id 幂等）。
@@ -1046,9 +1126,11 @@ impl ClientApp {
         // 与流式追加同一口径：超窗口丢最早的（压缩点的补齐由 `render_window` 负责）
         self.trim_loaded_front(&mut next);
         self.messages = Rc::new(next);
-        self.msg_list_state.reset(self.messages.len());
-        self.scroll_to_end_if_following();
         self.message_total = self.messages.len();
+        if !self.offline {
+            self.msg_list_state.reset(self.messages.len());
+            self.scroll_to_end_if_following();
+        }
     }
 
     /// 发送输入框内容（Enter 或「发送」按钮）

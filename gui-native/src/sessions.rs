@@ -548,38 +548,28 @@ impl ClientApp {
         self.thinking_menu_open = false;
         // 会话级模型 / 思考强度的权威值在会话头里：拉回来覆盖快照里的旧值
         self.load_session_model(id.clone(), cx);
-        // 消息：三条互不重叠的路，**都不做「本地消息 ↔ 库里消息」的比对/合并**。
+        // 消息：**有快照就不重拉** —— 这份快照现在真的是完整的。
         //
-        // 早先的写法是「有快照就不重拉，唯一例外是该会话正在跑 → 整页重拉」，两个
-        // 分支都有坑（用户实测「输入后切走再切回，之前的上下文渲染丢失」）：
-        // 1. 正在跑 → 整页重拉会**替换**列表，把最后一条 assistant **占位**删掉；
-        //    而流结束时的权威 `message` 事件要求「最后一条是 assistant」才落地
-        //    （`apply_authoritative_message` 的第一行就 return），于是那轮内容永远
-        //    无处落地 —— 表现为切回来只剩一条思考块；
-        // 2. 已结束 → 不重拉，本地缺切走期间的增量，内容仍是残缺的。
+        // 关键前提是 `apply_event_offline`：切走期间该会话的流式事件会按 `session_id`
+        // 写回它自己那份快照（对齐 vite 的 per-session store），所以 restore 出来就是
+        // 最新状态，不需要再用「整页重拉 + 按 seq 对齐」去猜 —— 那套猜测正是此前
+        // 「切回来内容只剩思考块 / 上滚的历史被 50 条截断 / 位置被钉在旧处」的来源。
         //
-        // 现在：还在跑就**什么都不做**（占位留着，等权威消息整条覆盖 —— 切走期间缺的
-        // 增量由那条全文一次性补齐）；已结束就整页重拉（库里是完整权威版，且按本地
-        // 已有条数拉，上滚加载过的历史不会被 50 条截断）。
+        // 唯一要兜的情况：最后一条 assistant **还没有 id**（= 这一轮没以权威消息收尾，
+        // 多半是切走期间 SSE 断过、事件真的丢了）。这时才拉一页对齐尾部；那一轮还在
+        // 跑（`running`）则不动 —— 占位是它的落点，等权威消息整条覆盖即可。
         if !restored {
             self.load_messages(id, cx);
-        } else if running {
-            // 占位是这一轮内容的落点，绝不能在这时候替换列表
-        } else {
-            // 重拉条数 = 本地已有（上限 200，服务端上限）
-            let limit = self.messages.len().clamp(MESSAGE_PAGE, 200);
-            // 滚动位置按**切走时的意图**分两种（用户实测指出过这一条）：
-            // - 切走时在底部（跟着最新看）→ 重拉后回到底部，看最新的对话；
-            // - 切走时主动上滚在中间/顶部 → 保住原位置，别把人拽走。
-            // 早先无条件按「顶部那条的 seq」恢复，于是「在底部」的情况也被钉在旧位置，
-            // 切回来看到的是几条旧消息，而不是刚才的对话（用户实测）。
-            let anchor_seq = if self.follows_tail() {
-                None // 新建的 ListState 本来就对齐 Bottom → 自然在底部
-            } else {
-                let top_ix = self.msg_list_state.logical_scroll_top().item_ix;
-                self.messages.get(top_ix).map(|m| m.seq).filter(|s| *s > 0)
-            };
-            self.load_messages_with(id, limit, anchor_seq, cx);
+        } else if !running {
+            let stale_tail = self
+                .messages
+                .last()
+                .map(|m| m.role == "assistant" && m.id.is_empty())
+                .unwrap_or(false);
+            if stale_tail {
+                let limit = self.messages.len().clamp(MESSAGE_PAGE, 200);
+                self.load_messages_with(id, limit, None, cx);
+            }
         }
         self.load_session_usage(cx);
         self.load_todos_goals(cx);
