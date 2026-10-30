@@ -1,88 +1,129 @@
 name: Release
 
+# 发布链：native（GPUI，内嵌 server）的 MSI。
+#
+# 历史：本文件此前是 `cargo tauri build` + updater 签名 + `latest.json`
+# （tauri 壳的链路）。tauri 壳退役后切换为 native MSI，打包实现收敛到
+# `gui-native/installer/build-msi.ps1`（版本注入 + 产物名同源）。
+# 旧链在 git 历史里可查（提交 `chore(release): 产品版本单源化` 之前）。
+#
+# 与旧链的两点**有意的差异**：
+#   1. **不再产出 `latest.json`**：那是 tauri updater 的清单（带 .sig 签名）。
+#      native 目前没有自动更新，硬塞一个无签名的 latest.json 只会让残留的
+#      tauri 客户端拿到「格式对但签名缺失」的更新而报错。改为 `SHA256SUMS.txt`，
+#      供手动安装前校验。
+#   2. **不构建 gui-vite**：native 是纯 Rust 前端，MSI 只装 exe。gui-vite 保留
+#      但暂不随包发布（要发 Web 端时再加构建 + 把 dist 打进 MSI；注意 server 的
+#      静态服务读的是 gui-vite/dist，当前安装包里没有它）。
+#
+# 注意构建耗时：GPUI 全量冷编译在 CI 上远慢于本地增量（本地增量约 2 分钟）。
+# `Swatinem/rust-cache` 的缓存命中是这条流水线能否可用的关键，两个 workspace
+# 的两个 target 目录都要缓存。
+
 on:
   push:
     tags:
       - 'v*'
+  # 手动触发：**只验构建链，不发布**。
+  # 为什么需要：GPUI 全量冷编译在 CI 上与本地差异很大（依赖、缓存命中、耗时），
+  # 而推 tag 才会真正跑一次——等那时才发现编不过就太晚了。用这个入口先跑一遍
+  # 绿色的 build-native，再推 tag。
+  workflow_dispatch:
+
+env:
+  # 与本地一致的 WiX 版本。wxs 用 v4 schema；WiX v7 引入 OSMF 收费条款，
+  # 故固定在 v6。
+  WIX_VERSION: 6.0.2
 
 jobs:
   # 质量门禁（复用 quality.yml）：红 → build 被跳过 → 不出包。
   quality:
     uses: ./.github/workflows/quality.yml
 
-  build:
+  build-native:
     needs: quality
     runs-on: windows-latest
-    # 创建 GitHub Release 需要 contents: write 权限
     permissions:
+      # 创建 GitHub Release 需要 contents: write
       contents: write
     steps:
       - uses: actions/checkout@v5
 
-      - uses: actions/setup-node@v5
-        with:
-          node-version: 24
-          cache: npm
-          cache-dependency-path: gui-vite/package-lock.json
-
       - uses: dtolnay/rust-toolchain@stable
 
-      # cargo 构建缓存：第二次起只重编译改动部分（首次仍全量，~2 小时）
+      # 两个 workspace、两个 target 目录：
+      #   主 workspace（core/server/plugins）→ ./target
+      #   gui-native（独立 workspace，自带 [workspace]）→ ./gui-native/target
+      #
+      # `save-if: true` 是**必须的**：tag 推送（refs/tags/*）既非默认分支也非 PR，
+      # 该 action 默认不保存缓存 → 每次发版都冷编译重型依赖（lance / datafusion /
+      # GPUI，quality.yml 里实测过一次 21 分钟→30:53 的教训）。不写它，这条
+      # 流水线每次都要几十分钟。
       - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: true
+          workspaces: |
+            . -> target
+            gui-native -> target
 
-      - name: Install frontend deps
-        run: cd gui-vite && npm ci
-
-      - name: Build frontend
-        run: cd gui-vite && npm run build
-
+      # ⚠️ 已知风险：`arduino/setup-protoc` 从 GitHub Releases 下载，历史上出现过
+      # 「00:00 瞬时失败」导致整轮白跑（quality.yml 在 Linux 上已改用 apt，见
+      # docs/operations/ci-pipeline.md §0）。Windows runner 上没有 apt，暂保留
+      # 本 action；若再遇到瞬时失败，改用 `choco install protoc -y`。
       - name: Install protoc (lance-encoding build dependency)
         uses: arduino/setup-protoc@v3
 
-      - name: Install Tauri CLI
-        run: cargo install tauri-cli --locked
+      - name: Install WiX
+        shell: pwsh
+        run: |
+          dotnet tool install --global wix --version $env:WIX_VERSION
+          # `dotnet tool install --global` 的可执行目录默认不在 PATH 上
+          "$env:USERPROFILE\.dotnet\tools" | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
 
-      - name: Build Tauri (signed)
-        env:
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-        run: cd tauri && cargo tauri build
-
-      - name: Generate latest.json
+      - name: Verify tag matches product version
+        # 手动触发时没有 tag，跳过 tag↔版本比对（内部一致性仍会跑）
+        if: startsWith(github.ref, 'refs/tags/')
         shell: pwsh
         run: |
           $tag = "${{ github.ref_name }}"
           $version = $tag.TrimStart('v')
-          # 固定取 en-US 一份（updater 用单一 URL；zh-CN/en-US 安装包内容同构，
-          # 二选一即可）——避免"任意 First 1"选到 zh 的 msi + en 的 sig 这类
-          # 不配对组合（url 与 signature 必须来自同一安装包）。
-          $msi = Get-ChildItem "target/release/bundle/msi/*_en-US.msi" | Select-Object -First 1
-          if (-not $msi) { throw "找不到 MSI 产物（target/release/bundle/msi/*_en-US.msi）" }
-          # .sig 与 msi 同 basename 配对（Tauri 签名产物命名 = <msi 全名>.sig）
-          $sigPath = "$($msi.FullName).sig"
-          if (-not (Test-Path $sigPath)) {
-            throw "找不到签名文件：$sigPath（检查 bundle.createUpdaterArtifacts=true 与 TAURI_SIGNING_PRIVATE_KEY secret）"
+          # 版本单源 = 根 Cargo.toml 的 [workspace.package] version。
+          # 先做内部一致性（主 workspace / gui-native / wxs 注入 / 打包脚本），
+          # 再校验 tag —— 防止「发了 v1.2.0 标签、包里还是 1.1.0」。
+          pwsh -NoProfile -File scripts/check-version.ps1
+          if ($LASTEXITCODE -ne 0) { throw "版本一致性校验失败" }
+
+          $inSection = $false
+          $productVersion = $null
+          foreach ($line in Get-Content Cargo.toml -Encoding utf8) {
+            $t = $line.Trim()
+            if ($t -match '^\[') { $inSection = ($t -eq '[workspace.package]'); continue }
+            if ($inSection -and $t -match '^version\s*=\s*"([^"]+)"') { $productVersion = $matches[1]; break }
           }
-          $signature = Get-Content $sigPath -Raw
-          $url = "https://github.com/andrelive/tianyan/releases/download/$tag/$($msi.Name)"
-          $json = @{
-            version = $version
-            notes = "Tianyan $version"
-            pub_date = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
-            platforms = @{
-              "windows-x86_64" = @{
-                signature = $signature
-                url = $url
-              }
-            }
+          if (-not $productVersion) { throw "读不到根 Cargo.toml 的 [workspace.package] version" }
+          if ($productVersion -ne $version) {
+            throw "tag '$tag' 与产品版本 '$productVersion' 不一致：发版前先改根 Cargo.toml（并同步 gui-native/Cargo.toml 与 tauri.conf.json）"
           }
-          $json | ConvertTo-Json -Depth 5 | Set-Content -Path latest.json -Encoding UTF8
-          Write-Output "latest.json generated for $version"
+          Write-Output "tag $tag ↔ 产品版本 $productVersion ✓"
+
+      - name: Build and package (native MSI)
+        shell: pwsh
+        run: pwsh -NoProfile -File gui-native/installer/build-msi.ps1
+
+      - name: Checksums
+        shell: pwsh
+        run: |
+          $msi = Get-ChildItem gui-native/installer/tianyan-native-*-x64.msi | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+          if (-not $msi) { throw "找不到 MSI 产物（gui-native/installer/tianyan-native-*-x64.msi）" }
+          $hash = (Get-FileHash $msi.FullName -Algorithm SHA256).Hash.ToLower()
+          "$hash  $($msi.Name)" | Set-Content -Path SHA256SUMS.txt -Encoding utf8
+          Get-Content SHA256SUMS.txt | Write-Output
 
       - name: Upload to GitHub Release
+        # 只有推 tag 才发布；手动触发跑完只留构建产物在日志/缓存里
+        if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            target/release/bundle/msi/*.msi
-            target/release/bundle/msi/*.sig
-            latest.json
+            gui-native/installer/tianyan-native-*-x64.msi
+            SHA256SUMS.txt
