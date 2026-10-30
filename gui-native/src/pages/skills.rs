@@ -5,12 +5,12 @@ use crate::*;
 // 滚动扩展方法（.overflow_y_scrollbar()）来自这个 trait，必须 in scope
 use gpui_kit::component::scroll::ScrollableElement as _;
 // 显式导入：gpui 也导出 `View`（trait）与 `AppRef`，glob 会与我们的同名枚举/别名歧义
+use crate::format::*;
 use crate::theme::colors;
+use crate::types::*;
 use gpui_kit::assets::IconName;
 use gpui_kit::component::input::Input;
 use gpui_kit::component::text::TextView;
-use crate::types::*;
-use crate::format::*;
 
 impl ClientApp {
     /// 技能页：顶部采纳统计 + 左列表（搜索）+ 右详情（markdown 正文）。

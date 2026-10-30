@@ -2,8 +2,8 @@
 //!
 //! 只放「两处以上使用」的构件；只在一页出现的构件留在那个页面的渲染文件里。
 
-use crate::*;
 use crate::theme::colors;
+use crate::*;
 use gpui_kit::component::input::{Input, InputState, Textarea, TextareaState};
 
 /// 表单单行输入框的外壳（去自带外观 + 统一边框底色；与设置页编辑框同一手法）。
@@ -53,8 +53,6 @@ pub(crate) fn stat_card(label: &'static str, value: String, sub: String) -> gpui
         )
         .into_any_element()
 }
-
-
 
 /// 表单多行输入框的外壳（同上）。
 pub(crate) fn field_wrap_area(input: &Entity<TextareaState>) -> gpui_kit::AnyElement {

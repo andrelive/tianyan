@@ -6,12 +6,12 @@ use crate::*;
 // 滚动扩展方法（.overflow_y_scrollbar()）来自这个 trait，必须 in scope
 use gpui_kit::component::scroll::ScrollableElement as _;
 // 显式导入：gpui 也导出 `View`（trait）与 `AppRef`，glob 会与我们的同名枚举/别名歧义
+use crate::format::*;
 use crate::theme::colors;
-use gpui_kit::assets::IconName;
-use gpui_kit::component::text::TextView;
 use crate::types::*;
 use crate::widgets::*;
-use crate::format::*;
+use gpui_kit::assets::IconName;
+use gpui_kit::component::text::TextView;
 
 impl ClientApp {
     /// 记忆页：左列表（按目录分组）+ 右详情（L0/L1/L2 三层，L2 默认收起）。
@@ -840,7 +840,12 @@ impl ClientApp {
     /// 路径输入入口：单一路径 → 交给 [`ClientApp::kb_ingest_paths`]。
     ///
     /// 自动化 `kb_ingest` 与手输路径共用这一条；文件选择器直接走 `kb_ingest_paths`。
-    pub(crate) fn kb_ingest_direct(&mut self, raw: String, category: String, cx: &mut Context<Self>) {
+    pub(crate) fn kb_ingest_direct(
+        &mut self,
+        raw: String,
+        category: String,
+        cx: &mut Context<Self>,
+    ) {
         if raw.is_empty() {
             self.kb_status = "请选择文件/目录，或填写绝对路径".to_string();
             cx.notify();

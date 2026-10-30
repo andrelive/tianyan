@@ -5,10 +5,10 @@ use crate::*;
 // 滚动扩展方法（.overflow_y_scrollbar()）来自这个 trait，必须 in scope
 use gpui_kit::component::scroll::ScrollableElement as _;
 // 显式导入：gpui 也导出 `View`（trait）与 `AppRef`，glob 会与我们的同名枚举/别名歧义
-use crate::theme::colors;
-use gpui_kit::assets::IconName;
-use crate::types::*;
 use crate::format::*;
+use crate::theme::colors;
+use crate::types::*;
+use gpui_kit::assets::IconName;
 
 impl ClientApp {
     /// 审批页：工作流配置 + 待审批（可操作）+ 待确认指纹 + 审计记录。
@@ -264,12 +264,7 @@ impl ClientApp {
                             .text_color(rgb(colors::TEXT_SECONDARY()))
                             .child("编辑后批准")
                             .on_click(cx.listener(move |this, _, window, cx| {
-                                this.open_edit_approval(
-                                    rid_e.clone(),
-                                    edit_cmd.clone(),
-                                    window,
-                                    cx,
-                                )
+                                this.open_edit_approval(rid_e.clone(), edit_cmd.clone(), window, cx)
                             })),
                     )
                     .child(

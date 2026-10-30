@@ -85,13 +85,8 @@ fn run(tx: UnboundedSender<TrayCommand>) -> Result<(), String> {
     let show = MenuItem::new("显示主窗口", true, None);
     let hide = MenuItem::new("隐藏到托盘", true, None);
     let quit = MenuItem::new("退出天演", true, None);
-    menu.append_items(&[
-        &show,
-        &hide,
-        &PredefinedMenuItem::separator(),
-        &quit,
-    ])
-    .map_err(|e| format!("构建托盘菜单失败：{e}"))?;
+    menu.append_items(&[&show, &hide, &PredefinedMenuItem::separator(), &quit])
+        .map_err(|e| format!("构建托盘菜单失败：{e}"))?;
 
     // `_tray` 必须活到循环结束（drop 即移除图标），所以绑在函数作用域
     let _tray = TrayIconBuilder::new()
@@ -315,4 +310,3 @@ pub fn post_close() {
         }
     }
 }
-

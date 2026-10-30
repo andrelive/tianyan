@@ -11,9 +11,9 @@ use crate::*;
 use gpui_kit::component::scroll::ScrollableElement as _;
 // 显式导入：gpui 也导出 `View`（trait）与 `AppRef`，glob 会与我们的同名枚举/别名歧义
 use crate::theme::colors;
+use crate::types::*;
 use gpui_kit::assets::IconName;
 use gpui_kit::component::input::Input;
-use crate::types::*;
 
 impl ClientApp {
     /// 打开「编辑后批准」弹窗（回填原命令）。
@@ -28,9 +28,7 @@ impl ClientApp {
         cx: &mut Context<Self>,
     ) {
         let prefill = command.clone();
-        self.dialog_input = Some(cx.new(|cx| {
-            InputState::new(window, cx).default_value(prefill)
-        }));
+        self.dialog_input = Some(cx.new(|cx| InputState::new(window, cx).default_value(prefill)));
         self.dialog = Some(Dialog::EditApproval { request_id });
         cx.notify();
     }
@@ -79,9 +77,7 @@ impl ClientApp {
                 ("选择目录".to_string(), None, "选择".to_string(), false)
             }
             // 文件选择弹窗在 `render_dialog` 开头就分流了，走不到这里
-            Dialog::FilePicker { .. } => {
-                ("选择文件".to_string(), None, "确定".to_string(), false)
-            }
+            Dialog::FilePicker { .. } => ("选择文件".to_string(), None, "确定".to_string(), false),
             Dialog::ResetRole { name } => (
                 "回退内置种子".to_string(),
                 Some(format!(
@@ -963,7 +959,11 @@ impl ClientApp {
     }
 
     /// 目录选择器「选这个目录」：按目标分派（新会话待绑定 / 绑定当前会话）。
-    pub(crate) fn confirm_workspace_picker(&mut self, target: PickerTarget, cx: &mut Context<Self>) {
+    pub(crate) fn confirm_workspace_picker(
+        &mut self,
+        target: PickerTarget,
+        cx: &mut Context<Self>,
+    ) {
         // 浏览根（未进入任何盘符）时不可选
         if self.picker_current.is_empty() || self.picker_current == "浏览根" {
             self.picker_status = "请先进入一个目录".to_string();

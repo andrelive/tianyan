@@ -33,35 +33,35 @@ use gpui_kit::*;
 use gpui_kit::{ListAlignment, ListState as GpuiListState};
 use std::rc::Rc;
 
-mod automation;
-mod hotkey;
-mod notify;
-mod tray;
-mod format;
 mod api;
-mod theme;
-mod types;
-mod widgets;
-mod msg;
 mod app;
+mod automation;
 mod chat;
 mod dialogs;
+mod format;
+mod hotkey;
+mod msg;
+mod notify;
+mod pages;
 mod sessions;
 mod tasks;
-mod pages;
+mod theme;
+mod tray;
+mod types;
+mod widgets;
 
 // 子模块的 item `pub(crate) use` 回根：其他模块 `use crate::*;` 取全名。
 // ⚠️ 外部 use（`gpui_kit::*` 等）保持**私有**——gpui 也导出 `View` /
 // `AppRef` / `colors`，一旦 `pub(crate) use gpui_kit::*` 就会让 `crate::View`
 // 变成双来源，子模块 `use crate::View` 直接 ambiguous（实测踩到）。
-pub(crate) use format::*;
 pub(crate) use api::*;
-pub(crate) use theme::*;
-pub(crate) use types::*;
-pub(crate) use msg::*;
+pub(crate) use format::*;
 use msg::AppRef;
+pub(crate) use msg::*;
 use theme::colors;
+pub(crate) use theme::*;
 use types::View;
+pub(crate) use types::*;
 
 pub(crate) const SERVER_HOST: &str = "127.0.0.1";
 pub(crate) const PREFERRED_PORT: u16 = 3000;
@@ -86,15 +86,6 @@ pub(crate) const ACTIVE_GROUP_WINDOW_SECS: i64 = 24 * 3_600;
 pub(crate) const ACTIVE_GROUP_LIMIT: usize = 3;
 /// 顶部会话 Tab 上限（超出丢弃最早打开的；当前会话永不被丢）
 pub(crate) const MAX_SESSION_TABS: usize = 8;
-
-
-
-
-
-
-
-
-
 
 struct ClientApp {
     /// 左栏派生行（分组 / 会话 / 查看更多）：由 `rebuild_session_rows` 从
@@ -391,8 +382,7 @@ struct ClientApp {
     ///
     /// GPUI 的编辑态是**实体**，而 render 是 `&self`（不能就地 `cx.new`），
     /// 所以按静态字段表在启动时一次建好（见 `settings::fields::FIELDS`）。
-    pub(crate) settings_editors:
-        std::collections::HashMap<&'static str, Entity<TextareaState>>,
+    pub(crate) settings_editors: std::collections::HashMap<&'static str, Entity<TextareaState>>,
     /// 设置页字段引擎：Bool/Enum 的改动（文本/数字直接读编辑器，不入表）。
     pub(crate) settings_dirty: std::collections::HashMap<&'static str, serde_json::Value>,
     /// 设置页字段引擎：保存 / 校验结果（顶部状态行优先显示它）。
@@ -489,8 +479,6 @@ struct ClientApp {
     /// 生产构建恒为 `None`，字段本身零开销。
     pub(crate) last_screenshot: Option<(String, u32, u32)>,
 }
-
-
 
 impl ClientApp {
     /// 右上角瞬时提示栈（错误不再被状态行覆盖 —— 早先只有 `status` 单行，
@@ -614,7 +602,6 @@ enum ActivityRow {
     Tool { key: String, call: ToolCall },
 }
 
-
 /// 隐藏**本进程独占的**控制台窗口。
 ///
 /// 为什么需要：debug 构建是 console subsystem（PE `Subsystem=3`，为了让 `println!`
@@ -727,7 +714,6 @@ fn main() {
     // 注册不到它们（通知归那个进程的宿主负责，tauri 版自带 sink）。这里不特判：
     // 注册是幂等的，代价为零，而加分支只会掩盖真实的装配关系。
     notify::install();
-
 
     // 图标资源：`gpui-kit-assets` 内嵌完整 Lucide 目录（`AllAssets`），
     // 必须在 `application()` 上注册 —— 否则 `svg().path("icons/*.svg")`

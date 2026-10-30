@@ -5,11 +5,11 @@ use crate::*;
 // 滚动扩展方法（.overflow_y_scrollbar()）来自这个 trait，必须 in scope
 use gpui_kit::component::scroll::ScrollableElement as _;
 // 显式导入：gpui 也导出 `View`（trait）与 `AppRef`，glob 会与我们的同名枚举/别名歧义
+use crate::format::*;
 use crate::theme::colors;
-use gpui_kit::assets::IconName;
 use crate::types::*;
 use crate::widgets::*;
-use crate::format::*;
+use gpui_kit::assets::IconName;
 
 impl ClientApp {
     /// 定时任务页：列表卡片 + 新建表单（间隔预设 / 自定义秒 / 工作区 / 指令）。

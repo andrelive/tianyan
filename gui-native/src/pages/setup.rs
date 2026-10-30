@@ -7,8 +7,8 @@
 //!
 //! 这里做的是三件真正缺的事：**说清还差什么**、**一键跳到能配的地方**、**重新检测**。
 
-use crate::*;
 use crate::theme::colors;
+use crate::*;
 use gpui_kit::assets::IconName;
 
 impl ClientApp {
@@ -16,10 +16,12 @@ impl ClientApp {
     pub(crate) fn render_setup_screen(&self, cx: &mut Context<Self>) -> AnyElement {
         let has_chat = self.models.iter().any(|m| m.is_chat);
         let status_line = if self.needs_setup {
-            "还没有配置文件（~/.tianyan/tianyan.toml）—— 先配一个模型提供商才能对话。"
-                .to_string()
+            "还没有配置文件（~/.tianyan/tianyan.toml）—— 先配一个模型提供商才能对话。".to_string()
         } else if !has_chat {
-            format!("已加载 {} 个模型，但**没有标记为对话模型**的那个。", self.models.len())
+            format!(
+                "已加载 {} 个模型，但**没有标记为对话模型**的那个。",
+                self.models.len()
+            )
         } else {
             "配置似乎完整，可以继续。".to_string()
         };

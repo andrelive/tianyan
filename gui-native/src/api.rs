@@ -28,7 +28,10 @@ pub(crate) async fn fetch_json(url: String) -> Result<serde_json::Value, String>
 }
 
 /// POST 一段 JSON 并取回 JSON（同样跑在 tokio runtime 上，跨 runtime await 安全）。
-pub(crate) async fn post_json(url: String, body: serde_json::Value) -> Result<serde_json::Value, String> {
+pub(crate) async fn post_json(
+    url: String,
+    body: serde_json::Value,
+) -> Result<serde_json::Value, String> {
     runtime()
         .spawn(async move {
             let resp = reqwest::Client::new()
@@ -106,7 +109,10 @@ pub(crate) async fn sleep_secs(secs: u64) {
 }
 
 /// PUT 一段 JSON（会话级模型选择等）：与 [`post_json`] 同一手法。
-pub(crate) async fn put_json(url: String, body: serde_json::Value) -> Result<serde_json::Value, String> {
+pub(crate) async fn put_json(
+    url: String,
+    body: serde_json::Value,
+) -> Result<serde_json::Value, String> {
     runtime()
         .spawn(async move {
             let resp = reqwest::Client::new()
@@ -140,7 +146,10 @@ pub(crate) fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
 /// `POST /api/v1/chat/stream` 只是开关，流式输出全部经这条常驻 SSE 下发
 /// （`server/src/api/chat/handlers.rs`），所以订阅必须**独立于发送**常驻。
 /// 断线（server 未起 / 重启）按 1s 间隔重连；`tx` 关闭即退出（窗口销毁）。
-pub(crate) fn spawn_event_reader(port: u16, tx: tokio::sync::mpsc::UnboundedSender<serde_json::Value>) {
+pub(crate) fn spawn_event_reader(
+    port: u16,
+    tx: tokio::sync::mpsc::UnboundedSender<serde_json::Value>,
+) {
     // `spawn` 返回的是 `JoinHandle`（任务**已经**开始调度，不是惰性 Future）；
     // 我们不需要 join，也不关心它何时结束——退出条件是 `tx.is_closed()`（窗口销毁）。
     // 这里显式 `drop` 掉句柄（= detach），顺带说明为什么不是 `let _ =`：

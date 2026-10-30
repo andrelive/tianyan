@@ -6,16 +6,16 @@
 
 use crate::*;
 // 显式导入：gpui 也导出 `View`（trait）与 `AppRef`，glob 会与我们的同名枚举/别名歧义
+use crate::format::*;
 use crate::msg::AppRef;
-use crate::types::View;
 use crate::theme::colors;
+use crate::types::View;
+use crate::types::*;
 use gpui_kit::component::input::{InputEvent, InputState, TextareaState};
 use gpui_kit::component::theme::{Theme, ThemeMode};
 use gpui_kit::{ListAlignment, ListState as GpuiListState};
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
-use crate::types::*;
-use crate::format::*;
 
 impl ClientApp {
     pub(crate) fn new(
@@ -279,9 +279,8 @@ impl ClientApp {
             mcp_msg: String::new(),
             mcp_msg_err: false,
             mcp_form_open: false,
-            mcp_name: cx.new(|cx| {
-                InputState::new(window, cx).placeholder("名称（唯一，如 filesystem）")
-            }),
+            mcp_name: cx
+                .new(|cx| InputState::new(window, cx).placeholder("名称（唯一，如 filesystem）")),
             mcp_command: cx
                 .new(|cx| InputState::new(window, cx).placeholder("命令（如 npx / uvx / python）")),
             mcp_args: cx.new(|cx| {
@@ -302,12 +301,14 @@ impl ClientApp {
             models_msg_err: false,
             model_form_open: false,
             model_form_provider: None,
-            model_form_name: cx
-                .new(|cx| InputState::new(window, cx).placeholder("模型名（与上游一致，如 gpt-4o）")),
+            model_form_name: cx.new(|cx| {
+                InputState::new(window, cx).placeholder("模型名（与上游一致，如 gpt-4o）")
+            }),
             model_form_caps: Vec::new(),
             prov_form_open: false,
-            prov_form_name: cx
-                .new(|cx| InputState::new(window, cx).placeholder("提供商名称（如 openai / ollama）")),
+            prov_form_name: cx.new(|cx| {
+                InputState::new(window, cx).placeholder("提供商名称（如 openai / ollama）")
+            }),
             prov_form_endpoint: cx.new(|cx| {
                 InputState::new(window, cx).placeholder("端点（可留空：命中预置时自动补齐）")
             }),
@@ -809,9 +810,7 @@ impl ClientApp {
         let need = match self.messages.last() {
             None => true,
             Some(m) if m.role != "assistant" => true,
-            Some(m) => {
-                !m.tool_calls.is_empty() && m.tool_calls.iter().all(|t| t.result.is_some())
-            }
+            Some(m) => !m.tool_calls.is_empty() && m.tool_calls.iter().all(|t| t.result.is_some()),
         };
         if need {
             self.push_assistant_row();
@@ -1366,7 +1365,11 @@ impl ClientApp {
     // 内建截图依赖 gpui 的 `test-support`（`Window::render_to_image` 是 cfg 门控的），
     // 所以本方法也必须同样门控 —— 否则默认构建找不到那个方法。
     #[cfg(feature = "screenshot")]
-    pub(crate) fn screenshot_to(&mut self, path: String, cx: &mut Context<Self>) -> Result<(), String> {
+    pub(crate) fn screenshot_to(
+        &mut self,
+        path: String,
+        cx: &mut Context<Self>,
+    ) -> Result<(), String> {
         let handle = self.window_handle;
         let target = path.clone();
         let size = handle
@@ -1625,9 +1628,9 @@ mod step_boundary_tests {
     // ⚠️ 不要写 `use super::*`：bin crate 根是 `main.rs`，glob 会拉进整棵模块树，
     // `#[test]` 宏展开时直接撞 `recursion_limit`（实测报
     // “recursion limit reached while expanding `#[test]`”）。只显式导入需要的类型。
+    use crate::app::{classify_boundary_message, BoundaryMessageAction};
     use crate::types::{MsgRow, Seg, ToolCall};
     use crate::ClientApp;
-    use crate::app::{classify_boundary_message, BoundaryMessageAction};
 
     fn tool(id: &str, done: bool) -> ToolCall {
         ToolCall {
@@ -1720,7 +1723,10 @@ mod step_boundary_tests {
             }],
             vec![tool("c1", false)],
         );
-        assert!(!ClientApp::step_closed(&m), "工具还没出结果 → 同一批并行工具不该被拆开");
+        assert!(
+            !ClientApp::step_closed(&m),
+            "工具还没出结果 → 同一批并行工具不该被拆开"
+        );
     }
 
     #[test]
@@ -1734,6 +1740,9 @@ mod step_boundary_tests {
             }],
             vec![tool("c1", true)],
         );
-        assert!(ClientApp::step_closed(&m), "工具出结果 → 下一步是新的 LLM 响应");
+        assert!(
+            ClientApp::step_closed(&m),
+            "工具出结果 → 下一步是新的 LLM 响应"
+        );
     }
 }

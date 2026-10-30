@@ -135,7 +135,8 @@ fn parse_combo(s: &str) -> Result<(u32, u32), String> {
                     // 单字母/数字：ASCII 大写即虚拟键码
                     let c = first.unwrap_or_default().to_ascii_uppercase();
                     vk = Some(c as u32);
-                } else if let Some(n) = other.strip_prefix('f').and_then(|x| x.parse::<u32>().ok()) {
+                } else if let Some(n) = other.strip_prefix('f').and_then(|x| x.parse::<u32>().ok())
+                {
                     if (1..=24).contains(&n) {
                         vk = Some(0x70 + n - 1); // VK_F1 = 0x70
                     } else {
@@ -149,7 +150,9 @@ fn parse_combo(s: &str) -> Result<(u32, u32), String> {
     }
     let vk = vk.ok_or_else(|| format!("组合键缺少主键（如 Ctrl+Alt+T 的 T）：{s}"))?;
     if mods == 0 {
-        return Err(format!("组合键至少需要一个修饰键（Ctrl/Alt/Shift/Win）：{s}"));
+        return Err(format!(
+            "组合键至少需要一个修饰键（Ctrl/Alt/Shift/Win）：{s}"
+        ));
     }
     Ok((mods, vk))
 }

@@ -36,9 +36,9 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
-use gpui_kit::{App, AsyncApp, WeakEntity};
 use gpui_kit::component::input::InputState;
 use gpui_kit::Entity;
+use gpui_kit::{App, AsyncApp, WeakEntity};
 use tokio::sync::{mpsc, oneshot};
 
 use crate::{
@@ -1308,9 +1308,7 @@ impl ClientApp {
                         }
                         cx.notify();
                     }
-                    other => {
-                        return Err(format!("field 只能是 name / provider / cap：{other}"))
-                    }
+                    other => return Err(format!("field 只能是 name / provider / cap：{other}")),
                 }
             }
             "model_add" => self.add_model_to_provider(cx),
@@ -1438,7 +1436,9 @@ impl ClientApp {
                     "args" => self.mcp_args.clone(),
                     "desc" => self.mcp_desc.clone(),
                     other => {
-                        return Err(format!("field 只能是 name / command / args / desc：{other}"))
+                        return Err(format!(
+                            "field 只能是 name / command / args / desc：{other}"
+                        ))
                     }
                 };
                 let handle = self.window_handle;
@@ -1567,10 +1567,7 @@ impl ClientApp {
             // 需要它是因为：真实压缩要 LLM 生成摘要 + 消息数阈值，隐藏窗口验收里
             // 造不出稳定前置条件，而「压缩点被丢弃」恰恰是用户实测的 bug。
             "_inject_event" => {
-                let ev = cmd
-                    .get("event")
-                    .cloned()
-                    .unwrap_or(serde_json::Value::Null);
+                let ev = cmd.get("event").cloned().unwrap_or(serde_json::Value::Null);
                 self.handle_event(&ev, cx);
             }
             // 写输入框正文（断言「多行自动增高」等依赖文本内容的渲染行为用；
@@ -1638,7 +1635,7 @@ impl ClientApp {
                 {
                     let _ = path;
                     return Err(
-                        "本二进制未启用截图（需 `cargo build --features screenshot`）".to_string()
+                        "本二进制未启用截图（需 `cargo build --features screenshot`）".to_string(),
                     );
                 }
             }

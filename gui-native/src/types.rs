@@ -368,9 +368,7 @@ pub(crate) enum Dialog {
     /// 后端语义（`RespondApprovalRequest.edited_command`）：编辑值**记入审计与
     /// 通知文本，实际执行仍由 agent 按原命令发起** —— 所以弹窗里必须写明，
     /// 否则用户会以为改了就按新的执行。
-    EditApproval {
-        request_id: String,
-    },
+    EditApproval { request_id: String },
 }
 
 impl Dialog {
@@ -580,7 +578,10 @@ impl UsageTotal {
         let t = v.filter(|v| !v.is_null())?;
         Some(Self {
             calls: t.get("calls").and_then(|v| v.as_u64()).unwrap_or(0),
-            uncached_input: t.get("uncached_input").and_then(|v| v.as_u64()).unwrap_or(0),
+            uncached_input: t
+                .get("uncached_input")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0),
             cached_input: t.get("cached_input").and_then(|v| v.as_u64()).unwrap_or(0),
             completion_tokens: t
                 .get("completion_tokens")

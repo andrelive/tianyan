@@ -7,10 +7,10 @@ use crate::*;
 // 滚动扩展方法（.overflow_y_scrollbar()）来自这个 trait，必须 in scope
 use gpui_kit::component::scroll::ScrollableElement as _;
 // 显式导入：gpui 也导出 `View`（trait）与 `AppRef`，glob 会与我们的同名枚举/别名歧义
-use crate::theme::colors;
-use gpui_kit::assets::IconName;
-use crate::types::*;
 use crate::format::*;
+use crate::theme::colors;
+use crate::types::*;
+use gpui_kit::assets::IconName;
 
 /// 任务是否仍「活跃」（`pending` / `running`）。
 ///
@@ -439,43 +439,36 @@ impl ClientApp {
             }
         }
         panel
-            .child(
-                {
-                    let mut list = div()
-                        .flex_1()
-                        .min_h_0()
-                        .flex()
-                        .flex_col()
-                        .gap_1()
-                        .p_2()
-                        .overflow_y_scrollbar();
-                    list = list.children(active_cards);
-                    // 「已结束」分隔行：只在两组都有时才画（否则一条光秃秃的分隔线）
-                    if !done_cards.is_empty() && !active_ids.is_empty() {
-                        list = list.child(
-                            div()
-                                .flex()
-                                .flex_row()
-                                .items_center()
-                                .gap_2()
-                                .pt_1()
-                                .child(
-                                    div()
-                                        .text_size(px(10.))
-                                        .text_color(rgb(colors::TEXT_TERTIARY()))
-                                        .child("已结束"),
-                                )
-                                .child(
-                                    div()
-                                        .flex_1()
-                                        .h(px(1.))
-                                        .bg(rgb(colors::BORDER())),
-                                ),
-                        );
-                    }
-                    list.children(done_cards)
-                },
-            )
+            .child({
+                let mut list = div()
+                    .flex_1()
+                    .min_h_0()
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .p_2()
+                    .overflow_y_scrollbar();
+                list = list.children(active_cards);
+                // 「已结束」分隔行：只在两组都有时才画（否则一条光秃秃的分隔线）
+                if !done_cards.is_empty() && !active_ids.is_empty() {
+                    list = list.child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .gap_2()
+                            .pt_1()
+                            .child(
+                                div()
+                                    .text_size(px(10.))
+                                    .text_color(rgb(colors::TEXT_TERTIARY()))
+                                    .child("已结束"),
+                            )
+                            .child(div().flex_1().h(px(1.)).bg(rgb(colors::BORDER()))),
+                    );
+                }
+                list.children(done_cards)
+            })
             .id("tasks-panel")
     }
 

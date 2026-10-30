@@ -6,9 +6,9 @@ use crate::*;
 use gpui_kit::component::scroll::ScrollableElement as _;
 // 显式导入：gpui 也导出 `View`（trait）与 `AppRef`，glob 会与我们的同名枚举/别名歧义
 use crate::theme::colors;
+use crate::types::*;
 use gpui_kit::assets::IconName;
 use gpui_kit::component::input::Input;
-use crate::types::*;
 
 impl ClientApp {
     pub(crate) fn render_roles(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -498,7 +498,12 @@ impl ClientApp {
     }
 
     /// 角色列表项：名称 + 来源徽章 + 职责 + 版本 / 工具数 / 成功率。
-    pub(crate) fn render_role_item(&self, ix: usize, role: &RoleRow, cx: &mut Context<Self>) -> AnyElement {
+    pub(crate) fn render_role_item(
+        &self,
+        ix: usize,
+        role: &RoleRow,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let selected = self.roles_selected.as_deref() == Some(role.name.as_str());
         let (source_label, source_color) = source_of(&role.source);
         let name = role.name.clone();

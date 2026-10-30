@@ -5,11 +5,11 @@
 
 use crate::*;
 // 显式导入：gpui 也导出 `View`（trait）与 `AppRef`，glob 会与我们的同名枚举/别名歧义
+use crate::format::*;
 use crate::theme::colors;
+use crate::types::*;
 use gpui_kit::assets::IconName;
 use gpui_kit::component::input::InputState;
-use crate::types::*;
-use crate::format::*;
 
 impl ClientApp {
     pub(crate) fn load_sessions(&self, cx: &mut Context<Self>) {
@@ -446,7 +446,12 @@ impl ClientApp {
 
     /// 确认回退：`POST /sessions/{id}/messages/delete`（删该消息及其后全部；
     /// ADR-040 事务内含工作区文件回退），成功后重拉消息链与会话统计。
-    pub(crate) fn confirm_rollback(&mut self, session_id: String, message_id: String, cx: &mut Context<Self>) {
+    pub(crate) fn confirm_rollback(
+        &mut self,
+        session_id: String,
+        message_id: String,
+        cx: &mut Context<Self>,
+    ) {
         self.dialog = None;
         let port = self.port;
         cx.spawn(async move |this, cx| {

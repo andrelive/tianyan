@@ -42,7 +42,11 @@ pub(crate) fn format_ms(ms: i64) -> String {
 ///
 /// 分母扣 TTFT 是 Web 版的口径：首包等待不属于生成阶段，否则慢首包会把速度
 /// 一起拖低，两个指标就失去正交性。
-pub(crate) fn tokens_per_sec(ttft_ms: Option<i64>, duration_ms: i64, completion: u64) -> Option<u64> {
+pub(crate) fn tokens_per_sec(
+    ttft_ms: Option<i64>,
+    duration_ms: i64,
+    completion: u64,
+) -> Option<u64> {
     let gen_ms = duration_ms - ttft_ms.unwrap_or(0);
     if completion == 0 || gen_ms <= 0 {
         return None;
@@ -243,7 +247,10 @@ pub(crate) fn same_dir(a: &str, b: &str) -> bool {
             Some(p) => p,
             None => raw.strip_prefix(r"\\?\").unwrap_or(raw).to_string(),
         };
-        plain.replace('/', "\\").trim_end_matches('\\').to_lowercase()
+        plain
+            .replace('/', "\\")
+            .trim_end_matches('\\')
+            .to_lowercase()
     };
     norm(a) == norm(b)
 }

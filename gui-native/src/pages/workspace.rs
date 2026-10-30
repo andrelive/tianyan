@@ -8,8 +8,8 @@ use crate::*;
 use gpui_kit::component::scroll::ScrollableElement as _;
 // 显式导入：gpui 也导出 `View`（trait）与 `AppRef`，glob 会与我们的同名枚举/别名歧义
 use crate::theme::colors;
-use gpui_kit::assets::IconName;
 use crate::types::*;
+use gpui_kit::assets::IconName;
 
 impl ClientApp {
     /// 设置页（第一版）：模型列表 + 切换聊天模型。

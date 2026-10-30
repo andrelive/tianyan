@@ -8,7 +8,6 @@
 //!
 //! 这条约定是拆分的收益所在：改一个页面时不需要读别的页面。
 
-pub(crate) mod setup;
 pub(crate) mod approval;
 pub(crate) mod insights;
 pub(crate) mod knowledge;
@@ -16,6 +15,7 @@ pub(crate) mod memory;
 pub(crate) mod roles;
 pub(crate) mod scheduled;
 pub(crate) mod settings;
+pub(crate) mod setup;
 pub(crate) mod skills;
 pub(crate) mod tools;
 pub(crate) mod workspace;

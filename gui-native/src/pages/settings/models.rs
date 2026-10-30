@@ -1333,4 +1333,3 @@ fn button_small(
         .on_click(on_click)
         .into_any_element()
 }
-
