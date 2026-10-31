@@ -1028,25 +1028,25 @@ pub(crate) fn render_assistant_footer(
         );
     }
     footer = footer.child(div().flex_1());
-    // 时间戳**每步都打**，但同轮后续步骤用更浅更小的样式。
+    // 时间戳**只在轮首**打（跨轮边界），同轮后续步骤不打。
     //
-    // 演变过程（两次都是用户实测反馈）：
-    // ① 起初每步都打时间 → 「两个工具调用本该是一轮，中间却被时间戳分开」；
-    // ② 改成 continuation 完全不打 → 轮与轮之间**也没有**任何时间线索，
-    //    「导致难以区分轮次」；
-    // ③ 现在：跨轮步骤 = 正常小字时间戳（轮边界一眼可见）；同轮后续 =
-    //    更浅（opacity 0.45）+ 更小（10px），既能看出每步耗时，又不会把一轮
-    //    切成一串"独立回复"。
-    if let Some(ts) = &msg.ts {
-        let ts_node = div()
-            .text_size(px(if is_continuation { 10. } else { 11. }))
-            .text_color(rgb(colors::TEXT_TERTIARY()))
-            .child(ts.clone());
-        footer = footer.child(if is_continuation {
-            ts_node.opacity(0.45)
-        } else {
-            ts_node
-        });
+    // 三次迭代都来自用户实测：
+    // ① 起初每步都打 → 「两个工具调用本该是一轮，中间却被时间戳分开」；
+    // ② 完全不打 → 「轮与轮之间的时间不见了，难以区分轮次」；
+    // ③ 每步都打（浅色小字）→ 「既然是同一轮返回的 tool_call，为什么调用时间
+    //    不一样？」—— 每步的时间戳制造了"这是几条独立回复"的错觉，反而更乱。
+    //
+    // 结论：**轮内不报时刻、只报工具耗时**（工具卡右侧那个 169ms / 13.18s 是
+    // 该步真正关心的信息）；**轮边界由「轮首时间戳 + 更大的间距」表达**。
+    if !is_continuation {
+        if let Some(ts) = &msg.ts {
+            footer = footer.child(
+                div()
+                    .text_size(px(11.))
+                    .text_color(rgb(colors::TEXT_TERTIARY()))
+                    .child(ts.clone()),
+            );
+        }
     }
     footer.into_any_element()
 }
@@ -1362,9 +1362,13 @@ pub(crate) fn render_msg_body(
     // 一轮多工具时每一步都是一条独立 `MsgRow`，若都用 `py_2`，卡片之间会堆出
     // 16px（上下 padding）+ 8px（body gap）的空白 —— 用户实测「同一轮次的工具调用
     // 之间间隔过大，建议参考思考过程和工具的间隔」。轮与轮之间仍保留 `py_2`。
-    // 同轮后续 1px（紧凑），跨轮 10px（比原来的 8px 略大 —— 用户实测「轮与轮之间
-    // 时间不见了，导致难以区分轮次」，间距 + 时间戳一起加强边界感）。
-    let pad_y = if is_continuation { 1.0 } else { 10.0 };
+    // 同轮后续 1px（紧凑，卡片紧贴）；跨轮 14px（原来 8px）。
+    //
+    // 轮边界现在只靠两件事表达：**轮首的时间戳** + **这个更大的间距**
+    // （见 `render_assistant_footer` 的注释：轮内不再报时刻，避免"每步都是独立
+    // 回复"的错觉）。14px 与用户消息自身的 4px 相加 ≈ 18px，一轮结束后有明显
+    // 空档，但仍比"一整屏"紧凑。
+    let pad_y = if is_continuation { 1.0 } else { 14.0 };
     div()
         .px_4()
         .py(px(pad_y))
