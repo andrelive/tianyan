@@ -300,9 +300,11 @@ impl VectorStorage for LanceDbVectorStore {
                 self.embedding_dim
             )));
         }
-        let stream = self
-            .table
-            .query()
+        let base = match query.category_filter.as_deref() {
+            Some(cat) => self.table.query().only_if(namespace_filter(cat)),
+            None => self.table.query(),
+        };
+        let stream = base
             .nearest_to(query.vector)
             .map_err(|e| TianyanError::Custom(format!("向量数据库错误：搜索失败: {e}")))?
             // T1-14：显式 limit（默认 top-k=10 会把请求条数静默截断）
@@ -400,9 +402,18 @@ impl VectorStorage for LanceDbVectorStore {
         for &vec_type in vector_types {
             let column = batch::vector_column_name(vec_type);
 
-            let stream = match self
-                .table
-                .query()
+            // namespace 过滤**下推**到 DB 层（`only_if`；`QueryRequest.prefilter`
+            // 默认为 true，即先在过滤后的行集上做 ANN 再取 top_k）。此前只在取回
+            // top_k 之后用内存 `retain` 过滤，而每列只取 top_k 行：全局 top_k 被
+            // 技能 / 记忆 / agent 这些条目多的命名空间占满时，过滤后一条不剩 ——
+            // 实测知识库 20 条**全部**有 L0/L1 向量，`search(q, 20, Knowledge)` 却
+            // 恒返回 0，同一 query 不加过滤能命中 7 条 knowledge（搜索页永远空的真因）。
+            let base = match category_filter {
+                Some(cat) => self.table.query().only_if(namespace_filter(cat)),
+                None => self.table.query(),
+            };
+
+            let stream = match base
                 .nearest_to(query_vector.clone())
                 .map_err(|e| TianyanError::Custom(format!("向量数据库错误：RRF 搜索失败: {e}")))?
                 // T1-14：每列取 top_k 参与 RRF 融合（默认 top-k=10 会让
@@ -469,6 +480,14 @@ impl VectorStorage for LanceDbVectorStore {
         fused.truncate(top_k);
         Ok(fused)
     }
+}
+
+/// 构造 `namespace` 列的等值过滤表达式（LanceDB `only_if` 的 SQL 片段）。
+///
+/// 值来自 `ContextNamespace` 的枚举字面量（`"knowledge"` / `"skill"` …），不是
+/// 用户输入；仍按 SQL 单引号规则转义，避免将来有人把用户串拼进来时无声注入。
+fn namespace_filter(namespace: &str) -> String {
+    format!("namespace = '{}'", namespace.replace('\'', "''"))
 }
 
 /// 表内 FixedSizeList 列宽与配置维度是否不一致（小写辅助：任一缺失或不等 = 重建）。

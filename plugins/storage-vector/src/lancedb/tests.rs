@@ -218,6 +218,75 @@ async fn test_search_with_category_filter() {
     }
 }
 
+/// 回归（知识检索恒空）：目标命名空间的条目**排在全局 top_k 之外**时仍须命中。
+///
+/// 旧实现把 `category_filter` 放在「取回 top_k 之后」用内存 `retain` 过滤 —— 全局
+/// top_k 被别的命名空间占满时，过滤后一条不剩。真实数据上表现为
+/// `vfs.search(q, 20, Some(Knowledge))` **恒为 0**（知识库 20 条全都有 L0/L1 向量），
+/// 而同一 query 不加过滤能命中 7 条 knowledge。
+///
+/// 修复 = 过滤下推 LanceDB（`only_if`；`QueryRequest.prefilter` 默认 true →
+/// 先过滤再 ANN）。上面的 `test_search_with_category_filter` 两个点都在全局 top_k 内，
+/// 所以从未暴露这个退化 —— 本测试必须让目标条目在全局 top_k **之外**才有意义。
+#[tokio::test]
+async fn test_search_category_filter_not_swallowed_by_global_topk() {
+    let (store, _dir) = create_store().await;
+    // 12 条 memory：向量与 query 完全相同（相似度 1.0）→ 必然占满全局 top-5
+    for i in 0..12 {
+        let p = make_point(
+            &format!("tianyan://memory/noise_{i}"),
+            Some(test_vec()),
+            None,
+        );
+        store.upsert_point(&p).await.unwrap();
+    }
+    // 1 条 knowledge：向量不同、相似度更低 → 排不进全局 top-5
+    let target = make_point("tianyan://knowledge/target", Some(test_vec2()), None);
+    store.upsert_point(&target).await.unwrap();
+
+    let query = VectorSearchQuery {
+        vector: test_vec(),
+        vector_type: VectorType::Abstract,
+        limit: 5,
+        category_filter: Some("knowledge".to_string()),
+        min_score: None,
+    };
+    let results = store.search(query).await.unwrap();
+    assert_eq!(
+        results.len(),
+        1,
+        "过滤下推后应命中 knowledge 条目（旧实现返回空）"
+    );
+    assert_eq!(results[0].id, target.uri().to_point_id());
+}
+
+/// 同上，但走 RRF 融合路径（`search_abstract_and_overview` = 知识检索实际入口）。
+#[tokio::test]
+async fn test_search_fused_category_filter_not_swallowed_by_global_topk() {
+    let (store, _dir) = create_store().await;
+    for i in 0..12 {
+        let p = make_point(
+            &format!("tianyan://memory/noise_{i}"),
+            Some(test_vec()),
+            Some(test_vec()),
+        );
+        store.upsert_point(&p).await.unwrap();
+    }
+    let target = make_point(
+        "tianyan://knowledge/target",
+        Some(test_vec2()),
+        Some(test_vec2()),
+    );
+    store.upsert_point(&target).await.unwrap();
+
+    let results = store
+        .search_abstract_and_overview(test_vec(), 5, Some("knowledge"))
+        .await
+        .unwrap();
+    assert_eq!(results.len(), 1, "RRF 路径同样不得被全局 top_k 吞掉");
+    assert_eq!(results[0].payload.uri.namespace().to_string(), "knowledge");
+}
+
 #[tokio::test]
 async fn test_search_with_min_score() {
     let (store, _dir) = create_store().await;
