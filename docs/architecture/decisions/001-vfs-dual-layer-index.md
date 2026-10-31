@@ -33,6 +33,15 @@
 - **知识库不做 chunk**：完整文档直接写入 L2，双层检索替代 chunk-based RAG。`Chunker` 已移除。
 - **技能渐进式披露**：L0 简介用于快速发现（`SkillManager::list_available_skills()`），L1 目录用于章节/部件定位，L2 正文按需取段；**多文件技能 = VFS 目录节点**（成员目录消费时现遍历，零生成、零向量）。
 - **图像双通道**：VLM 生成文本描述 → 文本 embedding（L0/L1），同时 `embed_image()` → `visual_vector` 用于视觉相似度搜索。
+- **检索分数 = 余弦相似度**：`score = 1 - _distance`，而距离由查询侧显式指定
+  `DistanceType::Cosine` ⇒ `_distance = 1 - cos`、`score = cos ∈ [-1, 1]`。
+  `ContentLoadStrategy` 的 `> 0.6` 阈值与 `min_score` 过滤都按这个口径标定。
+  ⚠️ 若退回 LanceDB 默认的 L2（平方欧氏），`1 - distance` 在归一化向量下等于
+  `2cos - 1`（正交 = -1）：0.6 阈值实际要求余弦 0.8，**所有检索结果永远只加载
+  L0**（2026-10 实测，另见 `gui-native/README.md` 第 18 条：知识检索整排负分）。
+- **命名空间过滤必须下推**：`search(_, _, Some(ns))` 的 `namespace` 过滤要在
+  DB 层（`only_if`，`prefilter` 默认开），不能取回 top-k 后再内存筛 —— 全局
+  top-k 被别的命名空间占满时，过滤后一条不剩（知识检索恒空的真因）。
 
 ## 禁止模式清单
 

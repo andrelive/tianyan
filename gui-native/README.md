@@ -213,10 +213,13 @@ vite 是 14 份手写受控表单，这里是「字段声明成数据 + 一套�
 期间被别处改过的东西（例如 agent 刚切换的模型）。顶部状态行给「已修改 N 项」与
 「保存 N 项 / 放弃」，保存后汇总「其中 M 项需重启客户端生效」。
 
-**数据目录搬迁的闭环**：`POST /config/migrate-data-dir` 只写请求文件并触发服务关停；
-真正「复制 → 校验 → 改配置 → 删源」在服务停掉之后做（SQLite/LanceDB 的文件锁才释放）。
-Tauri 版由监督循环在进程内完成；原生端在上一次进程退出后，由**下一次启动**在起 server
-之前执行（`main.rs` 的 `run_pending_migration`），所以 UI 明说「需关闭并重新打开客户端」。
+**数据目录搬迁的闭环**：入口只有一处 —— 设置页「数据目录」行右侧的「搬迁…」
+（该字段**只读**；`PUT /config` 会丢弃对它的修改，搬迁是唯一写入通道，见 ADR-023 §4）。
+点击后是目录选择器 → 确认框（选中 ≠ 生效），再 `POST /config/migrate-data-dir`：
+它只写请求文件并触发服务关停，真正「复制 → 校验 → 改配置 → 删源」在服务停掉之后做
+（SQLite/LanceDB 的文件锁那时才释放）。Tauri 版由监督循环在进程内完成；原生端在
+上一次进程退出后，由**下一次启动**在起 server 之前执行（`main.rs` 的
+`run_pending_migration`），所以 UI 明说「需关闭并重新打开客户端」。
 
 ## 已知限制与行为
 
@@ -286,6 +289,26 @@ Tauri 版由监督循环在进程内完成；原生端在上一次进程退出�
 ⚠️ 教训：隔离实例与已装实例**进程同名**（都叫 `tianyan-gui-native`），收尾**禁止**
 `Get-Process tianyan-gui-native | Stop-Process`——那会把用户正在用的实例一起杀掉
 （实测踩过）。只按 `Start-Process -PassThru` 拿到的 **PID**（或按 `Path`）精确操作。
+
+### 1.1.0 第二批（页面空白 / 检索为空 / 设置页显示与危险操作）
+
+| # | 症状 | 根因 / 修法 |
+|---|---|---|
+| 16 | **工具 / 技能 / 知识 / 记忆四个页面点进去全空** | 后端不空（`/skills` 14、`/tools` 57、`/memory` 115、知识两级 20 条），空的是界面：左栏 `on_click` 自己写了一份精简判断，只给 `Roles`/`Workspace` 补拉，其余七个页面**从未触发过加载**（旁边注释「数据已在启动时预加载」也不成立，启动只拉会话与配置）。而自动化 `/act` 走 `switch_view`（会加载）→「自动化验得出来、人点不出来」，正是 ADR-052 D8 警告的分叉。修法：左栏点击 / 对话页「文件视图」一律改调 `switch_view`，加载口径收进 `load_view_data`（每视图一次判定，统一「每次进入都刷新」；文件树只空时拉、知识页保留当前目录） |
+| 17 | **知识搜索任何 query 都是 0 条** | `namespace` 过滤在「取回 top_k **之后**」用内存 `retain` 做的，而每列 ANN 只取 top_k 行：全局 top_k 被技能/记忆/agent 占满，过滤后一条不剩（同一 query **不加**过滤能命中 7 条 knowledge）。修法：过滤下推 DB 层 `only_if("namespace = '…'")`（`QueryRequest.prefilter` 默认 true = 先过滤再 ANN），单列与 RRF 两条路径都改。**影响面不止知识页**：`policy-context` 的注入检索（`retriever.rs:150` 同样传 namespace）此前等于「按命名空间检索必空」 |
+| 18 | **搜索结果的相似度是负数**（-0.047 / -0.133） | LanceDB 默认 `L2`（平方欧氏），而代码一律 `score = 1 - _distance`：未归一化向量下毫无意义，归一化向量下等于 `2cos-1`（正交算出 -1）。修法：两处检索显式 `.distance_type(DistanceType::Cosine)` ⇒ `_distance = 1 - cos`、`score = cos`。实测同一条目同一 query **-0.047 → 0.476**。**顺带修好一处被误诊的退化**：`ContentLoadStrategy` 的 `score > 0.6` 是按余弦标定的（它自己的测试注释就写着「阈值按余弦相似度标定（0.6），导致所有结果永远停留在 Abstract」），底层给 `2cos-1` ⇒ 0.6 只对应余弦 0.2 ⇒ 注入永远只取 L0 |
+| 19 | **知识搜索结果卡片全空**，只剩一个分数 | 后端 `search` 把 `content`/`source` 留空、`metadata.title` 填 `None`，注释写「由前端按需调 `/entries/read`」——两个前端都没实现那一步。修法：服务端一次带回（title = L0 摘要、content = L2 前 300 字、source = 父目录路径），DTO 层把 score 钳到 0..1；native 搜索卡片改成「标题 / 百分比 / 目录 / 正文预览」四行 |
+| 20 | **设置页「数据目录」显示成 `%LOCALAPPDATA%\tianyan`**（placeholder） | 后端是对的（`/config` 里就是 `D:\tianyan`）。界面里 ReadOnly 字段直接读配置、**文本字段读的是编辑器**，而编辑器从未回填。三个叠加原因：①只有点二级栏目才懒加载 + 回填；②回填判据用 `raw_config.is_none()`，而 `load_models` 也会顺手设它 ⇒ 以为「不是首次」跳过；③**回填失败也置 `settings_backfilled = true`**（窗口句柄未就绪时静默失败）⇒ 一次性失败固化成永久状态。修法：进设置页就保证加载 + 回填、判据改 `!settings_backfilled && settings_dirty.is_empty()`、`handle.update` 成功才置位。**断言口径本身也要修**：`/state` 的字段 `value` 走 `field_edit_value`（未回填时回落配置值，看起来永远正确），新增 `settings_fields.backfilled` 与每字段 `editor` 才能看见「界面是空的」 |
+| 21 | 数据目录**可编辑**（与「搬迁才是唯一入口」的设计冲突） | 直接改配置里的 `storage.data_dir`，下次启动就在空目录里跑（旧库还在原处、服务看不到）= 用户视角「数据全没了」。修法两道防线：UI 改只读；`ConfigService::update_config` **以运行时值为准、丢弃请求里的 data_dir** 并 `warn!`（不返回 400 —— 客户端整份 PUT，报错会让「保存任意字段」连带失败）。实测直接 `PUT` 改成 `C:\should-be-ignored` → 重读仍是原值 |
+| 22 | 搬迁是一张**常驻卡片**（当前目录 + 手输路径 + 按钮） | 按用户意见改成「字段行动作 → 选择器 → 确认」：`storage.data_dir` 行右侧「搬迁…」→ `WorkspacePicker`（新增 `PickerTarget::DataDir`，标题/说明随用途切换）→ 选中后弹 `Dialog::DataDirMigrate` 确认（**选中 ≠ 生效**，整库搬迁不可撤销）。删掉整块卡片与 `storage_move_target` / `storage_msg` / `storage_msg_err` 三个字段，结果反馈改用 `push_notice`（`/state` 的 `notices` 本来就能断言） |
+| 23 | 向量索引两个字段**改了不报错但会坏** | 换 `collection_name` = 换一套空索引（检索立刻全空）；改 `vector_dimension` = 表重建 + **全量重新嵌入**（几分钟 + 嵌入费用）。不锁死（换嵌入模型时维度必须跟着改，是合法动作），改成**保存前确认**：`save_settings_fields_checked(force)` 检测到这两项脏就弹 `Dialog::VectorIndexChange`（点名要改哪几个），确认后才落盘 |
+| 24 | **记忆详情满屏 `#`、`**`、`- `** | 记忆是以 markdown 存进 VFS 的（`# 记忆: xxx` + `- **类别**: fact` + `## 内容`），而 L0/L1/L2 三段按纯文本渲染。改用 `TextView::markdown`（消息正文同一组件），L2 折叠展开一起改。限制：该组件**不继承父级 `text_color`**（用组件主题 foreground），只适用于普通/次级背景 —— 消息里的用户气泡是深棕底，那里不能用 |
+
+> **本批的教训**：16 / 17 / 20 三条都是「**两条路径各写一份**」——
+> 左栏点击 vs `switch_view`、内存过滤 vs DB 过滤、`raw_config` 判据 vs
+> `settings_backfilled`。修法一律是「收成一个入口 + 把判据换成真正表达语义的
+> 那个标志」。第 20 条还多一条：**断言口径本身会骗人**（`value` 回落配置值，
+> 看上去永远正确），所以得先补 `editor` / `backfilled` 才复现得出来。
 
 ### 出包一条链（产品级，已实测 1.1.0）
 
