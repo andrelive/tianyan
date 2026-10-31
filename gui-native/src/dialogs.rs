@@ -120,6 +120,17 @@ impl ClientApp {
                 "开始搬迁".to_string(),
                 true,
             ),
+            Dialog::VectorIndexChange { fields } => (
+                "修改向量索引配置".to_string(),
+                Some(format!(
+                    "将修改：{}。这会立即影响检索 —— 换集合名等于换一套空索引\
+                     （现有索引不再被使用，检索暂时为空）；改维度会触发表重建并\
+                     **重新嵌入全部条目**（几分钟 + 嵌入费用）。确认要写入吗？",
+                    fields.join("、")
+                )),
+                "仍然保存".to_string(),
+                true,
+            ),
         };
         let mut card = div()
             .w(px(420.))
@@ -224,6 +235,9 @@ impl ClientApp {
                                 }
                                 Some(Dialog::DataDirMigrate { target }) => {
                                     this.migrate_data_dir(target, cx)
+                                }
+                                Some(Dialog::VectorIndexChange { .. }) => {
+                                    this.confirm_vector_index_change(cx)
                                 }
                                 None => {}
                             }),

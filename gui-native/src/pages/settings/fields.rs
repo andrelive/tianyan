@@ -199,7 +199,7 @@ pub(crate) const FIELDS: &[FieldDef] = &[
         section: "向量索引",
         path: "storage.vector.collection_name",
         label: "集合名",
-        hint: "LanceDB 集合名（换名 = 换一套向量索引，旧索引留在原处）。",
+        hint: "LanceDB 集合名。换名 = 换一套**空**索引（旧索引留在原处但不再被使用，检索会暂时为空）；保存前会二次确认。",
         kind: FieldKind::Text {
             placeholder: "tianyan_data",
             empty_as: EmptyAs::Forbid,
@@ -211,7 +211,7 @@ pub(crate) const FIELDS: &[FieldDef] = &[
         section: "向量索引",
         path: "storage.vector.vector_dimension",
         label: "向量维度",
-        hint: "必须与嵌入模型输出维度一致（改维度需重建索引）。",
+        hint: "必须与嵌入模型输出维度一致。改了会触发表重建并**重新嵌入全部条目**（几分钟 + 嵌入费用）；保存前会二次确认。",
         kind: FieldKind::Int {
             min: 64,
             max: 8192,
@@ -1283,8 +1283,27 @@ impl ClientApp {
         row.into_any_element()
     }
 
+    /// 确认「向量索引改动」后真的保存（确认框的「仍然保存」按钮）。
+    pub(crate) fn confirm_vector_index_change(&mut self, cx: &mut Context<Self>) {
+        self.dialog = None;
+        self.save_settings_fields_checked(true, cx);
+    }
+
     /// 保存：GET 最新配置 → 只应用改动过的字段 → PUT 整份。
+    ///
+    /// 向量索引的两个字段（`collection_name` / `vector_dimension`）会先过一道确认，
+    /// 见 [`ClientApp::confirm_vector_index_change`]。
     pub(crate) fn save_settings_fields(&mut self, cx: &mut Context<Self>) {
+        self.save_settings_fields_checked(false, cx);
+    }
+
+    /// 保存的实体（`force` = 已过向量索引确认）。
+    ///
+    /// 为什么这两个字段要拦一下：改动**不会报错**，只会让事情变坏 ——
+    /// 换集合名 = 现有向量索引不再被使用，检索立刻全空（旧索引还躺在磁盘上）；
+    /// 改维度 = 表结构不匹配触发重建 + **全量重新嵌入**（几分钟 + 嵌入费用）。
+    /// 其余字段照旧，一次点击直接保存。
+    fn save_settings_fields_checked(&mut self, force: bool, cx: &mut Context<Self>) {
         let mut patches: Vec<(&'static str, serde_json::Value)> = Vec::new();
         let mut restart_count = 0usize;
         let mut errors: Vec<String> = Vec::new();
@@ -1320,6 +1339,32 @@ impl ClientApp {
             self.settings_error = false;
             cx.notify();
             return;
+        }
+        if !force {
+            let risky: Vec<String> = patches
+                .iter()
+                .filter(|(path, _)| {
+                    matches!(
+                        *path,
+                        "storage.vector.collection_name" | "storage.vector.vector_dimension"
+                    )
+                })
+                .map(|(path, _)| {
+                    let label = FIELDS
+                        .iter()
+                        .find(|d| d.path == *path)
+                        .map(|d| d.label)
+                        .unwrap_or(path);
+                    label.to_string()
+                })
+                .collect();
+            if !risky.is_empty() {
+                self.dialog = Some(Dialog::VectorIndexChange { fields: risky });
+                self.settings_msg = "向量索引改动需确认后才写入".to_string();
+                self.settings_msg_err = false;
+                cx.notify();
+                return;
+            }
         }
         let count = patches.len();
         let port = self.port;

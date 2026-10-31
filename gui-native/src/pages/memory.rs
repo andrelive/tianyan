@@ -11,6 +11,7 @@ use crate::theme::colors;
 use crate::types::*;
 use crate::widgets::*;
 use gpui_kit::assets::IconName;
+use gpui_kit::component::text::TextView;
 
 impl ClientApp {
     pub(crate) fn render_memory(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -246,11 +247,13 @@ impl ClientApp {
                             })),
                     );
                     if open {
+                        // L2 同样是 markdown（正文里常有 `##` 小节与列表），
+                        // 与 L0/L1 同一种渲染口径
                         body = body.child(
                             div()
                                 .text_size(px(11.))
                                 .text_color(rgb(colors::TEXT_SECONDARY()))
-                                .child(t.clone()),
+                                .child(TextView::markdown(("mem-detail", 0usize), t.clone())),
                         );
                     }
                 }

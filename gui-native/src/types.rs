@@ -384,6 +384,11 @@ pub(crate) enum Dialog {
     /// 搬迁请求**并触发服务优雅关停；真正的复制 → 校验 → 改配置 → 删源发生在
     /// 服务停掉之后（ADR-023），所以文案里必须说清「要重开客户端」。
     DataDirMigrate { target: String },
+    /// 改向量索引配置（集合名 / 维度）的保存前确认。
+    ///
+    /// 这两项的改动**不会报错**：换集合名 = 现有索引不再被使用（检索立刻全空），
+    /// 改维度 = 表重建 + 全量重新嵌入（几分钟 + 嵌入费用）。所以保存前拦一道。
+    VectorIndexChange { fields: Vec<String> },
 }
 
 impl Dialog {
@@ -403,6 +408,7 @@ impl Dialog {
             Dialog::RollbackMessage { .. } => "rollback_message",
             Dialog::EditApproval { .. } => "edit_approval",
             Dialog::DataDirMigrate { .. } => "data_dir_migrate",
+            Dialog::VectorIndexChange { .. } => "vector_index_change",
         }
     }
 }

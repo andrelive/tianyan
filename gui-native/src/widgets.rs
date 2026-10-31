@@ -5,6 +5,7 @@
 use crate::theme::colors;
 use crate::*;
 use gpui_kit::component::input::{Input, InputState, Textarea, TextareaState};
+use gpui_kit::component::text::TextView;
 
 /// 表单单行输入框的外壳（去自带外观 + 统一边框底色；与设置页编辑框同一手法）。
 pub(crate) fn field_wrap(input: &Entity<InputState>) -> gpui_kit::AnyElement {
@@ -100,6 +101,14 @@ pub(crate) fn collect_ingest_files(paths: &[std::path::PathBuf]) -> Vec<std::pat
 }
 
 /// 记忆详情里的一段（L0 摘要 / L1 概览 / L2 全文）。
+///
+/// 正文走 **Markdown 渲染**：记忆是以 markdown 存进 VFS 的（`# 记忆: xxx` +
+/// `- **类别**: fact` + `## 内容` 小节，自演化综述还带列表与加粗）。纯文本渲染
+/// 时用户看到的是满屏 `#`、`**`、`- `，等于读源码而不是读文档。
+///
+/// 注：`TextView::markdown` **不继承父级 `text_color`**（它用组件主题的
+/// foreground），所以只能放在普通/次级背景上 —— 消息里的用户气泡是深棕底，
+/// 那里不能用（`msg.rs` 里有同一坑的记录）。记忆详情页在这条线内。
 pub(crate) fn memory_block(label: &'static str, text: String) -> gpui_kit::AnyElement {
     div()
         .flex()
@@ -115,7 +124,7 @@ pub(crate) fn memory_block(label: &'static str, text: String) -> gpui_kit::AnyEl
             div()
                 .text_size(px(12.))
                 .text_color(rgb(colors::TEXT_SECONDARY()))
-                .child(text),
+                .child(TextView::markdown((label, 0usize), text)),
         )
         .into_any_element()
 }

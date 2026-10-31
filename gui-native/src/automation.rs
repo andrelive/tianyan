@@ -486,6 +486,9 @@ impl ClientApp {
                 if let Dialog::DataDirMigrate { target } = d {
                     v["target"] = serde_json::json!(target);
                 }
+                if let Dialog::VectorIndexChange { fields } = d {
+                    v["fields"] = serde_json::json!(fields);
+                }
                 v
             }),
             "picker": {
@@ -1493,6 +1496,8 @@ impl ClientApp {
                 self.remove_provider(name, cx);
             }
             "settings_save" => self.save_settings_fields(cx),
+            // 向量索引改动的确认框（「仍然保存」）：与界面点按钮同一条路径
+            "settings_save_confirm" => self.confirm_vector_index_change(cx),
             "settings_discard" => {
                 // 与界面「放弃」按钮同一条路径
                 self.discard_settings_changes(cx);
