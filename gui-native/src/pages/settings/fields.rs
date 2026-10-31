@@ -133,11 +133,12 @@ pub(crate) const FIELDS: &[FieldDef] = &[
         section: "数据目录",
         path: "storage.data_dir",
         label: "数据目录",
-        hint: "数据库 / 快照 / 向量索引的根目录。搬迁请用下方「搬迁数据目录」（复制 + 校验 + 改配置）。",
-        kind: FieldKind::Text {
-            placeholder: "%LOCALAPPDATA%\\tianyan",
-            empty_as: EmptyAs::Forbid,
-        },
+        // **只读**：数据库 / 快照 / 向量索引全都在这个目录下，直接改配置里的值，
+        // 下一次启动就在一个空目录里跑（旧库还在原处，服务却看不到）—— 用户视角
+        // 是「数据全没了」。搬迁是唯一入口：复制 → 校验 → 改配置 → 删源，
+        // 任一步失败自动回滚（ADR-023）。
+        hint: "只读。搬迁用下方「搬迁数据目录」——直接改这个值等于下次启动换一个空目录。",
+        kind: FieldKind::ReadOnly,
         restart: true,
     },
     FieldDef {
@@ -999,10 +1000,16 @@ impl ClientApp {
     ///
     /// `extra` 是追加在字段卡片之后的栏目专属区块（如「数据存储」的搬迁卡片）——
     /// 放进同一个滚动容器，避免嵌套滚动条。
+    ///
+    /// `extra_after` 指定把 `extra` 插到哪个 section 之后（`None` = 整页末尾）。
+    /// 「数据存储」必须用 `Some("数据目录")`：搬迁卡片是「数据目录」这一项**唯一**
+    /// 的修改入口，放到整页末尾会隔着「容量与清理」「向量索引」两张卡片，用户
+    /// 根本不会把两者联系起来。
     pub(crate) fn render_settings_fields(
         &self,
         tab: SettingsTab,
-        extra: Option<AnyElement>,
+        mut extra: Option<AnyElement>,
+        extra_after: Option<&'static str>,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let defs: Vec<&FieldDef> = FIELDS.iter().filter(|d| d.tab == tab).collect();
@@ -1051,6 +1058,11 @@ impl ClientApp {
                 card = card.child(self.render_field_row(def, cx));
             }
             col = col.child(card);
+            if extra.is_some() && extra_after == Some(section) {
+                if let Some(e) = extra.take() {
+                    col = col.child(e);
+                }
+            }
         }
         if let Some(extra) = extra {
             col = col.child(extra);
@@ -1197,11 +1209,46 @@ impl ClientApp {
                     None => div().into_any_element(),
                 }
             }
-            FieldKind::ReadOnly => div()
-                .text_size(px(11.))
-                .text_color(rgb(colors::TEXT_SECONDARY()))
-                .child(value_to_text(cfg.as_ref()))
-                .into_any_element(),
+            // 只读值（数据目录 / 存储后端 / SQLite 路径）：右侧给一个「复制」。
+            //
+            // 数据目录改成只读之后，用户唯一需要它的场景就是「去资源管理器里看看」
+            // 或「填进搬迁目标框」—— 一条长路径没法用鼠标选中复制（标签不可选），
+            // 所以这里必须给一个按钮，否则只读反而更难用。
+            FieldKind::ReadOnly => {
+                let text = value_to_text(cfg.as_ref());
+                let has_value = !text.trim().is_empty();
+                let copy = text.clone();
+                let mut cell = div().flex().flex_row().items_center().gap_2().child(
+                    div()
+                        .text_size(px(11.))
+                        .text_color(rgb(colors::TEXT_SECONDARY()))
+                        .child(text),
+                );
+                if has_value {
+                    cell = cell.child(
+                        div()
+                            // 同一 path 只会走一个 kind 分支（ReadOnly 与 Bool 互斥），
+                            // 所以直接复用字段路径当 id，不必再拼第二个维度
+                            .id(path)
+                            .px_2()
+                            .rounded_sm()
+                            .border_1()
+                            .border_color(rgb(colors::BORDER()))
+                            .cursor_pointer()
+                            .text_size(px(9.))
+                            .text_color(rgb(colors::TEXT_TERTIARY()))
+                            .child("复制")
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string(
+                                    copy.clone(),
+                                ));
+                                this.push_notice("已复制到剪贴板", false);
+                                cx.notify();
+                            })),
+                    );
+                }
+                cell.into_any_element()
+            }
         };
 
         // 布局：多行字段竖排（控件占整行宽），其余横排（控件定宽 240）

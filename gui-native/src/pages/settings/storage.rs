@@ -18,11 +18,15 @@ impl ClientApp {
     /// 渲染「数据存储」栏目：字段卡片 + 搬迁块。
     pub(crate) fn render_settings_storage(&self, cx: &mut Context<Self>) -> AnyElement {
         let extra = self.render_storage_migration(cx);
-        self.render_settings_fields(SettingsTab::Storage, Some(extra), cx)
+        // 搬迁卡片紧跟「数据目录」一组字段：它是该字段**唯一**的修改入口
+        self.render_settings_fields(SettingsTab::Storage, Some(extra), Some("数据目录"), cx)
     }
 
     /// 搬迁块（当前目录 / 目标目录输入 / 执行 / 前提说明）。
     fn render_storage_migration(&self, cx: &mut Context<Self>) -> AnyElement {
+        // 目标目录为空时把按钮做成「禁用态」：搬错目录的代价是数据搬走 / 半途失败，
+        // 不该让「没填就点」也走一趟后端校验。
+        let target_ready = !self.storage_move_target.read(cx).value().trim().is_empty();
         let current = self
             .raw_config
             .as_ref()
@@ -74,11 +78,23 @@ impl ClientApp {
                             .px_3()
                             .py_1()
                             .rounded_md()
-                            .bg(rgb(colors::BG_TERTIARY()))
+                            .bg(rgb(if target_ready {
+                                colors::ACCENT()
+                            } else {
+                                colors::BG_TERTIARY()
+                            }))
                             .cursor_pointer()
                             .text_size(px(11.))
-                            .text_color(rgb(colors::TEXT_PRIMARY()))
-                            .child("搬迁到上面的目录")
+                            .text_color(rgb(if target_ready {
+                                colors::TEXT_PRIMARY()
+                            } else {
+                                colors::TEXT_TERTIARY()
+                            }))
+                            .child(if target_ready {
+                                "搬迁到上面的目录"
+                            } else {
+                                "先填目标目录"
+                            })
                             .on_click(cx.listener(|this, _, _w, cx| {
                                 this.migrate_data_dir(cx);
                             })),
@@ -110,6 +126,29 @@ impl ClientApp {
         let target = self.storage_move_target.read(cx).value().trim().to_string();
         if target.is_empty() {
             self.storage_msg = "请先填写目标目录（绝对路径）".to_string();
+            self.storage_msg_err = true;
+            cx.notify();
+            return;
+        }
+        // 前置校验：只挡「一眼不对」的输入，让用户当场看到问题。真正的判据
+        // （目标必须为空或不存在、不可嵌在当前目录内部）仍以后端为准 ——
+        // 前端拿到的是原始字符串，规范化 / 盘符大小写 / 软链接都可能不同，
+        // 两边各判一遍必然分叉，最后以后端那次为准。
+        let current = self
+            .raw_config
+            .as_ref()
+            .and_then(|c| fields::json_get(c, "storage.data_dir"))
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string();
+        if !std::path::Path::new(&target).is_absolute() {
+            self.storage_msg = "目标目录必须是绝对路径（例如 D:\\tianyan-data）".to_string();
+            self.storage_msg_err = true;
+            cx.notify();
+            return;
+        }
+        if !current.is_empty() && crate::same_dir(&target, &current) {
+            self.storage_msg = "目标目录与当前数据目录是同一处，无需搬迁".to_string();
             self.storage_msg_err = true;
             cx.notify();
             return;

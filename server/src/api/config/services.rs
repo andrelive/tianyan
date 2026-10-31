@@ -123,8 +123,27 @@ impl ConfigService {
     /// 更新配置 — 验证、保存到文件、热重载 Agent
     pub async fn update_config(
         &self,
-        config: TianyanConfig,
+        mut config: TianyanConfig,
     ) -> Result<UpdateConfigResponse, ApiError> {
+        // 数据目录**只允许经搬迁通道修改**（ADR-023：复制 → 校验 → 改配置 → 删源）。
+        //
+        // 直接写配置里的 `storage.data_dir`，下一次启动就在一个空目录里跑：旧库还在
+        // 原处，服务却看不到它 —— 用户视角就是「数据全没了」。所以以运行时值为准、
+        // 丢弃请求里的这一项。
+        //
+        // **为什么不是返回 400**：客户端是整份 PUT（先 GET → 改脏字段 → PUT），
+        // 报错会让「保存任意字段」都失败。这里静默纠正 + warn，让绕过界面的调用方
+        // 在日志里看得见。
+        let current_dir = self.state.config().read().await.storage.data_dir.clone();
+        if config.storage.data_dir != current_dir {
+            warn!(
+                requested = %config.storage.data_dir.display(),
+                kept = %current_dir.display(),
+                "拒绝经配置接口修改 storage.data_dir（数据目录请走搬迁功能）"
+            );
+            config.storage.data_dir = current_dir;
+        }
+
         // 校验 + 持久化 + 热重载（统一序列 persist_and_reload）
         self.persist_and_reload(config).await?;
 
