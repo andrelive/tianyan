@@ -676,6 +676,9 @@ impl ClientApp {
                 "msg": &self.settings_msg,
                 "msg_err": self.settings_msg_err,
                 "field_count": FIELDS.len(),
+                // 回填是否真的发生过。`value` 在未回填时会回落成配置值（保存不会错），
+                // 但界面渲染的是**编辑器**：不回填 = 用户看到一片 placeholder。
+                "backfilled": self.settings_backfilled,
                 "editable_tabs": FIELDS
                     .iter()
                     .map(|f| f.tab.key())
@@ -686,6 +689,8 @@ impl ClientApp {
                     |(path, label, edit, cfg, dirty, restart)| serde_json::json!({
                         "path": path, "label": label, "value": edit,
                         "config": cfg, "dirty": dirty, "restart": restart,
+                        // 编辑器原始内容：这才是界面上真正显示的字符串
+                        "editor": self.field_editor_text(path, cx),
                     })
                 ).collect::<Vec<_>>(),
             },

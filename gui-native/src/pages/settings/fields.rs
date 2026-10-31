@@ -840,12 +840,20 @@ impl ClientApp {
             })
             .collect();
         let handle = self.window_handle;
-        let _ = handle.update(cx, move |_, window, cx| {
+        let applied = handle.update(cx, move |_, window, cx| {
             for (editor, text) in editors {
                 editor.update(cx, |state, cx| state.set_value(text, window, cx));
             }
         });
-        self.settings_backfilled = true;
+        // 只有**真的写进编辑器**才算回填过。
+        //
+        // 早先无论 `update` 成败都置位：窗口句柄还不接受更新时（启动早期、窗口尚未
+        // 显示），回填静默失败而标志已经 true —— 之后进设置页、点栏目都不再回填，
+        // 用户看到「数据目录」等文本框永远是 placeholder（实测复现：`backfilled=True`
+        // 但 `editor=''`）。标志位抢跑比不置位更糟：它把一次性失败固化成永久状态。
+        if applied.is_ok() {
+            self.settings_backfilled = true;
+        }
         cx.notify();
     }
 
@@ -947,7 +955,12 @@ impl ClientApp {
     ///    「已修改 27 项」（实测：state 里一片 `<非法值>`）；
     /// ② 更糟的是保存会把这种伪编辑态当成用户输入写进配置。
     /// 正确语义：没渲染过 = 用户不可能编辑过 = 回落到配置值（= 不脏）。
-    fn field_editor_text(&self, path: &str, cx: &App) -> Option<String> {
+    /// 编辑器里的**原始内容**（`None` = 该字段没有编辑器实体）。
+    ///
+    /// 与 `field_edit_value` 的区别是**不回落配置值**：未回填时这里是空串，
+    /// 而界面渲染的正是编辑器 —— 用户看到「数据目录」是一个 placeholder，
+    /// 只有这一项能断言到（`/state` 的 `value` 走回落，看起来永远是好的）。
+    pub(crate) fn field_editor_text(&self, path: &str, cx: &App) -> Option<String> {
         self.settings_editors
             .get(path)
             .map(|e| e.read(cx).value().to_string())

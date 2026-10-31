@@ -518,8 +518,17 @@ impl ClientApp {
                 let cfg = body.get("config").cloned();
                 if cfg.is_some() {
                     let _ = this.update(cx, |this, cx| {
-                        // 首次加载才回填：已有编辑器内容时回填会覆盖用户正在输入的值
-                        let first = this.raw_config.is_none();
+                        // 回填**只在从未回填过时**做一次：已有编辑器内容时再回填会覆盖
+                        // 用户正在输入的值。
+                        //
+                        // 判据不能是「`raw_config` 是不是 None」——`load_models` 也会
+                        // 顺手设 `raw_config`，那样这里就以为「不是首次」而跳过回填，
+                        // 编辑器一直是空的（界面全是 placeholder）。`settings_backfilled`
+                        // 才是「编辑器里已经有值」的权威标志。
+                        // 有未保存的编辑时不回填（否则会把用户正在输入的内容冲掉）；
+                        // 回填失败（窗口未就绪）时 `settings_backfilled` 保持 false，
+                        // 下次进设置页会重试 —— 但只在没改动过时重试。
+                        let first = !this.settings_backfilled && this.settings_dirty.is_empty();
                         this.raw_config = cfg;
                         if first {
                             this.backfill_settings_fields(cx);
