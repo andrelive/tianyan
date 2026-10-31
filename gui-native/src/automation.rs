@@ -793,6 +793,9 @@ impl ClientApp {
                 },
                 "results": self.kb_results.iter().map(|r| serde_json::json!({
                     "id": &r.id, "source": &r.source, "score": r.score,
+                    // 标题（L0 摘要）与正文预览：搜索结果卡片到底显示成什么，
+                    // 只能靠这两项断言（曾经两者全空 → 一排只有分数的空卡片）
+                    "title": &r.title,
                     "content_head": r.content.chars().take(120).collect::<String>(),
                 })).collect::<Vec<_>>(),
             },

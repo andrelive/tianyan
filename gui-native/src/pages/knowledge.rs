@@ -576,6 +576,17 @@ impl ClientApp {
             );
         }
         for (i, r) in self.kb_results.iter().enumerate() {
+            // 标题取 L0 摘要（后端随结果带回）；缺摘要时退到 `id` 末段的短哈希 ——
+            // 那一段就是摄入时算出的内容 sha256，整串 64 位对人没有信息量。
+            let short = short_digest(r.id.rsplit('/').next().unwrap_or(r.id.as_str()));
+            let title = r.title.clone().unwrap_or_else(|| short.clone());
+            let dir = if r.source.is_empty() {
+                short.clone()
+            } else {
+                r.source.clone()
+            };
+            // 后端已把负分钳到 0（`1 - 距离` 对正交/反向向量是 ≤0），这里直接当百分比。
+            let score_pct = (r.score.clamp(0.0, 1.0) * 100.0).round() as i32;
             results = results.child(
                 div()
                     .id(("kb-r", i))
@@ -598,25 +609,38 @@ impl ClientApp {
                                 div()
                                     .flex_1()
                                     .min_w_0()
-                                    .text_size(px(10.))
-                                    .text_color(rgb(colors::TEXT_TERTIARY()))
+                                    .text_size(px(12.))
+                                    .text_color(rgb(colors::TEXT_PRIMARY()))
                                     .whitespace_nowrap()
                                     .text_ellipsis()
                                     .overflow_hidden()
-                                    .child(r.source.clone()),
+                                    .child(title),
                             )
                             .child(
                                 div()
                                     .text_size(px(10.))
                                     .text_color(rgb(colors::ACCENT()))
-                                    .child(format!("{:.3}", r.score)),
+                                    .child(format!("{score_pct}%")),
                             ),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(9.))
+                            .text_color(rgb(colors::TEXT_TERTIARY()))
+                            .whitespace_nowrap()
+                            .text_ellipsis()
+                            .overflow_hidden()
+                            .child(dir),
                     )
                     .child(
                         div()
                             .text_size(px(11.))
                             .text_color(rgb(colors::TEXT_SECONDARY()))
-                            .child(ellipsis(&r.content.replace('\n', " "), 300)),
+                            .child(if r.content.is_empty() {
+                                "（无正文预览）".to_string()
+                            } else {
+                                ellipsis(&r.content.replace('\n', " "), 300)
+                            }),
                     ),
             );
         }
@@ -818,6 +842,12 @@ impl ClientApp {
                                             .and_then(|v| v.as_f64())
                                             .unwrap_or(0.0)
                                             as f32,
+                                        title: r
+                                            .get("metadata")
+                                            .and_then(|m| m.get("title"))
+                                            .and_then(|v| v.as_str())
+                                            .map(|s| s.to_string())
+                                            .filter(|s| !s.trim().is_empty()),
                                     })
                                 })
                                 .collect()

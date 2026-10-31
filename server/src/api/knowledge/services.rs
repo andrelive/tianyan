@@ -2,9 +2,7 @@ use std::sync::Arc;
 
 use tracing::{debug, info};
 
-use tianyan::common::types::{
-    ContentLevel, ContentSource, ContextNamespace, SearchResult as CoreSearchResult, TianyanUri,
-};
+use tianyan::common::types::{ContentLevel, ContentSource, ContextNamespace, TianyanUri};
 use tianyan::knowledge::{IngestionRequest, KnowledgeCategory, KnowledgeIngestor};
 use tianyan::vfs::VirtualFileSystem;
 
@@ -24,16 +22,39 @@ const KNOWLEDGE_NAMESPACE: &str = "tianyan://knowledge";
 /// 徒增响应体积。整段 L0 仍可经 `/entries/read?level=abstract` 取全文。
 const EXCERPT_MAX_CHARS: usize = 200;
 
+/// 检索结果里 `content` 预览的最大字符数。
+///
+/// 比列表摘录（200）略长：搜索结果是要判断「这条是不是我想找的」，多两行正文
+/// 比再点一次省事。再长前端也只能截断，徒增响应体积。
+const SEARCH_PREVIEW_MAX_CHARS: usize = 300;
+
 /// 把 L0 摘要压成列表能直接显示的一行：合并所有空白（换行 / 多空格）后限长。
 fn collapse_excerpt(text: &str) -> String {
+    collapse_excerpt_n(text, EXCERPT_MAX_CHARS)
+}
+
+/// 同 [`collapse_excerpt`]，但限长可配（检索预览与列表摘录的预算不同）。
+fn collapse_excerpt_n(text: &str, max_chars: usize) -> String {
     let one_line = text.split_whitespace().collect::<Vec<_>>().join(" ");
-    if one_line.chars().count() <= EXCERPT_MAX_CHARS {
+    if one_line.chars().count() <= max_chars {
         one_line
     } else {
         // 按字符边界截断：`&text[..200]` 会在多字节字符中间切断并 panic
-        let mut out: String = one_line.chars().take(EXCERPT_MAX_CHARS).collect();
+        let mut out: String = one_line.chars().take(max_chars).collect();
         out.push('…');
         out
+    }
+}
+/// URI 的父路径（`tianyan://knowledge/projects/<sha>` → `knowledge/projects`）。
+///
+/// 检索结果里用这个值替代原来恒为空的 `source`：前端显示「这条落在哪个目录」，
+/// 比一串 sha256 有用得多。字符串切分而非重新解析 URI —— 这里只想要展示用的段。
+fn parent_path_of(uri: &TianyanUri) -> String {
+    let s = uri.to_string();
+    let body = s.strip_prefix("tianyan://").unwrap_or(&s);
+    match body.rsplit_once('/') {
+        Some((dir, _file)) => dir.to_string(),
+        None => body.to_string(),
     }
 }
 
@@ -140,25 +161,42 @@ impl KnowledgeService {
             .await?;
 
         let total = results.len();
-        let search_results: Vec<SearchResult> = results
-            .into_iter()
-            .skip(query.offset)
-            .take(query.limit)
-            .map(|r: CoreSearchResult| SearchResult {
-                id: r.uri.to_string(),
-                // 向量搜索结果不携带内容（SearchResult.content 已移除），
-                // 内容由前端按需调用 /entries/read 加载。
-                content: String::new(),
-                source: String::new(),
-                score: r.score,
+        let mut search_results: Vec<SearchResult> = Vec::new();
+        for r in results.into_iter().skip(query.offset).take(query.limit) {
+            // 每条都补上「一眼能认出这是什么」的三件套（标题 = L0 摘要、正文预览 =
+            // L2 开头、来源 = 父目录路径）。
+            //
+            // 这里曾经把 `content` 留空、注释写「内容由前端按需调用 /entries/read
+            // 加载」—— 但两个前端都没实现那一步，搜索结果就成了一排**只有分数、
+            // 正文全空的卡片**（用户实测「知识条目显示不对」：20 张空卡片配
+            // `-0.047` 这种负分）。服务端一次带回，比让每个前端各写一遍 N 次请求
+            // 更省，也不会再各漂各的。
+            let uri = r.uri.clone();
+            let title = match self.vfs.read(&uri, ContentLevel::Abstract).await {
+                Ok(text) => Some(collapse_excerpt(&text)).filter(|s| !s.is_empty()),
+                Err(_) => None,
+            };
+            let preview = match self.vfs.read(&uri, ContentLevel::Detail).await {
+                Ok(text) => Some(collapse_excerpt_n(&text, SEARCH_PREVIEW_MAX_CHARS))
+                    .filter(|s| !s.is_empty()),
+                Err(_) => None,
+            };
+            search_results.push(SearchResult {
+                id: uri.to_string(),
+                content: preview.unwrap_or_default(),
+                source: parent_path_of(&uri),
+                // 负分来自 `1 - 距离`（正交或反向即 ≤0）：对界面它只表示「有多像」，
+                // 钳到 0..1 才能直接当百分比显示；向量层的原始分数保持不变
+                // （注入链路另有 0.6 之类的绝对阈值，不能被这里改写）。
+                score: r.score.clamp(0.0, 1.0),
                 metadata: Some(SearchResultMetadata {
-                    title: None,
+                    title,
                     url: None,
                     timestamp: None,
                     tags: None,
                 }),
-            })
-            .collect();
+            });
+        }
 
         Ok(SearchResponse {
             query: query.q,
@@ -337,5 +375,32 @@ mod tests {
         // 未超长不加省略号（避免"短摘要也带…"的视觉噪音）
         let short = collapse_excerpt("短摘要");
         assert_eq!(short, "短摘要");
+    }
+
+    #[test]
+    fn test_collapse_excerpt_n_respects_custom_budget() {
+        // 检索预览（300）与列表摘录（200）共用同一实现，预算必须各自生效
+        let long = "中".repeat(500);
+        assert_eq!(
+            collapse_excerpt_n(&long, SEARCH_PREVIEW_MAX_CHARS)
+                .chars()
+                .count(),
+            SEARCH_PREVIEW_MAX_CHARS + 1 // +1 = 省略号
+        );
+        assert_eq!(collapse_excerpt_n("短", SEARCH_PREVIEW_MAX_CHARS), "短");
+    }
+
+    #[test]
+    fn test_parent_path_of_strips_file_segment() {
+        // 检索结果的 `source`：落在哪个目录（前端显示这个，不是 sha256）
+        let uri = TianyanUri::parse("tianyan://knowledge/projects/abc123").unwrap();
+        assert_eq!(parent_path_of(&uri), "knowledge/projects");
+    }
+
+    #[test]
+    fn test_parent_path_of_keeps_namespace_for_root_entries() {
+        // 根级条目没有父目录段：退化成命名空间本身，前端不会显示空串
+        let uri = TianyanUri::parse("tianyan://knowledge/abc123").unwrap();
+        assert_eq!(parent_path_of(&uri), "knowledge");
     }
 }

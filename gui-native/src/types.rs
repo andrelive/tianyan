@@ -753,9 +753,19 @@ pub(crate) struct KbEntryRow {
 #[derive(Clone, Debug)]
 pub(crate) struct KbSearchRow {
     pub(crate) id: String,
+    /// 正文预览（后端取 L2 开头 300 字）。
+    ///
+    /// 曾经这里恒为空（后端把内容留给前端按需 `read`，而前端没实现）——
+    /// 搜索结果就只剩一排分数。现在内容随响应一次带回。
     pub(crate) content: String,
+    /// 父目录路径（`knowledge/projects`）：一条结果落在哪个目录。
     pub(crate) source: String,
+    /// 相似度，后端已钳到 0..1（原始向量分数可能为负，界面直接 ×100 当百分比）。
     pub(crate) score: f32,
+    /// 标题 = 条目的 L0 摘要（一句人话）。
+    ///
+    /// 缺失时由 `id` 末段的短哈希兑底 —— `id` 末段是摄入时算出的内容 sha256。
+    pub(crate) title: Option<String>,
 }
 
 /// 内嵌文件浏览器的一行（`GET /workspace/dirs?include_files=true`）。
