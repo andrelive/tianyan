@@ -17,6 +17,7 @@ use arrow_schema::{DataType, Field, Schema};
 use async_trait::async_trait;
 use futures::TryStreamExt;
 use lancedb::query::{ExecutableQuery, QueryBase};
+use lancedb::DistanceType;
 
 use tianyan::common::error::{Result, TianyanError};
 use tianyan::config::StorageConfig;
@@ -310,6 +311,11 @@ impl VectorStorage for LanceDbVectorStore {
             // T1-14：显式 limit（默认 top-k=10 会把请求条数静默截断）
             .limit(query.limit)
             .column(batch::vector_column_name(query.vector_type))
+            // 显式余弦距离：LanceDB 默认是 L2（平方欧氏），对**未归一化**的嵌入
+            // 向量 `1 - distance` 毫无意义；即使归一化，`1 - L2²` 等于 `2cos-1`
+            // （正交向量算出 -1），分数被系统性压到负区间。用余弦后
+            // `_distance = 1 - cos ∈ [0,2]`，`score = 1 - distance = cos` 才自洽。
+            .distance_type(DistanceType::Cosine)
             .execute()
             .await
             .map_err(|e| TianyanError::Custom(format!("向量数据库错误：执行失败: {e}")))?;
@@ -420,6 +426,9 @@ impl VectorStorage for LanceDbVectorStore {
                 // top_k>10 的请求静默退化）
                 .limit(top_k)
                 .column(column)
+                // 与单列 `search` 同口径的余弦距离（见那边的注释）：默认 L2 会让
+                // 暴露给上层的 score 变成 `2cos-1`，知识检索因此出现整排负分。
+                .distance_type(DistanceType::Cosine)
                 .execute()
                 .await
             {

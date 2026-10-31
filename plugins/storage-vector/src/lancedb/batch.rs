@@ -108,6 +108,15 @@ pub(super) fn vector_column_name(vec_type: VectorType) -> &'static str {
     }
 }
 
+/// 把一批 LanceDB 结果行转成 `VectorSearchResult`。
+///
+/// `score = 1 - _distance`，其中 `_distance` 的口径由**查询侧**决定：两处检索
+/// （单列 `search` 与 `search_fused`）都显式指定了 `DistanceType::Cosine`，
+/// 于是 `_distance = 1 - cos ∈ [0,2]`、`score = cos ∈ [-1,1]`。
+///
+/// 这里不自行换算距离：若哪天有人改回 LanceDB 默认的 L2（平方欧氏），
+/// 对未归一化向量 `1 - distance` 没有意义，归一化向量也会变成 `2cos-1`
+/// （正交算出 -1）—— 知识检索整排负分就是这么来的（用户实测 -0.047）。
 pub(super) fn batch_to_results(batch: &RecordBatch) -> Result<Vec<VectorSearchResult>> {
     let score_data = batch
         .column_by_name("_distance")

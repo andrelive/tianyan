@@ -287,6 +287,53 @@ async fn test_search_fused_category_filter_not_swallowed_by_global_topk() {
     assert_eq!(results[0].payload.uri.namespace().to_string(), "knowledge");
 }
 
+/// 距离口径回归：分数必须是**余弦相似度**，正交向量应为 0 而不是 -1。
+///
+/// 两个检索入口都显式指定 `DistanceType::Cosine`（`_distance = 1 - cos`），
+/// 所以 `score = 1 - distance = cos`。若退回 LanceDB 默认的 L2（平方欧氏）：
+/// 未归一化向量下 `1 - distance` 毫无意义，归一化向量下也等于 `2cos-1`
+/// —— 知识检索整排负分（用户截图里的 -0.047 / -0.133）就是它。
+#[tokio::test]
+async fn test_search_score_is_cosine_similarity() {
+    let (store, _dir) = create_store().await;
+    // 正交（cos = 0）
+    let orth = make_point(
+        "tianyan://knowledge/orth",
+        Some(vec![0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]),
+        None,
+    );
+    store.upsert_point(&orth).await.unwrap();
+    // 同向（cos = 1）
+    let same = make_point("tianyan://knowledge/same", Some(test_vec()), None);
+    store.upsert_point(&same).await.unwrap();
+
+    let query = VectorSearchQuery {
+        vector: test_vec(),
+        vector_type: VectorType::Abstract,
+        limit: 10,
+        category_filter: None,
+        min_score: None,
+    };
+    let results = store.search(query).await.unwrap();
+    let score_of = |id: &str| {
+        results
+            .iter()
+            .find(|r| r.id == id)
+            .map(|r| r.score)
+            .unwrap_or_else(|| panic!("结果里缺少 {id}"))
+    };
+    let same_score = score_of(&same.uri().to_point_id());
+    let orth_score = score_of(&orth.uri().to_point_id());
+    assert!(
+        (same_score - 1.0).abs() < 0.01,
+        "同向余弦相似度应≈1，实际 {same_score}"
+    );
+    assert!(
+        orth_score.abs() < 0.01,
+        "正交余弦相似度应≈0，实际 {orth_score}（L2 口径会得 -1）"
+    );
+}
+
 #[tokio::test]
 async fn test_search_with_min_score() {
     let (store, _dir) = create_store().await;
