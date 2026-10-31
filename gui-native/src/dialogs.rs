@@ -110,6 +110,16 @@ impl ClientApp {
                 "批准".to_string(),
                 false,
             ),
+            Dialog::DataDirMigrate { target } => (
+                "搬迁数据目录".to_string(),
+                Some(format!(
+                    "把当前数据目录的全部内容复制到 {target}（复制 → 校验 → 改配置 → 删源，\
+                     任一步失败自动回滚、源目录不动）。开始后服务会先停止，\
+                     需要**关闭并重新打开客户端**才能完成。"
+                )),
+                "开始搬迁".to_string(),
+                true,
+            ),
         };
         let mut card = div()
             .w(px(420.))
@@ -211,6 +221,9 @@ impl ClientApp {
                                 }) => this.confirm_rollback(session_id, message_id, text, cx),
                                 Some(Dialog::EditApproval { request_id, .. }) => {
                                     this.confirm_edit_approval(request_id, cx)
+                                }
+                                Some(Dialog::DataDirMigrate { target }) => {
+                                    this.migrate_data_dir(target, cx)
                                 }
                                 None => {}
                             }),
@@ -771,6 +784,21 @@ impl ClientApp {
         let pick_label = match target {
             PickerTarget::NewSession => "用它新建会话",
             PickerTarget::Session => "绑定到当前会话",
+            PickerTarget::DataDir => "搬到这个目录",
+        };
+        // 「搬迁数据目录」用同一个浏览 UI，但要说清两件别处不存在的后果：
+        // ① 这是**整库搬走**，不是「换个工作目录」；② 服务会先停，要重开客户端。
+        let (heading, note) = match target {
+            PickerTarget::DataDir => (
+                "搬迁数据目录",
+                Some(
+                    "选中的目录必须为空或不存在。选定后会再确认一次：复制 → 校验 → \
+                     改配置 → 删源，失败自动回滚（源目录不动）；服务会先停止，\
+                     需要关闭并重新打开客户端才能完成。"
+                        .to_string(),
+                ),
+            ),
+            _ => ("选择工作目录", None),
         };
 
         div()
@@ -797,8 +825,14 @@ impl ClientApp {
                         div()
                             .text_size(px(15.))
                             .text_color(rgb(colors::TEXT_PRIMARY()))
-                            .child("选择工作目录"),
+                            .child(heading),
                     )
+                    .children(note.map(|n| {
+                        div()
+                            .text_size(px(10.))
+                            .text_color(rgb(colors::TEXT_TERTIARY()))
+                            .child(n)
+                    }))
                     .child(
                         div()
                             .flex()
@@ -975,6 +1009,11 @@ impl ClientApp {
         let path = self.picker_current.clone();
         self.dialog = None;
         match target {
+            // 选中 ≠ 生效：整库搬迁不可撤销，先弹确认框再动（见 `Dialog::DataDirMigrate`）
+            PickerTarget::DataDir => {
+                self.dialog = Some(Dialog::DataDirMigrate { target: path });
+                cx.notify();
+            }
             PickerTarget::NewSession => {
                 self.new_session_workspace = Some(path.clone());
                 self.start_new_session(window, cx);

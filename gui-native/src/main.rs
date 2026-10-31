@@ -514,13 +514,6 @@ struct ClientApp {
     pub(crate) mcp_args: Entity<InputState>,
     /// 新增表单：说明
     pub(crate) mcp_desc: Entity<InputState>,
-    // ── 设置页「数据存储」搬迁 ──
-    /// 搬迁目标目录输入
-    pub(crate) storage_move_target: Entity<InputState>,
-    /// 搬迁状态行
-    pub(crate) storage_msg: String,
-    /// 上面那条是否为错误
-    pub(crate) storage_msg_err: bool,
     // ── 设置页「用量统计」 ──
     /// 分组维度：`model` / `provider`
     pub(crate) usage_group_by: &'static str,

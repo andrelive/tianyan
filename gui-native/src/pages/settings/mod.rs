@@ -264,7 +264,7 @@ impl ClientApp {
             SettingsTab::Mcp => self.render_settings_mcp(cx),
             SettingsTab::Usage => self.render_settings_usage(cx),
             SettingsTab::Storage => self.render_settings_storage(cx),
-            tab => self.render_settings_fields(tab, None, None, cx),
+            tab => self.render_settings_fields(tab, cx),
         }
     }
 

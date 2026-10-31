@@ -997,19 +997,9 @@ impl ClientApp {
     }
 
     /// 渲染一个栏目的全部字段（按 `section` 分组为卡片）。
-    ///
-    /// `extra` 是追加在字段卡片之后的栏目专属区块（如「数据存储」的搬迁卡片）——
-    /// 放进同一个滚动容器，避免嵌套滚动条。
-    ///
-    /// `extra_after` 指定把 `extra` 插到哪个 section 之后（`None` = 整页末尾）。
-    /// 「数据存储」必须用 `Some("数据目录")`：搬迁卡片是「数据目录」这一项**唯一**
-    /// 的修改入口，放到整页末尾会隔着「容量与清理」「向量索引」两张卡片，用户
-    /// 根本不会把两者联系起来。
     pub(crate) fn render_settings_fields(
         &self,
         tab: SettingsTab,
-        mut extra: Option<AnyElement>,
-        extra_after: Option<&'static str>,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let defs: Vec<&FieldDef> = FIELDS.iter().filter(|d| d.tab == tab).collect();
@@ -1058,14 +1048,6 @@ impl ClientApp {
                 card = card.child(self.render_field_row(def, cx));
             }
             col = col.child(card);
-            if extra.is_some() && extra_after == Some(section) {
-                if let Some(e) = extra.take() {
-                    col = col.child(e);
-                }
-            }
-        }
-        if let Some(extra) = extra {
-            col = col.child(extra);
         }
         col.into_any_element()
     }
@@ -1244,6 +1226,27 @@ impl ClientApp {
                                 ));
                                 this.push_notice("已复制到剪贴板", false);
                                 cx.notify();
+                            })),
+                    );
+                }
+                // 全表唯一一个带「动作」的只读字段：数据目录的**唯一**修改入口。
+                //
+                // 不为一个特例在 `FIELDS`（52 项字面量）里加 `action` 字段 —— 那要改
+                // 52 处初始化，只为表达一行 if。按 path 特判，理由写在这里。
+                if path == "storage.data_dir" {
+                    cell = cell.child(
+                        div()
+                            .id("storage-migrate-open")
+                            .px_2()
+                            .rounded_sm()
+                            .border_1()
+                            .border_color(rgb(colors::BORDER()))
+                            .cursor_pointer()
+                            .text_size(px(9.))
+                            .text_color(rgb(colors::ACCENT()))
+                            .child("搬迁…")
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.open_workspace_picker(PickerTarget::DataDir, cx);
                             })),
                     );
                 }

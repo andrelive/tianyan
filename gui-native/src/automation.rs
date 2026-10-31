@@ -482,6 +482,10 @@ impl ClientApp {
                 if let Dialog::FilePicker { purpose } = d {
                     v["purpose"] = serde_json::json!(purpose.key());
                 }
+                // 搬迁确认框：把目标路径暴露出来，否则断言不了「选中的到底是哪一个目录」
+                if let Dialog::DataDirMigrate { target } = d {
+                    v["target"] = serde_json::json!(target);
+                }
                 v
             }),
             "picker": {
@@ -717,10 +721,6 @@ impl ClientApp {
                     "days": self.usage_days,
                     "group_by": self.usage_group_by,
                     "msg": &self.usage_msg,
-                },
-                "storage_move": {
-                    "msg": &self.storage_msg,
-                    "msg_err": self.storage_msg_err,
                 },
                 "health": {
                     "status": self.health_info.as_ref().map(|h| h.status.clone()),
@@ -1597,17 +1597,17 @@ impl ClientApp {
                 self.remove_mcp_server(name, cx);
             }
             // ---- 设置页「数据存储」/「连接」----
-            "storage_migrate" => self.migrate_data_dir(cx),
-            "storage_set_target" => {
-                let text = arg_str(cmd, "value")?;
-                let entity = self.storage_move_target.clone();
-                let handle = self.window_handle;
-                handle
-                    .update(cx, move |_, window, cx| {
-                        entity.update(cx, |state, cx| state.set_value(text, window, cx));
-                    })
-                    .map_err(|e| format!("窗口已关闭：{e}"))?;
-                cx.notify();
+            // 搬迁三步与界面点击**同一路径**（ADR-052 D8）：字段上的「搬迁…」→
+            // 目录选择器选目录 → 确认框「开始搬迁」。不再有「手输目标路径」的直通动作。
+            "storage_migrate_open" => self.open_workspace_picker(PickerTarget::DataDir, cx),
+            "storage_migrate_pick" => {
+                self.confirm_workspace_picker(PickerTarget::DataDir, None, cx)
+            }
+            "storage_migrate_apply" => {
+                let Some(Dialog::DataDirMigrate { target }) = self.dialog.clone() else {
+                    return Err("没有待确认的搬迁（先 open → pick 选目录）".to_string());
+                };
+                self.migrate_data_dir(target, cx);
             }
             "health_refresh" => self.load_health(cx),
             "reload_scheduled" => self.load_sched_tasks(cx),

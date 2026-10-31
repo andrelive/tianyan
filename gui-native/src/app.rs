@@ -303,11 +303,6 @@ impl ClientApp {
                     .placeholder("参数（空格分隔，如 -y @modelcontextprotocol/server-filesystem）")
             }),
             mcp_desc: cx.new(|cx| InputState::new(window, cx).placeholder("说明（可选）")),
-            storage_move_target: cx.new(|cx| {
-                InputState::new(window, cx).placeholder("目标数据目录（绝对路径，须为空或不存在）")
-            }),
-            storage_msg: String::new(),
-            storage_msg_err: false,
             usage_group_by: "model",
             usage_msg: String::new(),
             health_info: None,

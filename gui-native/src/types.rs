@@ -306,6 +306,11 @@ pub(crate) enum PickerTarget {
     Session,
     /// 作为下一个新会话的待绑定目录（本地状态，首条消息时下发）
     NewSession,
+    /// 搬迁数据目录：选中后**先弹确认**，不直接改配置
+    ///
+    /// 与上面两个的区别是「选中 ≠ 生效」：搬迁会停服务、复制几百兆、再改配置，
+    /// 一步走错代价很大，所以选完目录还要过一道确认框。
+    DataDir,
 }
 
 impl PickerTarget {
@@ -314,6 +319,7 @@ impl PickerTarget {
         match self {
             PickerTarget::Session => "session",
             PickerTarget::NewSession => "new_session",
+            PickerTarget::DataDir => "data_dir",
         }
     }
 }
@@ -372,6 +378,12 @@ pub(crate) enum Dialog {
     /// 通知文本，实际执行仍由 agent 按原命令发起** —— 所以弹窗里必须写明，
     /// 否则用户会以为改了就按新的执行。
     EditApproval { request_id: String },
+    /// 搬迁数据目录确认：目录选择器选完之后必过的一道。
+    ///
+    /// `target` 就是选中的新目录。确认后 `POST /config/migrate-data-dir` 只**写入
+    /// 搬迁请求**并触发服务优雅关停；真正的复制 → 校验 → 改配置 → 删源发生在
+    /// 服务停掉之后（ADR-023），所以文案里必须说清「要重开客户端」。
+    DataDirMigrate { target: String },
 }
 
 impl Dialog {
@@ -390,6 +402,7 @@ impl Dialog {
             },
             Dialog::RollbackMessage { .. } => "rollback_message",
             Dialog::EditApproval { .. } => "edit_approval",
+            Dialog::DataDirMigrate { .. } => "data_dir_migrate",
         }
     }
 }
