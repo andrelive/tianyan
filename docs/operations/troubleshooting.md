@@ -428,4 +428,4 @@ At line:1 char:1
 - `core/src/common/types/structured_message.rs`（`prompt_side_tokens`、`compression_marker`）
 - `core/src/agent/{agent_core,loop}.rs`、`core/src/model/spec.rs`（`dynamic_max_tokens`）
 - `core/src/config/storage.rs`、`core/src/config/mod.rs`（数据目录/配置路径）
-- `.scratch/wake-no-user-finding.md`、`build-msi.log`、`AGENTS.md`、`docs/release/RELEASE_NOTES.md`
+- `.scratch/wake-no-user-finding.md`、`build-msi.log`、`AGENTS.md`、`docs/archive/release-notes.md`

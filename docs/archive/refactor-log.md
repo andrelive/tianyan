@@ -1,3 +1,5 @@
+> ⚠️ **历史快照（2026-08~09）**：一次性重构迭代日志（Wave 1a/1b/2 … 每轮的「改了什么 / 为什么」）。结论已进 `CHANGELOG.md` 与各 ADR，**不再作为事实来源**；查当前架构请从 [`../architecture/module-map.md`](../architecture/module-map.md) 起。
+
 # REFACTOR_LOG
 
 > **仅历史**（2026-08 迭代快照）：本文档记录 2026-08 期间 core 模块的系统性重构过程，

@@ -1,3 +1,5 @@
+> ⚠️ **历史快照（2026-10 迁移期）**：gui-vite → GPUI 的迁移盘点与顺序建议。迁移已完成、`tauri/` 已退役删除，**当前状态见 [`../../gui-native/README.md`](../../gui-native/README.md)**。
+
 # 天演 GUI 迁移盘点：Web（gui-vite）→ GPUI 原生（gui-native）
 
 > 性质：**调研盘点稿**（模块盘子 + 端点核实 + 组件可行性 + 排期建议）。本文只记录事实与判断，不含任何代码改动。

@@ -1,7 +1,10 @@
 # 天演模块索引
 
-> 快速导航：每个模块的职责、位置、关键文件。详细功能见 [module-descriptions.md](../module-descriptions.md)，模块间关系和调用流程见 [module-relationships.md](../module-relationships.md)。
-> **最后更新**: 2026-09-12（D 轮补全：专题文档导航、ADR 编号补齐、role_store 去向、事件总线有界化）
+> 模块的职责、位置、关键文件。**这是唯一的模块文档**：旧的
+> `module-descriptions.md` / `module-relationships.md` / `system-architecture.md`
+> 已归档到 [`docs/archive/`](../archive/)（2026-09 前快照，含已退役的 Tauri 与旧依赖矩阵）。
+> **最后更新**: 2026-10-31（补 `gui-native` 落地与 `tauri/` 退役；模块口径以根 `AGENTS.md` 为准）
+> 全量文档入口 → [`docs/README.md`](../README.md)
 
 **专题文档**（机制级说明，先读这些再看模块）：
 
@@ -31,7 +34,7 @@
 | `app/` | `tianyan-app` (bin: `tianyan-server`) | 装配器（headless）：配置加载 + 日志 + 启动 + 搬迁重启；清单取自 `tianyan-assembly`（ADR-049 期 1 / 期 4） | `app/src/` |
 | `plugins/*` | `tianyan-{tools-fs,tools-code,tools-todo,tools-web,storage-vector,storage-sqlite,task-builtin,task-evolution,policy-approval,policy-context,policy-review,provider-client,provider-llm,provider-embed,tool-pipeline}` | 编译期插件（只依赖 `core`，彼此零互赖） | `plugins/*/src/` |
 | `gui-vite/` | - | React TS 前端 | `gui-vite/src/` |
-| `tauri/` | `tianyan-tauri` | Tauri 桌面包装（第二个装配器：端口探测 + 窗口生命周期 + 关闭信号；清单同样取自 `tianyan-assembly`） | `tauri/src/` |
+| ~~`tauri/`~~ | ~~`tianyan-tauri`~~ | **已退役（2026-10）**：目录已删除、移出 workspace `members`；native（`gui-native`）是唯一发布渠道，第二个装配器的职责由 `desktop/` + `gui-native` 承接 | — |
 | `desktop/` | `tianyan-desktop` | 桌面启动编排：**单 server 发现与复用**（`ensure_server` / `discover_existing`：扫 `3000..=3100` + 校验 `/health` 的 `service` 与 `data_dir`）+ `find_available_port` / `start_axum_server`；`tauri/` 与 `gui-native/` 共用（ADR-051） | `desktop/src/` |
 | `gui-native/` | `tianyan-gui-native` | **GPUI 原生客户端（第二个桌面壳）**：自带 `[workspace]`，**不进主 workspace**（零脚本/IDE/CI 污染，代价 = core+server 编两份）；与 `gui-vite` 并存、走同一套 HTTP/SSE 协议；启动编排同样走 `tianyan-desktop`（ADR-051） | `gui-native/src/` |
 | `mcp/` | `tianyan-mcp` | MCP 协议客户端 | `mcp/src/` |

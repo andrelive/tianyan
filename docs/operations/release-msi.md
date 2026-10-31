@@ -1,211 +1,81 @@
-# 天演 MSI 打包与发布（release-msi）
+# 发布：native MSI（GPUI 客户端）
 
-> 适用版本：**1.0.0**（撰写基线 HEAD `732e44c`；初版写于 0.5.2 时代，示例版本号已统一同步到 1.0.0）
-> 覆盖：本地打包（Windows）、版本号落点、CI 发布链、已知坑、安装验收清单。
-> 全部结论取自脚本/配置/日志实读，未核实项标注 **待核实**。
-> CI 流水线（quality/release）**自身**的排障（挂死、日志丢失、包集合编译指纹）见 [`ci-pipeline.md`](ci-pipeline.md)。
+> **当前唯一发布渠道 = `gui-native`（GPUI 原生客户端，内嵌 server，单 exe）。**
+> `tauri/` 已于 2026-10 退役删除、`scripts/build.ps1` 同步退役；`gui-vite/` 保留做对照，**不随包发布**。
+> 本文替代 2026-10 之前的 Tauri 版发布文档（旧流程见 git 历史）。
 
-> ## ⚠️ 2026-10 现状更新（读本文前先看这段）
->
-> **native（GPUI）MSI 已是主发布渠道，本文 §1/§2 描述的 `tauri build` 链只适用于
-> tauri 壳（已列入退役计划）**。版本权威与打包命令都已改变：
->
-> | 事项 | 现在的答案 |
-> | --- | --- |
-> | 产品版本单源 | 根 `Cargo.toml` 的 `[workspace.package] version`（决定各 crate 版本、exe 属性）|
-> | `/health` 报的版本 | 就是上面这个值（`server` 用 `env!("CARGO_PKG_VERSION")`）|
-> | native exe 属性 | `gui-native/Cargo.toml` 的 `version`（独立 workspace，**必须手改**，须与单源一致）|
-> | native MSI `ProductVersion` | `gui-native/installer/tianyan.wxs` 里写 `$(var.ProductVersion)`，由 `build-msi.ps1` 从 `gui-native/Cargo.toml` 读版本补 `.0` 后注入（**不得硬编码**）|
-> | 打包命令 | `pwsh -File gui-native\installer\build-msi.ps1`（**不要直接调 `wix build`**）|
-> | 一致性门禁 | `scripts/check-version.ps1`（已进 `scripts/test.ps1 lint`，不一致则 lint 红）|
-> | 产物名 | `tianyan-native-<ver>-x64.msi`（perUser，装到 `%LOCALAPPDATA%\Programs\Tianyan`）|
->
-> **实测过的漂移**：主 workspace 停在 `1.0.1`、native 已到 `1.1.0`，于是「关于」页显示
-> 1.1.0 而 `/health` 报 1.0.1 —— 同一个产品两个号。成因就是本文 §1 那张表的模型
-> （"tauri.conf.json 是唯一权威"）在 native 成为主渠道后不再成立。
-> 修法见 `scripts/check-version.ps1` 的文件头注释。
+## 1. 版本号只有一个源
 
----
+| 位置 | 作用 | 发版时 |
+|---|---|---|
+| 根 `Cargo.toml` → `[workspace.package] version` | **产品版本单源**（3 段，如 `1.1.0`） | 改这里 |
+| `gui-native/Cargo.toml` → `[package] version` | exe 的 `FileVersion` / `ProductVersion`；`build-msi.ps1` **从这里读** | 必须与上面一致 |
+| `gui-native/installer/tianyan.wxs` | `Package/@Version` 必须是 `$(var.ProductVersion)`（脚本有门禁，硬编码会直接报错） | 不改 |
+| MSI 内部 `ProductVersion` | 4 段（`1.1.0.0`）—— Windows Installer 规范要求，仅用于升级比较 | 脚本自动补 `.0` |
+| ARP `DisplayVersion` | 3 段（`1.1.0`）——「设置 → 应用」里显示这个 | 脚本自动注入 |
 
-## 1. 版本号落点（**哪一处决定 MSI 文件名与版本**）
+**产物名同源**：`gui-native/installer/tianyan-native-<ver>-x64.msi`。
 
-| 文件 | 当前值 | 是否决定 MSI 版本 | 说明 |
-| --- | --- | --- | --- |
-| `tauri/tauri.conf.json` → `version` | **`1.0.0`** | ✅ **是**（唯一权威） | **MSI 文件名与 ProductVersion 由它决定**（安装后在「应用和功能」可见） |
-| `Cargo.toml` → `[workspace.package] version` | `1.0.0` | ❌ 否（但决定 **exe 文件属性**） | 各 crate 版本 + 编译产物的 `FileVersion`/`ProductVersion`。**0.3.16 起与产品版本统一**：此前为 `0.1.0`，导致 exe 属性里显示旧版本（MSI 名不受影响） |
-| `gui-vite/package.json` → `version` | `0.1.0` | ❌ 否 | 前端包版本（name `tianyan-gui`），不参与 MSI |
-| `docs/release/RELEASE_NOTES.md` | `1.0.0` | ❌ 否 | 发布说明（人工维护） |
-| `CHANGELOG.md` | `1.0.0` | ❌ 否 | 变更日志（人工维护） |
+门禁：`.\scripts\test.ps1 lint` 里有「版本一致性校验」（workspace / `gui-native` / wxs 注入 / 打包脚本四处对齐）。
 
-**结论（务必记住）**
+## 2. 本地出包
 
-- **MSI 文件名 = `Tianyan_<tauri.conf.json.version>_x64_<lang>.msi`**，
-  即 `<productName>_<version>_x64_<language>.msi`。
-- 语言取 `tauri.conf.json.bundle.windows.wix.language = ["zh-CN","en-US"]` → **一次构建产出两个 MSI**：
-  - `target/release/bundle/msi/Tianyan_1.0.0_x64_zh-CN.msi`
-  - `target/release/bundle/msi/Tianyan_1.0.0_x64_en-US.msi`
-- **只改 `Cargo.toml` / `package.json` 的版本不会改变 MSI 名**——必须改 `tauri/tauri.conf.json`
-  的 `version`。发布时四处（`tauri.conf.json` / `Cargo.toml`（workspace）/ CHANGELOG / RELEASE_NOTES）应保持一致。
-
-> ✅ **已修正（0.3.16）**：`RELEASE_NOTES.md` 的「安装与使用」此前写下载包为
-> `tianyan_0.2.0_x64.msi`（全小写、无语言段），现改为 `Tianyan_<版本>_x64_<lang>.msi`，
-> 并纠正「自签名」表述（实际未做 Windows 代码签名；`.sig` 是 Tauri 更新签名）。
-> 同时 `Cargo.toml` workspace 版本由 `0.1.0` 统一为 `0.3.16`（exe 文件属性随之一致）。
-
----
-
-## 2. 本地打包流程（`scripts/build.ps1` 实读）
-> ⛔ **本节已退役（2026-10）**：`scripts/build.ps1` 现在进入即 `exit 1`——tauri 壳已
-> 移出 workspace `members`，`tauri/Cargo.toml` 的 `version.workspace = true` 无法解析，
-> `cargo tauri build` 必然失败。下面保留原文作历史记录：§4「已知坑」里与 tauri 无关的
-> 条目（前端重复构建、产物路径不符）仍有参考价值。
-> **native 的本地打包**走：
-> ```powershell
-> pwsh -File gui-native\installer\build-msi.ps1   # 默认先 cargo build --release
-> ```
-> 产物：`gui-native/installer/tianyan-native-<ver>-x64.msi`（perUser）。
-
-
-`.\scripts\build.ps1`（默认构建模式）步骤：
-
-1. **依赖检查**（`Check-Dependencies`）：
-   - `cargo` 必须存在；
-   - `node`、`npm` 必须存在（Node.js 18+）；
-   - `tauri-cli`：用 `cargo install --list | Select-String "tauri-cli"` 探测，缺失则 `cargo install tauri-cli`。
-2. **构建前端**（`Build-Gui`）：`cd gui-vite` → `npm install` → `npm run build`
-   （`npm run build` = `tsc -b && vite build`），产物 `gui-vite/dist/`。
-   - 可用 `-SkipGui` 跳过。
-3. **构建 Tauri**（`Build-Tauri`）：`cd tauri` → `cargo tauri build`；
-   - `tauri.conf.json.beforeBuildCommand` 会**再跑一次** `npm run build`（cwd `../gui-vite`）
-     —— 所以第 2 步与第 3 步的前端构建**是重复的**（见 §4 已知坑）。
-4. **打印产物路径**：脚本查 `tauri\target\release\bundle`（**此路径与实际不符**，见 §4），
-   列出 `*.msi` / `*.exe` / `*.msi.zip`。
-
-其他开关：`-Dev`（`cargo tauri dev` 开发模式）、`-Verbose`。
-脚本顶部设 `$ErrorActionPreference = "Continue"`，成败以 `$LASTEXITCODE` 判定（见排障文档 §5）。
-
-### 2.1 产物路径（实际）
-
-```
-<仓库根>\target\release\bundle\msi\Tianyan_<ver>_x64_zh-CN.msi
-<仓库根>\target\release\bundle\msi\Tianyan_<ver>_x64_en-US.msi
+```powershell
+cd gui-native
+cargo build --release                        # build.rs 把 assets/icon.ico 嵌进 exe 资源
+pwsh -NoProfile -File installer\build-msi.ps1             # 默认会先 build（幂等）
+pwsh -NoProfile -File installer\build-msi.ps1 -SkipBuild  # exe 已就绪时跳过构建
 ```
 
-> 注意是**仓库根的 `target/`**（workspace 共享 target-dir），**不是** `tauri/target/`。
+- 耗时量级（本机增量）：release 增量 40–60s + 打包 80–110s，产物约 **61 MB**。
+- 依赖 **WiX v6**（`dotnet tool install --global wix --version 6.0.2`）。**固定 v6**：v7 引入 OSMF 收费条款。
+- **别直接 `wix build`**：版本注入、产物命名、`$(var.ProductVersion)` 门禁都在脚本里。
 
-### 2.2 耗时量级（据根目录 `build-msi*.log`）
+安装（perUser，无 UAC，约 3 秒）：
 
-| 日志 | 命令 | release 编译耗时 | MSI 产物 |
-| --- | --- | --- | --- |
-| `build-msi.log` | `cargo tauri build --no-bundle` | `Finished release ... in 11m 13s` | 无（--no-bundle） |
-| `build-msi-2.log` | `cargo tauri build` | `Finished ... in 12m 05s` | `Tianyan_0.3.7_x64_{zh-CN,en-US}.msi` |
-| `build-msi-3.log` | `cargo tauri build` | `Finished ... in 12m 50s` | `Tianyan_0.3.8_x64_{zh-CN,en-US}.msi` |
+```powershell
+msiexec /i gui-native\installer\tianyan-native-1.1.0-x64.msi /qn /norestart
+```
 
-**实测量级：release 编译约 11–13 分钟**（首次全量含依赖更久；CI 首次可达 ~2 小时，见 release.yml 注释）。
-（任务描述中的“约 9 分钟”与日志不符，以日志为准。）
+## 3. CI 发布链（`.github/workflows/release.yml`）
 
----
-
-## 3. CI 发布链
-
-### 3.1 `release.yml`（按 tag 发布）
-
-触发：`push` tag `v*`。Job `build`（`windows-latest`，`permissions: contents: write`）。
-
-步骤（实读）：
-
-1. `actions/checkout@v5`
-2. `actions/setup-node@v5`（node 24，npm 缓存 `gui-vite/package-lock.json`）
-3. `dtolnay/rust-toolchain@stable`
-4. `Swatinem/rust-cache@v2`（Rust 编译缓存）
-5. `cd gui-vite && npm ci`
-6. `cd gui-vite && npm run build`
-7. **`arduino/setup-protoc@v3`**（安装 protoc —— `lance-encoding` 构建依赖）
-8. `cargo install tauri-cli --locked`
-9. `cd tauri && cargo tauri build`（注入 `TAURI_SIGNING_PRIVATE_KEY` /
-   `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` 做 **updater 签名**）
-10. **生成 `latest.json`**（pwsh）：从 tag 去 `v` 得 version，读第一个 `*.msi` 的 `*.sig` 签名，
-    拼 `platforms.windows-x86_64.{signature,url}`，写出 `latest.json`
-11. `softprops/action-gh-release@v2` 上传 `*.msi` + `*.sig` + `latest.json`
-
-> `latest.json` 是 Tauri updater 的更新清单；`tauri.conf.json.plugins.updater.endpoints`
-> 指向 `https://github.com/andrelive/tianyan/releases/latest/download/latest.json`。
-
-### 3.2 `quality.yml`（0.3.15 新增的质量门禁）
-
-触发：`push` tag（`v*`，与 `release.yml` 同批）+ 所有 `pull_request`，
-并作为可复用工作流被 `release.yml` 的 `build` 依赖（`needs: quality`——
-门禁红则不出包）。`master` 推送**不再**触发（2026-09-18 起，降噪）。
-Job `quality`（`ubuntu-latest`）。
-
-门禁项（实读）：
-
-| 步骤 | 命令 |
-| --- | --- |
-| Rust fmt | `cargo fmt --all -- --check` |
-| Rust clippy（deny warnings） | `cargo clippy --workspace --exclude tianyan-tauri --all-targets -- -D warnings` |
-| Rust 单测 | `cargo test --workspace --exclude tianyan-tauri --lib` |
-| 工具目录 freshness | `cargo catalog-check`（alias 定义在 `.cargo/config.toml`——**命令单一来源**，CI / `gen-tool-catalog.ps1` / WSL 复刻脚本共用；勿在任一处内联 cargo 命令行） |
-| 前端依赖 | `cd gui-vite && npm ci` |
-| 前端 lint | `cd gui-vite && npm run lint`（eslint + prettier） |
-| 前端 typecheck | `cd gui-vite && npm run typecheck` |
-| 前端单测 | `cd gui-vite && npm test`（vitest） |
-
-> 注：两个 job 均**排除 `tianyan-tauri`**（桌面依赖在 ubuntu/CI 上不便构建）。
-
----
+- **触发**：推 `v*` tag = 真发布；`workflow_dispatch` = **只验构建链、不发布**。
+  > 推 tag 之前先手动跑一次。GPUI 全量冷编译在 CI 上与本地增量差异很大（依赖、缓存命中、耗时），等推 tag 才发现编不过就晚了。
+- **流程**：`quality`（复用 `quality.yml`，红则 build 跳过、不出包）→ `build-native`（windows-latest）
+  1. tag ↔ 版本比对：`scripts/check-version.ps1` + 读根 `Cargo.toml` 的 `[workspace.package] version`，先内部一致再比 tag（防「发了 v1.2.0 标签、包里还是 1.1.0」）
+  2. `Swatinem/rust-cache`：**两个 workspace 的 target 都要缓存**（`.` 与 `gui-native`），且必须 `save-if: true` —— tag 推送既非默认分支也非 PR，该 action 默认不存缓存，否则每次发版都冷编译 lance / datafusion / GPUI（实测 21 分钟 → 30:53）
+  3. `build-msi.ps1` → MSI + `SHA256SUMS.txt`
+  4. 只有 tag 才 `softprops/action-gh-release` 上传
+- **不产出 `latest.json`**：那是 tauri updater 的清单（带 `.sig`）。native 目前没有自动更新，硬塞一个无签名的 `latest.json` 只会让残留的 tauri 客户端拿到「格式对但签名缺失」的更新而报错。改为 `SHA256SUMS.txt` 供手动校验。
+- **不构建 `gui-vite`**：native 是纯 Rust 前端，MSI 只装 exe。注意 server 的静态服务读 `gui-vite/dist`，当前安装包里没有它。
+- **已知风险**：`arduino/setup-protoc` 从 GitHub Releases 拉取，历史上出现过「00:00 瞬时失败」导致整轮白跑（Linux 侧已改 apt，见 [`ci-pipeline.md`](ci-pipeline.md) §0）。Windows runner 无 apt，暂保留该 action；再遇到改用 `choco install protoc -y`。
 
 ## 4. 已知坑
 
-| 坑 | 说明 | 规避 |
-| --- | --- | --- |
-| **同版本号 MSI 覆盖/缓存** | 版本号不变时重新打包会**覆盖同名 MSI**；updater 按 `version` 判断，同版本**不会触发更新** | 发布前务必递增 `tauri/tauri.conf.json` 的 `version` |
-| **SmartScreen 警告** | `bundle.windows.certificateThumbprint = null` → MSI **无 Authenticode 代码签名**（`TAURI_SIGNING_PRIVATE_KEY` 只是 updater 签名，不等于代码签名），首次运行触发 SmartScreen | 用户点“仍要运行”；如需消除需自备代码签名证书并填 `certificateThumbprint` |
-| **动态端口** | 桌面端首选 3000，被占用则动态递增；实际端口经 `window.__TIANYAN_API_BASE__` 注入前端；CSP `connect-src` 已放行 `http://localhost:*` / `http://127.0.0.1:*` | 排障时别写死 3000；看日志“端口 3000 已被占用，动态选择端口 N” |
-| **打包时后端占用 build 锁 / 数据文件锁** | 本地若还有 `tianyan-tauri.exe` / `tianyan-server` 在跑，会**抢 build 锁**（`Blocking waiting for file lock`）并占用 `tianyan.db` | 打包前 `taskkill` 掉运行中的天演进程，并等待其它 cargo 构建结束 |
-| **脚本产物路径错误** | `build.ps1` 列产物查的是 `tauri\target\release\bundle`，实际产物在 `<仓库根>\target\release\bundle`（workspace 共享 target） | 以 §2.1 实际路径为准；或手动 `Get-ChildItem <仓库根>\target\release\bundle\msi\*.msi` |
-| **本地缺 protoc** | `release.yml` 装了 protoc（`lance-encoding` 构建依赖），但 **`build.ps1` 没有**该步骤 | 本地首次打包前确保 `protoc` 在 PATH（或安装 `protoc`），否则 lancedb/lance 相关编译可能失败 |
-| **前端重复构建** | `build.ps1` 先 `npm run build`，`cargo tauri build` 的 `beforeBuildCommand` 又跑一次 | 可用 `-SkipGui` 依赖 `beforeBuildCommand`（注意 `beforeBuildCommand` 仍会执行） |
-| **PowerShell 5.1 stderr 陷阱** | `cargo ... 2>&1 \| ...` 会把 cargo 的 warning/Info 当错误抛出 | 见排障文档 §5；`$ErrorActionPreference="Continue"` + `$LASTEXITCODE` |
-| **本地构建以 exit 1 收尾（`no private key`）——非失败** | `createUpdaterArtifacts: true` 时 tauri 会做 updater 签名；本地未设 `TAURI_SIGNING_PRIVATE_KEY` → 打印 `Error A public key has been found, but no private key` 并以**退出码 1** 结束。**MSI 在报错前已产出**，`.sig` 与 `latest.json` 由 CI 发布链生成（0.6.1 起每次本地构建都是如此） | **判断本地构建成功与否看 MSI 是否产出（含时间戳/大小），不看退出码**；本地验收不需要 `.sig` |
+- **`Get-Process tianyan-gui-native | Stop-Process` 会杀掉用户正在用的实例**（隔离实例与已装实例**进程同名**，实测踩过）。只按 **PID** 或 `Path` 精确操作。
+- **打包前必须退出运行中的实例**：exe 被占用时 `cargo build --release` 报 `failed to remove file ... 拒绝访问 (os error 5)`。
+- **`-SkipBuild` 会用旧 exe**：脚本会比对 exe 的 `ProductVersion` 与 `Cargo.toml`，不一致只**告警**（不是错误）—— 别忽略。
+- **装到哪、数据在哪**：程序在 `%LOCALAPPDATA%\Programs\Tianyan\`（perUser）；数据目录由配置 `storage.data_dir` 决定（本机 `D:\tianyan`），**卸载不删数据**（ADR-023）。
 
----
+## 5. 验收清单
 
-## 5. 验收清单（装前 / 装后）
+### 5.1 装前
 
-### 5.1 装前（打包/分发）
+- [ ] `.\scripts\test.ps1 lint` 绿（版本一致性 + tool-catalog freshness）
+- [ ] 没有运行中的实例（按 `Path` 确认，别按进程名一刀切）
+- [ ] exe 时间戳与本次构建一致（用 `-SkipBuild` 时尤其要看）
+- [ ] MSI 文件名里的版本 = 根 `Cargo.toml` 的版本
+- [ ] 记下 `SHA256`（CI 发布时会写进 `SHA256SUMS.txt`）
 
-- [ ] `tauri/tauri.conf.json` 的 `version` 与本次发布版本一致（决定 MSI 文件名）。
-- [ ] 四处版本一致：`tauri.conf.json`、`Cargo.toml`（workspace）、`CHANGELOG.md`、`docs/release/RELEASE_NOTES.md`
-      （`package.json` 的 `0.1.0` 不影响 MSI，见 §1）。
-- [ ] 无天演进程在运行（`Get-Process tianyan-tauri,tianyan-server -ErrorAction SilentlyContinue`）。
-- [ ] 无其它 cargo 构建在抢锁。
-- [ ] 本机有 `protoc`（若从零编译 lancedb）。
-- [ ] `target/release/bundle/msi/` 下产出**两份** MSI（`zh-CN` + `en-US`），文件名版本正确。
+### 5.2 装后
 
-### 5.2 装后（安装 MSI 后首次启动）
-
-- [ ] **版本号**：应用内“关于/更新检查”显示 `1.0.0`（与 MSI 版本一致）。
-- [ ] **思考语言**：新会话内部思考为**中文**（默认 soul「思考语言」约束；需重启应用生效）。
-- [ ] **审批默认自主**：默认 `approval_mode = autonomous`（黑名单外全放行、零打扰，ADR-033）；
-      如需收紧可设为 `confirm` / `interactive`。
-- [ ] **文件日志**：`%APPDATA%\com.tianyan.app\logs\tianyan_<时间戳>.log` **非空**、
-      内容随操作增长（0.3.15 修复 `file_filter` 后应稳定）。
-- [ ] **日志轮转/保留**：同目录文件数 ≤ `[logging].max_files`（默认 5，含当前文件）；
-      写满 `max_file_size`（默认 10 MB）时出现 `tianyan_<时间戳>.1.log` 等同族轮转文件。
-- [ ] **服务可达**：`http://127.0.0.1:3000/health`（端口被占用时以日志中的动态端口为准）返回 200。
-- [ ] **数据/配置就位**：`%LOCALAPPDATA%\tianyan\`（数据）、`~/.tianyan/tianyan.toml`（配置）存在。
-- [ ] （发布链）GitHub Release 含 `*.msi`、`*.sig`、`latest.json`；`latest.json.version` 与 tag 一致。
-
----
+- [ ] 「设置 → 应用」显示 `1.1.0`（3 段；`1.1.0.0` 只是 MSI 内部版本）
+- [ ] 设置 → 连接 里的服务版本与 `/health` 一致，且 **数据目录指原处**（`D:\tianyan`，设置页该字段只读 —— ADR-023 §4）
+- [ ] 默认 `approval_mode = autonomous`（黑名单外放行、零打扰，ADR-033）
+- [ ] 若开启了 `[logging]` 文件日志，日志文件非空且按天轮转
+- [ ] 首轮对话可用（模型服务已配置；未配置时前端显示配置向导）
 
 ## 附：核实来源
 
-- `tauri/tauri.conf.json`（`productName`/`version`/`bundle.targets=msi`/`wix.language`/`updater`）
-- `tauri/Cargo.toml`（`version.workspace = true`）、`Cargo.toml`（`[workspace.package] version=0.1.0`）
-- `gui-vite/package.json`（`version`、`build` 脚本）
-- `scripts/build.ps1`（依赖检查 / Build-Gui / Build-Tauri / 产物枚举）
-- `.github/workflows/release.yml`、`.github/workflows/quality.yml`
-- `build-msi.log`、`build-msi-2.log`、`build-msi-3.log`（耗时与产物名证据）
-- `target/release/bundle/msi/`（实际产物目录）
-- `docs/release/RELEASE_NOTES.md`、`CHANGELOG.md`（版本与发布说明）
+`gui-native/installer/build-msi.ps1`（版本注入 + 产物名 + 门禁）· `gui-native/installer/tianyan.wxs` ·
+`.github/workflows/release.yml` · `scripts/check-version.ps1` · `gui-native/README.md`「出包一条链」。

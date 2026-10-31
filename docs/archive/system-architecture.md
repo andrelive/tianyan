@@ -1,3 +1,5 @@
+> ⚠️ **历史快照（2026-09 前）**：系统架构总览与数据流图。此后 ADR-049（微内核化）、ADR-051（桌面单 server 复用）、`gui-native` 落地都未反映在此。**当前架构见 [`../architecture/module-map.md`](../architecture/module-map.md) + ADR-049/050/051。**
+
 # 天演 (Tianyan) 系统架构文档
 
 本文档描述天演本地智能代理系统的整体架构、核心决策和组件间交互——**README 级总览**。

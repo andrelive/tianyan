@@ -110,7 +110,7 @@
 
 | 方向 | 结论 | 依据 |
 |---|---|---|
-| "只对带 `tool_calls` 的消息回传思考内容" | **否定**。`assembler` 已**去掉 `has_tool_calls` 条件**，改为无条件保留 reasoning（回归测试锁定无工具调用轮也保留）。收益≈1%（**会话结论；仓库内无对应数据文件 → 来源不明，待复测**） | `core/src/context/assembler.rs:126-129`；`docs/release/RELEASE_NOTES.md`（0.2.x 条目"`assembler` 去掉 `has_tool_calls` 条件无条件保留 reasoning"） |
+| "只对带 `tool_calls` 的消息回传思考内容" | **否定**。`assembler` 已**去掉 `has_tool_calls` 条件**，改为无条件保留 reasoning（回归测试锁定无工具调用轮也保留）。收益≈1%（**会话结论；仓库内无对应数据文件 → 来源不明，待复测**） | `core/src/context/assembler.rs:126-129`；`docs/archive/release-notes.md`（0.2.x 条目"`assembler` 去掉 `has_tool_calls` 条件无条件保留 reasoning"） |
 | "裁剪思考内容（省略历史 reasoning）" | **否定**。契约优先、不裁剪——带 tools 时省略违反官方规则；且字段名/轮次覆盖是"静默失效"风险（发错字段或漏轮次都不会报错，只静默丢上下文）。安全性由探针验证（见下） | `core/src/config/model.rs:66-71`；探针 `.scratch/probe-strip-safety.py`（K1~K5）、`.scratch/probe-strip-safety2.py`（C1/C2/C4） |
 
 **裁剪安全性探针**（`.scratch/probe-strip-safety.py` / `probe-strip-safety2.py`，只读本地结果即可，**不要重跑**）：
@@ -147,7 +147,7 @@
 | 中文（CN） | 116 | 90 | ≈1.29 |
 | 英文（EN） | 418 | 104 | ≈4.02 |
 
-→ **同义内容中文比英文省 ~13% token**（90 vs 104）。与 `RELEASE_NOTES.md` 0.3.15 条目一致（"同义内容中文比英文省 ~13% token（思考占上下文 ~40% → 增速约 -5%）"）。
+→ **同义内容中文比英文省 ~13% token**（90 vs 104）。与 `release-notes.md（已归档 docs/archive/）` 0.3.15 条目一致（"同义内容中文比英文省 ~13% token（思考占上下文 ~40% → 增速约 -5%）"）。
 
 ### 3.3 强度矩阵：思考量级（会话实测）
 
@@ -178,8 +178,8 @@
 
 | 指标 | 值 | 来源 |
 |---|---|---|
-| 切中文成功率 | **12/12**（含英文历史 + 英文工具输出的抗锚定场景） | `RELEASE_NOTES.md` 0.3.15 条目；`.scratch/probe-anchor.py`（V3 覆盖条款下仍切中文，`.scratch/reason-anchor-V3-覆盖条款.txt`） |
-| 生效时机 | **需重启应用生效**：新会话立即；已有会话下次压缩点刷新 | `RELEASE_NOTES.md` 0.3.15 |
+| 切中文成功率 | **12/12**（含英文历史 + 英文工具输出的抗锚定场景） | `release-notes.md（已归档 docs/archive/）` 0.3.15 条目；`.scratch/probe-anchor.py`（V3 覆盖条款下仍切中文，`.scratch/reason-anchor-V3-覆盖条款.txt`） |
+| 生效时机 | **需重启应用生效**：新会话立即；已有会话下次压缩点刷新 | `release-notes.md（已归档 docs/archive/）` 0.3.15 |
 
 ---
 
@@ -208,7 +208,7 @@ pub fn prompt_side_tokens(&self) -> usize {
 
 ### 4.3 历史事故："上下文预算不足 1024" 误报
 
-- **现象**：压缩后继续对话直接报错，且该会话此后每条消息必现（会话卡死）。来源：`docs/operations/troubleshooting.md` §2.c、`RELEASE_NOTES.md` 0.3.14。
+- **现象**：压缩后继续对话直接报错，且该会话此后每条消息必现（会话卡死）。来源：`docs/operations/troubleshooting.md` §2.c、`release-notes.md（已归档 docs/archive/）` 0.3.14。
 - **根因（双叠）**：
   1. 实测输入恢复用 `tokens.input + cache.read` → double count。**事故实测**：`input=593_399 / cache_read=592_128` → 判定 `1_185_527` 直接越过 1M 窗口 → `dynamic_max_tokens` 返回 `None`（`core/src/model/spec.rs:344`，`MIN_MAX_TOKENS=1024`）→ 请求不发出；
   2. 恢复范围未按压缩点截断（压缩后组装视图实际仅 ~1.7 万）。
@@ -330,7 +330,7 @@ SELECT * FROM usage_logs WHERE session_id = '<会话 id>' ORDER BY id DESC LIMIT
 
 | 形态 | 说明 | 位置 |
 |---|---|---|
-| reasoning-only（有思考无正文） | ollama 对"system 完成通知"只输出思考不输出正文是**系统性**行为（相同上下文重试结果相同）——已**移除整轮重试**，保留 loop 内部空响应单次重试 | `RELEASE_NOTES.md` 0.3.9 条目；`core/src/agent/agent_core.rs:221-224, 1093-1107` |
+| reasoning-only（有思考无正文） | ollama 对"system 完成通知"只输出思考不输出正文是**系统性**行为（相同上下文重试结果相同）——已**移除整轮重试**，保留 loop 内部空响应单次重试 | `release-notes.md（已归档 docs/archive/）` 0.3.9 条目；`core/src/agent/agent_core.rs:221-224, 1093-1107` |
 | 非标准 `finish_reason` | 网关 `network_error` 等非标准值在 provider 层**显式上抛为错误**而非静默丢弃；`finish_reason` 随 assistant **持久化**到 `StructuredMessage.finish` | `docs/architecture/context-pipeline.md` §7.3 |
 | 流式中断 | 已有内容累积 → 保留为截断输出（`finish="interrupted"`）；完全无内容 → 按失败上报 | `core/src/agent/loop.rs:516-556` |
 | 上游错误分类 | 语义谓词（ADR-014）：`invalid_api_key`/`unauthorized` → permission、`model_not_found` → not_found、超时 → timeout；HTTP 401/403/404/408/504 各自语义分类 | `plugins/provider-llm/src/chat.rs`；`docs/architecture/decisions/014-error-classification.md` |
@@ -367,5 +367,5 @@ SELECT * FROM usage_logs WHERE session_id = '<会话 id>' ORDER BY id DESC LIMIT
 
 - `docs/architecture/context-pipeline.md` — 上下文组装顺序 + 压缩机制 + 构成量化方法 + 故障模式
 - `docs/architecture/decisions/014-error-classification.md` — 错误分类语义谓词（KIND 前缀 + 构造器/谓词）
-- `docs/release/RELEASE_NOTES.md` — 0.2.x（reasoning 回传 + 缓存）、0.3.9（ollama 思考字段回写）、0.3.14（预算误报）、0.3.15（思考语言中文约束）
+- `docs/archive/release-notes.md` — 0.2.x（reasoning 回传 + 缓存）、0.3.9（ollama 思考字段回写）、0.3.14（预算误报）、0.3.15（思考语言中文约束）
 - `docs/operations/troubleshooting.md` — 日志/DB 取证 + `finish_reason:"load"` 排查路径

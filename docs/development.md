@@ -28,9 +28,8 @@ npm run test:e2e       # Playwright e2e
 | 文档 | 定位 |
 |------|------|
 | [`docs/architecture/decisions/`](architecture/decisions/) | 架构决策记录（ADR-001~033）——**历史记录，不修改正文**；演进在末尾加"后续演进" |
-| [`docs/architecture/module-map.md`](architecture/module-map.md) | 模块索引（职责/位置/关键文件）——保持最新 |
-| [`docs/module-descriptions.md`](module-descriptions.md) | 模块详细说明——保持最新 |
-| [`docs/module-relationships.md`](module-relationships.md) | 模块间关系——保持最新 |
+| [`docs/README.md`](README.md) | **文档地图**（按「我要做什么」索引）——增删文档时先改它 |
+| [`docs/architecture/module-map.md`](architecture/module-map.md) | **唯一的**模块索引（职责/位置/关键文件）——保持最新 |
 | [`docs/architecture/tool-catalog.md`](architecture/tool-catalog.md) | **自动生成**（`scripts/gen-tool-catalog.ps1 -Check` 门禁）——改代码 schema，不改此文件 |
 | [`docs/architecture/context-pipeline.md`](architecture/context-pipeline.md) | 上下文组装顺序 + 压缩机制 + 构成量化方法 + 故障模式（机制级，先读它） |
 | [`docs/architecture/event-protocol.md`](architecture/event-protocol.md) | 事件通道模型 + 4 类事件字段表 + 订阅/快照恢复 + 可靠性分层 |

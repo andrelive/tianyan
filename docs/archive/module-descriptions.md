@@ -1,3 +1,5 @@
+> ⚠️ **历史快照（2026-09 前）**：模块功能说明，含已退役的 **Tauri 章节**与旧路径。**模块以 [`../architecture/module-map.md`](../architecture/module-map.md) 为准**，纪律与禁区见根 `AGENTS.md`。
+
 # 天演模块功能说明
 
 > 本文档描述天演项目各模块的功能职责、公开 API 和关键实现。

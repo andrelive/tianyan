@@ -156,60 +156,28 @@ agent 没有 system 前缀、上下文只增不减，服务起得来但行为已
 
 ## 架构导航
 
-核心架构决策 → [`docs/architecture/decisions/`](docs/architecture/decisions/)
-- [ADR-001: VFS 双层摘要索引](docs/architecture/decisions/001-vfs-dual-layer-index.md) — 项目基础机制
-- [ADR-002: StructuredMessage](docs/architecture/decisions/002-structured-message.md) — 单一真相源
-- [ADR-003: 组件工具化](docs/architecture/decisions/003-component-toolization.md) — ToolRegistry + call_skill 桥接
-- [ADR-004: 前缀匹配上下文组装](docs/architecture/decisions/004-prefix-match-context-assembly.md) — soul→rules→history 顺序
-- [ADR-005: SQLite 作为主存储后端](docs/architecture/decisions/005-sqlite-backend.md) — 替代 `LocalFileBackend`
-- [ADR-006: 工作区快照独立存储](docs/architecture/decisions/006-snapshot-storage-exception.md) — snapshot 的 VFS 例外
-- [ADR-009: 语义化编辑双原语](docs/architecture/decisions/009-semantic-editing.md) — apply_edit 内容匹配(old_string/new_string) + apply_patch unified diff 信封
-- [ADR-008: 快照升级](docs/architecture/decisions/008-snapshot-upgrade.md) — gzip 压缩 + GC + similar diff（扩展 ADR-006）
-- [ADR-010: 对话多模态链路](docs/architecture/decisions/010-multimodal-message-chain.md) — 图片输入（Message.content_parts + Part::Image）+ MCP 截图落盘
-- [ADR-011: 子任务授权边界](docs/architecture/decisions/011-subagent-approval-boundary.md) — 子 agent 无交互审批（任务下发即授权边界，交互只在主 agent 与用户之间）
-- [ADR-012: 注入上下文快照持久化](docs/architecture/decisions/012-injectable-snapshot-persistence.md) — 前缀零漂移（JSONL SessionHeader）+ 会话边界/压缩点技能刷新
-- [ADR-013: 统一消息通知与唤醒原语](docs/architecture/decisions/013-unified-message-notification-wake.md) — 消息入库 + 唤醒语义（shouldReply = allComplete || failure；任务持久化前置）
-- [ADR-018: 会话权威存储迁至 SQLite](docs/architecture/decisions/018-session-authoritative-sqlite.md) — 会话迁出 VFS（流式 vs 文档）；`SessionStore` 原子取号 + 失败上抛；VFS 恢复纯文档基座
-- [ADR-022: 会话绑定的任务面板与任务语义分层](docs/architecture/decisions/022-session-bound-task-ux.md) — todo/goal 会话绑定临时展示（无全局计划页）；内置任务→洞察、定时任务独立栏目、后台任务→会话停靠条；数据目录只读+搬迁对话框
-- [ADR-023: 配置目录与数据目录分离](docs/architecture/decisions/023-config-data-dir-separation.md) — 配置固定 `~/.tianyan/tianyan.toml` 永不搬迁；数据目录从配置读取；搬迁=复制+校验+先改配置后强制删源，失败可见
-- [ADR-024: 调度模型从 cron 改为间隔 + 补跑](docs/architecture/decisions/024-interval-scheduler.md) — 任务声明执行间隔；单一扫描循环每 60s 顺序检查、串行执行；last_run 持久化宕机补跑；cron 配置自动换算弃用
-- [ADR-025: 移除检索轨迹功能](docs/architecture/decisions/025-remove-retrieval-traces.md) — 只覆盖组装路径不覆盖 search_vfs、同 query 双记录误导、零有效使用；检索观测回归 UsageStats + tracing（否决记录 REJECTED #20）
-- [ADR-026: 后台任务与子智能体统一面板](docs/architecture/decisions/026-background-tasks-unified-panel.md) — 委托只支持异步；子智能体 = 带父会话引用的会话（存储/协议/渲染三层复用）；右侧任务面板（活跃在上、完成沉底、可展开过程/输出）；并发可配置（委托 20+排队 40、终端 16）+ SQL 权威注册表 + 3 天 TTL + 子会话级联/上限/不索引 FTS
-- [ADR-027: 会话时序链模型](docs/architecture/decisions/027-session-timeline-chain.md) — 会话 = 无分支时序链（user/assistant/tool/system 四种节点平等）；存储层永远返回完整链（无压缩点截断、无消息数上限），压缩点截断只发生在组装层视图；回退 = 锚点（用户输入）之后全部截断（含取消时序锚点之后的任务）；任务带 anchor_seq 时序锚点
-- [ADR-028: 会话消息统一事件推送与任务实时同步](docs/architecture/decisions/028-unified-event-push.md) — SSE 是水管（常驻）/循环是抽水机（请求驱动）；落库即推送（mpsc 单消费者）；GET /events 全局单连接按 session_id 路由；重连即快照（DSH 模式）+ 断点对齐 replace 兜底；任务状态/命令输出事件尽力而为（日志文件为权威）；JoinHandle watcher 收尾（panic 转 fail，非 watchdog）；POST /chat/stream 收敛为开关
-- [ADR-029: 事件订阅与快照恢复](docs/architecture/decisions/029-event-subscription-snapshot.md) — 单流按需订阅 + resident：POST /events/subscribe 触发快照（历史 + cursor）推入统一通道；打开过保持订阅（切回零延迟）；快照与实时同一条流（合并竞态消失）；ADR-031 后订阅集合移除（消息不再广播），端点仅承担快照推送
-- [ADR-030: 统一 Agent 循环框架](docs/architecture/decisions/030-unified-agent-loop.md) — 主 agent 与子代理同构：AgentLoop 抽配置点（上下文组装/工具集/持久化策略/完成回调/策略）；收尾条件统一"无工具调用"（submit_result 降级为可选结果落盘工具，主 agent 用 task_status 查结果 ID）；子代理用流式路径（task_id 即 session_id，前端完全复用）
-- [ADR-031: 乐观渲染 + user_message_id 确认 + 统一流式](docs/architecture/decisions/031-optimistic-render-user-message-id.md) — 用户消息发送即显示（乐观渲染），落库后经 user_message_id 确认事件回显真实 id（生命周期：请求→确认→弃）；assistant 纯流式（增量即终版，message 广播移除）；任务完成通知走 LOOP（process_wake 流式化，输出经 chat_stream 打字机展示）；子代理流式事件补 type/session_id 路由
-- [ADR-032: 流式事件转发统一](docs/architecture/decisions/032-unified-stream-forward.md) — 三处手写接线（用户轮/唤醒轮/子代理）收敛为 core 单一转发器 `spawn_stream_forwarder`（建通道即消费，防死锁不变量）；映射器与送达目标为有意可插拔 seam；`process_message_stream` 改收 sender（与 process_wake 同构，通道所有权归调用方）；字段注入单点
-- [ADR-033: 安全策略收敛——默认自主](docs/architecture/decisions/033-security-policy-convergence.md) — 审批行为收敛为 `ApprovalMode` 三态（autonomous 默认 / confirm / interactive）；`SafetyMode` 四态（relaxed 新默认，吸收 allow_all_operations 命令层语义）；`allow_all_operations`/`wait_for_approval`/`confirm_commands`/`unattended_mode` 四个旧开关下线（读取兼容 + 自动归一）；评估链模式短路单点
-- [ADR-034: 记忆生命周期治理](docs/architecture/decisions/034-memory-lifecycle-governance.md) — 运维子域消费面分离（`is_operational_path` 单一判定：面板/摘要/检索过滤）；概览压缩契约 L1≤L2（短内容直用 + 长度守卫）；GC 递归 + TTL 白名单分层；记忆巩固通道（merge/merge_from + `auto_consolidation` 兑现）+ 写入收口（过程记录不写记忆）；删除通道修复（find_entry 匹配文件条目）；存量清洗（80→22 / 391→31）
-- [ADR-035: 会话工作集](docs/architecture/decisions/035-session-working-set.md) — 会话物化上下文缓存（`SessionWorkingSet` + `WorkingSetRegistry`，键 session_id，**非第二权威**、非新存储、不改 ADR-027/018）；段 = 最近压缩点→现在（段外经库按需读）；写入收口四类（追加/整表重写/头部更新/删除，通知写入为追加特例）；**无投递水位**（seq 进上下文后读进度为推导值：`ctx.last_seq` vs `ws.last_seq` 续跑判定 + 唤醒幂等 `ensure_loop_running`（`running`/`last_consumed_seq` 与 loop 退出判定同一临界区）；T1-23 水位三件套删除，T1-24 机制性消失）；前缀存库 + 压缩点刷新 + 内容哈希；单写者（per-session 锁唯一持有者，不引入第二把锁）；空闲 30 分钟卸载、重建点 = 最近压缩点；前端历史分段加载直查库（`before_seq`+`limit`，与工作集解耦）+ 订阅快照最近 N 条 + cursor；`turn_state` 事件与消息按 seq 落位（U10 根治）；三阶段落地（读侧缓存→写侧收口→推送收口）+ 一致性回归清单
-- [ADR-036: 结构性取消](docs/architecture/decisions/036-structural-cancellation.md) — 取消统一语义"drop 即取消"（在等待处竞争、不逐层传导，model/context 签名零改动）；`cancel.rs` 等待原语（50ms 粒度 + 预置位快速路径）覆盖五类等待盲区（请求在飞/流式 recv/组装/压缩/非流式请求）；producer `tx.closed()` 传导闭环（接收端 drop 即断连）；收尾语义零新增；0ms 信号级（Notify/watch）为后续计划，只改原语内部
-- [ADR-037: 命令执行底层](docs/architecture/decisions/037-shell-provider.md) — shell provider 单一事实源（`ShellSpec`：执行/提示词同源，杜绝配置与提示漂移）；auto 探测（pwsh→powershell / bash→sh，命中记绝对路径）+ 用户可配（`[executor].shell` 枚举 + `shell_program` + custom 逃生舱）；hint 稳定性纪律（install 后字节稳定；切换代价 = 一次前缀重建 + 一次主动压缩，明示于配置注释）；PS 系 UTF-8 输出编码注入（修中文乱码）
-- [ADR-038: provider wire 方言单点](docs/architecture/decisions/038-provider-wire-dialect.md) — 方言即数据（`ProviderDialect` + `DialectPreset` 预设表，构造时解析一次、请求路径零判定）；三分法判据（协议级→拆子目录独立实现 / 字段级→方言数据 / 推断类→留启发式）；可观测性分层（静默失败必须显式可配、可见失败声明首选+容错兜底）；两级粒度（provider preset + `ModelEntry` 模型级覆盖）；embedding 手写请求复用请求层单点（不新增封装层）
-- [ADR-039: 会话写侧收口强制化](docs/architecture/decisions/039-session-write-side-enforcement.md) — 写权限面收窄：`SessionManager` trait 移除 5 个破坏性写（只留读 + 创建），写路径唯一入口 = 工作集；`BroadcastingSessionManager` 装饰器删除；fallback 直写删除（未装配 = 装配缺陷）；净删除 722 行
-- [ADR-040: 会话排他写事务](docs/architecture/decisions/040-session-exclusive-write-transaction.md) — 会话单写者：`WorkingSetRegistry::with_session_exclusive`（取锁 → 锁内 `rebuild` 最新链 → 闭包）+ 回退/重做/压缩内聚 core（`Agent::rollback_to`/`redo_to`，`RollbackOutcome`）；回退「先恢复文件、后截断链」（全或无）；取消/等待移出锁外先行；server handler 退化为薄壳
-- [ADR-043: 组装层工具对连续性规范化](docs/architecture/decisions/043-tool-pair-continuity.md) — 请求视图单点规范化（`ContextAssembler::normalize_tool_pairs`）：已存在结果提前 / 悬空调用移除并补合成结果 / 孤立结果丢弃；根治「孤立 tool_calls 链 → 会话持续 400」（全库实测 89 处插队 + 11 处悬空）；库不动、无迁移、幂等、前缀缓存不受影响
-- [ADR-044: 流式双预算](docs/architecture/decisions/044-stream-dual-budget.md) — 首 token 预算（`first_token_timeout`，默认 300s）与块间空闲（`timeout`）分离：首字节前用首包预算（覆盖大上下文预填充/弱网首包）、之后切空闲（心跳重置）；传输层 `read_timeout` 取 `max` 作兜底（否则先于显式判定掐断长预填充）；错误消息区分「首 token 超时」与「流式空闲超时」
-- [ADR-045: 纯通知轮状态](docs/architecture/decisions/045-notification-driven-turn-state.md) — 移除流看门狗（超时推断退场，长命令不再被误判中断）：前端轮状态只由事件驱动，快照帧携带权威值 `turn:{state,auto}`（用户轮 = Stream 租约 / 自动轮 = Agent 活动轮槽）——「能重取」替代「超时猜」；前提 = 同进程内嵌部署
-- [ADR-046: Provider 预置表与请求修饰单点](docs/architecture/decisions/046-provider-preset-and-request-modifiers.md) — 头差异数据化（预置表 + 动态会话头 + UA 全局默认）：预置与配置同构（显式 > 预置 > 默认，Option 语义支持显式清空）；动态头 = 受控绑定表（header 名 + 变量源枚举 `session_id`，非模板）；opencode 预置自动注入 `x-opencode-session` 覆盖对话流量（流式 + 非流式统一手写发送单点）；UA 全局默认 `tianyan/{VERSION}`；前端字段透传修复（`dialect` / `first_token_timeout` 不再丢）
-- [ADR-047: 工具输出统一 spill](docs/architecture/decisions/047-tool-output-spill.md) — 超预算工具结果落盘（会话只保留预览 + 路径）：落点为 post-execute 统一出口（单点，非逐工具补丁；注册在观测监听器之后——数据层须见原始结果）；`truncate_spill` 由死能力接线为活链路（阈值参数化，未超阈值不写文件）；`[tool_output]` 配置（`enabled` / `max_lines=2000` / `max_bytes=50KiB`，默认对齐 opencode）；白名单（`read_file`/`vfs_read`/`list_dir`/`glob` 等可重取、`execute_command` 已有 log_file）；落盘失败保持原结果（best effort）；目录 `{data_dir}/tool_output/`
-- [ADR-050: 工具结果携带图片](docs/architecture/decisions/050-tool-result-images.md) — 模型能看本机图片（`view_image` 直通）：tool 消息 `content` 可为内容块数组（`content_value` 单点，三家 provider 实测全通）；工具读文件 → magic bytes 严格校验 → sha256 冻结副本 `{data_dir}/session_images/` → 返回引用，字节不进 SQLite；组装期 `SessionImages` 按引用加载 data URL（只认 `session_images/<sha>` 单前缀 + 文件名禁分隔符，逃逸结构上不可能；副本缺失降级纯文本）；与 ADR-047 同族（大对象出库、会话留引用、best effort）；代价 = 带图 tool 结果每轮重传（不做事后裁剪——ADR-048 教训）
-- [ADR-051: 桌面端单 server 复用](docs/architecture/decisions/051-desktop-single-server-reuse.md) — 抽 `desktop/` 启动编排段：`ensure_server` 先发现「同一数据目录」的已有实例并复用（判据 = `/health` 的 `service` **且** `data_dir`），未命中才自起；修掉「两个桌面壳各起一个 server 同写一个数据目录」（实测 3000+3001 并存双写）；`data_dir` 比较口径收口 `core::common::path`；发现路径 快路径+并发+TCP 预探（51s→0.5s）；阶段 1 = gui-native 复用 / tauri 保持发现即退出
+**完整文档地图 → [`docs/README.md`](docs/README.md)**（按「我要做什么」索引）。这里只留最常查的。
 
-- [ADR-052: GUI 自动化端口](docs/architecture/decisions/052-gui-automation-port.md) — agent 直接读界面状态、触发语义动作，替代「DPI 抓屏 + 坐标点击」脚本（那套的三个坑：DPI-unaware 只抓到左上角 863×571、最小化窗口 rect 是假值、坐标强耦合布局）：`GET /state`（断言：最后一条消息正文头 / 左栏混排行 / picker 层级 / diff 增删行数 / 子代理活动流条数）+ `POST /act`（语义动作 20+，**全部转发现有方法不新造逻辑**——否则自动化路径与真实点击路径分叉，验证结论作废）；主线程独占 + mpsc 指令队列（不动用 `AsyncApp::update` 的 park 机制做跨线程借用），`/act` 返回动作**之后**的状态；`settle_ms` 表达「等异步数据落地」（MCP 的 request/response 表达不了这个——故不走 MCP，只让形状对齐 MCP tools，将来套薄适配器）；`TIANYAN_GUI_AUTOMATION_PORT` 才监听 + 只绑回环 + 不进 MSI + `state` 不含 api_key + 不碰 VFS；截图（`Window::render_to_image`，Windows 后端已实现）留阶段 2，需 `test-support` feature 故单独实测
+核心架构决策 → [`docs/architecture/decisions/`](docs/architecture/decisions/)（52 份，全量索引见该目录 `README.md`）。最常查的九份：
+
+- [ADR-001: VFS 双层摘要索引](docs/architecture/decisions/001-vfs-dual-layer-index.md) — 项目基础机制（**检索两铁律**见「模块速览」vfs 行）
+- [ADR-018: 会话权威存储迁至 SQLite](docs/architecture/decisions/018-session-authoritative-sqlite.md) — 会话不经 VFS 的唯一例外
+- [ADR-023: 配置目录与数据目录分离](docs/architecture/decisions/023-config-data-dir-separation.md) — 数据目录**只读**、搬迁是唯一写入通道（§4）
+- [ADR-027: 会话时序链模型](docs/architecture/decisions/027-session-timeline-chain.md) — 无分支链；截断只发生在组装层
+- [ADR-030: 统一 Agent 循环框架](docs/architecture/decisions/030-unified-agent-loop.md) — 主 agent 与子代理同构
+- [ADR-035: 会话工作集](docs/architecture/decisions/035-session-working-set.md) — 物化上下文缓存，非第二权威
+- [ADR-040: 会话排他写事务](docs/architecture/decisions/040-session-exclusive-write-transaction.md) — 单写者；回退全或无
+- [ADR-049: 插件化边界与装配模型](docs/architecture/decisions/049-microkernel-plugin-boundaries.md) — 微内核 + 三条依赖铁律
+- [ADR-052: GUI 自动化端口](docs/architecture/decisions/052-gui-automation-port.md) — `/state` + `/act`；动作必须复用真实点击路径
 
 被否决的方向（避免重复讨论；触发条件满足时据此重新评估）→ [REJECTED.md](docs/architecture/decisions/REJECTED.md)
 
-专题文档（机制级）→ [`context-pipeline`](docs/architecture/context-pipeline.md)（上下文组装+压缩）· [`event-protocol`](docs/architecture/event-protocol.md)（事件/SSE 协议）· [`model-provider-notes`](docs/architecture/model-provider-notes.md)（reasoning 回传+缓存）· [`operations/`](docs/operations/)（troubleshooting / data-health-check / release-msi / **ci-pipeline**）
+专题文档（机制级）→ [`context-pipeline`](docs/architecture/context-pipeline.md)（上下文组装+压缩）· [`event-protocol`](docs/architecture/event-protocol.md)（事件/SSE 协议）· [`model-provider-notes`](docs/architecture/model-provider-notes.md)（reasoning 回传+缓存）· [`task-runtime`](docs/architecture/task-runtime.md)（三类任务/并发/取消）· [`operations/`](docs/operations/)（troubleshooting / data-health-check / release-msi / ci-pipeline）
 
-模块索引 → [`docs/architecture/module-map.md`](docs/architecture/module-map.md)
+模块索引 → [`docs/architecture/module-map.md`](docs/architecture/module-map.md) — **唯一的模块文档**（旧的 `module-descriptions` / `module-relationships` 已归档到 `docs/archive/`，不再维护）
 设计原则 → [`docs/architecture/principles.md`](docs/architecture/principles.md)
-模块详细说明 → [`docs/module-descriptions.md`](docs/module-descriptions.md)
-模块间关系 → [`docs/module-relationships.md`](docs/module-relationships.md)
 Harness 工程 → [`docs/harness核心思路/harness-engineering-overview.md`](docs/harness核心思路/harness-engineering-overview.md)
 **重构实践指南（审查/波次/QA 纪律）→ [`docs/architecture/refactoring-practices.md`](docs/architecture/refactoring-practices.md)**
-
 ## 模块速览
 
 | 模块 | 位置 | 一句话 | ⛔ VFS 约束 |
