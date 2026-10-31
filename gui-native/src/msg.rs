@@ -997,15 +997,16 @@ pub(crate) fn render_user_footer(
 ///
 /// 同 [`render_user_footer`]：拆出来只为压 `render_msg_body` 的栈帧。
 ///
-/// `is_continuation` = 这条属于**同一轮**的后续步骤（见 `render_msg_body` 的说明）。
-/// 此时**不渲染时间戳**：一轮多步是常态（LLM→工具→LLM…），每步在库里都是独立
-/// assistant 消息；若每步都打时间，界面看起来就像「同一轮被切成几条独立回复」
-/// （用户实测提出：两个工具调用本该是一轮，中间却被时间戳分开）。
-pub(crate) fn render_assistant_footer(
-    msg: &MsgRow,
-    mi: usize,
-    is_continuation: bool,
-) -> AnyElement {
+/// `show_ts` = 这条是**本轮最后一个步骤**（见 `render_msg_body`）。
+///
+/// 时间戳只挂在轮末 —— 三次迭代的定稿（全为用户实测反馈）：
+/// ① 每步都打 → 「两个工具调用本该一轮、却被时间戳分开」；
+/// ② 只在轮首打 → 「轮与轮之间的时间不见了，难以区分轮次」（轮首常在正文处，
+///    滚到中段就完全看不到时间）；
+/// ③ 每步浅色打 → 「同一轮为什么调用时间不一样」；
+/// ④ **定稿**：轮内一律不打（只保留工具耗时），**轮末**打一条 —— 轮边界 =
+///    上一轮的"结束时刻" + 下一轮用户消息的"发生时刻"，两头都有锚点，轮内干净。
+pub(crate) fn render_assistant_footer(msg: &MsgRow, mi: usize, show_ts: bool) -> AnyElement {
     let mut footer = div().w_full().flex().flex_row().items_center().gap_2();
     if !msg.text.trim().is_empty() {
         let copy_text = msg.text.to_string();
@@ -1028,17 +1029,8 @@ pub(crate) fn render_assistant_footer(
         );
     }
     footer = footer.child(div().flex_1());
-    // 时间戳**只在轮首**打（跨轮边界），同轮后续步骤不打。
-    //
-    // 三次迭代都来自用户实测：
-    // ① 起初每步都打 → 「两个工具调用本该是一轮，中间却被时间戳分开」；
-    // ② 完全不打 → 「轮与轮之间的时间不见了，难以区分轮次」；
-    // ③ 每步都打（浅色小字）→ 「既然是同一轮返回的 tool_call，为什么调用时间
-    //    不一样？」—— 每步的时间戳制造了"这是几条独立回复"的错觉，反而更乱。
-    //
-    // 结论：**轮内不报时刻、只报工具耗时**（工具卡右侧那个 169ms / 13.18s 是
-    // 该步真正关心的信息）；**轮边界由「轮首时间戳 + 更大的间距」表达**。
-    if !is_continuation {
+    // 时间戳只在**轮末**（见上方 `show_ts` 的说明）
+    if show_ts {
         if let Some(ts) = &msg.ts {
             footer = footer.child(
                 div()
@@ -1055,6 +1047,9 @@ pub(crate) fn render_assistant_footer(
 ///
 /// **相邻同类段合并**（thinking / text 各自连成一块）：模型一次输出常被切成
 /// 多个同类增量，逐段渲染会让同一条思考碎成十几个小卡片。
+// 8 个参数都是单条消息渲染所需的语境（消息本体 / 索引 / 折叠态 / 回 app 的句柄 /
+// 会话 id / 同轮后续 / 轮末 / 思考指示），收敛成结构体反而把调用点拆得更散。
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn render_msg_body(
     msg: &MsgRow,
     mi: usize,
@@ -1070,6 +1065,10 @@ pub(crate) fn render_msg_body(
     // 判据由调用方（消息列表闭包）算：往前跳过 `tool` 消息，上一条非 tool 若为
     // assistant，则本条是同轮后续。
     is_continuation: bool,
+    // 这条是否是**本轮的最后一个步骤**（下一条不是 assistant / 已经是最后一条）。
+    // 时间戳只挂在轮末：既标出轮边界，又不在轮内制造"每条都是独立回复"的错觉
+    // （见 `render_assistant_footer` 里那段三次迭代的记录）。
+    is_round_end: bool,
     // 这条消息此刻的思考指示归属（`stream_pending` 单点判定）：只有本轮末尾的
     // assistant 在正文还空时才会是 `Bubble` / `Below`，其余一律 `None`。
     pending: StreamPending,
@@ -1355,7 +1354,7 @@ pub(crate) fn render_msg_body(
         ));
     }
     if !msg.compression {
-        body = body.child(render_assistant_footer(msg, mi, is_continuation));
+        body = body.child(render_assistant_footer(msg, mi, is_round_end));
     }
     // 同一轮的**后续步骤**（工具步）压紧上下留白。
     //

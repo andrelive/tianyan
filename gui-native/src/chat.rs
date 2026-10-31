@@ -653,6 +653,14 @@ impl ClientApp {
                             }
                             cont
                         };
+                        // 本条是否**本轮最后一步**：下一条不是 assistant（user / system）
+                        // 或已经没有下一条 → 是本轮收尾 → 只在它上面打时间戳。
+                        // 这样轮边界 = 「上一轮结束时刻 + 下一轮用户消息时刻」，两头
+                        // 都有锚点，而轮内保持干净（用户三次反馈的定稿，见 footer 注释）。
+                        let is_round_end = items
+                            .get(ix + 1)
+                            .map(|n| n.role != "assistant")
+                            .unwrap_or(true);
                         // 段渲染口径见 `render_msg_body`（思考块 / 工具卡可折叠，
                         // 结果按 `tool_calls` 的 id 关联）
                         render_msg_body(
@@ -662,6 +670,7 @@ impl ClientApp {
                             &app,
                             &sid,
                             is_continuation,
+                            is_round_end,
                             stream_pending(m, streaming && ix == tail_ix),
                         )
                     })
