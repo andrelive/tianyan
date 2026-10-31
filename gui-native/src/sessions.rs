@@ -512,14 +512,23 @@ impl ClientApp {
             // 注意用 `as_mut()`（借而不是 move）：后面恢复焦点还要再用一次
             if let Some(w) = window.as_mut() {
                 let w: &mut Window = w;
-                self.input = cx.new(|cx| TextareaState::new(w, cx).placeholder(placeholder));
+                // `auto_grow(1, 8)`：高度按真实文本测量（见 `ClientApp::new` 里的注释）
+                self.input = cx.new(|cx| {
+                    TextareaState::new(w, cx)
+                        .placeholder(placeholder)
+                        .auto_grow(1, 8)
+                });
                 self.draft_restore_path = "created-window".to_string();
             } else {
                 // 自动化/后台路径没有 `&mut Window`（也不在窗口借用中）→ 现取
                 let handle = self.window_handle;
                 let mut created: Option<Entity<TextareaState>> = None;
                 if let Err(e) = handle.update(cx, |_, w, cx| {
-                    created = Some(cx.new(|cx| TextareaState::new(w, cx).placeholder(placeholder)));
+                    created = Some(cx.new(|cx| {
+                        TextareaState::new(w, cx)
+                            .placeholder(placeholder)
+                            .auto_grow(1, 8)
+                    }));
                 }) {
                     self.set_error(format!("输入框创建失败（窗口不可用）：{e}"));
                 }

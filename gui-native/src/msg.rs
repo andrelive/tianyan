@@ -1028,15 +1028,25 @@ pub(crate) fn render_assistant_footer(
         );
     }
     footer = footer.child(div().flex_1());
-    if !is_continuation {
-        if let Some(ts) = &msg.ts {
-            footer = footer.child(
-                div()
-                    .text_size(px(11.))
-                    .text_color(rgb(colors::TEXT_TERTIARY()))
-                    .child(ts.clone()),
-            );
-        }
+    // 时间戳**每步都打**，但同轮后续步骤用更浅更小的样式。
+    //
+    // 演变过程（两次都是用户实测反馈）：
+    // ① 起初每步都打时间 → 「两个工具调用本该是一轮，中间却被时间戳分开」；
+    // ② 改成 continuation 完全不打 → 轮与轮之间**也没有**任何时间线索，
+    //    「导致难以区分轮次」；
+    // ③ 现在：跨轮步骤 = 正常小字时间戳（轮边界一眼可见）；同轮后续 =
+    //    更浅（opacity 0.45）+ 更小（10px），既能看出每步耗时，又不会把一轮
+    //    切成一串"独立回复"。
+    if let Some(ts) = &msg.ts {
+        let ts_node = div()
+            .text_size(px(if is_continuation { 10. } else { 11. }))
+            .text_color(rgb(colors::TEXT_TERTIARY()))
+            .child(ts.clone());
+        footer = footer.child(if is_continuation {
+            ts_node.opacity(0.45)
+        } else {
+            ts_node
+        });
     }
     footer.into_any_element()
 }
@@ -1352,7 +1362,9 @@ pub(crate) fn render_msg_body(
     // 一轮多工具时每一步都是一条独立 `MsgRow`，若都用 `py_2`，卡片之间会堆出
     // 16px（上下 padding）+ 8px（body gap）的空白 —— 用户实测「同一轮次的工具调用
     // 之间间隔过大，建议参考思考过程和工具的间隔」。轮与轮之间仍保留 `py_2`。
-    let pad_y = if is_continuation { 1.0 } else { 8.0 };
+    // 同轮后续 1px（紧凑），跨轮 10px（比原来的 8px 略大 —— 用户实测「轮与轮之间
+    // 时间不见了，导致难以区分轮次」，间距 + 时间戳一起加强边界感）。
+    let pad_y = if is_continuation { 1.0 } else { 10.0 };
     div()
         .px_4()
         .py(px(pad_y))

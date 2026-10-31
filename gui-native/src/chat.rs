@@ -761,50 +761,9 @@ impl ClientApp {
             .into_any_element()
     }
 
-    /// 输入框高度：随内容增高（2 行起，约 200px 封顶后内部滚动）。
-    ///
-    /// 为什么自己算：GPUI 的 `Textarea` 只暴露 `.h(DefiniteLength)`（固定高度），
-    /// 没有 auto-grow —— 早先写死 64px，用户写三行以上的 prompt 就得在 2.5 行高的
-    /// 小窗里滚动（Web 版是 3.5rem → 200px 自适应）。
-    ///
-    /// 估算口径：全角按 2 个半角宽，一行约 58 个半角字符（896px 卡片宽 / 14px 字号）。
-    /// 误差一两行不影响观感，**宁可高一点**也不要让人手动滚。
-    pub(crate) fn composer_height(&self, cx: &App) -> f32 {
-        const COLS: f32 = 58.0;
-        const LINE_H: f32 = 21.0;
-        const PAD: f32 = 26.0;
-        // 封顶所需行数：到这就不再往下数。长文本每帧全扫纯属浪费（输入一万字时
-        // 每帧一万次字符判断，60fps 就是 60 万次/秒，全为算一个恒定 200px）。
-        const MAX_ROWS: f32 = (200.0 - PAD) / LINE_H;
-        let text = self.input.read(cx).value().to_string();
-        let mut rows = 0.0f32;
-        for line in text.split('\n') {
-            let mut w = 0.0f32;
-            for ch in line.chars() {
-                // 制表符按 4 个半角宽，其余非 ASCII 按全角
-                w += if ch == '\t' {
-                    4.0
-                } else if ch.is_ascii() {
-                    1.0
-                } else {
-                    2.0
-                };
-                // 单行内也提前停：这一行自己就够了
-                if w > COLS * MAX_ROWS {
-                    break;
-                }
-            }
-            rows += (w / COLS).ceil().max(1.0);
-            if rows >= MAX_ROWS {
-                break;
-            }
-        }
-        // 最少**一行**（早先是 2 行 = 68px，用户实测指出「输入框文字下面一直留着
-        // 这么高的高度」——那不是图片残留，就是这条 `max(2.0)` 撑出来的）。
-        // 单行 = 21 + 26 ≈ 47px，与 vite `min-h-[3.5rem]` 的观感一致。
-        let rows = rows.max(1.0);
-        (rows * LINE_H + PAD).clamp(44.0, 200.0)
-    }
+    // 输入框高度**不再自己算**：`TextareaState::auto_grow(1, 8)` 按真实字形宽度测量
+    // （见 `ClientApp::new` 里那段注释）。手写估算（"一行 58 个半角字符"）比真实
+    // 宽度保守一半，导致「还没换行、光标走到一半」输入框就提前变高（用户实测）。
 
     /// 输入卡片 = **一体式卡片**（对齐 Tauri 版 `ChatInput`）：
     /// 外框限宽 896 居中、bg-secondary、rounded-2xl；卡片内 = 编辑器 + 底部控件行。
@@ -894,9 +853,12 @@ impl ClientApp {
                         // 「焦点在输入框里按 Ctrl+V 没反应，只能点按钮」。
                         // 返回 `false` 时文本粘贴照常走默认实现，不抢。
                         let app = self.app_ref.clone();
-                        let height = self.composer_height(cx);
+                        // ⚠️ **不要**再给 `.h(...)`：显式高度会盖掉 `auto_grow`
+                        // （那个能力是按真实字形宽度测量行数的，见 `ClientApp::new`）。
+                        // `min_h` 只设**下限**、不参与增长，所以留着它当兜底：
+                        // 万一 auto_grow 在某些布局下算不出高度，也不会塌成 0。
                         Textarea::new(&self.input)
-                            .h(px(height))
+                            .min_h(px(44.))
                             .appearance(false)
                             .on_paste(move |item, window, cx| {
                                 let Some(w) = app.lock().ok().and_then(|g| g.clone()) else {

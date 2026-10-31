@@ -41,7 +41,15 @@ impl ClientApp {
         let total: usize = 0;
 
         let input = cx.new(|cx| {
-            TextareaState::new(window, cx).placeholder("输入消息 · Enter 发送 / Shift+Enter 换行")
+            TextareaState::new(window, cx)
+                .placeholder("输入消息 · Enter 发送 / Shift+Enter 换行")
+                // **高度交给组件自己按真实文本测量**（1~8 行自适应）。
+                //
+                // 此前是手写估算（`composer_height`：按 58 个半角字符/行推算行数），
+                // 而真实渲染宽度能放 ~50 个汉字（≈100 半角单位）—— 估算偏保守，
+                // 于是「还没换行、光标走到一半」时输入框就提前变高了（用户实测）。
+                // `auto_grow` 用实际字形宽度测量，不存在这种误差。
+                .auto_grow(1, 8)
         });
         // 子智能体页的搜索框：改动即过滤（订阅 Change 事件）
         let roles_search = cx.new(|cx| InputState::new(window, cx).placeholder("搜索子智能体..."));

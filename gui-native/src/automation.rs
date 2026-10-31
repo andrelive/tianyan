@@ -868,10 +868,10 @@ impl ClientApp {
                 "zoomed_image": self.zoomed_image.is_some(),
                 // 待发送附件数（图片）
                 "composer_images": self.composer_images.len(),
-                // 输入框高度（随内容增高，64 → 200 封顶）。GPUI 的 Textarea 没有
-                // auto-grow，这个值是 `composer_height` 按文本估算出来的——写成
-                // state 字段才能在自动化里断言「多行输入框真的变高了」。
-                "composer_height": self.composer_height(cx),
+                // 输入框高度不再由前端估算（改由 `TextareaState::auto_grow(1, 8)`
+                // 按真实字形测量），所以这里没有可断言的数值字段；多行输入是否真的
+                // 撑高，用截图/肉眼验（自动化侧可断言的是 `composer_text` 与
+                // `composer_images`）。
                 // 只暴露 data URL 的 mime 前缀（`data:image/png`）。粘贴链路最常见的
                 // 故障就是「格式没转」——Windows 截图是 BMP，后端只认
                 // PNG/JPEG/WebP/GIF，不转直接 400。断言要看得见，又不能把图片字节
