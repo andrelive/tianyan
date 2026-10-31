@@ -8,6 +8,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- **知识检索按命名空间恒空（`search(_, _, Some(ns))` 永远返回 0 条）**：`namespace` 过滤此前在「取回 top_k **之后**」用内存 `retain` 做，而每列 ANN 只取 top_k 行 —— 全局 top_k 被技能 / 记忆 / agent 这些数量大的命名空间占满时，过滤后一条不剩。实测：知识库 20 条**全部**有 L0/L1 向量，`GET /knowledge/search?q=tianyan|GPUI|记忆` 三个 query 全是 `total=0`，而同一 query（「D93 三腿组合 A股策略 超额 CAGR」）**不加过滤**能命中 7 条 knowledge。修法：过滤下推到 DB 层 `only_if("namespace = '…'")`（`QueryRequest.prefilter` 默认 true，即先过滤再 ANN），单列 `search` 与 RRF 融合 `search_fused` 两条路径都改；内存 `retain` 保留作兜底。**影响面不止知识页**：`policy-context` 的注入检索（`retriever.rs:150` 同样传 namespace）此前等于「按命名空间检索必空」，知识/记忆进不了对话上下文。回归测试两个新用例（12 条 memory 占满 top-5 + 1 条 knowledge 相似度更低 → 仍须命中；临时移除 `only_if` 时这两个用例 FAIL，恢复后 18 passed）。
+- **相似度算出负数（`-0.047` / `-0.133`）**：LanceDB 默认距离是 `L2`（平方欧氏），而 `batch_to_results` 一律 `score = 1 - _distance` —— 未归一化的嵌入向量下毫无意义；即使归一化，`L2² = 2 - 2cos` ⇒ `score = 2cos - 1`（正交向量算出 -1，余弦 0.48 被压成 -0.05）。修法：两处检索显式 `.distance_type(DistanceType::Cosine)` ⇒ `_distance = 1 - cos`、`score = cos ∈ [-1, 1]`，与向量是否归一化无关。实测同一条目同一 query **-0.047 → 0.476**。**顺带修好一处被误诊的退化**：`ContentLoadStrategy` 的 `score > 0.6` 决定是否加载 L1 概览，那条阈值是按**余弦**标定的（它自己的测试注释就写着「阈值按余弦相似度标定（0.6），导致所有结果永远停留在 Abstract」），底层给 `2cos-1` ⇒ 0.6 实际对应余弦 0.2 ⇒ **注入永远只取 L0**。契约已写进 ADR-001「对子系统的约束」。
+- **知识搜索结果是空壳（只有 id 与分数）**：`KnowledgeService::search` 把 `content` / `source` 留空、`metadata.title` 填 `None`，注释写「内容由前端按需调用 `/entries/read` 加载」—— 但两个前端都没实现那一步，于是搜索结果是一排正文全空的卡片。修法：服务端一次带回（`title` = 条目 L0 摘要、`content` = L2 开头 300 字、`source` = 父目录路径 `knowledge/projects`），DTO 层把 `score` 钳到 `0..1`（向量层原始分数不动，注入链路另有阈值语义）。三个新单测锁 `parent_path_of` 的目录/根级两种形态与预览预算。
+- **配置接口能直接改数据目录（会「丢数据」）**：`PUT /api/v1/config` 接受任意 `storage.data_dir`，改完下一次启动就在一个空目录里跑 —— 旧库还在原处，服务却看不到它。修法：`ConfigService::update_config` 以运行时值为准**丢弃请求里的该字段**并记 `warn!`（不返回 400：客户端是整份 PUT，报错会让「保存任意字段」连带失败）。实测直接 `PUT` 改成 `C:\should-be-ignored` → 重读仍是原值。契约见 ADR-023 §4。
+- **GPUI 客户端（`gui-native`）第二批：四页空白 / 设置页字段全空 / 数据目录可编辑**——
+  ① 工具 / 技能 / 知识 / 记忆四页点进去全空：后端不空（14 / 57 / 115 / 20 条），是左栏
+  `on_click` 自己写了一份精简判断、只给 `Roles`/`Workspace` 补拉，其余七个页面从未触发加载；
+  而自动化 `/act` 走 `switch_view`（会加载）⇒「自动化验得出来、人点不出来」（ADR-052 D8 的
+  分叉）。修法：切页一律走 `switch_view`，加载口径收进 `load_view_data`。
+  ② 设置页文本字段显示 placeholder（`%LOCALAPPDATA%\tianyan`，而配置是 `D:\tianyan`）：
+  ReadOnly 字段直接读配置、文本字段读**编辑器**，而编辑器从未回填 —— 且回填失败也置
+  `settings_backfilled = true`（窗口句柄未就绪时静默失败），一次性失败被固化成永久状态。
+  ③ 数据目录改为只读 + 搬迁成为唯一入口（字段行「搬迁…」→ 目录选择器 → 确认框）；向量索引
+  两个字段（集合名 / 维度）保留可编辑但**保存前二次确认**；记忆详情 L0/L1/L2 改 markdown 渲染。
+  根因与踩坑细节（含「断言口径本身会骗人」——`value` 回落配置值，看上去永远正确）见
+  `gui-native/README.md`「1.1.0 第二批」。
 - **MCP 连接常驻吃满一个 CPU 核**（`rust-mcp-sdk 0.9.0` 内部忙循环）：现象是桌面端一开着就有一个线程接近满载——功能却完全正常（25 个 MCP 工具全部注册可用），因此长期被误当作「UI 渲染开销」。定位靠 GPUI 原生客户端里的 CPU 时间二分（5 秒窗口的进程 CPU 时间）：只跑 GPUI **0.14s** / 建 tokio runtime 不启 server **0.08s** / 完整 server **5.36s** → 落在 server 内部；按装配插槽再二分，`policies()`（去掉 MCP 动态工具 + LanceDB 两个插槽）**6.22s** 反而高于 `full()` 的 **5.45s** → 排除这两块；直接禁用 MCP **0.14s** vs 启用 **5.73s**（40 倍）；单独跑 playwright MCP 子进程也不忙 → 排除子进程自身与「连接失败重试」，锁定 SDK 内部。
   - 修法：**`rust-mcp-sdk` 0.9.0 → 1.1.0**（连带 `rust-mcp-schema` 0.10.3 → 1.0.0、`rust-mcp-transport` 0.9.1 → 1.0.1）。天演自身代码**零改动**——`McpClient` 用到的 stdio / streamable-http 传输、client handler、工具列表在 1.x 保持兼容。验证：`cargo check` 零错误、`cargo test -p tianyan-mcp` **18/18 通过**、同一 5 秒窗口 CPU 从 5.28s → **0.19s（−96.4%）**，且 MCP 仍连接成功（25 个工具）。
   - 影响面：**现有 Tauri 桌面版同样受益**（同一份 MCP 客户端代码），用户可感知的变化是「应用常开时风扇不再一直转」。
