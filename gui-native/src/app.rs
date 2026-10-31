@@ -514,21 +514,8 @@ impl ClientApp {
             rail = rail.child(
                 item.child(svg().path(icon.path()).size(px(18.)).text_color(rgb(tint)))
                     .on_click(cx.listener(move |this, _, _window, cx| {
-                        this.view = view;
-                        if view == View::Settings {
-                            this.load_models(cx);
-                        }
-                        // 数据已在启动时预加载：只在空列表（首次失败/未拉到）时补拉，
-                        // 避免每次切页都发请求、页面先空一帧再填
-                        if view == View::Roles && this.roles.is_empty() {
-                            this.load_roles(cx);
-                            this.load_roles_stats(cx);
-                        }
-                        // 文件页首次进入才拉目录树（工作区根 = 会话绑定目录）
-                        if view == View::Workspace && this.ws_root.is_empty() {
-                            this.load_workspace_tree(String::new(), cx);
-                        }
-                        cx.notify();
+                        // 只走 `switch_view`：切页的加载口径只有这一处（见该方法文档）
+                        this.switch_view(view, cx);
                     })),
             );
         }
@@ -537,48 +524,49 @@ impl ClientApp {
 
     pub(crate) fn switch_view(&mut self, view: View, cx: &mut Context<Self>) {
         self.view = view;
-        if view == View::Settings {
-            self.load_models(cx);
-        }
-        // 数据已在启动时预加载：只在空列表（首次失败/未拉到）时补拉，
-        // 避免每次切页都发请求、页面先空一帧再填
-        if view == View::Roles && self.roles.is_empty() {
-            self.load_roles(cx);
-            self.load_roles_stats(cx);
-        }
-        // 文件页首次进入才拉目录树（工作区根 = 会话绑定目录）
-        if view == View::Workspace && self.ws_root.is_empty() {
-            self.load_workspace_tree(String::new(), cx);
-        }
-        // 工具页首次进入才拉工具目录（与 roles 同一懒加载口径）
-        if view == View::Tools && self.tools.is_empty() {
-            self.load_tools(cx);
-        }
-        // 技能页首次进入才拉（列表 + 使用统计）
-        if view == View::Skills && self.skills.is_empty() {
-            self.load_skills(cx);
-        }
-        // 定时任务页每次进入都刷新：agent 可能刚用 schedule_task 建过任务
-        if view == View::Scheduled {
-            self.load_sched_tasks(cx);
-        }
-        // 记忆页每次进入都刷新：演化任务会在会话结束后写入
-        if view == View::Memory {
-            self.load_memories(cx);
-        }
-        // 洞察页每次进入都刷新（用量/调度状态随时在变）
-        if view == View::Insights {
-            self.load_insights(cx);
-        }
-        // 审批页每次进入都刷新（挂起请求随时可能出现）
-        if view == View::Approval {
-            self.load_approval_page(cx);
-        }
-        // 知识页首次进入才拉根目录（后续导航自己发请求）
-        if view == View::Knowledge && self.kb_entries.is_empty() {
-            self.load_kb_entries(String::new(), cx);
-        }
+        self.load_view_data(view, cx);
         cx.notify();
+    }
+
+    /// 切页时的数据加载口径（**每个视图一次判定，别在别处再补一份**）。
+    ///
+    /// 历史 bug（本方法存在的理由）：左栏 `on_click` 曾经自己写了一份精简判断，
+    /// 只给 `Roles` / `Workspace` 补拉；工具 / 技能 / 知识 / 记忆 / 洞察 / 审批 /
+    /// 定时任务**从来没有触发过加载**（旁边注释里「数据已在启动时预加载」也不成立，
+    /// 启动只拉会话与配置）—— 于是这些页面在真实点击路径上永远是空的，而自动化
+    /// `/act` 的 `switch_view` 走的是另一条路：验得出来、人点不出来
+    /// （ADR-052 D8 说的正是这个分叉）。
+    ///
+    /// 刷新口径统一为「每次进入都刷新」。`is_empty()` 守卫会让**学到的新东西看不见**
+    /// （技能是演化产物、工具集随插件装配变化、记忆在会话结束后写入），而这批要修的
+    /// 正是「看起来是空的」。刷新不会先空一帧 —— 旧数据留屏，新数据到了才替换。
+    /// 唯一例外是文件树：每次重拉会丢展开态，只在空时拉。
+    fn load_view_data(&mut self, view: View, cx: &mut Context<Self>) {
+        match view {
+            View::Chat => {}
+            View::Settings => self.load_models(cx),
+            View::Tools => self.load_tools(cx),
+            View::Skills => self.load_skills(cx),
+            View::Roles => {
+                self.load_roles(cx);
+                self.load_roles_stats(cx);
+            }
+            // 目录树每次重拉会丢失展开态，只在空时拉（工作区根 = 会话绑定目录）
+            View::Workspace => {
+                if self.ws_root.is_empty() {
+                    self.load_workspace_tree(String::new(), cx);
+                }
+            }
+            // 保留用户当前所在目录（不回根）：进入知识页不该把人踢回顶层
+            View::Knowledge => {
+                let path = self.kb_path.clone();
+                self.load_kb_entries(path, cx);
+            }
+            View::Memory => self.load_memories(cx),
+            View::Scheduled => self.load_sched_tasks(cx),
+            View::Insights => self.load_insights(cx),
+            View::Approval => self.load_approval_page(cx),
+        }
     }
 
     /// 订阅一个会话（ADR-029）：`POST /events/subscribe` → 服务端把快照（历史 +

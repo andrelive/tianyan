@@ -516,8 +516,8 @@ impl ClientApp {
                             )
                             .child("文件视图")
                             .on_click(cx.listener(|this, _, _, cx| {
-                                this.view = View::Workspace;
-                                cx.notify();
+                                // 与左栏同一入口：切页的加载口径只住在 `switch_view`
+                                this.switch_view(View::Workspace, cx);
                             })),
                     ),
             )
