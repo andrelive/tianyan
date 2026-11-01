@@ -1737,6 +1737,13 @@ impl ClientApp {
                 input.update(cx, |state, cx| state.set_value(text, cx));
                 cx.notify();
             }
+            // 模拟一次 IME 组合 → 上屏（验收用）：真实输入法只能在真机上敲，
+            // 但「组合串必须被替换、不能一路追加」这条逻辑可以在这里断言。
+            "ime_probe" => {
+                let input = self.input.clone();
+                input.update(cx, |state, cx| state.ime_probe(cx));
+                cx.notify();
+            }
             // 系统通知：走全局通道发一条，验证「注册 → 全局包装 → WinRT」整条链路
             // （通知是否真的弹出来只能人眼/截图确认，这里保证调用链没断）
             "test_notification" => {

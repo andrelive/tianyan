@@ -59,6 +59,8 @@ pub(crate) struct ComposerState {
     hits: RefCell<Vec<HitRow>>,
     /// 最近一次绘制的元素原点（鼠标坐标换算用）。
     origin: RefCell<(f32, f32)>,
+    /// 最近一次粘贴的时刻（`Ctrl+V` 与平台 `paste` 可能同时到达，靠它去重）。
+    last_paste: Option<std::time::Instant>,
 }
 
 impl ComposerState {
@@ -72,6 +74,7 @@ impl ComposerState {
             scroll: 0.0,
             hits: RefCell::new(Vec::new()),
             origin: RefCell::new((0.0, 0.0)),
+            last_paste: None,
         }
     }
 
@@ -873,6 +876,18 @@ impl ComposerState {
                     self.buffer.delete_selection();
                 }
             }
+            // 粘贴：**自己接管**（平台的 paste 通道另有路径，两者共用
+            // `handle_paste_item` 并用 200ms 去重）。早先只依赖平台 paste，
+            // 实测「Ctrl+V 粘文字没反应」—— 两条路都兜住才不会漏。
+            (true, "v") => {
+                if let Some(item) = cx.read_from_clipboard() {
+                    self.handle_paste_item(item, window, cx);
+                }
+                cx.stop_propagation();
+                cx.notify();
+                window.invalidate_character_coordinates();
+                return;
+            }
             _ => return,
         }
         if self.buffer.text != before.0 {
@@ -930,6 +945,126 @@ impl ComposerState {
         }
         cx.notify();
         window.invalidate_character_coordinates();
+    }
+
+    /// 当前组合态在 UTF-16 下的范围（平台对账用）。
+    fn marked_utf16(&self) -> Option<Range<usize>> {
+        self.marked.as_ref().map(|m| {
+            utf16_from_byte(&self.buffer.text, m.start)..utf16_from_byte(&self.buffer.text, m.end)
+        })
+    }
+
+    /// 用 `text` 替换一个 **UTF-16** 范围（清除组合态与选区）。
+    fn replace_byte_range(
+        &mut self,
+        range_utf16: Range<usize>,
+        text: &str,
+        cx: &mut Context<Self>,
+    ) {
+        self.push_undo();
+        let s = byte_from_utf16(&self.buffer.text, range_utf16.start);
+        let e = byte_from_utf16(&self.buffer.text, range_utf16.end);
+        self.buffer.anchor = None;
+        self.buffer.text.replace_range(s..e, text);
+        self.buffer.cursor = s + text.len();
+        self.marked = None;
+        cx.notify();
+    }
+
+    /// IME **组合中**：把上一次的组合串换成 `composing`（没有组合态就插入），
+    /// 并把新区间记为组合态（绘制时加下划线、平台据此定位候选框）。
+    fn apply_compose(&mut self, composing: &str, cx: &mut Context<Self>) {
+        self.push_undo();
+        match self.marked.take() {
+            Some(m) => {
+                self.buffer.text.replace_range(m.clone(), composing);
+                self.buffer.cursor = m.start + composing.len();
+                self.buffer.anchor = None;
+            }
+            None => self.buffer.insert(composing),
+        }
+        if !composing.is_empty() {
+            let end = self.buffer.cursor;
+            self.marked = Some(end.saturating_sub(composing.len())..end);
+        }
+        cx.notify();
+    }
+
+    /// IME **上屏**：把组合串换成最终文本（无组合态时等价于插入）。
+    fn apply_commit(&mut self, text: &str, cx: &mut Context<Self>) {
+        self.push_undo();
+        match self.marked.take() {
+            Some(m) => {
+                self.buffer.text.replace_range(m.clone(), text);
+                self.buffer.cursor = m.start + text.len();
+                self.buffer.anchor = None;
+            }
+            None => self.buffer.insert(text),
+        }
+        cx.notify();
+    }
+
+    /// 处理一份剪贴板载荷：图片 → 交宿主；文件 → 行内 chip；其余 → 文本。
+    ///
+    /// `Ctrl+V`（键盘路径）与平台 `paste`（输入法框架路径）都会到这儿，用
+    /// `last_paste` 做 200ms 去重，避免同一份内容被插两遍。
+    pub(crate) fn handle_paste_item(
+        &mut self,
+        item: gpui_kit::ClipboardItem,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(t) = self.last_paste {
+            if t.elapsed().as_millis() < 200 {
+                return;
+            }
+        }
+        self.last_paste = Some(std::time::Instant::now());
+        // 分流顺序不可"优化"：图片优先（走附件区），文件其次（行内 chip），最后文本。
+        // 反过来会把「复制的 png」变成模型读不了的路径引用（Web 版同一条结论）。
+        let has_image = item
+            .entries
+            .iter()
+            .any(|e| matches!(e, gpui_kit::ClipboardEntry::Image(_)));
+        if has_image {
+            cx.emit(ComposerEvent::PasteImage(item));
+            return;
+        }
+        let paths: Vec<String> = item
+            .entries
+            .iter()
+            .filter_map(|e| match e {
+                gpui_kit::ClipboardEntry::ExternalPaths(p) => Some(
+                    p.paths()
+                        .iter()
+                        .map(|x| x.to_string_lossy().to_string())
+                        .collect::<Vec<_>>(),
+                ),
+                _ => None,
+            })
+            .flatten()
+            .collect();
+        if !paths.is_empty() {
+            self.push_undo();
+            for p in paths {
+                self.buffer.insert_file_ref(&p);
+            }
+            cx.notify();
+            return;
+        }
+        if let Some(text) = item.text() {
+            self.replace_text_in_range(None, text.as_str(), window, cx);
+        }
+    }
+
+    /// 模拟一次 IME 组合 → 上屏（**验收用**：真实输入法只能在真机上敲，
+    /// 但「组合串是否被替换」这条逻辑可以用它断言 —— 用户实测报的
+    /// 「每敲一个字母都追加」正是这里出错）。
+    pub(crate) fn ime_probe(&mut self, cx: &mut Context<Self>) {
+        for composing in ["w", "wo", "wǒ"] {
+            self.apply_compose(composing, cx);
+        }
+        self.apply_commit("我", cx);
     }
 }
 
@@ -1014,19 +1149,13 @@ impl gpui_kit::EntityInputHandler for ComposerState {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.push_undo();
+        // 平台的「提交」语义：有显式 range 就替换它；**没有 range 但正处在组合态时，
+        // 要替换掉组合串**（这一步错了就是用户实测的「每敲一个字母都追加一遍」：
+        // w → wo → wǒ 会累积成 `wwowǒ`）。都没有才是普通插入。
         match range_utf16 {
-            Some(r) => {
-                let s = byte_from_utf16(&self.buffer.text, r.start);
-                let e = byte_from_utf16(&self.buffer.text, r.end);
-                self.buffer.anchor = None;
-                self.buffer.text.replace_range(s..e, text);
-                self.buffer.cursor = s + text.len();
-            }
-            None => self.buffer.insert(text),
+            Some(r) => self.replace_byte_range(r, text, cx),
+            None => self.apply_commit(text, cx),
         }
-        self.marked = None;
-        cx.notify();
     }
 
     fn replace_and_mark_text_in_range(
@@ -1037,15 +1166,15 @@ impl gpui_kit::EntityInputHandler for ComposerState {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.replace_text_in_range(range_utf16, new_text, _window, cx);
-        let end = self.buffer.cursor;
-        let start = end.saturating_sub(new_text.len());
-        self.marked = if new_text.is_empty() {
-            None
-        } else {
-            Some(start..end)
-        };
-        cx.notify();
+        // 组合态更新：平台通常把 range 传成 `None`（意思是「就是刚才那段 marked」），
+        // 所以这里一律**替换上一次的组合串**，而不是插入。
+        if let Some(r) = range_utf16 {
+            if Some(&r) != self.marked_utf16().as_ref() {
+                // 平台的 range 与本地记录不一致（少见）：先按平台给的替换掉
+                self.replace_byte_range(r, "", cx);
+            }
+        }
+        self.apply_compose(new_text, cx);
     }
 
     fn bounds_for_range(
@@ -1108,40 +1237,7 @@ impl gpui_kit::EntityInputHandler for ComposerState {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        // 分流顺序不可"优化"：图片优先（走附件区），文件其次（行内 chip），最后才是文本。
-        // 反过来会把「复制的 png」变成模型读不了的路径引用（Web 版同一条结论）。
-        let has_image = item
-            .entries
-            .iter()
-            .any(|e| matches!(e, gpui_kit::ClipboardEntry::Image(_)));
-        let paths: Vec<String> = item
-            .entries
-            .iter()
-            .filter_map(|e| match e {
-                gpui_kit::ClipboardEntry::ExternalPaths(p) => Some(
-                    p.paths()
-                        .iter()
-                        .map(|x| x.to_string_lossy().to_string())
-                        .collect::<Vec<_>>(),
-                ),
-                _ => None,
-            })
-            .flatten()
-            .collect();
-        if has_image {
-            cx.emit(ComposerEvent::PasteImage(item));
-            return;
-        }
-        if !paths.is_empty() {
-            self.push_undo();
-            for p in paths {
-                self.buffer.insert_file_ref(&p);
-            }
-            cx.notify();
-            return;
-        }
-        if let Some(text) = item.text() {
-            self.replace_text_in_range(None, &text, window, cx);
-        }
+        // 平台粘贴路径（输入法框架/系统菜单）：与 Ctrl+V 共用同一份分流逻辑
+        self.handle_paste_item(item, window, cx);
     }
 }
