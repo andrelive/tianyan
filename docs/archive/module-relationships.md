@@ -144,7 +144,7 @@ core/src/
 - `agent` → 协调者，聚合 context、model、session、vfs
 - `skills / scheduler` → 被 agent 调用，scheduler 独立运行后台任务
 
-**依赖环现状（阶段 1-3 分层重构后，详见 [ADR-007](architecture/decisions/007-core-dependency-cycle-removal.md) + [ADR-020](architecture/decisions/020-database-facade.md) + [ADR-021](architecture/decisions/021-layered-refactor.md)）**：
+**依赖环现状（阶段 1-3 分层重构后，详见 [ADR-007](../architecture/decisions/007-core-dependency-cycle-removal.md) + [ADR-020](../architecture/decisions/020-database-facade.md) + [ADR-021](../architecture/decisions/021-layered-refactor.md)）**：
 
 - ✅ **生产代码零模块环**（文件级 SCC 检测 = 0）：
   - 基础类型层：`roles`（角色纯类型）、`common`（错误/估算器等纯类型）——config/agent/scheduler 共用，不依赖领域
@@ -460,7 +460,7 @@ SSE 事件（`server/src/api/chat/types.rs`，逐行 `data:` JSON），完整字
 
 ## 7. 核心架构决策与模块关系
 
-以下 4 个架构决策决定了模块间的职责划分和依赖方向（完整决策清单见 [decisions/](architecture/decisions/)，另含 ADR-005 SQLite 后端、ADR-006 快照例外、ADR-007 依赖环消除）：
+以下 4 个架构决策决定了模块间的职责划分和依赖方向（完整决策清单见 [decisions/](../architecture/decisions/)，另含 ADR-005 SQLite 后端、ADR-006 快照例外、ADR-007 依赖环消除）：
 
 ### 决策 1：VFS 双层摘要索引 — 底层基础
 
@@ -482,7 +482,7 @@ SSE 事件（`server/src/api/chat/types.rs`，逐行 `data:` JSON），完整字
 
 ### 决策 3：组件工具化
 
-`agent/tool_registry/`（目录模块）注册内置工具（当前 34 个，完整清单见自动生成的 [`tool-catalog.md`](./tool-catalog.md)，freshness 由 `scripts/gen-tool-catalog.ps1 -Check` 门禁），其中 `call_skill` 读 VFS 技能文档（`skills/manager.rs`，方法论文档无执行语义）。工具执行器按域拆分为 8 个文件（`file_ops.rs` / `code_ops.rs` / `knowledge_ops.rs` / `agent_ops.rs` / `fs_ops.rs` / `symbol_ops.rs` / `repo_map_ops.rs` / `test_ops.rs`），公开 API 与 dispatch 不变。工具执行管线为可插拔瀑布（`pipeline.rs`：pre-execute 监听器 / 单调守卫 / post-execute 监听器，A1/A4 吸收），**管线出口的两个内置监听器已出 core**（ADR-049 期 3-T5）：可观测性监听器（`plugins/tool-pipeline/src/observability.rs`，承担统计/Trace/GEPA 历史/规则学习）与输出落盘（`plugins/tool-pipeline/src/spill.rs`，ADR-047；**必须注册在观测监听器之后**——数据层要看到原始结果）。
+`agent/tool_registry/`（目录模块）注册内置工具（当前 34 个，完整清单见自动生成的 [`tool-catalog.md`](../architecture/tool-catalog.md)，freshness 由 `scripts/gen-tool-catalog.ps1 -Check` 门禁），其中 `call_skill` 读 VFS 技能文档（`skills/manager.rs`，方法论文档无执行语义）。工具执行器按域拆分为 8 个文件（`file_ops.rs` / `code_ops.rs` / `knowledge_ops.rs` / `agent_ops.rs` / `fs_ops.rs` / `symbol_ops.rs` / `repo_map_ops.rs` / `test_ops.rs`），公开 API 与 dispatch 不变。工具执行管线为可插拔瀑布（`pipeline.rs`：pre-execute 监听器 / 单调守卫 / post-execute 监听器，A1/A4 吸收），**管线出口的两个内置监听器已出 core**（ADR-049 期 3-T5）：可观测性监听器（`plugins/tool-pipeline/src/observability.rs`，承担统计/Trace/GEPA 历史/规则学习）与输出落盘（`plugins/tool-pipeline/src/spill.rs`，ADR-047；**必须注册在观测监听器之后**——数据层要看到原始结果）。
 
 **模块影响**：`agent/tool_registry/` 依赖 `skills::SkillManager` 实现 call_skill 工具（VFS 读取），形成 agent → skills 单向依赖。
 
@@ -504,7 +504,7 @@ soul → rules+memories → history(from compression_marker，含当前用户输
 - `LoggingConfig` → `common/logging.rs`（`config::LoggingConfig` re-export 仍可用）
 - `TokenEstimator`/`estimate_tokens` → `common/token_estimator.rs`（全系统唯一估算入口；插件 `context::compression` re-export）
 
-**模块影响**：3 个依赖环（vfs→observability、context↔observability、common↔config）全部消除；残留单向依赖 `observability→vfs`、`observability→common`、`vfs→model` 均为非环。详见 [ADR-007](architecture/decisions/007-core-dependency-cycle-removal.md)。
+**模块影响**：3 个依赖环（vfs→observability、context↔observability、common↔config）全部消除；残留单向依赖 `observability→vfs`、`observability→common`、`vfs→model` 均为非环。详见 [ADR-007](../architecture/decisions/007-core-dependency-cycle-removal.md)。
 
 ---
 

@@ -1,6 +1,6 @@
 # 天演运维排障手册（troubleshooting）
 
-> 适用版本：0.5.2（撰写基线 HEAD `732e44c`）
+> 适用版本：1.1.0（撰写起点 0.5.2 / HEAD `732e44c`；2026-11 按 native 客户端重校准日志与端口两节）
 > 面向：本机/内网部署天演的维护者与 QA。所有路径、命令、查询均取自当前代码，未核实项显式标注 **待核实**。
 > CI / GitHub Actions 流水线自身的问题（挂死、日志丢失、编译指纹）见 [`ci-pipeline.md`](ci-pipeline.md)。
 
@@ -10,8 +10,8 @@
 
 | 取证对象 | 位置 | 说明 |
 | --- | --- | --- |
-| 应用文件日志（桌面端） | `%APPDATA%\com.tianyan.app\logs\tianyan_<YYYYMMDD_HHMMSS>.log`（轮转出 `….1.log` 等） | 由已删除的 tauri 壳 `init_logging` 创建（native 客户端尚未接入文件日志）；按 `[logging].max_file_size` / `max_files` 轮转与清理 |
-| 启动失败提示里的“详细日志”路径 | 同上 | `fatal_startup_error` 弹窗中给出同一目录 |
+| 运行时日志（桌面端） | **默认没有文件**：`[logging].file` 未设时只走控制台，而 release 包无控制台 | 要取证就先给配置加 `[logging].file`（见 §1.1），再按 `max_file_size` / `max_files` 轮转 |
+| panic 日志（桌面端） | `%APPDATA%\com.tianyan.app\logs\panic.log` | `panic_hook::install` **恒落盘**（`dirs::data_dir()` = Roaming，不在数据目录下）；崩溃/闪退先看它 |
 | SQLite 权威数据 | `<data_dir>\tianyan.db`（+ `-wal`/`-shm`） | 默认 `data_dir = %LOCALAPPDATA%\tianyan` |
 | 向量库 | `<data_dir>\lancedb\` | LanceDB，表名 = `storage.vector.collection_name` |
 | 统一事件流 | `GET /api/v1/events`（SSE 单连接） | 前端 EventSource 常驻，`http://127.0.0.1:3000` 起 |
@@ -21,55 +21,44 @@
 
 ---
 
-> ⚠️ **§1 / §0 的日志路径描述的是已删除的 tauri 壳（2026-10 前）**。当前 native 客户端（`gui-native`）尚未接入文件日志落盘，日志仍走 tracing 控制台输出 —— 排查以控制台与 `/state` 为准。
+## 1. 日志在哪（三条通道，别找错地方）
 
-## 1. 日志位置与命名（重要：与数据目录**不在一起**）
+### 1.1 桌面端运行时日志：默认不落文件
 
-### 1.1 桌面端文件日志
+`gui-native/src/main.rs` 在起 server 之前就调用 `tianyan::common::logging::init_logging(&config.logging)`，与后端**同一套**实现：
 
-`tauri/src/lib.rs` 中初始化日志目录的代码是：
+- 控制台 layer **恒装配**；文件 layer **只在 `[logging].file` 有值时装配**（`core/src/common/logging.rs::init_logging`）。
+- `LoggingConfig::default().file = None`，`config.example.toml` 也没有这个字段 ⇒ **默认没有运行时日志文件**。
+- release 包是 GUI subsystem（`#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]`）⇒ **没有控制台**，stdout 无处可去；debug 版从终端启动才能看到 stdout。
 
-```rust
-let log_dir = dirs::data_dir()                       // Windows = %APPDATA%（Roaming）
-    .unwrap_or_else(std::env::temp_dir)
-    .join("com.tianyan.app")
-    .join("logs");
-let stem = format!("tianyan_{}", chrono::Local::now().format("%Y%m%d_%H%M%S"));
-// RotatingWriter：写满 max_file_size(MB) 轮转出 tianyan_<ts>.<n>.log；
-// 打开/轮转时按 max_files 清理同族最旧文件（含上次启动遗留）。
+所以要拿运行日志，给 `~/.tianyan/tianyan.toml` 加一段：
+
+```toml
+[logging]
+level = "debug"
+file = "D:\\tianyan\\logs\\tianyan.log"
 ```
 
-由此得出：
+之后按 `[logging].max_file_size`（默认 10 MB）轮转出 `tianyan.1.log`…，按 `max_files`（默认 5）保留最新 N 个；文件族前缀 = `file` 的文件名主体。
 
-- **日志目录 = `%APPDATA%\com.tianyan.app\logs\`**（典型 `C:\Users\<你>\AppData\Roaming\com.tianyan.app\logs\`）。
-- 每个进程启动生成一个文件：`tianyan_20260912_124231.log`（本地时间 `%Y%m%d_%H%M%S`）。
-- **同一次启动内按大小轮转**：写满 `[logging].max_file_size`（默认 10 MB）即开新文件
-  `tianyan_<时间戳>.1.log`、`.2.log`…（单条日志不被切断——写入前判断，故单文件 ≤ 上限）。
-- **保留上限**：`[logging].max_files`（默认 5）。每次打开/轮转时按 mtime 清理同族最旧文件
-  （含**上次启动遗留**），目录不会无限增长；当前正在写的文件永不删除。
-- 文件层固定 text 格式（`with_ansi(false)`），带 target / thread id / 行号 / 文件名。
+### 1.2 panic 日志：唯一默认落盘的东西
 
-> ⚠️ **易踩坑 / 待对齐点**：`dirs::data_dir()` 在 Windows 上是 **Roaming**（`%APPDATA%`），
-> 而数据目录 `storage.data_dir` 默认用 `dirs::data_local_dir()` = **`%LOCALAPPDATA%\tianyan`**。
-> 因此**日志并不落在数据目录下**，两者是分离的（见 `core/src/config/storage.rs::default_data_dir`
-> 与 `tauri/src/lib.rs::init_logging`）。排障时别只在 `%LOCALAPPDATA%\tianyan` 里找日志。
+`core/src/common/panic_hook.rs::install` 把 panic 报告 append 到 `%APPDATA%\com.tianyan.app\logs\panic.log`（`dirs::data_dir()` = Roaming，**不在数据目录下**），目录不存在时尽力创建、写入失败静默。
 
-### 1.2 日志级别语义（`file_filter` 恒用配置级别）
+桌面端崩溃、闪退、窗口没出来 —— **先看这个文件**，再看 §3 的 DB。
 
-`tauri/src/lib.rs::layer_filters` 是纯函数（有回归测试 `test_layer_filters_*`）：
+### 1.3 独立后端（`cargo run -p tianyan-server`）
 
-| 层 | 级别来源 | 说明 |
-| --- | --- | --- |
-| 控制台层 | `RUST_LOG` 优先，非法/缺省回退 `[logging].level` | 仅开发调试入口 |
-| **文件层** | **恒用 `[logging].level`** | `RUST_LOG` **不应**影响文件层 |
+`app/src/main.rs` 同样调 `init_logging`：
 
-这是 0.3.15 刚修的回归（提交 5c4f62d 保护）：此前 `file_filter` 建了但**未挂载**（unused），
-一旦设置 `RUST_LOG` 会连带过滤文件层 → GUI 实例文件日志可能静默为空、流式中断无取证。
-若你看到文件日志 0 字节：
+- 前台运行，控制台输出可见；
+- 配了 `[logging].file` 时同时落文件（轮转规则同 §1.1）；
+- 仓库根偶尔出现的 `server.log` / `server.err.log` 是**手动重定向**产物（`> server.log 2>&1`），不是应用自己写的。
 
-1. 确认版本 ≥ 0.3.15（`layer_filters` 已接线）。
-2. 检查 `~/.tianyan/tianyan.toml` 的 `[logging] level`（`trace|debug|info|warn|error`；默认 `info`）。
-3. 文件层**只受配置级别控制**——把 `RUST_LOG` 设成 `error` 不会让文件层变空（这正是修复点）。
+### 1.4 日志级别
+
+- `RUST_LOG` 优先于 `[logging].level`（`EnvFilter::try_from_default_env()`），非法值回退配置级别。
+- 两个 layer 共用同一个全局过滤器 ⇒ 把 `RUST_LOG` 设成 `error` **文件里也只剩 error**（旧版 tauri 壳曾让文件层忽略 `RUST_LOG`，该实现已随壳删除）。
 
 ### 1.3 独立后端的日志（与桌面端不同）
 
@@ -104,8 +93,8 @@ let stem = format!("tianyan_{}", chrono::Local::now().format("%Y%m%d_%H%M%S"));
 
 **查什么**
 
-- 文件日志搜关键词 `LLM 返回空响应，重试一次`、`唤醒轮空输出`。
-  （事故证据：`tianyan_20260912_124231.log` 05:07:18–05:07:22。）
+- 已配 `[logging].file` 时，搜关键词 `LLM 返回空响应，重试一次`、`唤醒轮空输出`
+  （该事故的原始证据是 tauri 时代的文件日志 `tianyan_20260912_124231.log` 05:07:18–05:07:22；未配 `file` 时只能靠下面的 DB 查询）。
 - DB 查最近消息的 `finish` / tokens：
 
   ```sql
@@ -368,8 +357,8 @@ FROM background_tasks ORDER BY seq DESC LIMIT 20;
 - **端口约定**：`server/src/main.rs` **不解析 `--host/--port`**——独立启动**默认监听
   `127.0.0.1:3000`**（`ServerConfig::default()` = `host 127.0.0.1`, `port 3000`；`TIANYAN_PORT`
   可覆盖，走 `ServerConfig::from_env`）；QA 时**直接测 3000**。
-  桌面端则首选 3000，被占用时**动态递增**（`find_available_port`），并把实际端口经
-  `window.__TIANYAN_API_BASE__` 注入前端。**GUI e2e 后端不用 3000**（默认 3099，
+  桌面端不自己抢端口：先经 `tianyan_desktop::ensure_server` **发现同一数据目录的已有实例并复用**，
+  未命中才 `find_available_port` 自起（扫 `3000..=3100`，ADR-051）。**GUI e2e 后端不用 3000**（默认 3099，
   `gui-vite/playwright.config.ts`）——避免与运行中的桌面应用互斥。
 - **配置热更新会落盘**：`PUT /api/v1/config`（`config/services.rs::persist_and_reload`）
   = 校验 → `save_to_file` 写回 `~/.tianyan/tianyan.toml` → 热重载。
@@ -384,16 +373,16 @@ FROM background_tasks ORDER BY seq DESC LIMIT 20;
 的**正常输出**（warning 列表、`Blocking waiting for file lock` 等）被 PowerShell 当成
 `NativeCommandError` **抛出** → 脚本**误判“编译失败”**。
 
-**实锤证据**（仓库根 `build-msi.log` 首行）：
+**实锤证据**（tauri 时代 `build-msi.log` 的首行，教训与今天同一份）：
 
 ```
-cargo :         Info Looking up installed tauri packages to check mismatched versions...
+cargo :         Info Looking up installed packages to check mismatched versions...
 At line:1 char:1
-+ cargo tauri build --no-bundle 2>&1 | Out-File -FilePath build-msi.log ...
++ cargo build --release 2>&1 | Out-File -FilePath build-msi.log ...
 + CategoryInfo : NotSpecified: (...) [], RemoteException
 ```
 
-—— 明明只是 tauri CLI 的 Info 行，却被报成 `RemoteException`。
+—— 那只是 cargo 的一行 Info，却被报成 `RemoteException`。tauri 已删除，这个陷阱不随壳消失。
 
 **当前脚本的写法（已核实，如实描述）**
 
@@ -421,8 +410,9 @@ At line:1 char:1
 
 ## 附：本手册核实来源
 
-- `tauri/src/lib.rs`（`init_logging`、`layer_filters`、`fatal_startup_error`、端口注入）
-- `tauri/src/server.rs`（`SERVER_HOST=127.0.0.1`、`PREFERRED_PORT=3000`、`find_available_port`）
+- `gui-native/src/main.rs`（`init_logging` 调用点、`panic_hook::install`、`windows_subsystem`、`ensure_server`）
+- `core/src/common/logging.rs`（`LoggingConfig` / `init_logging` / 轮转）、`core/src/common/panic_hook.rs`（`default_log_dir`）
+- `desktop/src/`（`discover_existing` / `ensure_server` / `find_available_port`）
 - `server/src/main.rs`、`server/src/lib.rs`（`ServerConfig::default`）
 - `server/src/api/tasks/{routes,handlers}.rs`（`/events`、`/events/subscribe`、`/tasks/{id}/log`）
 - `server/src/api/config/services.rs`（`persist_and_reload`）

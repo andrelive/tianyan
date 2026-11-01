@@ -397,7 +397,7 @@
 
 - **依据**：17,599 次工具调用中 `lsp` 仅 **2 次且两次全部失败**（`rust-analyzer 不可用`）；2,312 次编辑结果附带的 `diagnostics` 字段 **100% 是空数组**（服务器只在 `lsp` 工具路径启动，编辑 / 验证路径永不触发）；服务器池无空闲回收 ⇒ 一旦调用成功即**常驻占 CPU**，与「通用助手」定位不符
 - **动作**：`lsp` 工具 + `core/src/lsp/` 整个模块（7 文件）+ `lsp-types` 依赖 + 编辑后诊断附加链路一并删除；工具数 **34 → 33**
-- **替代**：按需 `repo_map`（本版新增）；四条路线对照与决策依据见 `docs/architecture/code-intelligence-routes.md`
+- **替代**：按需 `repo_map`（本版新增）；四条路线对照与决策依据见 `docs/archive/code-intelligence-routes.md`
 
 ### 变更：工具参数形态收敛批次（破坏性；消除「同一意图两套写法」）
 
@@ -1097,7 +1097,7 @@
 
 ## 已知问题
 
-见 [known-issues.md](known-issues.md)。重点：
+见 [known-limits.md](../known-limits.md)（原 `known-issues.md`，已重写为长期限制）。重点：
 - 模型生成截断工具调用（已护栏）
 - apply_edit 精确匹配脆弱（引导用 apply_patch）
 - 会话内规则/记忆不刷新（ADR-012 缓存优先，可用 search_vfs 检索）

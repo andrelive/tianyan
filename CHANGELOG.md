@@ -7,6 +7,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+_（下批）_
+
+## [1.1.0] - 2026-10-31
+
+> **本版定位**：主发布渠道从 tauri 壳换成 GPUI 原生客户端（`gui-native`）——发布物是
+> **单个 exe**（进程内一半 GPUI 界面、一半内嵌 Axum server）+ 一个 MSI。11 个一级入口、
+> 设置页 14 个二级栏目、系统通知 / 托盘 / 全局快捷键在本版补齐；同场景进程内存 **116.8 MB**。
+
+### Added
+- **GPUI 原生客户端（`gui-native`）成为主发布渠道**：从独立 workspace 的可行性验证（`36ed91c`）到接上内核、起内嵌 server、渲染真实会话列表（`a771a05`，实测自动选到 3002 端口——3000/3001 被占则递增——拉到并渲染 49 条真实会话）。内嵌 server 走 `tianyan_assembly::full()`，与 `app` 同一份装配清单、不另写副本；端口只做**避让**（占用即递增），不做固定绑定。
+- **11 个一级入口全部落地（页面覆盖 11 / 11）**：会话 / 文件 / 技能 / 子智能体 / 工具 / 知识 / 记忆 / 审批 / 定时任务 / 洞察 / 设置。七个原本是「暂未实现」的占位页（工具 / 技能 / 定时任务 / 记忆 / 洞察 / 审批 / 知识）按 Web 版的信息密度逐页补齐、`render_placeholder` 随之删除；文件页从只读目录树 + 文件内容做起，再补 diff 审计（逐文件 `+N −M`、文件列表自带滚动容器）与目录选择器（替代手输路径）。工具页右侧只读 JSON Schema（工具是给模型调的，人只读 schema、不做表单）；知识页三 tab——浏览 / 导入（**内嵌文件浏览器**，不依赖 OS 模态框，因此可自动化）/ 搜索；另补会话 Tab 条（浏览器式，上限 8 个）、输入卡片底部统计行（未命中 / 缓存命中 / 输出 / 命中率 / TTFT / tok/s）、压缩点改成可展开的摘要卡片（默认收起）、外观三套色板（羊皮纸 / 石墨灰 / 午夜蓝）。
+- **设置页 14 个二级栏目全部可用（无「暂未实现」）**：先建栏目骨架（id / 顺序 / 文案 / 图标与 Web 版 `TABS` 逐项一致），再补内容——字段引擎把 **52 个字段**声明成数据（`FIELDS` 表：开关 / 分段枚举 / 数字 / 单行 / 多行 / 只读六种控件，逐字段带说明与「需重启」徽标），其余走自带接口（模型服务：provider 编辑 + 测连、模型切换；人设编辑：全文编辑 + 填入默认；MCP：列表 + 启停 + 测试连接 + 增删）与只读展示（用量统计 / 连接 / 关于 / 外观）。保存语义比 Web 版更保守：`PUT /config` 是整份替换，所以先 `GET` 最新配置、只覆盖**真正改动过**的字段、再整份提交，把「读-改-写」窗口压到一次往返，不冲掉期间别处刚改的值；顶部状态行给「已修改 N 项」与保存后「其中 M 项需重启客户端生效」。
+- **事件订阅补齐「断线自愈」整套机制**：症状是「会话输出完了，界面停在中间某个阶段不动（按钮已回到发送、正文缺最后一段），重启应用才正常」。根因链是事件走 `broadcast`（有界）→ SSE handler 再转 `mpsc`（有界），UI 一慢链条末端满 → `Lagged` → 旧事件被挤出；被挤掉的若正好是收尾的权威 `message`（全文），而 `turn_state(idle)` 侥幸留下，就固化成上面那个状态。补齐六条：服务端心跳 **15s**、客户端 **50s 无任何字节判半死主动重连**（`reqwest` 的 `bytes_stream()` 默认没有读超时，必须自己包 `timeout`）、指数退避 1s→2s→…→**30s**（连上即重置）、重连后**整集重放订阅**（`force=true` 绕过 resident 幂等）、订阅端点推**快照**并按「replace + 分页游标 + 轮状态权威值」应用（流式中跳过）、连接状态可见（`/state` 的 `session.events.connected` + 消息列上方横幅）。
+- **消息改成 per-session 存储**：此前 `ClientApp.messages` 只有「当前会话」一份，事件处理里有 `if sid != current { return }` —— 切走期间的流式增量**直接丢**，切回只能整页重拉，于是带来三件用户报过的事：上滚加载过的更早历史被 50 条截断、滚动位置被钉在旧处、未落库的 assistant 占位被删掉而权威 `message` 再也无处落地。改为每个订阅过的会话各存一份（`parked` 快照），切回只是把对应会话重新渲染、不重拉；per-session 视图状态整组 park / restore，不再「漏一个补一个」。
+- **虚拟列表元素数与消息条数脱钩（「输出完又丢数据」的根因）**：用户报「明明输出完了，页面又丢数据；新输入一条消息之后就恢复正常」。`gpui_list` 的元素数只在构造 / `reset` / `splice` 时确定，**不是每帧读 `messages.len()`**：切回时恢复的 `ListState` 带的是 park 那一刻的条数，而切走期间一直在往那份 `messages` 追加 → 条数涨了、`item_count` 没涨 → 后续 `remeasure_items` 作用在越界索引上，新内容在数据里、界面上渲染不出来。两条漏同步的路径都补上。实测 5 万条稳态只渲染 **40 项**，滚动 3000+ 行内存 131–139 MB 不涨。
+- **`@` 文件引用**：弹窗选文件 → 光标处插入行内 code，序列化口径与 Web 版**逐字一致**（`` `@file:"<绝对路径>"` ``）：模型拿到的是连贯句子里的行内 code、路径直白可用，消息区渲染无需特殊处理。复用知识导入那份文件弹窗（上级目录 / 名称过滤 / 隐藏项开关 / 大小格式化），只在用途上分叉，不另写一个。
+- **图片：渲染、放大与粘贴**：`/messages` 的 `images`（data URL）此前被前端整个丢弃 —— 补上 `decode_data_url` → `Image::from_bytes` → `img(...)`（不落盘：GPUI 的 `Image` 直接吃编码字节），非法 / 不支持的 data URL 退化为不渲染、不影响文字气泡；点击图片 → 全屏半透明遮罩 + 居中大图（小图按原始尺寸不拉伸）、点遮罩任意处关闭。粘贴侧走剪贴板原始字节（单张 8 MB 上限），而 Windows 截图给的是 **BMP**（`CF_DIB`）而后端 data URL 白名单只有 PNG/JPEG/WebP/GIF（会 400 报「不支持的图片格式」）→ 本地解码后重编码 PNG。
+- **内建截图（`--features screenshot`）**：`render_to_image` 拿的是**渲染输出**而不是屏幕像素，因此不受 DPI 缩放影响（进程外 `CopyFromScreen` 在 150% 缩放下只抓到窗口左上角那块，症状极像「右下角元素没渲染」，曾据此误判布局失效、白查数轮）。评估结论也修正了：`cargo check --features screenshot` 在 Windows 上**直接通过**（42s），新增依赖只有 gpui 的测试支撑（`proptest` 等），**没有** wayland/x11（那些是 Linux 平台的 cfg）。边界写清：它取的是「最近一次绘制的帧」——窗口被完全遮挡时 GPUI 跳过重绘会截到旧帧（截图前先提前台），`show=false` 从未显示的窗口截出 1×1，所以「隐藏窗口跑断言」与「可见窗口核视觉」必须分开跑。
+- **内建 GUI 自动化端口（ADR-052）**：界面自己提供 `GET /state`（状态快照）与 `POST /act`（20+ 语义动作：导航 / 对话 / 选择器 / 文件页 / 任务 / 审批 / 角色），agent 直接读断言、直接触发动作，**锁屏也能跑**（不依赖窗口可见）。以前只能看图才能确认的东西现在是字段：消息正文头、左栏分组折叠剩几条、目录选择器在第几层、diff 每文件增删行数、子代理活动流拉到几条。`/act` 返回动作**之后**的状态，`settle_ms` 表达「等异步数据落地」；主线程独占 + mpsc 指令队列，不用 `AsyncApp::update` 的 park 机制做跨线程借用。默认不开（设了 `TIANYAN_GUI_AUTOMATION_PORT` 才监听）、只绑 `127.0.0.1`、`state` 不含 `api_key`、不碰 VFS。它的价值当场被验证：`switch_tab` 只赋 view，而「首次进入才补拉」内联在侧栏 `on_click` 闭包里 → 自动化走得通、人点不出来（文件页树一直是空的），这是 ADR-052 D8 那条「自动化路径与真实点击路径分叉」的第一次实证。
+- **系统集成：系统通知 / 系统托盘 / 全局快捷键**：三个能力都不在 GPUI 的 API 里，共同做法是**独立线程 + 自己的 Win32 消息循环**（GPUI 独占主线程循环且不暴露 hook），主线程只执行动作。通知走 core 已有的 `NotificationSink` 抽象（后台任务完成 / 失败、主动提醒、审批挂起，注册即刻生效、不需要逐个事件挂接），并注册 `AppUserModelID` —— 不注册也能弹，但归属名退回「Windows PowerShell」，比不弹更糟。托盘用 `EnumWindows` 找主窗口且**必须缓存 `HWND`**：窗口一被 `SW_HIDE`，`IsWindowVisible` 恒 false，「隐藏之后再显示」会永久失效且毫无报错。于是「关闭」= 藏到托盘、真退出走托盘右键菜单。全局快捷键 `Ctrl+Alt+T` 切换主窗口显隐，热键线程 `GetMessageW` 阻塞等待（空闲零 CPU），可用 `TIANYAN_GUI_HOTKEY` 覆盖。
+- **桌面端单 server 发现与复用（ADR-051，新增 `desktop/` crate）**：修的是实测撞出来的问题——端口探测只能避免端口冲突，**不能避免数据目录双写**：桌面版占 3000、native 顺延 3001，两个内嵌 server 同时写同一个数据目录（定时任务各跑一遍 + SQLite 并发写），而原有的「单实例」判定只探 3000，于是判定「无实例」再起第二个。修法：`/health` 增 `service` / `data_dir` / `pid` 暴露身份；`discover_existing` 快路径先探首选端口，未命中再**并发**扫 `preferred+1..=preferred+100`，每端口先 TCP 预探（150ms）再校验身份（「端口上是别的服务」「是天演但数据目录不同」都只跳过 + 告警）；`ensure_server` 命中即 `reused=true`（本进程不启 server，退出时也不该关它），未命中才绑定 → 装配 → 启动 → 等就绪（就绪失败把刚 spawn 的 server abort 掉，否则留下一个「在跑但没人用」的 server 卡住优雅关停）。性能是被测试顺带抓出来的：串行扫 101 个端口首次 **51.37 s**（Windows 上这些端口是 DROP 不是 RST，每个吃满 500ms 超时，等于「用户每次白等 50 秒」），三处修复后 **0.50 s（102×）**，并加测试钉住「扫 101 个端口 < 5 秒」。实测两个实例：P2 日志「复用本机已有 server（端口 3002），本进程未启动 server」，且**没有**任何「注册任务 / 任务调度器 / MCP 预热」行 —— 定时任务确实只跑一遍；两者都能拿到 49 条会话、订阅同一事件流。
+- **产品级 MSI 打包 + 发布链 + 版本一致性门禁**：exe 嵌入图标（GPUI 的窗口/任务栏图标取自 exe 资源，代码里没设，不嵌就是白板）、perUser 装到 `%LOCALAPPDATA%\Programs\Tianyan`、开始菜单快捷方式、`MajorUpgrade`。实测 MSI **61 MB**、`msiexec /i /qn` 静默安装 **2.8 秒、无 UAC**、装好的客户端自起 server 并读到同一数据目录、`release` 版跑 77 项断言全绿。版本单源化：以根 `Cargo.toml` 的 `[workspace.package] version` 一处为准 —— 此前主 workspace 停在 1.0.1 而 native 已到 1.1.0，同一个产品两个号（`/health` 报 1.0.1、「关于」页显示 1.1.0），根因是旧模型「`tauri.conf.json` 是唯一权威」；`build-msi.ps1` 从 `Cargo.toml` 读版本补成 4 段注入 wxs、产物名同源，`check-version.ps1` 接进 `lint`（反向实测：临时改成 1.2.3 → FAIL + exit 1）。ARP 的版本列取 `DisplayVersion` 并显式设为 **1.1.0**（`ProductVersion` 仍是 `1.1.0.0`，那是 MSI 内部字段、规范要求 4 段）。快捷方式从 advertised 改常规（advertised 是白板图标的真凶）。`gui-native` 的 `fmt` / `clippy` 也纳入统一门禁，`release.yml` 的 `rust-cache` 显式声明两个 workspace 的 target 并写 `save-if: true`（tag 推送既非默认分支也非 PR，该 action 默认不保存缓存）；另加 `workflow_dispatch`（手动触发只跑构建链、不发布）与 tag ↔ 产品版本校验（本地模拟正反两向：v1.1.0 通过、v1.2.0 exit 1）。
+
+### Changed
+- **数据目录改为只读，搬迁是唯一写入通道（ADR-023 §4）**：字段行右侧「搬迁…」→ 目录选择器 → 确认框（**选中 ≠ 生效**），后端 `POST /config/migrate-data-dir` 只写请求文件并触发服务关停，真正「复制 → 校验 → 改配置 → 删源」在服务停掉之后做（SQLite / LanceDB 的文件锁那时才释放）；原生端在**下一次启动**、起 server 之前执行，所以 UI 明说「需关闭并重新打开客户端」。原先那是一张常驻卡片（当前目录 + 手输路径 + 按钮），删掉整块与三个状态字段，结果反馈改用统一 notice。
+- **向量索引两个字段保留可编辑，但保存前二次确认**：换 `collection_name` = 换一套空索引（检索立刻全空）；改 `vector_dimension` = 表重建 + **全量重新嵌入**（几分钟 + 嵌入费用）。不锁死（换嵌入模型时维度必须跟着改，是合法动作），改为保存前弹确认并点名要改哪几项，确认后才落盘。
+- **记忆详情改 markdown 渲染**：记忆是以 markdown 存进 VFS 的（`# 记忆: xxx` + `- **类别**: fact` + `## 内容`），而 L0 / L1 / L2 三段按纯文本渲染 → 满屏 `#`、`**`、`- `。改用与消息正文同一个 `TextView::markdown`，L2 折叠展开一起改。限制：该组件**不继承父级 `text_color`**（用组件主题 foreground），只适用于普通/次级背景 —— 消息里的用户气泡是深棕底，那里不能用。
+- **输入框改用组件 `auto_grow`，不再估算行数**：手写的估算按「一行 58 个半角字符」推算行数，而 896px 卡片按 14px 字号真实能放约 50 个汉字（≈100 半角单位）—— 估算比真实宽度保守一半，于是光标走到半行就被判成两行、框提前变高。改用 `TextareaState::auto_grow(1, 8)` 让组件按**真实字形宽度**测量行数，去掉显式 `h(px(...))`（显式高度会盖掉 auto_grow），只留 `min_h(44px)` 当下限兜底；`composer_height` 整个删除，`/state` 里那个字段随之移除（数值来源已不存在，留着会误导）。
+- **时间戳挂到轮末，轮内只报工具耗时**：轮首往往是正文消息，滚到中段（思考 / 工具循环）就完全看不到时间，观感等同「没有时间」；而每步都打又让一轮多步看起来像几条独立回复（用户实测报过）。按「轮边界 = 上一轮结束时刻 + 下一轮用户消息时刻」来放：轮内各步**不打**消息时刻、只保留工具耗时（卡片右侧 `169ms` / `13.18s`），**轮末**那一步打 11px 灰字时间戳（判据 `is_round_end` = 下一条不是 assistant），下一轮的用户消息本身带时间。于是无论从哪一头看都能定位轮次，轮内不会出现「同一轮几个不同时刻」的错觉。
+- **知识列表显示 L0 摘录，不再是一屏哈希**：条目名是摄入时算出的内容 sha256，而给人看的 L0 摘要就在旁边没人用。`GET /knowledge/entries` 增加 `abstract_excerpt`（合并空白 + 按**字符**限长 200，不会切出半个 UTF-8；无摘录时字段省略），数据取自同一次 `vfs.list` 已读出的 `ContextEntry`，**零额外 IO**；UI 有摘录即以它为标题，哈希退成右侧 `c45badca…  L0 L1 L2` 短标记。原始文件名暂不可得：`original_name` 只进了向量 payload，`vfs_entries` 表没有该列（存量条目也补不回）。
+
+### Removed
+- **tauri 壳退役：冻结 → 移出 workspace**：根 `Cargo.toml` 的 members 注释掉 `"tauri"`，`cargo --workspace` 不再编它（`Cargo.lock` 随之删掉整棵依赖树，−3628 行）；`quality.yml` 撤掉两处 `--exclude tianyan-tauri`，**一并修掉「包集合不一致」隐患**——此前 clippy / test 带 exclude、本地 `lint` 不带，三种集合会让编译指纹互相作废；`scripts/build.ps1` 改为进入即 `exit 1` + 指路（它构建 tauri，而 tauri 移出 workspace 后 `version.workspace = true` 无法解析，跑到 `cargo tauri build` 必然失败，不该让人白等十几分钟）；`AGENTS.md` 4 处会误导的表述与 `release-msi.md` §2 同步改正（ADR 正文按纪律不改，只加后续状态注记）。
+- **发布链从 `cargo tauri build` 切到 native MSI**：新链是 checkout → rust-cache → protoc → 装 WiX v6 → tag ↔ 版本校验 → `build-msi.ps1`（构建 + 打包）→ `SHA256SUMS.txt` → 上传。两处有意不再产：**不再产 `latest.json`**（那是 tauri updater 的清单、带 `.sig` 签名；native 无自动更新，塞一个无签名的清单只会让残留的 tauri 客户端拿到「格式对但签名缺失」的更新而报错），改产 `SHA256SUMS.txt` 供安装前校验；**不再构建 gui-vite**（native 是纯 Rust 前端，MSI 只装 exe）。同时去掉对 `TAURI_SIGNING_*` secrets 的依赖。
+- **`tauri/` 目录整体删除**：含两个 3035 行的 `gen/schemas` ACL 清单、全套 `icons`（含 android mipmap）、`capabilities`、`build.rs`、`tauri.conf.json`——它已冻结、已移出 members、图标与打包早已解耦，留着只会让人以为还有两条发布路线；同时删掉 IDE 工作空间数据 `.trae/`（被 `.gitignore` 忽略，非权威文档来源）。
+- **图标改由 `gui-native/assets/icon.ico` 自持**：`build.rs` 与 `installer/tianyan.wxs`（ARPPRODUCTICON）原先都指向 `tauri/icons/icon.ico`——tauri 目录删掉那天 exe 会**静默变白板图标**（`build.rs` 找不到图标只 `cargo:warning` 后 return），MSI 会**直接打包失败**（`<Icon SourceFile>` 缺失是硬错误）。改为复制到 gui-native 并同步两处引用（79,304 字节，哈希与原件一致）。
+- **`gui-vite` 降为对照前端，不随包发布**：React + TypeScript 的那套保留在仓库里当**行为对齐依据**（同一套 HTTP / SSE 协议，逐项对齐的依据写在原生端文档里），但 MSI 只装 exe，安装包里没有它的产物。
+
 ### Fixed
 - **知识检索按命名空间恒空（`search(_, _, Some(ns))` 永远返回 0 条）**：`namespace` 过滤此前在「取回 top_k **之后**」用内存 `retain` 做，而每列 ANN 只取 top_k 行 —— 全局 top_k 被技能 / 记忆 / agent 这些数量大的命名空间占满时，过滤后一条不剩。实测：知识库 20 条**全部**有 L0/L1 向量，`GET /knowledge/search?q=tianyan|GPUI|记忆` 三个 query 全是 `total=0`，而同一 query（「D93 三腿组合 A股策略 超额 CAGR」）**不加过滤**能命中 7 条 knowledge。修法：过滤下推到 DB 层 `only_if("namespace = '…'")`（`QueryRequest.prefilter` 默认 true，即先过滤再 ANN），单列 `search` 与 RRF 融合 `search_fused` 两条路径都改；内存 `retain` 保留作兜底。**影响面不止知识页**：`policy-context` 的注入检索（`retriever.rs:150` 同样传 namespace）此前等于「按命名空间检索必空」，知识/记忆进不了对话上下文。回归测试两个新用例（12 条 memory 占满 top-5 + 1 条 knowledge 相似度更低 → 仍须命中；临时移除 `only_if` 时这两个用例 FAIL，恢复后 18 passed）。
 - **相似度算出负数（`-0.047` / `-0.133`）**：LanceDB 默认距离是 `L2`（平方欧氏），而 `batch_to_results` 一律 `score = 1 - _distance` —— 未归一化的嵌入向量下毫无意义；即使归一化，`L2² = 2 - 2cos` ⇒ `score = 2cos - 1`（正交向量算出 -1，余弦 0.48 被压成 -0.05）。修法：两处检索显式 `.distance_type(DistanceType::Cosine)` ⇒ `_distance = 1 - cos`、`score = cos ∈ [-1, 1]`，与向量是否归一化无关。实测同一条目同一 query **-0.047 → 0.476**。**顺带修好一处被误诊的退化**：`ContentLoadStrategy` 的 `score > 0.6` 决定是否加载 L1 概览，那条阈值是按**余弦**标定的（它自己的测试注释就写着「阈值按余弦相似度标定（0.6），导致所有结果永远停留在 Abstract」），底层给 `2cos-1` ⇒ 0.6 实际对应余弦 0.2 ⇒ **注入永远只取 L0**。契约已写进 ADR-001「对子系统的约束」。
@@ -22,11 +60,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `settings_backfilled = true`（窗口句柄未就绪时静默失败），一次性失败被固化成永久状态。
   ③ 数据目录改为只读 + 搬迁成为唯一入口（字段行「搬迁…」→ 目录选择器 → 确认框）；向量索引
   两个字段（集合名 / 维度）保留可编辑但**保存前二次确认**；记忆详情 L0/L1/L2 改 markdown 渲染。
-  根因与踩坑细节（含「断言口径本身会骗人」——`value` 回落配置值，看上去永远正确）见
-  `gui-native/README.md`「1.1.0 第二批」。
+  回填失败的三个叠加原因：① 只有点二级栏目才懒加载 + 回填；② 判据用 `raw_config.is_none()`，
+  而 `load_models` 也会顺手设它 ⇒ 以为「不是首次」跳过；③ 回填失败也置
+  `settings_backfilled = true`。修法：进设置页就保证加载 + 回填，判据改
+  `!settings_backfilled && settings_dirty.is_empty()`，`handle.update` 成功才置位。
+  **断言口径本身也要修**：`/state` 的字段 `value` 走 `field_edit_value`（未回填时回落配置值，
+  看上去永远正确），得先补 `settings_fields.backfilled` 与每字段 `editor` 才复现得出「界面是空的」。
 - **MCP 连接常驻吃满一个 CPU 核**（`rust-mcp-sdk 0.9.0` 内部忙循环）：现象是桌面端一开着就有一个线程接近满载——功能却完全正常（25 个 MCP 工具全部注册可用），因此长期被误当作「UI 渲染开销」。定位靠 GPUI 原生客户端里的 CPU 时间二分（5 秒窗口的进程 CPU 时间）：只跑 GPUI **0.14s** / 建 tokio runtime 不启 server **0.08s** / 完整 server **5.36s** → 落在 server 内部；按装配插槽再二分，`policies()`（去掉 MCP 动态工具 + LanceDB 两个插槽）**6.22s** 反而高于 `full()` 的 **5.45s** → 排除这两块；直接禁用 MCP **0.14s** vs 启用 **5.73s**（40 倍）；单独跑 playwright MCP 子进程也不忙 → 排除子进程自身与「连接失败重试」，锁定 SDK 内部。
   - 修法：**`rust-mcp-sdk` 0.9.0 → 1.1.0**（连带 `rust-mcp-schema` 0.10.3 → 1.0.0、`rust-mcp-transport` 0.9.1 → 1.0.1）。天演自身代码**零改动**——`McpClient` 用到的 stdio / streamable-http 传输、client handler、工具列表在 1.x 保持兼容。验证：`cargo check` 零错误、`cargo test -p tianyan-mcp` **18/18 通过**、同一 5 秒窗口 CPU 从 5.28s → **0.19s（−96.4%）**，且 MCP 仍连接成功（25 个工具）。
-  - 影响面：**现有 Tauri 桌面版同样受益**（同一份 MCP 客户端代码），用户可感知的变化是「应用常开时风扇不再一直转」。
+  - 用户可感知的变化：应用常开时风扇不再一直转。
 
 ## [1.0.1] - 2026-10-24
 
@@ -689,7 +731,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [0.3.10] ~ [0.3.14] - 2026-09-11 ~ 2026-09-12
 
 ### Changed / Fixed / Added
-- 详见 [`docs/release/RELEASE_NOTES.md`](docs/release/RELEASE_NOTES.md)：记忆面板分类树、记忆浏览修复、唤醒轮实时性 + ollama 思考字段回传、压缩点体验与 user 锚定、预算误报修复 + 压缩阈值 60% + 读通道治理 + 思考块收起
+- 详见 `docs/archive/release-notes.md`（历史发布说明）：记忆面板分类树、记忆浏览修复、唤醒轮实时性 + ollama 思考字段回传、压缩点体验与 user 锚定、预算误报修复 + 压缩阈值 60% + 读通道治理 + 思考块收起
 
 ## [Unreleased]
 
@@ -944,7 +986,7 @@ No breaking changes in the unreleased version.
 
 ## Roadmap
 
-> ⚠️ 此 Roadmap 自 2024-01 后未更新。当前架构已大幅演进，参见 [系统架构文档](./docs/system-architecture.md)。
+> ⚠️ 此 Roadmap 自 2024-01 后未更新。当前架构已大幅演进，参见 [系统架构文档](./docs/archive/system-architecture.md)。
 
 ---
 

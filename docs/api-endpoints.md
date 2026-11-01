@@ -1,6 +1,6 @@
 # HTTP API 端点
 
-天演本地服务的完整 REST API 端点列表（从 README 迁移，2026-10-16）。
+天演本地服务的完整 REST API 端点列表（从 README 迁移，2026-10-16；2026-11 与代码路由逐条比对，补 `provider-presets`）。
 
 全部业务接口挂载于 `/api/v1` 前缀下；服务默认监听 `127.0.0.1:3000`
 （`TIANYAN_PORT` 可覆盖端口；独立启动不解析 CLI 参数）。
@@ -81,3 +81,4 @@
 | `/api/v1/config/providers/test` | POST | 测试 Provider 连接（protocol: openai/ollama） |
 | `/api/v1/config/providers/scan` | POST | 扫描 Provider 模型（protocol: openai/ollama） |
 | `/api/v1/config/providers/add-model` | POST | 注册模型到 Provider 配置 |
+| `/api/v1/config/provider-presets` | GET | 内置 Provider 预置列表（ADR-046） |

@@ -2,7 +2,7 @@
 //!
 //! 目的：**一次调用**给出「仓库里有什么、大概在哪」的压缩骨架，替代多轮 grep
 //! 试探。按需调用（模型自行拉取），零外部依赖、零常驻进程——与 LSP 路线相反
-//! （后者需装语言服务器且进程常驻，见 `docs/architecture/code-intelligence-routes.md`）。
+//! （后者需装语言服务器且进程常驻，见 `docs/archive/code-intelligence-routes.md`）。
 //!
 //! ## 与其它代码智能路线的关系
 //!

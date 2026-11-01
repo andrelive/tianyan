@@ -31,11 +31,36 @@ pwsh -NoProfile -File installer\build-msi.ps1 -SkipBuild  # exe 已就绪时跳�
 - 依赖 **WiX v6**（`dotnet tool install --global wix --version 6.0.2`）。**固定 v6**：v7 引入 OSMF 收费条款。
 - **别直接 `wix build`**：版本注入、产物命名、`$(var.ProductVersion)` 门禁都在脚本里。
 
-安装（perUser，无 UAC，约 3 秒）：
+### 2.1 静默安装与同版本升级（已实测）
+
+产品包是 `Scope="perUser"`（装到 `%LOCALAPPDATA%\Programs\Tianyan\`），**全程无 UAC**。
+装（§2 出包后执行；约 1.3–3 秒）：
 
 ```powershell
-msiexec /i gui-native\installer\tianyan-native-1.1.0-x64.msi /qn /norestart
+msiexec /i installer\tianyan-native-<ver>-x64.msi /qn /norestart   # 静默，实测 1.3–3 秒
 ```
+
+| 场景 | 结果 |
+|---|---|
+| perMachine（`ALLUSERS=1`） | 需管理员提权 → 每次更新必弹 UAC |
+| **perUser** | ✅ `msiexec /i /qn` 静默安装成功，1.3 秒，无 UAC |
+| 不同版本升级（MajorUpgrade） | ✅ 正确替换，注册表恒单条目，**无新旧并存** |
+| **同版本号重新构建**（修 bug 但版本仍是 1.1.0） | ✅ 开 `AllowSameVersionUpgrades="yes"` 后走 MajorUpgrade 序（先卸旧、再装新），ARP 恒单条目，实测 3.3 秒；**不开则报 1638**（已安装此产品的另一个版本） |
+| 应用运行中执行升级 | ⚠️ msiexec 退出码 0、版本已升，**但进程被 Restart Manager 直接杀掉**（无提示，也不帮你重启） |
+
+**为什么必须开 `AllowSameVersionUpgrades`**：`installer/tianyan.wxs` 未显式指定 `ProductCode`，
+WiX **每次 `wix build` 都生成新 GUID**，而 MSI 把「同版本 + 不同 ProductCode」判成**另一个产品**
+→ 默认直接拒绝（错误 1638）。改 bug 但版本号仍保持 1.1.0（不擅自升版本）就会踩到，
+因此该属性在 `tianyan.wxs` 里**固定开着**。不同版本号的升级行为不受影响
+（`Upgrade` 表同版本行 `VersionMax=当前版本` / `Attributes=513`，降级检测行
+`VersionMin=当前版本` / `Attributes=2`）。
+
+**升级前后版本比对的做法**：用 `WindowsInstaller.Installer` COM 的
+`ProductInfo(productCode, 'VersionString')` 读已安装版本（4 段 `1.1.0.0`），
+装前记一次、装后再读一次比对；ARP（设置 → 应用）显示的是 3 段 `DisplayVersion`
+`1.1.0`，两者不是同一口径，别混着比。
+
+卸载**不删数据**（数据目录由配置 `storage.data_dir` 决定，ADR-023），见 §4「装到哪、数据在哪」。
 
 ## 3. CI 发布链（`.github/workflows/release.yml`）
 
@@ -75,7 +100,22 @@ msiexec /i gui-native\installer\tianyan-native-1.1.0-x64.msi /qn /norestart
 - [ ] 若开启了 `[logging]` 文件日志，日志文件非空且按天轮转
 - [ ] 首轮对话可用（模型服务已配置；未配置时前端显示配置向导）
 
+## 6. 自动更新：当前没有（若要做，编排清单在这）
+
+**现状**：native 客户端**没有自动更新**。发布件随附 `SHA256SUMS.txt`，升级 = 下载新 MSI 手工安装
+（同版本号重建要靠 `AllowSameVersionUpgrades`，见 §2.1）。不产出 `latest.json` 的理由见 §3
+（那是 tauri updater 的清单，带 `.sig`；native 没有自动更新，硬塞只会让残留客户端拿到「格式对但签名缺失」的更新而报错）。
+
+若以后要做自研 updater，**必须做的编排（约 200–400 行）**：
+
+1. 检查更新（HTTP 拉 release 清单，比对版本）
+2. 下载 MSI + 校验（sha256，或沿用 minisign 签名）
+3. **主动优雅关闭自己**（保存状态；否则会被 Restart Manager 强杀）
+4. 以分离进程调 `msiexec /i <msi> /qn /norestart`
+5. 成功后**重新启动新版本**；退出码 `3010` 表示需重启
+6. 失败要可见（日志 + 提示），MSI 自身有事务回滚
+
 ## 附：核实来源
 
 `gui-native/installer/build-msi.ps1`（版本注入 + 产物名 + 门禁）· `gui-native/installer/tianyan.wxs` ·
-`.github/workflows/release.yml` · `scripts/check-version.ps1` · `gui-native/README.md`「出包一条链」。
+`.github/workflows/release.yml` · `scripts/check-version.ps1` · `scripts/verify-gui-native.ps1`（发布前断言）。

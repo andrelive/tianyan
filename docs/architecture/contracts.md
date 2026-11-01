@@ -1,7 +1,7 @@
 # 契约分级台账（ADR-049 D3 落地）
 
 **日期**: 2026-10-20
-**状态**: 期 0 交付物（分级已定，**尚未冻结** —— 冻结时点 = 期 3 结束）
+**状态**: 常驻台账 · 分级已冻结（期 3 结束，2026-10-21）——改契约按本表的级别条款执行
 **用途**: 回答三个问题 —— 这个 trait 归哪一级、改它会影响谁、谁来保证它不被乱改。
 
 ---
@@ -47,7 +47,7 @@ Rust 下「契约 = 成本」：契约变更会穿透依赖图，改动成本随
 | # | trait | 位置 | 目标归属 | 说明 |
 |---|---|---|---|---|
 | 15 | `AgentCoordinator` | `core/src/agent/coordinator.rs:94` | kernel-api（通道端口） | 装配器用它跑一轮；thin-channel 的唯一 agent 入口 |
-| 16 | `StreamEventDeliver` | `core/src/agent/stream_forward.rs:55` | kernel-api（通道端口） | 流式事件投递目标（SSE / Tauri / 测试） |
+| 16 | `StreamEventDeliver` | `core/src/agent/stream_forward.rs:55` | kernel-api（通道端口） | 流式事件投递目标（SSE / gui-native / 测试） |
 | 17 | `TaskEventSink` | `core/src/agent/background.rs:65` | kernel-api | 后台任务事件出口 |
 | 18 | `TaskNotifier` | `core/src/agent/background.rs:237` | kernel-api | 任务完成通知 |
 | 19 | `TaskWaker` | `core/src/agent/background.rs:250` | kernel-api | 唤醒轮触发 |

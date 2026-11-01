@@ -257,9 +257,9 @@ vite 是 14 份手写受控表单，这里是「字段声明成数据 + 一套�
 | 代码签名 | 现状 `certificateThumbprint: null`（未签名 → SmartScreen 警告），换方案不改变 |
 | 多语言 MSI | 现状 Tauri 出 `zh-CN` / `en-US` 两份，WiX 需配 culture 文件 |
 | 托盘右键菜单的人工交互 | 菜单项动作与自动化走**同一对** `tray::*` 函数（已断言），但"右键弹出菜单、点菜单项"这一步只能人眼确认 |
-| 系统集成：托盘 / 通知 / 全局快捷键 / updater 编排 | tauri/ 那 1163 行的 B 类职责需逐个接管 |
+| 系统集成：托盘 / 通知 / 全局快捷键 / updater 编排 | 前三个已接；updater 目前没有（若要做，编排清单见 [`../docs/operations/release-msi.md`](../docs/operations/release-msi.md) §6） |
 
-## MSI 打包与自动更新（已实测）
+## 1.1.0 实测修复记录（两批，均为用户反馈 + 顺手修）
 
 ### 1.1.0 修的十五处（用户实测反馈 + 顺手修）
 
@@ -313,83 +313,9 @@ vite 是 14 份手写受控表单，这里是「字段声明成数据 + 一套�
 > 那个标志」。第 20 条还多一条：**断言口径本身会骗人**（`value` 回落配置值，
 > 看上去永远正确），所以得先补 `editor` / `backfilled` 才复现得出来。
 
-### 出包一条链（产品级，已实测 1.1.0）
+## MSI 打包与自动更新
 
-```powershell
-cd gui-native
-cargo build --release                 # build.rs 会把 assets/icon.ico 嵌进 exe 资源
-pwsh -NoProfile -File ..\scripts\verify-gui-native.ps1 -Release   # 77 项断言（验的是要发的那份）
-# 打包：**不要直接调 wix**，走脚本（版本从 Cargo.toml 读出后注入，产物名同源）
-pwsh -NoProfile -File installer\build-msi.ps1        # 默认会先 cargo build --release
-msiexec /i installer\tianyan-native-<ver>-x64.msi /qn   # perUser：2.8 秒，无 UAC
-```
-> **版本单源**：`gui-native/Cargo.toml` 的 `version` 是 exe 属性与 MSI `ProductVersion`
-> 的来源；`installer/tianyan.wxs` 里**不得**写版本号（用 `$(var.ProductVersion)`，
-> 由 `build-msi.ps1` 注入 4 段形式）。它与主 workspace 的
-> `[workspace.package] version` 必须一致 —— `scripts/check-version.ps1`（进
-> `scripts/test.ps1 lint`）会校验，不一致 lint 直接红。`/health` 报的是
-> **主 workspace** 版本（`server` 的 `CARGO_PKG_VERSION`），两边一致才不会再出现
-> 「关于页说 A、`/health` 说 B」。
-
-
-`tianyan.wxs` 是**产品级**清单，与 `main.wxs` / `peruser.wxs`（早期验证用，Source 指向 `target\debug`）
-的区别：
-
-| 项 | 验证包 | 产品包（tianyan.wxs） |
-|---|---|---|
-| 名称/版本 | 「天演原生客户端（验证）」0.1.3.0 | 「天演」1.0.1.0（与 server / tauri 版对齐，ARP 里看起来是同一个产品） |
-| 二进制 | `target\debug` | `target\release`（PE `Subsystem=2`，无控制台窗口） |
-| 图标 | 无 | `build.rs` 嵌 exe 图标（取自本 crate 的 `assets/icon.ico`）+ ARP/快捷方式图标 |
-| 安装位置 | `%LOCALAPPDATA%\Programs\TianyanGuiNative` | `%LOCALAPPDATA%\Programs\Tianyan`（**不碰** tauri 的 `D:\Program Files\Tianyan`——那里已被历史产物污染） |
-| 快捷方式 | 无 | 开始菜单「天演」 |
-| 数据目录 | 不动 | 不动（`D:\tianyan` 由配置决定，卸载不删） |
-
-体积：release exe 275MB（`[profile.release] strip = "symbols"` 后；不 strip 是 288MB），
-MSI **61MB**。GPUI 的体积大头是静态数据（LanceDB/DataFusion、gpui-kit-assets 的 1800+ SVG、
-tree-sitter 语法），不是符号表——strip 只省 13MB。
-
-### 打包路径：WiX v6（不是 cargo-wix）
-
-| 方案 | 结论 |
-|---|---|
-| `cargo-wix` | ❌ 依赖 WiX **v3** 的 `candle.exe`/`light.exe`，最新版停在 2025-03 |
-| `cargo-dist` / `dist` | ⚠️ 仍用 WiX v3；其 updater `axoupdater` 依赖 install receipts，与 MSI 分发不匹配 |
-| **WiX v6（dotnet tool）** | ✅ `dotnet tool install --global wix --version 6.0.2` → `wix build -o x.msi x.wxs` |
-| WiX v7 | ⚠️ **引入 OSMF 收费条款**：年收入 > $10,000 的组织必须赞助；低于此额度免费但需显式 `-acceptEula wix7`。**用 v6 可彻底绕开这个法律承诺** |
-
-实测：`wix build` 打 42.9MB 的 debug exe → **9.34MB MSI，18 秒**。
-
-### 静默安装 / 升级实测
-
-| 场景 | 结果 |
-|---|---|
-| perMachine（现状，`ALLUSERS=1`） | 需管理员提权 → 更新必弹 UAC |
-| **perUser（`Scope="perUser"`，装到 `%LOCALAPPDATA%\Programs\`）** | ✅ **`msiexec /i /qn` 静默安装成功，1.3 秒，无 UAC** |
-| MajorUpgrade（0.1.1 → 0.1.2 → 0.1.3） | ✅ 正确替换，注册表恒为单条目，**无新旧并存** |
-| **同版本号重新构建**（1.1.0.0 → 1.1.0.0 的新 build） | ✅ 开了 `AllowSameVersionUpgrades="yes"` 后走 MajorUpgrade 序（先卸旧、再装新），ARP 恒单条目，实测 3.3 秒；**不开则报 1638**（已安装此产品的另一个版本） |
-| 查询已安装版本 | ✅ `WindowsInstaller.Installer` COM 的 `ProductInfo(..,'VersionString')` |
-| **应用运行中升级** | ⚠️ msiexec 退出码 0、版本已升，**但进程被 Restart Manager 直接杀掉**（无提示，也不帮你重启） |
-
-> 现状：生产版 `Tianyan 1.0.1` 是 perMachine，装在 `D:\Program Files\Tianyan\`。
->
-> **为什么需要 `AllowSameVersionUpgrades`**：WiX 未显式指定 `ProductCode` 时
-> **每次 `wix build` 都生成新 GUID**（实测同一份 `tianyan.wxs` 连续三次构建 =
-> `{CDCA811D…}` / `{632C1702…}` / `{ADBD5FD1…}`），而 MSI 把「同版本 + 不同
-> ProductCode」判成**另一个产品** → 默认直接拒绝（错误 1638）。改 bug 但版本号
-> 仍保持 1.1.0（不擅自升版本）就会踩到，因此 `tianyan.wxs` 里**固定开着**它。
-> 不同版本号的升级行为不受影响：`Upgrade` 表的同版本行是
-> `VersionMax=当前版本`、`Attributes=513`，降级检测行是 `VersionMin=当前版本`、
-> `Attributes=2`。
-> 改 perUser 可换来「更新零 UAC」，代价是多用户机器上需各自安装。
-
-### 自研 updater 必须做的编排（约 200–400 行）
-
-1. 检查更新（HTTP 拉 release 清单，比对版本）
-2. 下载 MSI + 校验（sha256，或沿用 minisign 签名）
-3. **主动优雅关闭自己**（保存状态；否则会被 Restart Manager 强杀）
-4. 以分离进程调 `msiexec /i <msi> /qn /norestart`
-5. 成功后**重新启动新版本**；退出码 `3010` 表示需重启
-6. 失败要可见（日志 + 提示），MSI 自身有事务回滚
+打包流程、静默安装实测、自动更新编排清单**只有一份**：见 [`../docs/operations/release-msi.md`](../docs/operations/release-msi.md)。本文件不再重复。
 
 ## 怎么跑
 
@@ -575,9 +501,6 @@ win32 消息循环**（GPUI 独占主线程循环且不暴露 hook），主线�
 `unsafe` 只出现在 `tray.rs` / `hotkey.rs` 的 Win32 边界（枚举窗口、显隐窗口、泵消息、
 注册热键），每处都有 SAFETY 注释。
 
-打包 MSI（需先 `dotnet tool install --global wix --version 6.0.2`）：
-
-```powershell
-cd gui-native\installer
-wix build -o tianyan-gui-native.msi peruser.wxs
-```
+打包 MSI：**不要直接跑 WiX CLI** —— 版本注入、产物命名、`$(var.ProductVersion)` 门禁都在
+`installer/build-msi.ps1` 里；完整流程（含依赖版本、静默安装与验收清单）见
+[`../docs/operations/release-msi.md`](../docs/operations/release-msi.md)。

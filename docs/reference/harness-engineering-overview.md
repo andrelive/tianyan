@@ -1,3 +1,5 @@
+> **定位**：外部资料整理（Mitchell Hashimoto / OpenAI 博客 / Martin Fowler / Claude Code 源码分析），不是天演自身机制文档。天演的 harness 落地见 [`../architecture/contracts.md`](../architecture/contracts.md) 与 ADR-049。
+
 # Harness Engineering 核心精要
 
 > **来源**: Mitchell Hashimoto、OpenAI 官方博客、Martin Fowler / Thoughtworks 分析、Claude Code 源码泄露分析等
@@ -175,7 +177,7 @@ Types → Config → Repo → Service → Runtime → UI
 **质量文档**:
 - `docs/quality/domain-grades.md` — 各域质量等级
 - `docs/quality/verification-status.md` — 验证状态
-- `docs/quality/golden-principles.md` — 核心原则的机械规则
+- `docs/quality/` 下的 golden-principles — 核心原则的机械规则
 
 **运行策略**:
 - 每次运行结束执行轻量 cleanup

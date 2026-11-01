@@ -120,7 +120,7 @@ cargo run -p tianyan-server                          # 只跑后端（默认 127
 
 **全部文档的入口 → [`docs/README.md`](./docs/README.md)**（按「我要做什么」索引：模块 / 决策 / 机制 / 运维 / 归档）。
 
-- 架构：[模块索引](./docs/architecture/module-map.md) · [设计原则](./docs/architecture/principles.md) · [ADR 索引（52 份）](./docs/architecture/decisions/README.md)
+- 架构：[模块索引](./docs/architecture/module-map.md) · [设计原则与纪律](./AGENTS.md) · [ADR 索引（52 份）](./docs/architecture/decisions/README.md)
 - 机制：[上下文管线](./docs/architecture/context-pipeline.md) · [事件协议](./docs/architecture/event-protocol.md) · [Provider 备注](./docs/architecture/model-provider-notes.md) · [任务运行时](./docs/architecture/task-runtime.md)
 - 开发与运维：[开发指南](./docs/development.md) · [运维手册](./docs/operations/) · [更新日志](./CHANGELOG.md)
 

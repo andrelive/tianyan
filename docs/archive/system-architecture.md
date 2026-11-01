@@ -6,11 +6,11 @@
 实现细节与最新事实以代码为准，权威文档：
 
 > **相关文档导航**：
-> - [模块索引](./architecture/module-map.md) — 模块清单与位置
+> - [模块索引](../architecture/module-map.md) — 模块清单与位置
 > - [模块关系图](./module-relationships.md) — 模块间依赖关系、调用流程和数据交互机制
 > - [模块功能说明](./module-descriptions.md) — 各模块功能职责、公开 API 和集成状态
-> - [架构决策记录](./architecture/decisions/) — ADR-001~030（含修订关系）
-> - [工具目录](./architecture/tool-catalog.md) — 自动生成，与代码一致
+> - [架构决策记录](../architecture/decisions/) — ADR-001~030（含修订关系）
+> - [工具目录](../architecture/tool-catalog.md) — 自动生成，与代码一致
 
 > **最后更新**: 2026-09-06（同步 ADR-028/029/030：统一事件推送、事件订阅与快照恢复、统一 Agent 循环框架）
 
@@ -194,7 +194,7 @@ pub struct StructuredMessage {
 
 知识库查询、技能调用等能力封装为 OpenAI function calling 兼容的工具，由 LLM 通过 `tool_call` 自主调用。
 
-当前 `ToolRegistry` 注册 34 个内置工具（完整清单见自动生成的 [`tool-catalog.md`](architecture/tool-catalog.md)）：`read_file`、`write_file`、`apply_edit`、`apply_patch`、`execute_command`、`search_vfs`、`call_skill`、`run_tests`、`discover_tests`、`ask_user`、`self_check`、`knowledge_ingest`、`web_search`、`web_fetch`、`delegate_to_agent`、`glob`、`list_dir`、`symbol_outline`、`repo_map`、`task_status`、`task_cancel` 等。其中 `call_skill` 读 VFS 技能文档（方法论文档，无执行语义）；`delegate_to_agent` 走统一循环框架（ADR-030：子代理 = AgentLoop 实例 + `TurnPolicy` 委托策略，流式路径 + 消息落库即广播）；`web_search`/`web_fetch` 提供网页感知（后端 + SSRF 防护 + 缓存）。
+当前 `ToolRegistry` 注册 34 个内置工具（完整清单见自动生成的 [`tool-catalog.md`](../architecture/tool-catalog.md)）：`read_file`、`write_file`、`apply_edit`、`apply_patch`、`execute_command`、`search_vfs`、`call_skill`、`run_tests`、`discover_tests`、`ask_user`、`self_check`、`knowledge_ingest`、`web_search`、`web_fetch`、`delegate_to_agent`、`glob`、`list_dir`、`symbol_outline`、`repo_map`、`task_status`、`task_cancel` 等。其中 `call_skill` 读 VFS 技能文档（方法论文档，无执行语义）；`delegate_to_agent` 走统一循环框架（ADR-030：子代理 = AgentLoop 实例 + `TurnPolicy` 委托策略，流式路径 + 消息落库即广播）；`web_search`/`web_fetch` 提供网页感知（后端 + SSRF 防护 + 缓存）。
 
 ### 3.4 决策 4: 上下文组装前缀匹配原则
 
@@ -250,7 +250,7 @@ Agent :: process_message(session_id, msg) / process_message_stream（多模态 +
 
 装配经 `AssemblyServices::tool_pipeline_factory` 注入（server 库不认识该插件）；工厂的**实现**在 `tianyan-assembly`（ADR-049 期 4：11 个插件工厂的单一实现，`app` bin / `tauri` / 集成测试共用同一份，改造前共有 5 处副本）。
 
-- **25 个内置工具**：基于 `#[derive(JsonSchema)]` 参数结构体自动生成 Schema；完整清单见自动生成的 [`docs/architecture/tool-catalog.md`](architecture/tool-catalog.md)（`scripts/gen-tool-catalog.ps1` 生成，freshness 挂入 `scripts/test.ps1` lint 门禁）
+- **25 个内置工具**：基于 `#[derive(JsonSchema)]` 参数结构体自动生成 Schema；完整清单见自动生成的 [`docs/architecture/tool-catalog.md`](../architecture/tool-catalog.md)（`scripts/gen-tool-catalog.ps1` 生成，freshness 挂入 `scripts/test.ps1` lint 门禁）
 - **展示契约（A2）**：每个工具注册 `ToolPresentation` 展示意图（read/terminal/diff/search/web/...），随 SSE `tool_call` 事件透传，前端 `ToolCallCard` 数据驱动渲染——工具与 UI 解耦
 - **安全策略**：`SecurityPolicy` 控制命令白名单/黑名单，文件操作前检查
 - **审批工作流**：`ApprovalWorkflow` 五级风险（Safe/Low/Medium/High/Critical）

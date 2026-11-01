@@ -65,7 +65,7 @@ cargo test -p tianyan-core vfs::backend::local -- --nocapture  # 指定测试模
 | `service/config/` | `tianyan-service-config` | **服务层**：配置加载 / 持久化（段保全）/ 数据目录迁移 / 校验编排 / 向导 DTO（ADR-049 期 3-T4，753 生产行从 core 搬出）；**不含配置结构**（`TianyanConfig` 留 core——内核与插件的共同构造参数） |
 | `assembly/` | `tianyan-assembly` | **装配清单**：11 个插件工厂 + 两份清单（`full()` = 生产 11 插槽 / `policies()` = 集成测试的 9 插槽前缀）+ 跨插件顺序断言的**单一实现**（ADR-049 期 4）；全仓唯一 `use` 全部插件 crate 之处（改造前同一份清单在 `app` / `gui-native` / `server/tests` / `app/tests` / `app/examples` 共 5 处副本） |
 | `tools-ops/` | `tianyan-tools-ops` | **运维工具**（ADR-049 期 4d）：服务停止后直接修数据的终端脚本（`skill_import` / `rebuild_overviews`），**不被任何 crate 依赖**；插件 crate 因此零 dev 边 |
-| `desktop/` | `tianyan-desktop` | **桌面启动编排（单 server 发现与复用）**：`ensure_server` / `discover_existing`（扫 `3000..=3100` + 校验 `/health` 的 `service` **与** `data_dir`）+ `find_available_port` / `start_axum_server`；`tauri/`（已冻结）与 `gui-native/` 共用这一份。**端口探测只避免端口冲突，不能避免数据目录双写**——实测撞上过「桌面版占 3000、gui-native 顺延 3001，两个 server 同写 `D:\tianyan`」（定时任务各跑一遍 + SQLite 并发写）。只经 `tianyan-assembly::full()` 取插件清单，**不直接认识插件 crate**（不是第二份装配清单） |
+| `desktop/` | `tianyan-desktop` | **桌面启动编排（单 server 发现与复用）**：`ensure_server` / `discover_existing`（扫 `3000..=3100` + 校验 `/health` 的 `service` **与** `data_dir`）+ `find_available_port` / `start_axum_server`；`gui-native/` 共用这一份（`tauri/` **已于 2026-10 删除**）。**端口探测只避免端口冲突，不能避免数据目录双写**——实测撞上过「桌面版占 3000、gui-native 顺延 3001，两个 server 同写 `D:\tianyan`」（定时任务各跑一遍 + SQLite 并发写）。只经 `tianyan-assembly::full()` 取插件清单，**不直接认识插件 crate**（不是第二份装配清单） |
 | `plugins/tools-fs/` | `tianyan-tools-fs` | 插件：glob / list_dir / read_file / write_file / apply_edit / apply_patch / **view_image**（定义/门控/审批；实现暂留 core） |
 | `plugins/tools-code/` | `tianyan-tools-code` | 插件：symbol_outline / repo_map / grep（**含实现**，tree-sitter ×6 在此） |
 | `plugins/tools-todo/` | `tianyan-tools-todo` | 插件：todo / goal（含实现） |
@@ -81,7 +81,7 @@ cargo test -p tianyan-core vfs::backend::local -- --nocapture  # 指定测试模
 | `plugins/provider-llm/` | `tianyan-provider-llm` | 插件：**聊天 + 视觉 provider**（`chat` / `vision` / `discovery` / 日志装饰，约 2,450 行 + 39 个迁移测试）+ 连通性探针（配置页「测试连接」）；`async-openai` 随之离开 core（ADR-049 期 2 序 6） |
 | `plugins/provider-embed/` | `tianyan-provider-embed` | 插件：**文本嵌入 provider**（宽容 usage 解析 / 用量上报 / 查询缓存 FIFO 256，约 700 行 + 10 个迁移测试）；用量上报**契约** `EmbeddingUsageSink` 留 core（实现方在通道层）（期 2 序 6） |
 | `plugins/tool-pipeline/` | `tianyan-tool-pipeline` | 插件：**工具管线出口侧**——观测监听器（统计 / Trace / GEPA 执行记录 / 失败规则学习，213 生产行）+ 超预算输出落盘（ADR-047，181 生产行）+ 工具目录渲染（96 生产行），394 生产行搬出 core + 14 个迁移测试 + 2 个新增；契约 `ToolPostExecuteListener` / `ToolPipelineWiring` / `ToolPipelineFactory` 留 core（`agent::tool_registry::pipeline`，期 3-T5） |
-| `gui-native/` | `tianyan-gui-native` | **GPUI 原生客户端（第二个桌面壳，独立 workspace）**：自带 `[workspace]`，**不进主 workspace**（零脚本改动、零 IDE 索引污染、零 CI 风险；代价 = `core`/`server` 编两份）。与 `gui-vite` 并存（`tauri/` 已冻结），连同一个内嵌 server、走同一套 HTTP/SSE 协议。验证结论与实测数据见 `gui-native/README.md`（含 GPUI 内存对比、IME/Markdown/虚拟列表实测、MSI perUser 静默升级） |
+| `gui-native/` | `tianyan-gui-native` | **GPUI 原生客户端（第二个桌面壳，独立 workspace）**：自带 `[workspace]`，**不进主 workspace**（零脚本改动、零 IDE 索引污染、零 CI 风险；代价 = `core`/`server` 编两份）。与 `gui-vite` 并存（`tauri/` **已于 2026-10 删除**），连同一个内嵌 server、走同一套 HTTP/SSE 协议。验证结论与实测数据见 `gui-native/README.md`（含 GPUI 内存对比、IME/Markdown/虚拟列表实测）；打包四节（静默安装 / 同版本升级 / 验收 / 自动更新编排）见 [`docs/operations/release-msi.md`](docs/operations/release-msi.md) |
 
 **依赖铁律**（破一条拆包收益全部回吐）：插件只依赖 `core`（kernel-api）；插件之间零互赖；
 `core`/`server` 不认识任何插件 crate。**认识具体插件 crate 的只有三处**：`assembly/`
@@ -147,6 +147,18 @@ agent 没有 system 前缀、上下文只增不减，服务起得来但行为已
 - 所有错误用 `TianyanError`，禁止引入新错误类型。`TianyanError` 仅保留 4 个变体（`Io` / `Json` / `Toml` / `Custom`），模块内部错误通过 `Custom(String)` 传递，调用方在消息中携带"模块前缀：详情"，**严禁新增变体**
 - **错误分类用语义谓词**（ADR-014）：构造用 `not_found` / `conflict` / `invalid_input` / `permission` / `timeout`，判定用 `is_not_found` / `is_conflict` / `is_invalid_input` / `is_permission` / `is_timeout`。**禁止在调用方对错误消息做字符串匹配分类**（`starts_with` / `contains` 判定错误类别）——分类契约只在 `core/src/common/error.rs` 一处
 
+## 设计原则
+
+> 只收**不可违反的形状约束**（设计原则的单一出处就是本节）。模块职责 / 关键文件 / 装配细节 → [module-map](docs/architecture/module-map.md)；契约分级 → [contracts](docs/architecture/contracts.md)。
+
+- **Seam 原则**：*One adapter = hypothetical seam. Two adapters = real seam.* 不因「未来可能需要」引入 trait；测试 mock 算 adapter，有生产实现 + 测试 mock 才是真实 seam —— `ChatService`（1 生产 + 5 mock）/ `EmbeddingService` / `VlmService` / `ServiceDiscovery` 均属真实 seam。
+- **Trait 实现直接写在 `impl Trait for Struct`**：不定义中间 inherent 方法做委托。
+- **泛型边界**：被其他 crate 实例化的类型优先 `Arc<dyn Trait>`（泛型只做模块内部封装；对外暴露先看 trait object 兼容性）。
+- **共享基础设施归被依赖方**：跨模块共享的具体类型放**被依赖方 / 叶模块**，消费方经单向 re-export 保留下游路径 —— 先例 `SqliteDb` → `vfs::backend`、`LoggingConfig` / `TokenEstimator` → `common`；目标是**无依赖环**（ADR-007）。
+- **层间职责分明**：持久化层只管存，执行层才决定用什么模型执行；中间层既拿不到上游值、也无权读配置时，传 `Option::None` 让下游自己决断。
+- **Providers 的 fail fast 是跨层语义**：请求层内置指数退避重试（见「常见陷阱」），「fail fast」仅指不跨 Agent 层 / 不跨任务重试；`RetryService` 已移除，**禁止重新引入**独立的请求重试封装层。
+- **初始化分离**：VFS 基础设施 → `vfs/vfs_impl.rs::initialize()`，应用内容（soul.md / learned 目录）→ `server/src/lib.rs::bootstrap_app_vfs()`；`DEFAULT_SOUL` 用 `include_str!`（见「常见陷阱」两条）。
+
 ## 文档写作层次
 
 **对外文档 = 完整成果；缘由与代价 = ADR / CHANGELOG / 对话回复。** 不要混层。
@@ -168,7 +180,7 @@ agent 没有 system 前缀、上下文只增不减，服务起得来但行为已
 
 核心架构决策 → [`docs/architecture/decisions/`](docs/architecture/decisions/)（52 份，全量索引见该目录 `README.md`）。最常查的九份：
 
-- [ADR-001: VFS 双层摘要索引](docs/architecture/decisions/001-vfs-dual-layer-index.md) — 项目基础机制（**检索两铁律**见「模块速览」vfs 行）
+- [ADR-001: VFS 双层摘要索引](docs/architecture/decisions/001-vfs-dual-layer-index.md) — 项目基础机制（**检索两铁律**见「模块速览」下方注）
 - [ADR-018: 会话权威存储迁至 SQLite](docs/architecture/decisions/018-session-authoritative-sqlite.md) — 会话不经 VFS 的唯一例外
 - [ADR-023: 配置目录与数据目录分离](docs/architecture/decisions/023-config-data-dir-separation.md) — 数据目录**只读**、搬迁是唯一写入通道（§4）
 - [ADR-027: 会话时序链模型](docs/architecture/decisions/027-session-timeline-chain.md) — 无分支链；截断只发生在组装层
@@ -183,34 +195,41 @@ agent 没有 system 前缀、上下文只增不减，服务起得来但行为已
 专题文档（机制级）→ [`context-pipeline`](docs/architecture/context-pipeline.md)（上下文组装+压缩）· [`event-protocol`](docs/architecture/event-protocol.md)（事件/SSE 协议）· [`model-provider-notes`](docs/architecture/model-provider-notes.md)（reasoning 回传+缓存）· [`task-runtime`](docs/architecture/task-runtime.md)（三类任务/并发/取消）· [`operations/`](docs/operations/)（troubleshooting / data-health-check / release-msi / ci-pipeline）
 
 模块索引 → [`docs/architecture/module-map.md`](docs/architecture/module-map.md) — **唯一的模块文档**（旧的 `module-descriptions` / `module-relationships` 已归档到 `docs/archive/`，不再维护）
-设计原则 → [`docs/architecture/principles.md`](docs/architecture/principles.md)
-Harness 工程 → [`docs/harness核心思路/harness-engineering-overview.md`](docs/harness核心思路/harness-engineering-overview.md)
-**重构实践指南（审查/波次/QA 纪律）→ [`docs/architecture/refactoring-practices.md`](docs/architecture/refactoring-practices.md)**
+设计原则（不可违反的形状约束）→ 本文「## 设计原则」一节
+Harness 工程（外部资料整理，非天演机制）→ [`docs/reference/harness-engineering-overview.md`](docs/reference/harness-engineering-overview.md)
+重构实践（审查 / 波次 / QA 纪律）→ [`docs/development.md`](docs/development.md) 的「重构实践」章
+已知限制（用户可见的长期形状约束）→ [`docs/known-limits.md`](docs/known-limits.md)
+契约分级台账（S / A / B，**改契约前必读**）→ [`docs/architecture/contracts.md`](docs/architecture/contracts.md)
+
 ## 模块速览
+
+> 每个模块的详细职责、关键文件、装配细节见 [`docs/architecture/module-map.md`](docs/architecture/module-map.md)（唯一的模块文档）。本表只给「有这个模块、它大概干什么、它受什么约束」。
 
 | 模块 | 位置 | 一句话 | ⛔ VFS 约束 |
 |------|------|--------|-------------|
-| `common` | `core/src/common/` | 通用类型/错误（`TianyanError` 4 变体 + 语义谓词）/日志/token 估算/UTF-8 截断/二进制嗅探（`sniff_binary` + `sniff_image_mime` 严格图片格式）/SHA-256 摘要（`hash::hex_sha256`）/HTTP 工厂 | — |
-| `config` | `core/src/config/` | 配置**结构 + 全局槽位**：`TianyanConfig` 与全部子 Config（agent/storage/model/security/web/mcp/events/evolution/reminder/retrieval/roles/executor/tool_output/memory/clipboard）及其 `Default`、预设数据表 `PROVIDER_PRESETS`/`find_preset`、安全策略归一（ADR-033：`approval_mode`/`safety_mode`）、`get_config()`/`set_config()`/`try_get_config()`（OnceLock 槽位，装配层注入）。**加载 / 持久化 / 迁移 / 校验 / 向导已出 core**（ADR-049 期 3-T4 → `service/config`，`tianyan-service-config`）：它们是服务层的运维语义，不是内核机制 | — |
-| `db` | `core/src/db/` | **统一写入门面**（ADR-020）：Database 门面（单连接 + schema 集中）+ SqliteDb + 业务域 Repository（stats/trace/execution/usage）；只依赖 common | — |
-| `roles` | `core/src/roles/` | 角色基础类型（ADR-016 纯类型层）：config/agent/scheduler 共用 | — |
-| `role_store` | `core/src/role_store.rs` | 角色 VFS 存储（独立存储层，依赖 vfs + roles） | — |
-| `vfs` | `core/src/vfs/` | **基础机制**：统一存储检索层（L0/L1/L2 + RRF 融合）。**检索两铁律**（ADR-001「对子系统的约束」）：① 分数 = **余弦相似度**（查询侧显式 `DistanceType::Cosine`；默认 L2 会让 `1 - distance` 变成 `2cos-1`，0.6 阈值实际要求余弦 0.8 ⇒ 永远只加载 L0）；② 命名空间过滤**必须下推 DB 层**（`only_if`），取回 top-k 再内存筛会因全局 top-k 被占满而归零。只留 `StorageBackend` 契约与 `UriMapper` 等机制，后端实现已出 core（ADR-049 序 4：`backend/sqlite.rs`、`backend/local.rs` 在 `plugins/storage-sqlite`；`backend/sqlite_db.rs` 仅是 `db::sqlite_db` 的兼容 re-export）；向量实现同样在 `plugins/storage-vector`（序 3） | — |
-| `agent` | `core/src/agent/` | Agent 协调器 + AgentLoop + ToolRegistry + 后台任务（ADR-026：委托只支持异步、双信号量排队 20+40、SQL 权威 + 3 天 TTL）；**统一循环框架（ADR-030）**：主 agent 与子代理同构（`TurnPolicy` 配置——工具执行器 Global/RoleFiltered、持久化 FTS 开关、max_turns 策略、请求工具集），收尾统一"无工具调用"（submit_result 降级为可选结果落盘工具，主 agent 用 task_status 查询）；子智能体会话消息落库不索引 FTS（`add_structured_message_no_fts`）+ 流式事件同一通道（ADR-031：消息不再广播，chat_stream 带 session_id=task_id 路由）；**流式转发统一（ADR-032）**：`stream_forward.rs` 单点（建通道即消费防死锁 + 字段注入），用户轮/唤醒轮/子代理共用，映射器与送达目标可插拔；**结构性取消（ADR-036）**：`cancel.rs` 等待原语（`wait_cancelled`/`cancellable`）覆盖请求在飞/流式 recv/组装/压缩等待盲区；**排他写事务（ADR-040）**：`working_set::with_session_exclusive`（取锁 → 锁内 `rebuild` 最新链 → 闭包）+ `rollback.rs`（`rollback_to` / `redo_to`——回退「先文件、后链」全或无，session handler 退化为薄壳）；工具执行走可插拔管线（`tool_registry/pipeline.rs`：pre-execute 监听器 / 单调守卫 / post-execute 监听器，DSH 吸收）+ **接线契约**（`ToolPipelineWiring` / `ToolPipelineFactory`）；**监听器实现已出 core**（ADR-049 期 3-T5 → `plugins/tool-pipeline`：观测 = 统计/Trace/GEPA/规则学习，落盘 = ADR-047，工具目录渲染）——注册表不再自带任何监听器，未装配 = 不落盘 + 无观测 + 装配期告警 | 所有工具操作通过 VFS |
-| `context` | `core/src/context/` | 上下文工程**契约 + 组装机制**：`ContextAssembler`（K1 组装，纯静态函数，ADR-043 工具对规范化 + 前缀零漂移）、`ContextPort`（3 方法 seam）、`ContextServices`（装配能力集合）、`NullContextPort`（未装配兜底）、`SessionImages`（ADR-050 tool 结果图片的组装期加载）。**策略实现已出 core**（ADR-049 期 3-T2）：管线 / 压缩 / 双层检索 → `plugins/policy-context` | 检索仅通过 `DualLayerRetriever`（在 `tianyan_policy_context`） |
+| `common` | `core/src/common/` | 通用类型 / 错误（`TianyanError` 4 变体 + 语义谓词）/ 日志 / token 估算 / 截断 / 摘要 | — |
+| `config` | `core/src/config/` | 配置结构与全局槽位（`get_config`）；加载 / 持久化 / 迁移 / 校验在 `service/config` | — |
+| `db` | `core/src/db/` | 统一写入门面（ADR-020）：单连接 + schema 集中 + 业务域 Repository；只依赖 `common` | — |
+| `roles` | `core/src/roles/` | 角色基础类型（ADR-016 纯类型层） | — |
+| `role_store` | `core/src/role_store.rs` | 角色 VFS 存储（依赖 vfs + roles） | — |
+| `vfs` | `core/src/vfs/` | 统一存储检索层（L0/L1/L2 + RRF）；只留 `StorageBackend` 契约 + `UriMapper`，后端实现在 `plugins/storage-sqlite` / `storage-vector` | — |
+| `agent` | `core/src/agent/` | Agent 循环 / 工具注册表 / 可插拔工具管线 / 后台委托（ADR-026 异步 + 双信号量、ADR-030 同构、ADR-040 排他写）；监听器在 `plugins/tool-pipeline` | 所有工具操作通过 VFS |
+| `context` | `core/src/context/` | 上下文契约 + 组装机制（`ContextAssembler` / `ContextPort`）；策略实现在 `plugins/policy-context` | 检索仅通过 `DualLayerRetriever`（在 `tianyan_policy_context`） |
 | `knowledge` | `core/src/knowledge/` | 知识库导入管道 | ❌ **不建独立检索管道**，导入→VFS→SummaryEngine |
-| `skills` | `core/src/skills/` | 技能 = VFS 方法论文档（发现/读取；无执行语义）：`SkillManager`（发现/读取）+ `REVIEWS_PREFIX`（评审记录目录名，技能发现时排除它——复审**契约已退役**，常量保留只为防存量 `_reviews` 目录被当成一个技能列出）。技能质量评审整体退役（ADR-049 期 4c），判断归演化智能体；`SkillManager` 因 3a 业务复用（`api/skills/services.rs` 直接持具体类型）留 core | ❌ **不全量加载**，L0 发现→L2 按需 |
-| `session` | `core/src/session/` | `SessionStore`（SQLite 权威存储，ADR-018；SQL 收敛本模块，经 db 单连接）+ `PersistentSessionManager` + `SessionRecall`（FTS 回忆） | ⚠️ 例外：会话内容不经 VFS（ADR-018）；`tianyan://session/{id}` 仅作逻辑标识 |
-| `model` | `core/src/model/` | 模型服务**契约 + 数据**：`ChatService`/`EmbeddingService`/`VlmService`/`ServiceDiscovery`（S 级）、载荷（`types/`）、模型规格（`spec`）、重试策略（`retry`）、装配原语（`assembly`：`ProviderLlmServices`/`ProviderEmbedServices`/`ConnectionProbe`）、降级服务（`unconfigured`）、用量上报契约（`usage`）。**实现已全部出 core**（ADR-049 期 2 序 6）：聊天/视觉 → `plugins/provider-llm`，嵌入 → `plugins/provider-embed`，共享客户端 → `plugins/provider-client`；容器 `ModelServices` → `server/src/model_services.rs` | — |
-| `scheduler` | `core/src/scheduler/` | 定时任务**机制 + 装配原语**：`TaskScheduler`（间隔+补跑）、`TaskHandler`/`TaskContext`/`TaskDefinition`、`TaskRegistration`/`TaskServices`、`EvolutionReviewExecutor`（综述执行器契约）；**core 已无任何具体任务实现**（5 个内置任务 → `plugins/task-builtin` 序 5a，演化任务 → `plugins/task-evolution` 序 5b） | 定时任务产物写入 VFS |
-| `observability` | `core/src/observability/` | `AgentMetrics`/`UsageStats`/`TraceCollector`/`ExecutionLog`/`UsageLog`/`RuleRecorder`；SQL 经 db Repository 收敛 | — |
-| `executor` | `core/src/executor/` | 工具执行支撑（Action、审批**门控契约**、任务自审**契约** `review::TaskReviewer`、验证门控）+ 语义化编辑（内容匹配 edit / patch）、文件浏览（fs/search）、代码智能（symbols/repo_map/project/test_discovery）、图片冻结副本（`image::prepare_session_image`，ADR-050——`view_image` 的定义在 `plugins/tools-fs`）。**审批与自审的实现均已出 core**（→ `plugins/policy-approval` 期 3-T1 / `plugins/policy-review` 期 3-T3） | — |
-| `snapshot` | `core/src/snapshot/` | 工作区快照（回退/撤销回退；gzip 压缩 + GC + similar diff） | ⚠️ **ADR-006 例外**：独立文件存储于 `{data_dir}/snapshots/`，不经 VFS |
-| `events` | `core/src/events/` | 事件驱动触发（T1 路线：文件监听 + webhook → 事件总线 → 规则动作） | — |
-| `goals` | `core/src/goals/` | 长期目标 + 进度跟踪（与待办联动；运行期 `goals.json` 持久化） | ⚠️ 例外：运行期结构化产物 |
-| `todos` | `core/src/todos/` | 待办清单（会话绑定；运行期 `todos.json` 持久化） | ⚠️ 例外：运行期结构化产物 |
-| `notification` | `core/src/notification.rs` | 通知通道抽象（`NotificationSink`）；桌面实现 = gui-native 的 `notify.rs`（WinRT + AUMID 注册），tauri 版曾由插件注入（随 tauri 删除） | — |
+| `skills` | `core/src/skills/` | 技能 = VFS 方法论文档（发现 / 读取，**无执行语义**） | ❌ **不全量加载**，L0 发现→L2 按需 |
+| `session` | `core/src/session/` | 会话存储与回忆（`SessionStore` + FTS）；SQL 收敛本模块 | ⚠️ 例外：会话内容不经 VFS（ADR-018）；`tianyan://session/{id}` 仅作逻辑标识 |
+| `model` | `core/src/model/` | 模型服务契约 + 载荷 + 装配原语；实现全在 provider 三 crate | — |
+| `scheduler` | `core/src/scheduler/` | 定时任务机制 + 装配原语；具体任务全在 task 插件 | 定时任务产物写入 VFS |
+| `observability` | `core/src/observability/` | 指标 / 用量 / Trace / 执行日志（SQL 经 db Repository） | — |
+| `executor` | `core/src/executor/` | 工具执行支撑 + 语义化编辑 + 文件浏览 + 代码智能 + 图片冻结副本；审批 / 自审契约留 core | — |
+| `snapshot` | `core/src/snapshot/` | 工作区快照（回退 / 重做 / gzip / GC / diff） | ⚠️ **ADR-006 例外**：独立文件存储于 `{data_dir}/snapshots/`，不经 VFS |
+| `events` | `core/src/events/` | 事件触发（文件监听 + webhook → 总线 → 规则动作） | — |
+| `goals` | `core/src/goals/` | 长期目标 + 进度跟踪（会话绑定） | ⚠️ 例外：运行期结构化产物 |
+| `todos` | `core/src/todos/` | 待办清单（会话绑定） | ⚠️ 例外：运行期结构化产物 |
+| `notification` | `core/src/notification.rs` | 通知通道抽象（`NotificationSink`；桌面实现在 gui-native） | — |
 
+> **注（VFS 检索两铁律，ADR-001「对子系统的约束」）**：① 分数 = **余弦相似度**（查询侧显式 `DistanceType::Cosine`；默认 L2 会让 `1 - distance` 变成 `2cos-1`，0.6 阈值实际要求余弦 0.8 ⇒ 永远只加载 L0）；② 命名空间过滤**必须下推 DB 层**（`only_if`），取回 top-k 再内存筛会因全局 top-k 被占满而归零。
+>
 > **注**：MCP 桥接（`server/src/mcp_bridge.rs`）返回的图片（浏览器截图等）落盘于 `{data_dir}/mcp_images/`，与 snapshot 同级运行时产物例外，不经 VFS（ADR-010）。
 >
 > **注（工具图片冻结副本，ADR-050）**：`view_image` 读取的图片复制到 `{data_dir}/session_images/{sha256}.{ext}`（内容寻址、同图去重、不清理）；tool 结果只存引用（`session_images/<sha>.png`），组装期按引用加载为 data URL 随该条 tool 消息发给模型。与 `tool_output/` 同类运行期产物，不经 VFS。

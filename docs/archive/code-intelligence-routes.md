@@ -1,3 +1,5 @@
+> **归档（2026-11）**：这是已完成实施的路线决策记录（LSP 已移除、tree-sitter 工具已落地）。当前状态见 [`../architecture/module-map.md`](../architecture/module-map.md) 的 `plugins/tools-code` 与根 `AGENTS.md`。本文不再作为事实来源。
+
 # 代码智能路线决策（grep / tree-sitter / LSP / code graph）
 
 > 状态：**已决策（2026-09-21）**——LSP 选定 **C 彻底移除**（已实施，工具数 34 → 33）；

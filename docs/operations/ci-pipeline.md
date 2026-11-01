@@ -1,6 +1,6 @@
 # CI 流水线排障手册（ci-pipeline）
 
-> 适用版本：0.6.7（撰写基线 0.6.3 HEAD `87aa123`；0.6.6 周期增补 §6 rustc 小版本更新案例）
+> 适用版本：1.1.0（撰写基线 0.6.3 / HEAD `87aa123`；0.6.6 增补 §6 rustc 小版本更新案例；2026-11 去掉已退役包的 `--exclude`）
 > 覆盖：GitHub Actions 上 `quality.yml` / `release.yml` 的**挂死、日志丢失、假失败**类问题。
 > 结论全部来自 0.6.3 发布周期的真机实测（附 run id / commit 便于复核）。
 > 相关文档：[`troubleshooting.md`](troubleshooting.md)（应用运行时）· [`release-msi.md`](release-msi.md)（打包发布）
@@ -38,7 +38,7 @@ Rust unit tests (core 1/2)      15 分钟后被 timeout 杀掉
 
 **cargo 的 feature 统一（feature unification）范围取决于「本次命令行选中的包集合」**：
 
-- `--workspace --exclude tianyan-tauri` 编出的产物
+- `--workspace`（全量集合）编出的产物
 - 与 `-p tianyan-core` 编出的产物
 
 **编译指纹不同** ⇒ 后者会**整棵依赖树重编译**，前一步的 29 分钟白干。
@@ -50,7 +50,7 @@ Rust unit tests (core 1/2)      15 分钟后被 timeout 杀掉
 | --- | --- | --- |
 | STEP1 | `cargo test -p tianyan-core -p tianyan-server -p tianyan-mcp --lib --no-run`（冷） | **1310s（21.8 min）**、637 条 `Compiling`、产物 **6.29 GB** |
 | STEP2 | **完全相同命令**再跑 | **2.8s、0 条编译** ⇒ 复用成立 |
-| STEP3 | `cargo test --workspace --exclude tianyan-tauri --lib --no-run` | 2.7s、0 条编译（本机两集合恰好无差异；CI 上则出现过重编译，见 §0） |
+| STEP3 | `cargo test --workspace --lib --no-run` | 2.7s、0 条编译（本机两集合恰好无差异；CI 上则出现过重编译，见 §0） |
 
 CI 侧另有直接证据（run `37730710190`）：`reuse probe` 步用**与测试步骤逐字相同**的参数跑 `--no-run`，
 耗时 **1.58s**（另一轮 0.53s / 0.23s / 0.01s）—— 证明"同参数必复用"。

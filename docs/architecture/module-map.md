@@ -14,11 +14,11 @@
 | [event-protocol.md](event-protocol.md) | 事件通道模型 + 4 类事件字段表 + 订阅与快照恢复 + 可靠性分层 + 防死锁不变量 |
 | [model-provider-notes.md](model-provider-notes.md) | Provider/协议矩阵 + reasoning 回传契约 + 思考强度×语言实测 + 前缀缓存 + 上游异常 |
 | [task-runtime.md](task-runtime.md) | 三类任务 + 并发排队 + TTL + 唤醒语义 + 取消/回退 + 子会话 FTS 边界 + 面板数据流 |
-| [principles.md](principles.md) | 设计原则 |
-| [refactoring-practices.md](refactoring-practices.md) | 重构实践指南（审查/波次/QA 纪律） |
+| [../../AGENTS.md](../../AGENTS.md)「设计原则」 | 设计原则（不可违反的形状约束；原独立文档已并入根 `AGENTS.md`） |
+| [../development.md](../development.md)「重构实践」 | 重构实践（审查 / 波次 / QA 纪律；原独立文档已并入 `development.md`） |
 | [../operations/troubleshooting.md](../operations/troubleshooting.md) | 日志与三类高频故障排查 + DB 取证 + QA 纪律 |
 | [../operations/data-health-check.md](../operations/data-health-check.md) | 表清单 + 巡检 SQL 集 + 解读处置 |
-| [../operations/release-msi.md](../operations/release-msi.md) | 版本号落点 + 本地打包流程 + CI 发布链 + 已知坑 + 验收清单 |
+| [../operations/release-msi.md](../operations/release-msi.md) | 版本号落点 + 本地打包流程 + 静默安装/同版本升级实测 + CI 发布链 + 已知坑 + 验收清单 + 自动更新现状与编排清单 |
 
 ---
 

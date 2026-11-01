@@ -10,7 +10,7 @@
 #   .\scripts\measure-rebuild.ps1 -Command check -Targets core/src/executor/web.rs
 #
 # 判据（ADR-049）：
-#   现状基线 = core+server+mcp 全量（源码口径见 microkernel-baseline.md；tauri 壳已删除）
+#   现状基线 = core+server+mcp 全量（源码口径见 docs/archive/microkernel-baseline.md；tauri 壳已删除）
 #   闸门 A  = 改一行工具插件 ≤ 3,500 行源码（前提：插件独立 crate + 清单住 bin）
 
 param(

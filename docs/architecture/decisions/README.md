@@ -7,7 +7,7 @@
 
 - 改某个模块之前，先看相关 ADR：`rg -l "模块名" docs/architecture/decisions/`
 - 想知道「为什么不这么做」，先翻 [REJECTED.md](REJECTED.md)
-- 机制级说明（现在怎么运作，不是为什么）→ [`../README.md`](../README.md) 各专题文档
+- 机制级说明（现在怎么运作，不是为什么）→ [`../../README.md`](../../README.md) 各专题文档
 
 | # | 决策 | 文件 |
 |---|---|---|
