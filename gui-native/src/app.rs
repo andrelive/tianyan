@@ -258,6 +258,8 @@ impl ClientApp {
             ctx_compressing: false,
             ctx_compress: None,
             session_usage: None,
+            usage_shown: None,
+            usage_anim_epoch: 0,
             request_perf: None,
             tasks: Vec::new(),
             tasks_collapsed: false,
@@ -1081,11 +1083,14 @@ impl ClientApp {
                         // 也不会出现「速度已是这一步、累计还是上一步」。
                         if let Some(su) = ev.get("session_usage") {
                             let pick = |k: &str| su.get(k).and_then(|v| v.as_u64()).unwrap_or(0);
-                            self.session_usage = Some((
-                                pick("uncached_input"),
-                                pick("cached_input"),
-                                pick("completion_tokens"),
-                            ));
+                            self.set_session_usage(
+                                (
+                                    pick("uncached_input"),
+                                    pick("cached_input"),
+                                    pick("completion_tokens"),
+                                ),
+                                cx,
+                            );
                         }
                     }
                 }
@@ -2121,6 +2126,61 @@ impl ClientApp {
         }
     }
 
+    /// 写入会话累计并驱动统计行的**数字滚动**（260ms 缓出）。
+    ///
+    /// 为什么要有动画：这组数每步刷新一次（`request_perf` 事件同帧带出），直接跳变
+    /// 看起来像「数据在闪」；插值滚动让眼睛跟得上「又涨了多少」。
+    ///
+    /// 分工：`session_usage` 始终是**权威值**（`/state` 断言与发送判据读它），
+    /// `usage_shown` 只是它的插值中间帧（`None` = 直接显示权威值）。世代号
+    /// `usage_anim_epoch` 让「后到的新值」顶掉正在跑的动画，不会两个任务同时写。
+    pub(crate) fn set_session_usage(&mut self, next: (u64, u64, u64), cx: &mut Context<Self>) {
+        let prev = self.usage_shown.or(self.session_usage).unwrap_or((0, 0, 0));
+        self.session_usage = Some(next);
+        if prev == next {
+            // 数值没变（同一帧重复到达 / 首次回填）：不用动画，直接显示权威值
+            self.usage_shown = None;
+            return;
+        }
+        self.usage_anim_epoch = self.usage_anim_epoch.wrapping_add(1);
+        let epoch = self.usage_anim_epoch;
+        self.usage_shown = Some(prev);
+        const DUR_MS: f32 = 260.0;
+        cx.spawn(async move |this, cx| {
+            let start = std::time::Instant::now();
+            loop {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(16))
+                    .await;
+                let p = (start.elapsed().as_secs_f32() * 1000.0 / DUR_MS).min(1.0);
+                // 缓出（ease-out cubic）：起步快、收尾稳 —— 数字滚动末尾不会「刹车」
+                let e = 1.0 - (1.0 - p).powi(3);
+                let done = this
+                    .update(cx, |this, cx| {
+                        if this.usage_anim_epoch != epoch {
+                            return true; // 被新动画顶掉：这个任务自行退出
+                        }
+                        if p >= 1.0 {
+                            this.usage_shown = None; // 收尾：回到权威值
+                        } else {
+                            this.usage_shown = Some((
+                                lerp_u64(prev.0, next.0, e),
+                                lerp_u64(prev.1, next.1, e),
+                                lerp_u64(prev.2, next.2, e),
+                            ));
+                        }
+                        cx.notify();
+                        p >= 1.0
+                    })
+                    .unwrap_or(true);
+                if done {
+                    break;
+                }
+            }
+        })
+        .detach();
+    }
+
     pub(crate) fn load_session_usage(&self, cx: &mut Context<Self>) {
         let Some(sid) = self.current_session.clone() else {
             return;
@@ -2177,13 +2237,28 @@ impl ClientApp {
                 if this.is_stale_for(&sid) {
                     return;
                 }
-                this.session_usage = usage;
+                // 回填也走动画入口：它带来的同样是「权威值变了」，两种来源
+                // （每步事件 / 打开会话回填）不该走两套显示逻辑。
+                match usage {
+                    Some(u) => this.set_session_usage(u, cx),
+                    None => {
+                        this.session_usage = None;
+                        this.usage_shown = None;
+                    }
+                }
                 this.request_perf = perf;
                 cx.notify();
             });
         })
         .detach();
     }
+}
+
+/// 线性插值（统计行数字滚动用）：`e` 已含缓动，这里只负责取整。
+fn lerp_u64(from: u64, to: u64, e: f32) -> u64 {
+    let f = from as f64;
+    let t = to as f64;
+    (f + (t - f) * e as f64).round().max(0.0) as u64
 }
 
 /// 把增量并入 `segs` 末尾同类段；类型不同就新起一段。

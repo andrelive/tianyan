@@ -446,6 +446,13 @@ struct ClientApp {
     /// 会话 token 汇总（`GET /usage/stats?days=0&session_id=`）：
     /// `(未命中输入, 缓存命中输入, 输出)`；全零时 `None`（不显示统计行）
     pub(crate) session_usage: Option<(u64, u64, u64)>,
+    /// 统计行**动画中间帧**的累计值：`None` = 直接显示 `session_usage`（权威值）。
+    ///
+    /// 只在「数值变了」的那 260ms 里非空——数字滚动比直接跳变好读（每步都刷新一次，
+    /// 跳变看起来像数据在闪）。动画不改变权威值，也不参与 `/state` 断言。
+    pub(crate) usage_shown: Option<(u64, u64, u64)>,
+    /// 统计行动画世代号：新值到达时 +1，旧动画任务见世代不符即自行退出（顶掉而不是叠加）。
+    pub(crate) usage_anim_epoch: u64,
     /// 最近一次请求性能（`GET /usage/recent?limit=1`）：
     /// `(ttft_ms, duration_ms, completion_tokens)`；`duration_ms < 0` 时 `None`
     pub(crate) request_perf: Option<(Option<i64>, i64, u64)>,

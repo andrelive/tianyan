@@ -360,6 +360,7 @@ impl ClientApp {
         self.ctx_panel_open = false;
         self.ctx_compress = None;
         self.session_usage = None;
+        self.usage_shown = None;
         self.request_perf = None;
         self.todos.clear();
         self.goals.clear();
@@ -440,6 +441,8 @@ impl ClientApp {
         self.ctx_panel_open = snap.ctx_panel_open;
         self.ctx_compress = snap.ctx_compress;
         self.session_usage = snap.session_usage;
+        // 恢复是「换了一份权威值」，不接上一个会话的动画中间帧
+        self.usage_shown = None;
         self.request_perf = snap.request_perf;
         self.todos = snap.todos;
         self.goals = snap.goals;
@@ -738,6 +741,7 @@ impl ClientApp {
                             this.message_total = 0;
                             this.current_title = "选择左侧会话查看消息".to_string();
                             this.session_usage = None;
+                            this.usage_shown = None;
                             this.request_perf = None;
                             this.todos.clear();
                             this.goals.clear();

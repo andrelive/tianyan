@@ -38,29 +38,23 @@ pub(crate) fn format_ms(ms: i64) -> String {
     }
 }
 
-/// 生成速度可出数的最小「纯生成窗口」（毫秒）。
-///
-/// 为什么需要它：速度 = 输出 token / 窗口，窗口太小时分母的**测量误差**会盖过
-/// 信号本身。实测（2026-11，`deepseek-v4.1-flash` 经网关）有一批请求 TTFT 与
-/// 流结束只差 26~98ms —— 网关把整段响应攒完再一次性下发，于是同一批样本算出
-/// 1133 / 2088 / 2962 / 4361 / 6451 tok/s。那不是模型快，是分母没有物理意义：
-/// 真流式下几百个 token 不可能在几十毫秒内逐块抵达。
-///
-/// 窗口不足一律**不出数**（只显示 TTFT），宁可少一个指标，也不给一个荒谬值。
-pub(crate) const MIN_GEN_WINDOW_MS: i64 = 200;
-
 /// 生成速度（tok/s）= 输出 token / **纯生成时长**（扣掉首 token 等待）。
 ///
 /// 分母扣 TTFT 是 Web 版的口径：首包等待不属于生成阶段，否则慢首包会把速度
-/// 一起拖低，两个指标就失去正交性。窗口不足 [`MIN_GEN_WINDOW_MS`] 时返回
-/// `None` —— 理由见该常量的文档（网关整段缓冲会造出几千 tok/s 的假读数）。
+/// 一起拖低，两个指标就失去正交性。
+///
+/// **口径只排除「无输出 / 窗口非正」，不设窗口下限**（2026-11 用户拍板）：一度按
+/// 200ms 下限把成团下发的样本（TTFT 与流结束只差几十毫秒 → 上千 tok/s）挡成空档，
+/// 但用户的原话是「不管多少，都正常显示吧」—— 一个偏大的数字，好过这一栏突然消失。
+/// 数字偏大的成因是上游把整段响应攒完再一次性下发（实测 `ollama.com`：153 帧聚在
+/// 两个时刻），不是天演缓冲，也不是算错。
 pub(crate) fn tokens_per_sec(
     ttft_ms: Option<i64>,
     duration_ms: i64,
     completion: u64,
 ) -> Option<u64> {
     let gen_ms = duration_ms - ttft_ms.unwrap_or(0);
-    if completion == 0 || gen_ms < MIN_GEN_WINDOW_MS {
+    if completion == 0 || gen_ms <= 0 {
         return None;
     }
     Some((completion as f64 / (gen_ms as f64 / 1000.0)).round() as u64)
@@ -269,12 +263,13 @@ pub(crate) fn same_dir(a: &str, b: &str) -> bool {
 
 #[cfg(test)]
 mod perf_tests {
-    //! 生成速度口径：窗口太小的样本不出数（防网关整段缓冲造出几千 tok/s）。
+    //! 生成速度口径：只排除「无输出 / 窗口非正」，窗口再小也照实出数。
     //!
-    //! 判据来自实测样本（`/usage/recent`，50 条里 7 条窗口 < 200ms）：26ms/77 token
-    //! → 2962 tok/s、51ms/329 token → 6451 tok/s。真流式下几百 token 不可能在几十
-    //! 毫秒里逐块到达，那批分母没有物理意义。
-    use crate::format::{tokens_per_sec, MIN_GEN_WINDOW_MS};
+    //! 这些数字里有一批是上游成团下发算出来的偏大值（26ms/77 token → 2962 tok/s），
+    //! 曾按 200ms 下限把它们挡成空档；用户 2026-11 拍板改为照实显示 —— 一个偏大的
+    //! 数字，好过这一栏突然消失。所以下面钉住的是「偏大值照出、只有无输出/非正
+    //! 窗口才空」。
+    use crate::format::tokens_per_sec;
 
     #[test]
     fn normal_sample_keeps_speed() {
@@ -283,24 +278,19 @@ mod perf_tests {
     }
 
     #[test]
-    fn buffered_stream_yields_no_speed() {
-        // 实测样本：TTFT 2021ms / 总 2072ms / 输出 329 —— 窗口 51ms，旧口径算出 6451
-        assert_eq!(tokens_per_sec(Some(2021), 2072, 329), None);
-        // 26ms 窗口那条（77 token → 2962 tok/s）
-        assert_eq!(tokens_per_sec(Some(1842), 1868, 77), None);
+    fn buffered_stream_still_shows_speed() {
+        // 实测样本：TTFT 2021ms / 总 2072ms / 输出 329 —— 窗口 51ms → 6451 tok/s。
+        // 数字偏大是上游成团下发所致（不是天演缓冲，也不是算错），照实显示
+        assert_eq!(tokens_per_sec(Some(2021), 2072, 329), Some(6451));
+        // 更极端的 26ms 窗口（77 token → 2962 tok/s）同样出数
+        assert_eq!(tokens_per_sec(Some(1842), 1868, 77), Some(2962));
     }
 
     #[test]
-    fn window_boundary_is_inclusive_low() {
-        // 恰好等于窗口下限 → 出数；少 1ms → 不出
-        assert_eq!(
-            tokens_per_sec(Some(1800), 1800 + MIN_GEN_WINDOW_MS, 100),
-            Some(500)
-        );
-        assert_eq!(
-            tokens_per_sec(Some(1800), 1800 + MIN_GEN_WINDOW_MS - 1, 100),
-            None
-        );
+    fn tiny_window_still_yields_speed() {
+        // 没有窗口门槛：200ms 与 199ms 都出数
+        assert_eq!(tokens_per_sec(Some(1800), 2000, 100), Some(500));
+        assert_eq!(tokens_per_sec(Some(1800), 1999, 100), Some(503));
     }
 
     #[test]

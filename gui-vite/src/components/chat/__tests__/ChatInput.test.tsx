@@ -403,16 +403,17 @@ describe('ChatInput', () => {
     expect(screen.queryByText('tok/s')).not.toBeInTheDocument();
   });
 
-  it('hides tok/s when the generation window is too small to measure', () => {
-    // 网关把整段响应攒完再一次性下发：TTFT 2.0s、总 2.07s、输出 329 token。
-    // 旧口径按 51ms 窗口算会得到 6451 tok/s —— 窗口没有物理意义，不展示。
+  it('still shows tok/s when the generation window is tiny', () => {
+    // 上游把整段响应攒完再一次性下发：TTFT 2000ms、总 2070ms、输出 329 token →
+    // 70ms 窗口算出 4700 tok/s。数字偏大照实显示（不设窗口下限，2026-11 拍板）
     renderChatInput({
       sessionUsage: null,
       requestPerf: { ttftMs: 2000, durationMs: 2070, completionTokens: 329 },
     });
 
     expect(screen.getByText('2.0s')).toBeInTheDocument();
-    expect(screen.queryByText('tok/s')).not.toBeInTheDocument();
+    expect(screen.getByText('4700')).toBeInTheDocument();
+    expect(screen.getByText('tok/s')).toBeInTheDocument();
   });
 });
 

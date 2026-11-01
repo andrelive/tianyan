@@ -1066,12 +1066,15 @@ impl ClientApp {
             .gap_2()
             .text_size(px(11.))
             .text_color(rgb(colors::TEXT_TERTIARY()));
-        if self.session_usage.is_none() && self.request_perf.is_none() {
+        // 显示值优先取**动画中间帧**（`usage_shown`）：它只在数值刚变的那 260ms 里
+        // 非空，其余时刻回落到权威值 `session_usage`。两者都是 `(未命中, 命中, 输出)`。
+        let shown = self.usage_shown.or(self.session_usage);
+        if shown.is_none() && self.request_perf.is_none() {
             // 空内容但**等高**：占位不留白条，也不让布局跳
             return line.into_any_element();
         }
         let dot = || div().text_color(rgb(colors::BORDER())).child("·");
-        if let Some((uncached, cached, completion)) = self.session_usage {
+        if let Some((uncached, cached, completion)) = shown {
             let total = uncached + cached;
             let hit_rate = if total > 0 {
                 (cached as f64 / total as f64 * 100.0).round() as u64
@@ -1088,7 +1091,7 @@ impl ClientApp {
                 .child(div().child(format!("缓存命中率 {hit_rate}%")));
         }
         if let Some((ttft, duration, completion)) = self.request_perf {
-            if self.session_usage.is_some() {
+            if shown.is_some() {
                 line = line.child(dot());
             }
             line = line.child(div().child(format!(

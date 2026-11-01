@@ -131,17 +131,15 @@ function formatMs(ms: number): string {
  * 生成速度（token/s）= 输出 token / 纯生成时长。
  *
  * 分母扣掉 TTFT：首包等待不属于生成阶段（否则慢首包会把速度也拖低，
- * 两个指标失去正交性）。无输出 / 窗口过小 → null（不展示）。
+ * 两个指标失去正交性）。只排除「无输出 / 窗口非正」，**不设窗口下限**
+ * （2026-11 用户拍板）：上游把整段响应攒完再一次性下发时，几十毫秒窗口会算出
+ * 上千 tok/s —— 但一个偏大的数字，好过这一栏突然消失。
  *
- * 窗口下限与原生端 `format.rs::MIN_GEN_WINDOW_MS` 同一口径：网关把整段响应
- * 攒完再一次性下发时，TTFT 与流结束只差几十毫秒，按窗口算会得到几千 tok/s
- * 的假读数 —— 真流式下几百个 token 不可能在几十毫秒内逐块抵达。
+ * 与原生端 `format.rs::tokens_per_sec` 同一口径。
  */
-const MIN_GEN_WINDOW_MS = 200;
-
 function perfTokensPerSec(perf: RequestPerf): number | null {
   const genMs = perf.durationMs - (perf.ttftMs ?? 0);
-  if (perf.completionTokens <= 0 || genMs < MIN_GEN_WINDOW_MS) return null;
+  if (perf.completionTokens <= 0 || genMs <= 0) return null;
   return Math.round(perf.completionTokens / (genMs / 1000));
 }
 

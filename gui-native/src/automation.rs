@@ -940,6 +940,12 @@ impl ClientApp {
                 "session": self.session_usage.map(|(i, c, o)| serde_json::json!({
                     "input_uncached": i, "input_cached": c, "output": o,
                 })),
+                // 统计行数字滚动的**中间帧**（None = 静止，直接显示权威值）：
+                // 数值刚变的那 260ms 内非空 —— 断言「不是硬跳」靠它（ADR-052：
+                // state 是断言面）。权威值仍是上面的 `session`。
+                "session_shown": self.usage_shown.map(|(i, c, o)| serde_json::json!({
+                    "input_uncached": i, "input_cached": c, "output": o,
+                })),
                 "request": self.request_perf.map(|(ttft, dur, completion)| serde_json::json!({
                     "ttft_ms": ttft, "duration_ms": dur,
                     "completion_tokens": completion,
