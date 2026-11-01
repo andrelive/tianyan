@@ -1076,6 +1076,11 @@ impl ClientApp {
                             .and_then(|v| v.as_u64())
                             .unwrap_or(0);
                         self.request_perf = Some((ttft, dur, completion));
+                        // 会话累计（未命中输入 / 缓存命中 / 输出 / 命中率）也**每步**
+                        // 刷一次：它和 TTFT 出自同一个事件源，没有理由一个每步动、
+                        // 另一个等轮末。刷新点收敛成「事件驱动 + 打开会话/快照回填」，
+                        // `turn_state(idle)` 那处重复刷新随之删掉。
+                        self.load_session_usage(cx);
                     }
                 }
             }
@@ -1105,8 +1110,9 @@ impl ClientApp {
                     self.streaming = state == "running";
                     if !self.turn_running && !self.streaming {
                         self.set_status(format!("空闲 · {sid}"));
-                        // 本轮结束：刷新底部统计行（token 汇总 + 最近一次请求性能）
-                        self.load_session_usage(cx);
+                        // 底部统计行不在这里刷：`request_perf` 事件每步就刷过（含会话
+                        // 累计），这里再拉一次纯属重复 —— 刷新点越少越不容易出现
+                        // 「某个入口忘了刷 / 两个入口互相覆盖」。
                     }
                 }
             }

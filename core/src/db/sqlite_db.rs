@@ -366,6 +366,10 @@ const SCHEMA_SQL: &str = "
     );
     CREATE INDEX IF NOT EXISTS idx_usage_logs_ts ON usage_logs(ts);
     CREATE INDEX IF NOT EXISTS idx_usage_logs_model ON usage_logs(provider, model);
+    -- 会话级统计（`/usage/stats?session_id=` 与「每步刷新底部统计行」）都按 session
+    -- 过滤：没有这条索引就得全表扫 —— 而表随每次 LLM 调用长一行（含子代理与演化
+    -- 任务），量级上来后每步一次查询会变成几十毫秒的固定开销。
+    CREATE INDEX IF NOT EXISTS idx_usage_logs_session ON usage_logs(session_id, ts);
 
     -- FTS5 倒排索引（trigram tokenizer：中文子串匹配；rowid 对应 session_messages.id）
     CREATE VIRTUAL TABLE IF NOT EXISTS session_messages_fts USING fts5(
