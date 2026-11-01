@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use crate::agent::cancel::cancellable;
 use crate::agent::tool_registry::ToolRegistry;
-use crate::agent::types::{StreamEventSender, ToolCallEvent};
+use crate::agent::types::{SessionTotals, StreamEventSender, ToolCallEvent};
 use crate::common::error::TianyanError;
 use crate::common::types::{FunctionCall, Message, MessageRole, StructuredMessage, TokenUsage};
 use crate::common::types::{ToolCall, ToolCallType};
@@ -604,23 +604,16 @@ impl AgentLoop {
                             provider.as_deref(),
                         )
                         .await?;
-                    // 请求性能（TTFT / 总耗时 / 输出 token）：**必须在 usage 兜底
-                    // 之后**发送——网关不返回流式 usage 时（opencode 等），
-                    // `accum.usage` 为 None，提前发送只能带上 0 输出 token，
-                    // 前端会判定「无生成速度」而只显示 TTFT（实测 bug）。
-                    let perf = accum.perf;
-                    let finalized = AgentLoop::finalize_streamed_turn(
+                    // 请求性能事件**不在这里发**：它要带「会话累计」，而累计必须在
+                    // 本步 usage 落库（[`Self::record_usage_log`]）之后才查得准。
+                    // 发送点因此上移到 `run_turns`（那里同时拿到 `turn_perf` 与落库
+                    // 结果）。此处的 `accum.perf` 随 `finalize_streamed_turn` 一并返回。
+                    AgentLoop::finalize_streamed_turn(
                         accum,
                         &msgs,
                         model,
                         last_input_usage.as_ref(),
-                    );
-                    if let Ok((_, Some(usage), _, _, _, _)) = &finalized {
-                        sender
-                            .send_request_perf(perf, usage.completion_tokens as u64)
-                            .await;
-                    }
-                    finalized
+                    )
                 })
             },
         )
@@ -1041,6 +1034,21 @@ impl AgentLoop {
             )
             .await;
 
+            // 请求性能 + **会话累计**：同一个事件下发（底部统计条的两个输入）。
+            //
+            // 顺序是硬约束：先落库本步这一行，再查累计 —— 反过来会永远少掉当前
+            // 这一步（首轮尤其明显：累计恒为 0）。早先这条事件在 `run_stream` 的
+            // 闭包里发（那时 usage 还没落库），所以累计只能让前端自己再去拉一次
+            // `/usage/stats`；现在两者同帧，前端零额外请求。
+            if let (Some(sender), Some(perf), Some(usage)) =
+                (stream_sender, turn_perf, turn_usage.as_ref())
+            {
+                let totals = self.session_totals(session_id).await;
+                sender
+                    .send_request_perf(perf, usage.completion_tokens as u64, totals)
+                    .await;
+            }
+
             let mut ctx = TurnContext {
                 session_id,
                 current_parent_id: &mut current_parent_id,
@@ -1246,6 +1254,27 @@ impl AgentLoop {
                     .await;
             }
         }
+    }
+
+    /// 会话累计 token 用量（底部统计条的累计部分）。
+    ///
+    /// 与 `/usage/stats?session_id=` **同一口径**（按会话全时段聚合，与消息分页
+    /// 窗口无关），只是查询点在循环里——所以 `usage_logs` 必须有 `session_id`
+    /// 索引（`idx_usage_logs_session`），否则每步一次全表扫。
+    ///
+    /// 未装配 `usage_log`（未配置统计）时返回 `None`：前端保留旧值，不把展示
+    /// 清零。查询失败同样降级为 `None`（`stats` 内部已吞错误并返回空集）。
+    async fn session_totals(&self, session_id: &str) -> Option<SessionTotals> {
+        let log = self.usage_log.as_ref()?;
+        let stats = log
+            .stats(None, None, None, None, Some(session_id), "none")
+            .await;
+        let stat = stats.first()?;
+        Some(SessionTotals {
+            uncached_input: stat.uncached_input,
+            cached_input: stat.cached_input,
+            completion_tokens: stat.completion_tokens,
+        })
     }
 
     /// 记录本轮的 G6 结构化 Trace span（含 token 消耗）。

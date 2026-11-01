@@ -176,14 +176,16 @@ export default function ChatPanel() {
       });
   }, [currentSessionId]);
 
-  // 会话 token 汇总刷新（底部统计条）：打开/切换立即拉取（250ms 防抖，
-  // 与「消息数变化」共用同一 effect——新轮落库/压缩点插入也触发）。
-  // 数据源为后端全量聚合，与分页加载窗口无关。
+  // 会话 token 汇总回填（底部统计条）：**只在打开/切换会话时**拉一次。
+  //
+  // 每轮/每步的刷新改由 `request_perf` 事件同帧带出（`chat-stream.ts` 里的
+  // `session_usage`）——早先依赖 `messages.length` 触发，一轮多步就要发好几次
+  // 请求，而后端本来就在同一帧给了权威累计值。
   useEffect(() => {
     if (!currentSessionId) return;
     const timer = setTimeout(() => void refreshSessionTokenUsage(currentSessionId), 250);
     return () => clearTimeout(timer);
-  }, [currentSessionId, messages.length]);
+  }, [currentSessionId]);
 
   // Sync URL sessionId to store on mount / navigation
   // （per-session 追问不随切换清除：各会话条目独立留存，切回即恢复接管）

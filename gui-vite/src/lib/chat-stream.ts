@@ -186,6 +186,17 @@ export function handleChatStreamEvent(event: ChatStreamEvent): void {
     });
   }
 
+  // 会话累计（同一帧带出；后端在落库本步 usage 后按会话聚合）：直接写入 store，
+  // 不再为「累计要动」单独拉 `/usage/stats` —— 打开/切换会话时仍回填一次
+  // （见 ChatPanel 的 effect），那是唯一剩下的请求点。
+  if (event.session_usage && sid) {
+    st.setSessionTokenUsage(sid, {
+      uncachedInput: event.session_usage.uncached_input,
+      cachedInput: event.session_usage.cached_input,
+      completion: event.session_usage.completion_tokens,
+    });
+  }
+
   // 完成 chunk 携带 token 用量 → 附加到流归属会话的 assistant 消息
   // （上下文圆环经 lastMessageUsage 读取，跨会话独立）
   if (event.usage) {

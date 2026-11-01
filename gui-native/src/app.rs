@@ -1076,11 +1076,18 @@ impl ClientApp {
                             .and_then(|v| v.as_u64())
                             .unwrap_or(0);
                         self.request_perf = Some((ttft, dur, completion));
-                        // 会话累计（未命中输入 / 缓存命中 / 输出 / 命中率）也**每步**
-                        // 刷一次：它和 TTFT 出自同一个事件源，没有理由一个每步动、
-                        // 另一个等轮末。刷新点收敛成「事件驱动 + 打开会话/快照回填」，
-                        // `turn_state(idle)` 那处重复刷新随之删掉。
-                        self.load_session_usage(cx);
+                        // 会话累计（未命中输入 / 缓存命中 / 输出 / 命中率）**同帧**
+                        // 带过来：后端在 `record_usage_log` 落库后用同一事件下发，
+                        // 所以这里不再发 `/usage/stats` 请求 —— 少一条刷新链路，
+                        // 也不会出现「速度已是这一步、累计还是上一步」。
+                        if let Some(su) = ev.get("session_usage") {
+                            let pick = |k: &str| su.get(k).and_then(|v| v.as_u64()).unwrap_or(0);
+                            self.session_usage = Some((
+                                pick("uncached_input"),
+                                pick("cached_input"),
+                                pick("completion_tokens"),
+                            ));
+                        }
                     }
                 }
             }

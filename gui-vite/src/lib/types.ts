@@ -130,6 +130,12 @@ export interface ChatStreamEvent {
   duration_ms?: number | null;
   /** 该轮输出 token（RequestPerf 事件携带；算生成速度用） */
   perf_completion_tokens?: number | null;
+  /** 会话累计 token 用量（RequestPerf 事件同帧携带；底部统计条的累计部分） */
+  session_usage?: {
+    uncached_input: number;
+    cached_input: number;
+    completion_tokens: number;
+  } | null;
 }
 
 /**

@@ -1015,6 +1015,12 @@ async fn test_run_stream_emits_request_perf() {
         completion > 0,
         "网关未返回 usage 时应带兜底估算的输出 token（提前发送会得 0 → 界面无 tok/s）"
     );
+    // 会话累计：本测试的 AgentLoop 未装配 usage_log → 累计为 None
+    // （前端保留旧值；装配后会带权威聚合值，见 UsageLog 单测）
+    assert!(
+        p.session_totals.is_none(),
+        "未装配 usage_log 时不应带会话累计"
+    );
 }
 
 /// 纯 tool_calls 轮的 TTFT：没有正文/思考增量，但首个 tool_call delta 就是

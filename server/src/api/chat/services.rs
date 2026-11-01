@@ -14,7 +14,9 @@ use tianyan::session::SessionManager;
 use tianyan::Message as CoreMessage;
 use tianyan::MessageRole as CoreMessageRole;
 
-use crate::api::chat::types::{ChatRequest, ChatStreamEvent, SkillCallInfo, StreamUsage};
+use crate::api::chat::types::{
+    ChatRequest, ChatStreamEvent, SessionUsage, SkillCallInfo, StreamUsage,
+};
 use crate::api::shared::error::ApiError;
 use crate::api::shared::short_uuid;
 use crate::api::shared::types::{ChatMessage, MessageRole};
@@ -291,6 +293,12 @@ pub(crate) fn map_chunk_to_event(
         ttft_ms: chunk.ttft_ms,
         duration_ms: chunk.duration_ms,
         perf_completion_tokens: chunk.perf_completion_tokens,
+        // 会话累计同帧带出（同一事件的累计部分，前端不再单独拉 /usage/stats）
+        session_usage: chunk.session_totals.map(|t| SessionUsage {
+            uncached_input: t.uncached_input,
+            cached_input: t.cached_input,
+            completion_tokens: t.completion_tokens,
+        }),
         usage: chunk.token_usage.map(|u| StreamUsage {
             prompt_tokens: u.prompt_tokens as u64,
             completion_tokens: u.completion_tokens as u64,
@@ -503,6 +511,11 @@ mod tests {
             ttft_ms: Some(1200),
             duration_ms: Some(3400),
             perf_completion_tokens: Some(110),
+            session_totals: Some(tianyan::agent::SessionTotals {
+                uncached_input: 1200,
+                cached_input: 800,
+                completion_tokens: 500,
+            }),
             ..Default::default()
         };
 
@@ -511,6 +524,12 @@ mod tests {
         assert_eq!(event.ttft_ms, Some(1200));
         assert_eq!(event.duration_ms, Some(3400));
         assert_eq!(event.perf_completion_tokens, Some(110));
+        // 会话累计与性能**同帧**透传（底部统计条的累计部分，前端不再单独拉
+        // /usage/stats —— 漏了这一段，累计就只能在打开会话时回填一次）
+        let su = event.session_usage.expect("会话累计应随同一事件下发");
+        assert_eq!(su.uncached_input, 1200);
+        assert_eq!(su.cached_input, 800);
+        assert_eq!(su.completion_tokens, 500);
         // 性能事件不携带正文（避免污染消息流）
         assert!(event.delta.is_empty());
     }

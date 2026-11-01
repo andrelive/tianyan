@@ -157,6 +157,13 @@ pub struct AgentStreamChunk {
     /// `token_usage` 分离，避免触发用量归约副作用）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub perf_completion_tokens: Option<u64>,
+    /// 会话累计 token 用量（RequestPerf chunk 携带；底部统计条的累计部分）。
+    ///
+    /// 与 TTFT / 生成速度**同帧**下发：两者是同一个展示条的两个输入，拆成两个
+    /// 事件会让界面出现「速度已经是这一步、累计还停在上一轮」的中间态，也会让
+    /// 前端多一条「自己去拉 `/usage/stats`」的刷新路径。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_totals: Option<SessionTotals>,
 }
 
 /// 单轮模型调用的性能指标（不随消息落库；经 RequestPerf 事件与 usage_logs 双通道）。
@@ -166,6 +173,21 @@ pub struct RequestPerf {
     pub ttft_ms: Option<u64>,
     /// 请求总耗时（毫秒；请求发出 → 流结束）。
     pub duration_ms: u64,
+}
+
+/// 会话累计 token 用量（底部统计条的累计部分）。
+///
+/// 口径与 `/usage/stats?session_id=` 完全一致（按会话全时段聚合
+/// `usage_logs`，与消息分页窗口无关）——同帧随 RequestPerf 事件下发，
+/// 前端不再需要自己拉一份。
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
+pub struct SessionTotals {
+    /// 缓存未命中输入（真金白银）。
+    pub uncached_input: u64,
+    /// 缓存命中输入。
+    pub cached_input: u64,
+    /// 输出 token。
+    pub completion_tokens: u64,
 }
 
 /// 轮状态事件（ADR-035 §9）。
@@ -348,20 +370,29 @@ impl StreamEventSender {
         .await;
     }
 
-    /// 发送单轮请求性能事件（TTFT / 总耗时 / 输出 token）。
+    /// 发送单轮请求性能事件（TTFT / 总耗时 / 输出 token + 会话累计）。
     ///
     /// 每轮 LLM 调用结束时下发一次（工具轮也发，前端只保留最近一次 → 底部
     /// 统计条显示「最近一次请求」的 TTFT 与生成速度）。delta 为空、
     /// `is_complete = false`，前端只消费性能字段（不产生正文/消息副作用）。
     /// `token_usage` 有意留空：用量已由 [`send_turn_usage`] / [`send_complete`]
     /// 归约，重复携带会让会话消耗汇总双计。
-    pub async fn send_request_perf(&self, perf: RequestPerf, completion_tokens: u64) {
+    ///
+    /// `totals` = 会话累计（调用方在**落库本步 usage 之后**查好传入——查在
+    /// 落库之前会永远少掉当前这一步）。
+    pub async fn send_request_perf(
+        &self,
+        perf: RequestPerf,
+        completion_tokens: u64,
+        totals: Option<SessionTotals>,
+    ) {
         self.try_send(AgentStreamChunk {
             delta: String::new(),
             chunk_type: StreamChunkType::RequestPerf,
             ttft_ms: perf.ttft_ms,
             duration_ms: Some(perf.duration_ms),
             perf_completion_tokens: Some(completion_tokens),
+            session_totals: totals,
             ..Default::default()
         })
         .await;
@@ -512,6 +543,7 @@ mod tests {
             ttft_ms: None,
             duration_ms: None,
             perf_completion_tokens: None,
+            session_totals: None,
         };
         assert_eq!(chunk.delta, "你好");
         assert!(!chunk.is_complete);
@@ -544,6 +576,7 @@ mod tests {
             ttft_ms: None,
             duration_ms: None,
             perf_completion_tokens: None,
+            session_totals: None,
         };
         assert_eq!(chunk.delta, "调用技能");
         assert!(chunk.is_complete);
@@ -570,6 +603,7 @@ mod tests {
             ttft_ms: None,
             duration_ms: None,
             perf_completion_tokens: None,
+            session_totals: None,
         };
         let json = serde_json::to_string(&chunk).unwrap();
         let deserialized: AgentStreamChunk = serde_json::from_str(&json).unwrap();
@@ -599,6 +633,7 @@ mod tests {
             ttft_ms: None,
             duration_ms: None,
             perf_completion_tokens: None,
+            session_totals: None,
         };
         let json = serde_json::to_string(&chunk).unwrap();
         assert!(
@@ -634,6 +669,7 @@ mod tests {
             ttft_ms: None,
             duration_ms: None,
             perf_completion_tokens: None,
+            session_totals: None,
         };
         let json = serde_json::to_string(&chunk).unwrap();
         // skill_calls 为 None 时不应出现在 JSON 中

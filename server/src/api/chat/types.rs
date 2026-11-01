@@ -156,6 +156,21 @@ pub struct StreamUsage {
     pub context_window: u64,
 }
 
+/// 会话累计 token 用量（chunk_type=request_perf；底部统计条的累计部分）。
+///
+/// 与 [`StreamUsage`] 分开：那个带 `context_window`、服务于上下文环（单轮口径），
+/// 这个只是「这个会话至今花了多少」，服务于底部统计条。同帧随 RequestPerf 事件
+/// 下发，前端不再自己拉 `/usage/stats`。
+#[derive(Debug, Clone, Serialize)]
+pub struct SessionUsage {
+    /// 缓存未命中输入（真金白银）
+    pub uncached_input: u64,
+    /// 缓存命中输入
+    pub cached_input: u64,
+    /// 输出 token
+    pub completion_tokens: u64,
+}
+
 /// SSE 流式事件
 #[derive(Debug, Serialize)]
 pub struct ChatStreamEvent {
@@ -210,6 +225,12 @@ pub struct ChatStreamEvent {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     /// 该轮输出 token（chunk_type=request_perf；算生成速度用）。
     pub perf_completion_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// 会话累计 token 用量（chunk_type=request_perf；底部统计条的累计部分）。
+    ///
+    /// 与 TTFT / 速度同帧：前端收到这一帧就同时刷新「最近一次请求」与「会话累计」，
+    /// 不再单独拉 `/usage/stats`。
+    pub session_usage: Option<SessionUsage>,
 }
 
 impl ChatStreamEvent {
@@ -237,6 +258,7 @@ impl ChatStreamEvent {
             && self.ttft_ms.is_none()
             && self.duration_ms.is_none()
             && self.perf_completion_tokens.is_none()
+            && self.session_usage.is_none()
     }
 
     /// 错误事件（校验失败/处理失败）：chunk_type=Error，delta 为人类可读消息，
@@ -248,6 +270,7 @@ impl ChatStreamEvent {
             ttft_ms: None,
             duration_ms: None,
             perf_completion_tokens: None,
+            session_usage: None,
             id: stream_id.to_string(),
             session_id: session_id.to_string(),
             message: None,
@@ -273,6 +296,7 @@ impl ChatStreamEvent {
             ttft_ms: None,
             duration_ms: None,
             perf_completion_tokens: None,
+            session_usage: None,
             id: stream_id.to_string(),
             session_id: session_id.to_string(),
             message: Some(message),

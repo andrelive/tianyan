@@ -120,8 +120,19 @@
 | `tool_call` | ToolCallEvent? | 结构化工具调用（工具卡片） |
 | `tool_result` | ToolResultEvent? | 结构化工具结果（耗时/成败/结果内容） |
 | `usage` | StreamUsage? | 本轮 token 用量（含 `context_window`） |
+| `turn_state` | TurnStatePayload? | 轮状态（`chunk_type=turn_state`；ADR-035 §9） |
+| `ttft_ms` | number? | 首 token 时间（`chunk_type=request_perf`） |
+| `duration_ms` | number? | 请求总耗时（`chunk_type=request_perf`） |
+| `perf_completion_tokens` | number? | 该轮输出 token（`chunk_type=request_perf`；算 tok/s） |
+| `session_usage` | SessionUsage? | 会话累计（`uncached_input` / `cached_input` / `completion_tokens`） |
 | `user_message_id` | string? | ADR-031 乐观渲染临时 id（`chunk_type=user_message_id`） |
 | `message_id` | string? | 用户消息落库后的真实 id |
+
+> **`request_perf` 为什么把「最近一次请求」与「会话累计」放在同一帧**：底部统计条的两个输入
+> 如果分两个事件，界面会出现「速度已是这一步、累计还停在上一轮」的中间态；而且前端要么自己
+> 再拉一次 `/usage/stats`（多一条可失败的链路），要么等轮末（累计半天不动）。同帧的代价只是
+> 一次按 `session_id` 的聚合查询（`idx_usage_logs_session`），发送点在 `record_usage_log`
+> **之后**——早于落库查累计会永远少掉当前这一步。
 
 > 子代理路径的 `chunk_to_stream_json` 只产出 `chunk_type`/`delta`/`thinking`/`finish_reason`/
 > `tool_call`/`tool_result`（无 `id`/`usage`/`message`），并跳过 `Message`/`Error` chunk。
@@ -185,7 +196,7 @@
 
 ---
 
-## 4. `StreamChunkType` 全成员（7）
+## 4. `StreamChunkType` 全成员（10）
 
 枚举定义 `core/src/agent/types.rs:78-97`，序列化为小写（`#[serde(rename_all = "snake_case")]`）；
 前端联合类型 `gui-vite/src/lib/types.ts:5`。
@@ -199,6 +210,9 @@
 | `Error` | `error` | 错误信息 | `delta`（+ `finish_reason=error`） |
 | `Message` | `message` | 消息边界（流开始用户消息 / 流结束 assistant 消息 / 边界通知） | `message` |
 | `UserMessageId` | `user_message_id` | 用户消息落库确认（ADR-031 乐观渲染 id 回显） | `user_message_id` + `message_id` |
+| `TurnState` | `turn_state` | 轮开始/结束（ADR-035 §9；联动输入框与停止按钮） | `turn_state` |
+| `Retry` | `retry` | 上游失败/空响应后的重试提示（不进入正文） | `delta` |
+| `RequestPerf` | `request_perf` | 单轮请求性能 + **会话累计**（底部统计条） | `ttft_ms` / `duration_ms` / `perf_completion_tokens` / `session_usage` |
 
 > ⚠️ **旧文档遗留**：`system-architecture.md` / `module-relationships.md` 曾写 `chunk_type` 含
 > `clarification`——**实为 `user_message_id`**（原 `clarification` 已改名/取代）。另 `usage` 并非 chunk_type，
