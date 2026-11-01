@@ -11,61 +11,108 @@ _（下批）_
 
 ## [1.1.1] - 2026-11-01
 
-> **本版定位**：把「日志找不到」和「粘贴文件显示成一长串路径」两个日常摩擦点补上——
-> 运行时日志与 panic 现场默认落到 `<data_dir>\logs\`，文件引用在输入框和消息气泡里都是
-> chip。产品版本 **1.1.1**（对外 3 段；MSI 内部 `ProductVersion` 仍是 `1.1.1.0`）。
+> **本版定位**：收口三处日常摩擦——日志与 panic 现场默认落盘（不再「一条都没留」）；输入框
+> 换成自研编辑器，文件引用与正文**同行**渲染成 chip（vite 形态），IME / 光标 / 拖拽选择 /
+> 折行一并修好；输入卡片下方的统计行改成「每步实时 + 会话累计与请求性能同帧下发」，累计数字
+> 加滚动动画。产品版本 **1.1.1**（对外 3 段；MSI 内部 `ProductVersion` 仍是 `1.1.1.0`）。
 
 ### Added
+
 - **运行时日志默认落盘**：`[logging].file` 未配置时用 `<data_dir>/logs/tianyan.log`
-  （`init_logging_with_data_dir` + `default_log_file`）。桌面客户端的 release 构建是 GUI
-  subsystem、没有控制台，此前「不配 `file` 就等于一条日志都不留」——出问题只能靠猜。默认值
-  只在**运行时**生效、不写回 `tianyan.toml`，数据目录搬迁后日志跟着新目录走。三个启动点
-  （桌面客户端 / `tianyan-server` 二进制 / 库 `init()`）统一走这个入口。
+  （`init_logging_with_data_dir` + `default_log_file`）。桌面客户端 release 是 GUI subsystem、
+  没有控制台，此前「不配 `file` 就等于一条日志都不留」——出问题只能靠猜。默认值只在**运行时**
+  生效、不写回 `tianyan.toml`，数据目录搬迁后日志跟着新目录走。三个启动点（桌面客户端 /
+  `tianyan-server` 二进制 / 库 `init()`）统一走这个入口。实测：空数据目录 debug 实例
+  11,594 字节、release 实例 1.18 MB 完整启动链。
 - **panic 现场与运行时日志同目录**：`panic_hook::install` 改接 `<data_dir>/logs/`（此前恒在
-  `%APPDATA%\com.tianyan.app\logs\`——那是系统应用数据根，与配置里的 `storage.data_dir` 无关，
-  旧注释还把它写成 `{data_dir}/…`，容易误读）。排查时只看一个目录。
-- **粘贴文件 → 草稿区文件 chip**：Ctrl+V 粘贴文件（资源管理器里复制的文件）不再往输入框
-  里插 `` `@file:"<路径>"` `` 原文，而是变成输入卡片上方的**附件 chip**（图标 + 文件名 + ×，
-  与图片缩略图同一行混排）；发送时才展开成同一份 `@file:` 标记（与 Web 版序列化口径一致，
-  后端零改动）。用户消息气泡里再把引用渲染回 chip（文本 + chip 行内混排，批次 1 的整行
-  `@file:"…"` 旧格式同样认得），自己发出的引用不再显示成一长串带反引号的路径。
-- **验收面补齐**：`/state` 新增 `usage.composer_files`（草稿区文件引用）与
-  `messages.recent[].ts`（历史消息时间戳）；自动化动作新增 `paste_files`（走
-  `paste_files_from_item` 这条真实粘贴入口）与 `send_composer`（走 `send_text` 这条真实
-  发送路径），`composer_clear` 一并清掉附件。`scripts/verify-gui-native.ps1` 新增 7 项断言
-  （粘贴文件后正文不含 `@file:` 原文 / 附件计数 / 清空后归零 / 历史消息带时间戳），
-  全套 **84 项断言全绿**。
+  `%APPDATA%\com.tianyan.app\logs\`——那是系统应用数据根，与配置里的 `storage.data_dir` 无关）。
+  排查时只看一个目录。
+- **自研行内 chip 输入框**（替换组件 `Textarea`，`composer.rs` + `composer_ui.rs`）：GPUI 的
+  `Textarea` 是纯文本控件、没有行内钩子（`set_highlighter` / `TextDecoration` 只在
+  `LayoutMode::CodeEditor` 生效），而 vite 那边文件引用是 Lexical 自定义节点。改为自绘：
+  - **编辑核心**：`@file:"…"` 标记扫成互不重叠的原子区间；退格/删除整块删、左右跨块、
+    光标不进内部；序列化与 Web 逐字一致（`` `@file:"<绝对路径>"` ``）。
+  - **绘制与输入**：硬分行 → 行内分段 → 字节二分软换行；`shape_line` 直绘 + chip 取真实
+    shaping 宽；光标 / 选区 / IME 下划线自绘；`EntityInputHandler` 接 `window.handle_input`
+    与 `ElementInputHandler`（字符与 IME 两条路）。
+  - **粘贴分流**：图片 → 附件区缩略图；文件 → 正文行内 chip；其余 → 文本。Ctrl+V 自接管
+    （平台 `paste` 通道与 `on_key_down` 共用同一处理，200 ms 去重让两条都命中时不会贴两份）。
+- **消息气泡的行内排版（`RichTextBody`）**：flex 换行以 item 为单位，chip 与文字做不了行内
+  绕排（表现是 chip 之后强制换行）。改为自绘 Element 复用输入框那份 `layout_rows`：宽度两段式
+  ——`request_layout` 先按 608 估行数（多留一行），`prepaint` 按真实 `bounds.width` 重排绘制。
+- **统计行每步实时 + 会话累计与请求性能同帧**：后端每一步 LLM 调用结束都发
+  `chunk_type=request_perf`（`ttft_ms` / `duration_ms` / `perf_completion_tokens`），本版把
+  **会话累计**（`SessionTotals`：未命中 / 命中 / 输出）也放进同一帧，前端不再自己拉
+  `/usage/stats`。发送点在 `record_usage_log` **之后**（早于落库查累计会永远少掉当前这一步）。
+- **累计数字滚动动画**：`(未命中, 命中, 输出)` 变化时按 260 ms ease-out cubic 插值（16 ms
+  一帧），世代号让后到的新值顶掉正在跑的动画；命中率随中间帧一起动。动画只是显示层，权威值
+  不变。
+- **验收面**：`/state` 新增 `usage.composer_file_refs`（编辑器扫出的行内引用）、
+  `usage.session_shown`（滚动中间帧）、`usage.composer_rows`（输入框真实行数）、
+  `messages.recent[].ts`；自动化动作新增 `paste_files`（走真实粘贴入口）/ `send_composer` /
+  `ime_probe`。`scripts/verify-gui-native.ps1` 全套 **84 项断言全绿**（隔离配置 + 数据副本跑）。
 
 ### Fixed
-- **历史消息时间戳（核实结论：一直有）**：实测 `GET /sessions/{id}/messages` 对最早与最新
-  消息都下发 `timestamp`（`101573f` 起由 `StructuredMessage.time.created` 转 RFC3339 →
-  `ChatMessage.timestamp`），前端 `parse_msg_row` 也解析它；`/state.messages.recent[].ts`
-  非空、历史会话轮末正常显示时刻。此前 `parse_msg_ts` 的注释与 `send_text` 里「后端
-  `timestamp` 恒空 / 历史消息不显示时间」的说法是错的，已按代码事实更正——这条链路自此由
-  验收脚本断言，不再靠翻历史看图。
+
+- **压缩点紧贴上一轮与待办卡**：根因不是「间距配小了」，而是压缩点被算成**上一轮的后续步骤**
+  —— 它是 `role=user` 锚定的消息，判据只看「上一条非 tool 是不是 assistant」，而压缩点前一条
+  通常正是上一轮的 assistant（真实数据核实：seq 15183 assistant → 15184 marker），于是留白
+  落到 1 px 那档。判据收进 `msg::same_turn_continuation`（压缩点两头挡），留白另立一档
+  `msg_pad_y`：压缩点 16 px / 同轮后续 1 px / 跨轮 14 px。
+- **用户气泡长文本不折行被裁**：文件引用行内化时把每行包进 `flex_row`，而 taffy 里 flex 子项
+  `min-width` 默认 `auto` → 文本撑到 max-content → `flex_wrap` 永不触发。修：列/行加
+  `w_full()`、文本段 `min_w_0()`、纯文本行不走 flex。
+- **粘贴文件后光标停在 chip 左侧 + chip 观感差**：绘制层 `caret_position` 对 chip 段恒返回
+  左边缘；按 `byte >= piece.byte.end` 区分。chip 改强调色 13% 淡底 + 42% 描边 + 0.82 行高
+  垂直居中 + 12 px 文件图标。
+- **输入框 IME 组合串被追加而非替换**：`replace_and_mark_text_in_range` 的 range 常为
+  `None`，旧实现走 insert。拆 `apply_compose`（替换上次组合串）/ `apply_commit`。实测
+  「w→wo→wǒ→我」得 `'我'`、两次得 `'我我'`。
+- **粘贴文字无反应**：平台 `paste` 通道没被触发；`on_key_down` 自接管 Ctrl+V，两条路共用
+  `handle_paste_item` + 200 ms 去重。
+- **光标略长 / 不能拖选 /「思考中」跳位置**：光标改 0.85 行高垂直居中；`on_mouse_down` /
+  `on_mouse_move` / `on_mouse_up` 做拖拽选择（锚点钉按下点）；「思考中」的根因是**两处渲染
+  切换**（`Below` 在控件行、思考一出现切 `Bubble` 挂气泡内 = 视觉左下角）→ 气泡内一律不画。
+- **软换行被静默裁行**：元素高度靠估算 + `ContentMask` = 多出行被裁。修：`prepaint` 回写
+  真实行数 / 宽度到 `rows_cache` / `avail_cache`，下帧 `request_layout` 用真实值定高。
+- **底部统计行半天不动（跑好几轮才变一次）**：native 端没接 `request_perf` 事件（落进
+  `_ => {}`），TTFT / 速度只能等 `turn_state(idle)` 那一次从 `/usage/recent` 回填。接上事件后
+  每步刷新；启动恢复走快照帧路径，也补了一次回填（此前 `open_session` 不在链上 → 刚启动底部
+  是空的）。
+- **「几千 tok/s」是上游成团下发，不是算错**：直连 `ollama.com` 实测 153 条 `data:` 帧聚在
+  两个时刻（1217 ms / 1505 ms），天演 provider 层是 `bytes_stream()` 逐块转发的。速度偏大的
+  成因在分母（纯生成窗口只有几十毫秒），本版按用户口径**照实显示**（见 Changed）。
+- **历史消息时间戳（核实结论：一直有）**：实测 `GET /sessions/{id}/messages` 对最早与最新消息
+  都下发 `timestamp`（`101573f` 起由 `StructuredMessage.time.created` 转 RFC3339），前端
+  `parse_msg_row` 也解析它；此前注释里「后端恒空 / 历史不显示」的说法是错的，已按代码事实
+  更正，并由验收脚本断言（`messages.recent[].ts`）。
 
 ### Changed
+
 - **「思考中…」移到输入卡片底部控件行最左**：原先在消息列表下方、紧贴最后一个强视觉块
-  （如待办卡）8px，看起来像卡片的附属行（用户报「思考中在待办下面」）。四个原型
-  （列表下方 / 居中胶囊 / 卡片内顶部 / 控件行左侧）截图对比后由用户选定控件行左侧：
-  不占额外高度、输入卡片高度恒定不随「忙 / 闲」抖动、消息流末尾保持干净。判据仍收敛在
-  `stream_pending` 一处（三态互斥：首 token 前走这里，思考一开始转气泡内「思考中 · N 字」）。
-- **时间戳只留两端**：用户消息（气泡内，恒显示）+ 该轮**最后一条有正文的 assistant**；
-  整轮没有正文（纯工具调用就结束）时兜底到该轮最后一条 assistant。判据从「下一条不是
-  assistant」的**几何位置**改成**语义**——`tool` 的 role 也不是 assistant，旧判据会把
-  「assistant → 工具结果」的中间步误判成轮末（一轮冒出好几个时刻）；而真正的轮末落在
-  工具卡上时，时间挂在卡片下方 11px 灰字里，看起来像「时间不见了」。新增 6 个单测
-  （`msg::ts_anchor_tests`），并做过「先红后绿」判别力验证（去掉 `.rev()` 与去掉兜底
-  各让 2 个 / 1 个用例 FAIL）。
+  （如待办卡）8 px，看起来像卡片的附属行。四个原型截图对比后选定控件行左侧：不占额外高度、
+  输入卡片高度恒定不随「忙 / 闲」抖动、消息流末尾保持干净。
+- **时间戳只留两端**：用户消息（气泡内，恒显示）+ 该轮最后一条有正文的 assistant；整轮没有
+  正文时兜底到该轮最后一条 assistant。判据从「下一条不是 assistant」的**几何位置**改成
+  **语义**（`tool` 的 role 也不是 assistant，旧判据会把中间步误判成轮末）。
+- **文件引用从「附件区 chip」改为「正文行内 chip」**：`Ctrl+V` 改走编辑器后，附件区那份
+  `composer_files` 只剩自动化在写，界面却只显示编辑器里的 chip —— 两条路径各存一份引用。
+  本版收干：删除 `ClientApp.composer_files` / `SessionSnapshot.composer_files` 及
+  park/restore/clear，`attach_files` 直接写 `ComposerState::insert_file_ref`，`send_text`
+  不再展开（正文里本来就是那份标记）；`/state` 的 `usage.composer_files` →
+  `usage.composer_file_refs`。
+- **生成速度不设窗口下限**：一度按 200 ms 下限把成团下发的样本挡成空档，用户口径是
+  「不管多少，都正常显示」—— 一个偏大的数字，好过这一栏突然消失。现在只排除「无输出 /
+  窗口非正」。native 与 vite 同口径。
+- **`usage_logs` 补 `idx_usage_logs_session(session_id, ts)`**：会话统计一直按 session 过滤，
+  却只有 `ts` 与 `(provider, model)` 两条索引；每步刷新之后，缺索引就是每步一次全表扫。
 
 ### Removed
+
 - **输入框只保留 Ctrl+V 一条粘贴通道**：移除「插入图片」「插入文件（`@` 引用）」「从剪贴板
-  粘贴」三个按钮及其界面（OS 图片选择器、文件弹窗的 Mention 用途与 `FilePickPurpose`）。
-  同一能力开三个入口只会让人猜「该点哪个」；粘贴通道在 `Textarea::on_paste` 里已经覆盖
-  两种载荷（图片 → data URL 挂待发列表；文件路径 → `@file:"…"` 引用）。
-  `/state` 的 `stream_pending` 值随之由 `below` 改为 `composer`；自动化动作删
-  `attach_image` / `mention_file` / `mention_pick`（对应界面已不存在），`paste_image` 保留
-  （= Ctrl+V 的同一份实现）。
+  粘贴」三个按钮及其界面。同一能力开三个入口只会让人猜「该点哪个」；粘贴通道已覆盖两种载荷。
+  `/state` 的 `stream_pending` 值随之由 `below` 改为 `composer`。
+- **附件区文件 chip（`composer_files`）**：见 Changed「文件引用从附件区改为行内」。
 
 ## [1.1.0] - 2026-10-31
 

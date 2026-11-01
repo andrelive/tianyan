@@ -75,7 +75,9 @@ GPUI 侧分档：
 - [x] **SSE 常驻订阅 + 发送闭环**（`GET /events` + `POST /chat/stream`）：无人值守自测通过——
       13 个 `chat_stream` 事件、`delta` 共 9 字、"消息 2 条"、`turn_state` 回 `idle` 后
       `streaming=false`；新会话 id 由客户端本地生成、服务端据此新建（列表 49 → 50 条）
-- [x] **输入框**：`Textarea`（IME / 选区 / 撤销由组件管）+ Enter 发送 / Shift+Enter 换行
+- [x] **输入框**：自研编辑器（`composer.rs` 编辑核心 + `composer_ui.rs` 绘制与输入）——文件引用
+      与正文**同行**渲染成 chip（vite 形态）、IME / 选区 / 拖拽选择 / 光标闪烁自绘、
+      Enter 发送 / Shift+Enter 换行；粘贴分流：图片 → 附件区、文件 → 行内 chip、其余 → 文本
 - [x] **停止**：`streaming` 时按钮切「停止」→ `POST /chat/streams/{id}/cancel`
 - [x] **MSI 打包 + 静默升级**（见文末）
 
@@ -106,6 +108,10 @@ GPUI 侧分档：
 | 21 | **流式多步：一轮对话 = 多条 assistant 消息** | 流式期能看到「🔧 工具名」，流一结束（或切换会话重载）前面几步的工具调用全不见；工具没有参数/结果/耗时 | 后端一轮是**多步**（LLM→工具→LLM…），库里每个 assistant 响应是独立一条消息（实测 4 步=4 条）。前端早期把整轮堆在一条占位里，`tool_call` 还被塞成正文文本 `` `🔧 name` ``、`observation` 空实现。正解=对齐 vite：`tool_call` → `Seg::Tool` + `ToolCall` 占位；`observation` → 按 `tool_call_id` 回填结果/耗时；步边界→新开一条（判据 `step_closed`：已有正文段 或 工具都已出结果），并配 5 个单测钉住 |
 | 22 | **bin crate 里写 `#[test]` 别用 `use super::*`** | `recursion limit reached while expanding #[test]`；更狠时 rustc 直接 `STATUS_STACK_OVERFLOW`（0xc00000fd） | bin crate 的根是 `main.rs`，`super::*` 把整棵模块树 + 巨大泛型拉进宏展开。显式 `use crate::types::{MsgRow, Seg, ToolCall}`；必要时 `$env:RUST_MIN_STACK = "67108864"` 给 rustc 加栈 |
 | 23 | **剪贴板图片可直接读，不用落盘** | 想「截图→粘贴」，以为得走 Win32 `CF_DIB` + 手工转 PNG | GPUI 的 `cx.read_from_clipboard()` 返回 `ClipboardItem.entries`，其中 `ClipboardEntry::Image(Image { format, bytes, .. })` 直接给原始字节 + 格式，复用 `bytes_to_data_url` 即可（8MB 上限） |
+| 24 | **GPUI `Textarea` 没有行内元素钩子** | 想用 `set_highlighter` / `TextDecoration` 给文件引用画 chip，结果毫无效果 | 那些只在 `LayoutMode::CodeEditor` 生效；`Textarea` 是纯文本控件。行内 chip 只能自绘（`composer_ui.rs`：`shape_line` 直绘 + 自绘光标/选区/IME 下划线 + 自管命中测试） |
+| 25 | **IME 组合串走 `replace_and_mark_text_in_range` 时 range 常为 `None`** | 中文逐键组合变成「wwo我」——旧实现按 `None` 走 insert，把组合串追加了而不是替换 | 记住上次组合串的 range，**替换**它：拆 `apply_compose`（替换）/ `apply_commit`（提交）。实测「w→wo→wǒ→我」得 `'我'`，连打两次得 `'我我'` |
+| 26 | **自绘元素被 `ContentMask` 裁掉时不报错** | 高度按估算给，多出来的行静默消失（看起来像「不换行/被截断」） | `prepaint` 把真实行数/宽度回写缓存（`rows_cache` / `avail_cache`），下一帧 `request_layout` 用真实值定高；另外自绘元素**不受父级 padding 恩惠**，内边距要自己给 |
+| 27 | **flex 子项 `min-width: auto` 撑爆父级 + flex 换行以 item 为单位** | 文本折行失效被裁；chip 与文字做不到「行内绕排」（chip 之后强制换行） | 文本段加 `min_w_0()`、容器 `w_full()`；行内绕排必须自绘 inline formatting（本项目 `RichTextBody` 复用输入框那份 `layout_rows`，宽度两段式：先估、`prepaint` 按真实宽度重排） |
 
 ## API 备忘（实测签名，省一次翻源码）
 
@@ -137,14 +143,16 @@ impl ListDelegate for D {
 }
 List::new(&entity)                              // IndexPath 从 gpui_kit::component 导入
 
-// 输入框（Textarea = 多行 + IME + 选区 + 撤销，全由组件管，不要自造）
-let input = cx.new(|cx| TextareaState::new(window, cx).placeholder("输入消息…"));  // placeholder 在 State 上
-Textarea::new(&entity).h(px(110.))              // 渲染；.h() 收 DefiniteLength
-state.value() -> SharedString
-state.set_value("", window, cx)                 // 清空（窗口参数不可省）
-// Enter 提交：订阅 InputEvent（多行框自己已插入换行，发送后清空即可）
-cx.subscribe_in(&input, window, |this, _input, ev: &InputEvent, window, cx| {
-    if let InputEvent::PressEnter { shift, .. } = ev { if !shift { /* 发送 */ } }
+// 输入框（自研：GPUI 的 Textarea 是纯文本控件，没有行内元素钩子 —— 高亮只在 CodeEditor
+// 模式生效，chip 只能自绘。编辑语义在 composer.rs::Buffer，绘制/输入在 composer_ui.rs）
+let input: Entity<ComposerState> = cx.new(|cx| ComposerState::new(cx));
+state.value() -> String                          // 正文（含 `@file:"…"` 标记，chip 就是它）
+state.buffer.file_refs() -> Vec<FileRef>         // 扫出的原子区间（path + byte range）
+state.insert_file_ref("F:\\a.md", cx)            // 光标处插入一个 chip（原子块）
+state.set_value("…", cx) / state.clear(cx)       // 回填 / 清空
+// Enter 提交：自研实现在 on_key_down 里 emit ComposerEvent::Submit（不再插换行）
+cx.subscribe_in(&input, window, |this, _input, ev: &ComposerEvent, window, cx| {
+    if matches!(ev, ComposerEvent::Submit) { /* 发送 */ }
 }).detach();
 
 // 异步
