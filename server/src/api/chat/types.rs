@@ -389,6 +389,7 @@ mod tests {
             ttft_ms: None,
             duration_ms: None,
             perf_completion_tokens: None,
+            session_usage: None,
         };
         let json = serde_json::to_string(&event).unwrap();
         assert!(json.contains("Hello"));

@@ -60,7 +60,7 @@ pub use tool_registry::{
     ToolPostExecuteListener, ToolPreExecuteListener, ToolRegistry, TRACE_PARAMS_MAX_BYTES,
 };
 pub use types::{
-    AgentResponse, AgentState, AgentStreamChunk, SkillCallInfo, StreamChunkType, StreamEventSender,
-    ToolCallEvent, ToolResultEvent, TurnStateEvent,
+    AgentResponse, AgentState, AgentStreamChunk, RequestPerf, SessionTotals, SkillCallInfo,
+    StreamChunkType, StreamEventSender, ToolCallEvent, ToolResultEvent, TurnStateEvent,
 };
 pub use working_set::{SessionWorkingSet, WorkingSetRegistry, WORKING_SET_IDLE_TTL};
