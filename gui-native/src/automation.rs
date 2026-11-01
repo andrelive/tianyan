@@ -40,7 +40,7 @@ use gpui_kit::component::input::InputState;
 use gpui_kit::Entity;
 // `Focusable` 提供 `focus_handle(cx)`（`InputBaseState` **没有**同名固有方法，
 // 实测过）：键盘类回归要把焦点放进输入框，必须先拿到焦点句柄。
-use gpui_kit::{App, AsyncApp, Focusable as _, WeakEntity};
+use gpui_kit::{App, AsyncApp, WeakEntity};
 use tokio::sync::{mpsc, oneshot};
 
 use crate::{
@@ -963,8 +963,7 @@ impl ClientApp {
         let input = self.input.clone();
         handle
             .update(cx, move |_, window, cx| {
-                let focus = input.read(cx).focus_handle(cx);
-                // 句柄在 `cx` 借用期间先算出来，再交给 `focus`（它同时要 window 与 cx）
+                let focus = input.read(cx).focus_handle.clone();
                 focus.focus(window, cx);
             })
             .map_err(|e| format!("窗口已关闭：{e}"))?;
@@ -1734,13 +1733,8 @@ impl ClientApp {
             // 与真实键入同一个 `TextareaState::set_value`，不另造路径）
             "composer_set" => {
                 let text = arg_str(cmd, "text")?;
-                let handle = self.window_handle;
                 let input = self.input.clone();
-                handle
-                    .update(cx, move |_, window, cx| {
-                        input.update(cx, |state, cx| state.set_value(text, window, cx));
-                    })
-                    .map_err(|e| format!("窗口已关闭，无法写入输入框：{e}"))?;
+                input.update(cx, |state, cx| state.set_value(text, cx));
                 cx.notify();
             }
             // 系统通知：走全局通道发一条，验证「注册 → 全局包装 → WinRT」整条链路

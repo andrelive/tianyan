@@ -40,17 +40,10 @@ impl ClientApp {
         let messages: Rc<Vec<MsgRow>> = Rc::new(Vec::new());
         let total: usize = 0;
 
-        let input = cx.new(|cx| {
-            TextareaState::new(window, cx)
-                .placeholder("输入消息 · Enter 发送 / Shift+Enter 换行")
-                // **高度交给组件自己按真实文本测量**（1~8 行自适应）。
-                //
-                // 此前是手写估算（`composer_height`：按 58 个半角字符/行推算行数），
-                // 而真实渲染宽度能放 ~50 个汉字（≈100 半角单位）—— 估算偏保守，
-                // 于是「还没换行、光标走到一半」时输入框就提前变高了（用户实测）。
-                // `auto_grow` 用实际字形宽度测量，不存在这种误差。
-                .auto_grow(1, 8)
-        });
+        // 输入框：自研 `ComposerState`（见 `composer_ui`）——`gpui-component` 的
+        // `Textarea` 是纯文本控件，做不到「文件引用与正文排在同一行并渲染成 chip」
+        // （vite 的 composer 形态）。高度由 `ComposerBody` 按行数自适应（1~8 行）。
+        let input = cx.new(ComposerState::new);
         // 子智能体页的搜索框：改动即过滤（订阅 Change 事件）
         let roles_search = cx.new(|cx| InputState::new(window, cx).placeholder("搜索子智能体..."));
         cx.subscribe_in(
@@ -1434,7 +1427,7 @@ impl ClientApp {
             let sub = cx.subscribe_in(
                 &self.input,
                 w,
-                |this, _input, event: &InputEvent, window, cx| {
+                |this, _input, event: &ComposerEvent, window, cx| {
                     Self::on_composer_event(this, event, window, cx);
                 },
             );
@@ -1471,13 +1464,19 @@ impl ClientApp {
     /// capture 追不上 Textarea 的 InsertNewline。
     fn on_composer_event(
         &mut self,
-        event: &InputEvent,
+        event: &ComposerEvent,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if let InputEvent::PressEnter { shift, .. } = event {
-            if !shift {
-                self.send_current_input(window, cx);
+        match event {
+            ComposerEvent::Submit => self.send_current_input(window, cx),
+            ComposerEvent::PasteImage(item) => {
+                // 图片仍走附件区（与 vite 一致：图片在输入框上方，不进正文）
+                let item = item.clone();
+                if !self.paste_image_from_item(&item, cx) {
+                    self.set_status("这张图贴不上（格式不支持或超过 8MB）".to_string());
+                    cx.notify();
+                }
             }
         }
     }
@@ -1494,44 +1493,21 @@ impl ClientApp {
             );
             return;
         }
-        let (text, cursor) = {
-            let state = self.input.read(cx);
-            (state.value().to_string(), state.cursor())
-        };
+        let _ = &window;
+        let text = self.input.read(cx).value();
         // 正文为空但草稿区有文件引用时**照样能发**（只发附件是合法用法，
         // Web 版同样允许）；两者都空才是「没什么可发」。
         if text.trim().is_empty() && self.composer_files.is_empty() {
-            // 全是空白也要把输入框清掉：多行 Textarea 会把 Enter 插入成换行，
-            // 而 Enter 的发送拦截若走了兜底路径（见 `PressEnter` 订阅），此刻框里
-            // 就只剩那个换行 —— 不清掉用户会看到一个凭空的空行。
             if !text.is_empty() {
-                self.input
-                    .update(cx, |state, cx| state.set_value("", window, cx));
+                self.input.update(cx, |state, cx| state.clear(cx));
             }
             return;
         }
-        // 删掉 Enter 自己插进去的那个换行。
-        //
-        // 多行 `Textarea` 的 Enter 是「**先在光标处插入换行、再 emit
-        // `InputEvent::PressEnter`**」（`InputBaseState::enter` 的固有顺序，改不了）。
-        // 于是回调里拿到的文本必然比用户想发的多一个 `\n`，位置就在**光标前一位**。
-        //
-        // 早先只 `trim_end` 末尾：光标停在末尾时够用，但**光标停在正文中间**按回车
-        // 就会在句子里留一个换行（用户截图报的那条「回车先换行再发送」）。
-        // 现在按光标定位：`cursor - 1` 就是那个换行，删它一个字节，别处一律不动
-        // （正文中间的换行若来自 Shift+Enter，光标此刻在别处，不会被误删）。
-        //
-        // 兜底：光标为 0 / 该位不是 `\n`（说明 PressEnter 不是从编辑器来的，比如
-        // 自动化动作直接调 `send_text`）→ 什么都不做。
-        let mut text = text;
-        let at = cursor.saturating_sub(1);
-        if cursor > 0 && text.as_bytes().get(at) == Some(&b'\n') {
-            text.remove(at);
-        }
-        self.input
-            .update(cx, |state, cx| state.set_value("", window, cx));
-        // 发送后输入框已清空（上面 set_value("")），不再需要删草稿条目：
-        // 文本随实体走（每会话一个 `Entity<TextareaState>`），图片被 `send_text`
+        // 自研输入框的 Enter **不往正文插换行**（`ComposerState::on_key_down` 里
+        // 直接 emit `Submit`），所以那段「先删掉 Enter 插进去的换行」的清理不再需要
+        // —— 那是 `Textarea` 固有顺序（先插入换行再 emit PressEnter）留下的特例。
+        self.input.update(cx, |state, cx| state.clear(cx));
+        // 文本随实体走（每会话一个 `Entity<ComposerState>`），图片被 `send_text`
         // 里的 `mem::take(&mut self.composer_images)` 取走。
         self.send_text(text, cx);
     }

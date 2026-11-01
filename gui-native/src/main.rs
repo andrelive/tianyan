@@ -38,6 +38,7 @@ mod app;
 mod automation;
 mod chat;
 mod composer;
+mod composer_ui;
 mod dialogs;
 mod format;
 mod hotkey;
@@ -56,6 +57,7 @@ mod widgets;
 // `AppRef` / `colors`，一旦 `pub(crate) use gpui_kit::*` 就会让 `crate::View`
 // 变成双来源，子模块 `use crate::View` 直接 ambiguous（实测踩到）。
 pub(crate) use api::*;
+pub(crate) use composer_ui::{ComposerEvent, ComposerState};
 pub(crate) use format::*;
 use msg::AppRef;
 pub(crate) use msg::*;
@@ -286,7 +288,7 @@ struct ClientApp {
     /// 文本/光标/undo 一次到位，不再手工搬运。
     ///
     /// 与 `parked` 同构：最近使用的在末尾（LRU），上限 [`MAX_PARKED_SESSIONS`]。
-    pub(crate) inputs: Vec<(Option<String>, Entity<TextareaState>)>,
+    pub(crate) inputs: Vec<(Option<String>, Entity<ComposerState>)>,
     /// 哪些会话**当前有轮在跑**（`turn_state` 事件驱动，含非当前会话）。
     ///
     /// 为什么需要它：`streaming` 只是「**当前**会话在跑」的渲染态，切走时会被
@@ -379,8 +381,8 @@ struct ClientApp {
     pub(crate) current_title: String,
     /// 当前选中会话 id —— 事件路由键：只渲染本会话的 `chat_stream` 增量
     pub(crate) current_session: Option<String>,
-    /// 输入框（gpui-component 的 `Textarea`：IME / 选区 / 撤销都由它管，不自造）
-    pub(crate) input: Entity<TextareaState>,
+    /// 输入框（自研 `ComposerState`：行内文件 chip + 键盘 / IME / 选区 / 撤销都在里面）
+    pub(crate) input: Entity<ComposerState>,
     /// 是否有轮在跑（`turn_state` 驱动，同时闸住重复发送）
     pub(crate) streaming: bool,
     /// **服务端权威**的轮状态（`turn_state` 事件 / 快照帧的 `turn.state`）。
@@ -714,8 +716,7 @@ impl Render for ClientApp {
         // 待回填文本（异步结果 → 编辑器）：只在**当前**输入框实体上落一次。
         // 首个用例 = 回退后把被回退的用户输入放回输入框（用户实测指出该缺）。
         if let Some(text) = self.pending_composer_text.take() {
-            self.input
-                .update(cx, |state, cx| state.set_value(text, window, cx));
+            self.input.update(cx, |state, cx| state.set_value(text, cx));
         }
         // 说明：设置页/人设的编辑器回填**不在这里做**——窗口隐藏时不会触发渲染，
         // 而自动化验收正是隐藏窗口跑的。回填统一走 `window_handle.update` 现取窗口

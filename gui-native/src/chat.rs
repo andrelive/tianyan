@@ -14,7 +14,6 @@ use crate::types::*;
 // 文件引用 chip（草稿区附件条）：与消息区共用同一个形态
 use crate::widgets::file_chip;
 use gpui_kit::assets::IconName;
-use gpui_kit::component::input::Textarea;
 use gpui_kit::component::progress::ProgressCircle;
 use gpui_kit::list as gpui_list;
 
@@ -885,28 +884,10 @@ impl ClientApp {
                                 // （Textarea 内建的 paste action 先消费掉了），实测现象就是
                                 // 「焦点在输入框里按 Ctrl+V 没反应，只能点按钮」。
                                 // 返回 `false` 时文本粘贴照常走默认实现，不抢。
-                                let app = self.app_ref.clone();
-                                // ⚠️ **不要**再给 `.h(...)`：显式高度会盖掉 `auto_grow`
-                                // （那个能力是按真实字形宽度测量行数的，见 `ClientApp::new`）。
-                                // `min_h` 只设**下限**、不参与增长，所以留着它当兜底：
-                                // 万一 auto_grow 在某些布局下算不出高度，也不会塌成 0。
-                                Textarea::new(&self.input)
-                                    .min_h(px(44.))
-                                    .appearance(false)
-                                    .on_paste(move |item, _window, cx| {
-                                        let Some(w) = app.lock().ok().and_then(|g| g.clone())
-                                        else {
-                                            return false;
-                                        };
-                                        w.update(cx, |this: &mut ClientApp, cx| {
-                                            // 分流顺序不可"优化"：图片优先，文件只兜底。
-                                            // 反过来会把「复制的 png」变成模型读不了的路径引用
-                                            // （Web 版同一条结论，见 ChatInput.tsx 的图片通道注释）。
-                                            this.paste_image_from_item(item, cx)
-                                                || this.paste_files_from_item(item, cx)
-                                        })
-                                        .unwrap_or(false)
-                                    })
+                                // 输入区：自研编辑器（键盘 / IME / 粘贴分流都在
+                                // `ComposerState` 里；`min_h` 只是兜底，高度由
+                                // `ComposerBody` 按行数算）
+                                div().min_h(px(44.)).w_full().child(self.input.clone())
                             })
                     })
                     .child(
@@ -1714,15 +1695,8 @@ impl ClientApp {
     /// 只给自动化收尾用（测完不让残留文本污染用户下一次发送）。转的是
     /// `TextareaState::set_value` 这个既有 API，没有第二套写入口。
     pub(crate) fn clear_composer(&mut self, cx: &mut Context<Self>) -> Result<(), String> {
-        let handle = self.window_handle;
         let input = self.input.clone();
-        handle
-            .update(cx, move |_, window, cx| {
-                input.update(cx, |state, cx| {
-                    state.set_value("", window, cx);
-                });
-            })
-            .map_err(|e| format!("窗口已关闭：{e}"))?;
+        input.update(cx, |state, cx| state.clear(cx));
         cx.notify();
         Ok(())
     }

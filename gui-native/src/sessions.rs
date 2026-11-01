@@ -9,7 +9,7 @@ use crate::format::*;
 use crate::theme::colors;
 use crate::types::*;
 use gpui_kit::assets::IconName;
-use gpui_kit::component::input::{InputState, TextareaState};
+use gpui_kit::component::input::InputState;
 
 impl ClientApp {
     pub(crate) fn load_sessions(&self, cx: &mut Context<Self>) {
@@ -501,7 +501,7 @@ impl ClientApp {
         // （实测 `no method named is_focused`），但它有固有的 `focus_handle()`。
         let had_focus = window
             .as_ref()
-            .map(|w| self.input.read(cx).focus_handle(cx).is_focused(w))
+            .map(|w| self.input.read(cx).focus_handle.clone().is_focused(w))
             .unwrap_or(false);
         let key = self.current_session.clone();
         if let Some(i) = self.inputs.iter().position(|(k, _)| k == &key) {
@@ -510,28 +510,19 @@ impl ClientApp {
             self.input = entity;
             self.draft_restore_path = "restored".to_string();
         } else {
-            // 新建：每个会话必须有自己的实体
-            let placeholder = "输入消息 · Enter 发送 / Shift+Enter 换行";
+            // 新建：每个会话必须有自己的实体（自研输入框，高度自适应 1~8 行）
             // 注意用 `as_mut()`（借而不是 move）：后面恢复焦点还要再用一次
             if let Some(w) = window.as_mut() {
-                let w: &mut Window = w;
-                // `auto_grow(1, 8)`：高度按真实文本测量（见 `ClientApp::new` 里的注释）
-                self.input = cx.new(|cx| {
-                    TextareaState::new(w, cx)
-                        .placeholder(placeholder)
-                        .auto_grow(1, 8)
-                });
+                let _w: &mut Window = w;
+                self.input = cx.new(ComposerState::new);
                 self.draft_restore_path = "created-window".to_string();
             } else {
                 // 自动化/后台路径没有 `&mut Window`（也不在窗口借用中）→ 现取
                 let handle = self.window_handle;
-                let mut created: Option<Entity<TextareaState>> = None;
+                let mut created: Option<Entity<ComposerState>> = None;
                 if let Err(e) = handle.update(cx, |_, w, cx| {
-                    created = Some(cx.new(|cx| {
-                        TextareaState::new(w, cx)
-                            .placeholder(placeholder)
-                            .auto_grow(1, 8)
-                    }));
+                    let _ = w;
+                    created = Some(cx.new(ComposerState::new));
                 }) {
                     self.set_error(format!("输入框创建失败（窗口不可用）：{e}"));
                 }
