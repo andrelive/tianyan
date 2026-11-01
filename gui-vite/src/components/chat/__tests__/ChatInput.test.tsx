@@ -402,6 +402,18 @@ describe('ChatInput', () => {
     expect(screen.getByText('820ms')).toBeInTheDocument();
     expect(screen.queryByText('tok/s')).not.toBeInTheDocument();
   });
+
+  it('hides tok/s when the generation window is too small to measure', () => {
+    // 网关把整段响应攒完再一次性下发：TTFT 2.0s、总 2.07s、输出 329 token。
+    // 旧口径按 51ms 窗口算会得到 6451 tok/s —— 窗口没有物理意义，不展示。
+    renderChatInput({
+      sessionUsage: null,
+      requestPerf: { ttftMs: 2000, durationMs: 2070, completionTokens: 329 },
+    });
+
+    expect(screen.getByText('2.0s')).toBeInTheDocument();
+    expect(screen.queryByText('tok/s')).not.toBeInTheDocument();
+  });
 });
 
 /**

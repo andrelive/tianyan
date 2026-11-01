@@ -723,6 +723,13 @@ impl ClientApp {
                 "[事件] 快照 {sid}：{n} 条（replace={} running={running}）",
                 !protect_inflight
             );
+            // 快照帧是**权威对齐点**：顺带把底部统计行（会话累计 + 最近一次请求
+            // 性能）回填一次。
+            //
+            // 为什么必须在这里补：`open_session` 之外没有任何回填点，而启动恢复 /
+            // 断线重连走的正是这条快照路径 —— 用户实测「刚启动底部什么都没有，
+            // 要等到某一轮结束才出现」。一次快照一次 GET，代价可忽略。
+            self.load_session_usage(cx);
         } else if let Some(pos) = self
             .parked
             .iter()
@@ -1041,6 +1048,34 @@ impl ClientApp {
                     // 这里补一次。订阅成功 → 服务端推快照 → 断线自愈/权威对齐有兜底。
                     if !self.offline {
                         self.subscribe_session(sid.to_string(), false, cx);
+                    }
+                }
+            }
+            // 请求性能（TTFT / 总耗时 / 输出 token）：后端**每一步** LLM 请求结束
+            // 都发一次（工具轮也发），后到覆盖先到 —— 只保留最近一次。
+            //
+            // 早先这个 chunk_type 没人接（落进 `_ => {}`），底部统计行只能等
+            // `turn_state(idle)` 那**一次**回填：整轮跑下来 TTFT / tok/s 一直停在
+            // 上一轮的值，轮末才跳一下（用户实测「半天不动，跑了好几轮才变」）。
+            // 现在每步一结束就刷新，与 vite `chat-stream.ts` 的 request_perf 口径一致。
+            "request_perf" => {
+                // 离线会话（切走）不写：`request_perf` 是**当前会话**的展示字段，
+                // 切回时 `open_session` 会从 `/usage/recent` 回填，不会丢。
+                if !self.offline {
+                    if let Some(dur) = ev
+                        .get("duration_ms")
+                        .and_then(|v| v.as_i64())
+                        .filter(|d| *d >= 0)
+                    {
+                        let ttft = ev
+                            .get("ttft_ms")
+                            .and_then(|v| v.as_i64())
+                            .filter(|t| *t >= 0);
+                        let completion = ev
+                            .get("perf_completion_tokens")
+                            .and_then(|v| v.as_u64())
+                            .unwrap_or(0);
+                        self.request_perf = Some((ttft, dur, completion));
                     }
                 }
             }

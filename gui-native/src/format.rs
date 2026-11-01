@@ -38,17 +38,29 @@ pub(crate) fn format_ms(ms: i64) -> String {
     }
 }
 
+/// 生成速度可出数的最小「纯生成窗口」（毫秒）。
+///
+/// 为什么需要它：速度 = 输出 token / 窗口，窗口太小时分母的**测量误差**会盖过
+/// 信号本身。实测（2026-11，`deepseek-v4.1-flash` 经网关）有一批请求 TTFT 与
+/// 流结束只差 26~98ms —— 网关把整段响应攒完再一次性下发，于是同一批样本算出
+/// 1133 / 2088 / 2962 / 4361 / 6451 tok/s。那不是模型快，是分母没有物理意义：
+/// 真流式下几百个 token 不可能在几十毫秒内逐块抵达。
+///
+/// 窗口不足一律**不出数**（只显示 TTFT），宁可少一个指标，也不给一个荒谬值。
+pub(crate) const MIN_GEN_WINDOW_MS: i64 = 200;
+
 /// 生成速度（tok/s）= 输出 token / **纯生成时长**（扣掉首 token 等待）。
 ///
 /// 分母扣 TTFT 是 Web 版的口径：首包等待不属于生成阶段，否则慢首包会把速度
-/// 一起拖低，两个指标就失去正交性。
+/// 一起拖低，两个指标就失去正交性。窗口不足 [`MIN_GEN_WINDOW_MS`] 时返回
+/// `None` —— 理由见该常量的文档（网关整段缓冲会造出几千 tok/s 的假读数）。
 pub(crate) fn tokens_per_sec(
     ttft_ms: Option<i64>,
     duration_ms: i64,
     completion: u64,
 ) -> Option<u64> {
     let gen_ms = duration_ms - ttft_ms.unwrap_or(0);
-    if completion == 0 || gen_ms <= 0 {
+    if completion == 0 || gen_ms < MIN_GEN_WINDOW_MS {
         return None;
     }
     Some((completion as f64 / (gen_ms as f64 / 1000.0)).round() as u64)
@@ -253,4 +265,52 @@ pub(crate) fn same_dir(a: &str, b: &str) -> bool {
             .to_lowercase()
     };
     norm(a) == norm(b)
+}
+
+#[cfg(test)]
+mod perf_tests {
+    //! 生成速度口径：窗口太小的样本不出数（防网关整段缓冲造出几千 tok/s）。
+    //!
+    //! 判据来自实测样本（`/usage/recent`，50 条里 7 条窗口 < 200ms）：26ms/77 token
+    //! → 2962 tok/s、51ms/329 token → 6451 tok/s。真流式下几百 token 不可能在几十
+    //! 毫秒里逐块到达，那批分母没有物理意义。
+    use crate::format::{tokens_per_sec, MIN_GEN_WINDOW_MS};
+
+    #[test]
+    fn normal_sample_keeps_speed() {
+        // 实测样本：TTFT 1810ms / 总 6787ms / 输出 1218 → 纯生成 4977ms ≈ 245 tok/s
+        assert_eq!(tokens_per_sec(Some(1810), 6787, 1218), Some(245));
+    }
+
+    #[test]
+    fn buffered_stream_yields_no_speed() {
+        // 实测样本：TTFT 2021ms / 总 2072ms / 输出 329 —— 窗口 51ms，旧口径算出 6451
+        assert_eq!(tokens_per_sec(Some(2021), 2072, 329), None);
+        // 26ms 窗口那条（77 token → 2962 tok/s）
+        assert_eq!(tokens_per_sec(Some(1842), 1868, 77), None);
+    }
+
+    #[test]
+    fn window_boundary_is_inclusive_low() {
+        // 恰好等于窗口下限 → 出数；少 1ms → 不出
+        assert_eq!(
+            tokens_per_sec(Some(1800), 1800 + MIN_GEN_WINDOW_MS, 100),
+            Some(500)
+        );
+        assert_eq!(
+            tokens_per_sec(Some(1800), 1800 + MIN_GEN_WINDOW_MS - 1, 100),
+            None
+        );
+    }
+
+    #[test]
+    fn unknown_ttft_uses_whole_duration() {
+        // TTFT 未知（历史行 / 非流式路径，落库为 -1 → 前端 None）：分母退回总耗时
+        assert_eq!(tokens_per_sec(None, 5000, 100), Some(20));
+    }
+
+    #[test]
+    fn zero_output_has_no_speed() {
+        assert_eq!(tokens_per_sec(Some(500), 5000, 0), None);
+    }
 }
