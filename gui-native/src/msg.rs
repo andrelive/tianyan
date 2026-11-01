@@ -83,8 +83,10 @@ pub(crate) fn parse_msg_images(msg: &serde_json::Value) -> Vec<String> {
 
 /// 后端 `timestamp`（RFC3339）→ 本地 `HH:mm:ss`；缺失/非法返回 `None`。
 ///
-/// 注：历史消息后端**不下发** `timestamp`（`ChatMessage.timestamp` 恒 None），
-/// 所以历史消息不显示时间——与 vite 一致（它只在流式轮次开始时本地打点）。
+/// 历史消息**也带** `timestamp`：`ChatMessage.timestamp` 由
+/// `StructuredMessage.time.created`（epoch 毫秒，落库时写入 `session_messages.ts`）
+/// 转成 RFC3339（`101573f`）。所以流式与历史走**同一份**解析，界面上的落点差异只
+/// 由 `ts_anchor_flags` 决定（该轮最后一条有正文的 assistant + 用户消息气泡内）。
 pub(crate) fn parse_msg_ts(msg: &serde_json::Value) -> Option<String> {
     let raw = msg.get("timestamp").and_then(|v| v.as_str())?;
     let dt = chrono::DateTime::parse_from_rfc3339(raw).ok()?;
@@ -98,6 +100,130 @@ pub(crate) fn parse_msg_ts(msg: &serde_json::Value) -> Option<String> {
 /// 当前本地时钟 `HH:mm:ss`（新一轮 assistant 消息打点用）。
 pub(crate) fn now_clock() -> String {
     chrono::Local::now().format("%H:%M:%S").to_string()
+}
+
+/// 正文片段：纯文本 or 文件引用。
+///
+/// `File` 里存的是**完整绝对路径**（显示时由 [`crate::widgets::file_chip`] 省略成
+/// 文件名；语义与模型读到的一致）。
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum InlinePiece {
+    Text(String),
+    File(String),
+}
+
+/// 把一段正文按行切成片段（每行一组，行内可混排文本与文件引用）。
+///
+/// 两种格式都认（与 Web 版 `attachments.ts` 同一口径）：
+/// - **行内** `` `@file:"<路径>"` ``（当前写入口径：草稿区 chip 在发送时展开成它，
+///   一行里可以有多个）；
+/// - **整行** `@file:"<路径>"`（批次 1 的历史格式，**独占一行**时才认——否则
+///   用户手打的「把 @file:"x.ts" 放这里」会被误判成引用）。
+///
+/// 半截引用（`` `@file:" 没闭合 ``）原样留在文本里：宁可显示原文，也不吞掉内容。
+pub(crate) fn split_file_chips(text: &str) -> Vec<Vec<InlinePiece>> {
+    const OPEN: &str = "`@file:\"";
+    text.split('\n')
+        .map(|line| {
+            let mut out: Vec<InlinePiece> = Vec::new();
+            // 整行旧格式（trim 后整行就是一个引用）
+            let trimmed = line.trim();
+            if let Some(rest) = trimmed.strip_prefix("@file:\"") {
+                if let Some(path) = rest.strip_suffix('"') {
+                    if !path.is_empty() && !path.contains('"') {
+                        out.push(InlinePiece::File(path.to_string()));
+                        return out;
+                    }
+                }
+            }
+            let mut rest = line;
+            loop {
+                let Some(i) = rest.find(OPEN) else {
+                    if !rest.is_empty() {
+                        out.push(InlinePiece::Text(rest.to_string()));
+                    }
+                    break;
+                };
+                let after = &rest[i + OPEN.len()..];
+                let Some(j) = after.find("\"`") else {
+                    // 没闭合：这一行的剩余部分全是文本
+                    out.push(InlinePiece::Text(rest.to_string()));
+                    break;
+                };
+                let path = &after[..j];
+                if i > 0 {
+                    out.push(InlinePiece::Text(rest[..i].to_string()));
+                }
+                if path.is_empty() {
+                    // `@file:""` 这种空路径：原样保留（不产生空 chip）
+                    out.push(InlinePiece::Text(
+                        rest[..i + OPEN.len() + j + 2].to_string(),
+                    ));
+                } else {
+                    out.push(InlinePiece::File(path.to_string()));
+                }
+                rest = &after[j + 2..];
+            }
+            out
+        })
+        .collect()
+}
+
+/// 草稿区的文件引用 → 正文（`` `@file:"<路径>"` ``，与 Web 版序列化同口径）。
+///
+/// 追加在**正文末尾**而不是插入光标处：native 的文件引用是「草稿区附件」，正文里
+/// 没有插入点可依；末尾追加语义最直白（正文 → 引用），模型读到的顺序也自然。
+/// 正文为空时只发引用（只发附件是合法用法）。
+pub(crate) fn attach_file_refs(text: String, files: &[String]) -> String {
+    if files.is_empty() {
+        return text;
+    }
+    let refs = files
+        .iter()
+        .map(|p| format!("`@file:\"{p}\"`"))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let body = text.trim_end();
+    if body.is_empty() {
+        refs
+    } else {
+        format!("{body}\n{refs}")
+    }
+}
+
+/// 用户消息正文（气泡内）：文本 + 行内文件 chip。
+///
+/// 为什么不走 Markdown 渲染：用户气泡是强调色深底，`TextView::markdown` 用组件主题
+/// 的 foreground（浅色面配色），落在深底上等于看不见（见 `render_msg_body` 里那段
+/// 记录）。所以这里手排：**按行**（保留换行语义）+ **行内 flex_wrap**（文本与 chip
+/// 混排），空行留一点高度，不至于把段间距吃掉。
+pub(crate) fn render_user_body(text: &str) -> AnyElement {
+    let mut col = div().flex().flex_col().gap_1();
+    for line in split_file_chips(text) {
+        let empty = line.is_empty()
+            || line
+                .iter()
+                .all(|p| matches!(p, InlinePiece::Text(t) if t.trim().is_empty()));
+        if empty {
+            col = col.child(div().h(px(6.)));
+            continue;
+        }
+        let mut row = div()
+            .flex()
+            .flex_row()
+            .flex_wrap()
+            .items_center()
+            .gap_1()
+            .min_w_0();
+        for piece in line {
+            row = row.child(match piece {
+                InlinePiece::Text(t) => div().child(t).into_any_element(),
+                InlinePiece::File(p) => crate::widgets::file_chip(&p, true),
+            });
+        }
+        col = col.child(row);
+    }
+    col.into_any_element()
 }
 
 /// 后端接受的图片 MIME 白名单（与 `server/src/api/chat/types.rs` 的
@@ -1189,7 +1315,9 @@ pub(crate) fn render_msg_body(
                 // 否则气泡内文字与时间之间会凭空多一个空行（用户截图指出的那条）
                 let body_text = msg.text.trim_end().to_string();
                 if !body_text.is_empty() {
-                    bubble = bubble.child(div().child(body_text));
+                    // `@file:"…"` 渲染成 chip（与 vite 的消息区同口径）：直接铺原文时，
+                    // 用户自己发的文件引用在气泡里就是一长串反引号包着的路径
+                    bubble = bubble.child(render_user_body(&body_text));
                 }
                 // 气泡末尾的操作行（复制 / 回退 + 时间）单独成函数：GPUI 递归
                 // prepaint 时每层帧都算进栈，把它内联进本函数会让单帧翻倍
@@ -1744,5 +1872,91 @@ mod ts_anchor_tests {
         // 只有 user、助手还没回 → 没有任何 assistant 锚点
         let items = vec![row("user", "刚发出")];
         assert!(flagged(&items).is_empty());
+    }
+}
+
+#[cfg(test)]
+mod file_ref_tests {
+    //! 文件引用（`@file:` 标记）的解析与序列化。
+    //!
+    //! 为什么用单测：这条链路两头都是「看起来对了其实错了」的重灾区 ——
+    //! ① 草稿区 chip 发送时若序列化漏掉反引号，消息区就认不出（用户看到一长串
+    //!    路径原文）；② 行内匹配若把用户手打的 `把 @file:"x" 放这里` 也当引用，
+    //!    正文会被悄悄吞掉。判据是纯函数，单测钉住比截图核对便宜得多。
+    use crate::msg::{attach_file_refs, split_file_chips, InlinePiece};
+
+    fn t(s: &str) -> InlinePiece {
+        InlinePiece::Text(s.to_string())
+    }
+    fn f(s: &str) -> InlinePiece {
+        InlinePiece::File(s.to_string())
+    }
+
+    #[test]
+    fn attached_refs_go_to_the_end_of_body() {
+        let out = attach_file_refs(
+            "看下这个\n".to_string(),
+            &[r"F:\work\a.docx".to_string(), r"F:\work\b.ts".to_string()],
+        );
+        assert_eq!(
+            out,
+            "看下这个\n`@file:\"F:\\work\\a.docx\"` `@file:\"F:\\work\\b.ts\"`"
+        );
+    }
+
+    #[test]
+    fn attached_refs_only_when_body_empty() {
+        // 只发附件（正文空）也合法
+        assert_eq!(
+            attach_file_refs(String::new(), &[r"C:\a b\c.pdf".to_string()]),
+            "`@file:\"C:\\a b\\c.pdf\"`"
+        );
+        // 没有附件时正文原样（一个字符都不动）
+        assert_eq!(attach_file_refs("原文\n\n".to_string(), &[]), "原文\n\n");
+    }
+
+    #[test]
+    fn inline_refs_split_keep_surrounding_text() {
+        let lines = split_file_chips("帮我看下 `@file:\"C:\\a b\\c.docx\"` 的架构");
+        assert_eq!(lines.len(), 1);
+        assert_eq!(
+            lines[0],
+            vec![t("帮我看下 "), f("C:\\a b\\c.docx"), t(" 的架构")]
+        );
+    }
+
+    #[test]
+    fn multiple_refs_in_one_line() {
+        let lines = split_file_chips("A `@file:\"/a.ts\"` B `@file:\"/b.md\"`");
+        assert_eq!(lines[0], vec![t("A "), f("/a.ts"), t(" B "), f("/b.md")]);
+    }
+
+    #[test]
+    fn legacy_whole_line_ref_is_recognized() {
+        // 批次 1 的历史格式：整行一个引用（正文 + 空行 + 引用）
+        let lines = split_file_chips("看这个文件\n\n@file:\"C:\\a.ts\"");
+        assert_eq!(lines.len(), 3);
+        assert_eq!(lines[0], vec![t("看这个文件")]);
+        assert_eq!(lines[1], vec![]);
+        assert_eq!(lines[2], vec![f("C:\\a.ts")]);
+    }
+
+    #[test]
+    fn hand_typed_ref_inside_sentence_is_not_a_chip() {
+        // 用户手打的（不带反引号、也不独占一行）→ 原样留在文本里，不能吞掉内容
+        let lines = split_file_chips("把 @file:\"x.ts\" 放到这里");
+        assert_eq!(lines[0], vec![t("把 @file:\"x.ts\" 放到这里")]);
+    }
+
+    #[test]
+    fn unclosed_marker_stays_as_text() {
+        let lines = split_file_chips("把 `@file:\"x.ts 放到这里");
+        assert_eq!(lines[0], vec![t("把 `@file:\"x.ts 放到这里")]);
+    }
+
+    #[test]
+    fn empty_ref_path_does_not_produce_empty_chip() {
+        let lines = split_file_chips("`@file:\"\"` 后面");
+        assert_eq!(lines[0], vec![t("`@file:\"\"`"), t(" 后面")]);
     }
 }

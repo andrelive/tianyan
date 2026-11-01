@@ -457,6 +457,9 @@ impl ClientApp {
                             "tool_calls": m.tool_calls.len(),
                             "tools_done": m.tool_calls.iter().filter(|t| t.result.is_some()).count(),
                             "id_empty": m.id.is_empty(),
+                            // 时间戳：断言「历史消息到底有没有时间」的唯一手段
+                            // （截图只能证明某一屏，翻历史核对太贵；这里直接看数据）
+                            "ts": m.ts,
                             // 正文里的换行个数。Enter 发送的「凭空多一个换行」只能靠它
                             // 断言：光标在末尾时那个换行跟在最后（渲染上不显形），光标在
                             // 中间时它卡在句子里（用户实测一眼可见）—— 两种都要能回归。
@@ -878,6 +881,10 @@ impl ClientApp {
                 "zoomed_image": self.zoomed_image.is_some(),
                 // 待发送附件数（图片）
                 "composer_images": self.composer_images.len(),
+                // 待发送的**文件引用**（绝对路径）。两条回归都靠它断言：
+                // ① 粘贴文件后输入框正文里**不该**出现 `@file:` 原文（`composer_text`）；
+                // ② 附件条里有 N 个 chip（= 这里的长度），发送后清零。
+                "composer_files": &self.composer_files,
                 // 输入框高度不再由前端估算（改由 `TextareaState::auto_grow(1, 8)`
                 // 按真实字形测量），所以这里没有可断言的数值字段；多行输入是否真的
                 // 撑高，用截图/肉眼验（自动化侧可断言的是 `composer_text` 与
@@ -1018,6 +1025,12 @@ impl ClientApp {
                     self.load_approvals(cx);
                 }
                 cx.notify();
+            }
+            // 发草稿（正文 + 附件）：走 `send_text` 这条真实发送路径，验证「草稿区
+            // chip 在发送时展开成 `@file:` 标记、消息气泡里再渲染回 chip」。
+            // 与「点发送按钮」的唯一差别是少了 Enter 那个换行的清理（需要 window）
+            "send_composer" => {
+                self.send_draft(cx)?;
             }
             // ---- 对话 ----
             "send_message" => self.send_text(arg_str(cmd, "text")?, cx),
@@ -1181,6 +1194,18 @@ impl ClientApp {
             "paste_image" => {
                 if !self.paste_image_from_clipboard(cx) {
                     return Err("剪贴板里没有图片（先截图到剪贴板再试）".to_string());
+                }
+            }
+            // 粘贴**文件**（资源管理器里复制的文件在剪贴板里是 CF_HDROP）：
+            // 与真实 Ctrl+V 走**同一个入口** `paste_files_from_item`（`Textarea::on_paste`
+            // 的文件分支就是它），只是省掉 keystroke 派发（自动化端口不抢用户焦点）。
+            // 与上面的 `paste_image` 同一手法：真实路径的函数 + 自动化触发。
+            "paste_files" => {
+                let item = cx
+                    .read_from_clipboard()
+                    .ok_or_else(|| "剪贴板为空".to_string())?;
+                if !self.paste_files_from_item(&item, cx) {
+                    return Err("剪贴板里没有文件（先在资源管理器复制一个文件再试）".to_string());
                 }
             }
             // 图片放大（对齐 vite `ZoomableImage`）：不带 `open` 时取反；
@@ -1674,6 +1699,11 @@ impl ClientApp {
             // 清空输入框（测试收尾；真实路径里发送成功后也会清）
             "composer_clear" => {
                 self.clear_composer(cx)?;
+                // 附件也算「草稿的一部分」：只清正文会留下上一轮的图片/文件引用，
+                // 验收脚本收尾清理后若还挂着附件，下一条断言就会被旧状态干扰
+                self.composer_images.clear();
+                self.composer_files.clear();
+                cx.notify();
             }
             // 把一条外部事件直接喂给事件处理器 —— 只验证「事件 → 界面归约」这一段。
             // 事件本身的**生产侧**由 `server/src/event_push.rs` 的测试保证

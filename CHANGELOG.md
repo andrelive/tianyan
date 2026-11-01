@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **粘贴文件 → 草稿区文件 chip**：Ctrl+V 粘贴文件（资源管理器里复制的文件）不再往输入框
+  里插 `` `@file:"<路径>"` `` 原文，而是变成输入卡片上方的**附件 chip**（图标 + 文件名 + ×，
+  与图片缩略图同一行混排）；发送时才展开成同一份 `@file:` 标记（与 Web 版序列化口径一致，
+  后端零改动）。用户消息气泡里再把引用渲染回 chip（文本 + chip 行内混排，批次 1 的整行
+  `@file:"…"` 旧格式同样认得），自己发出的引用不再显示成一长串带反引号的路径。
+- **验收面补齐**：`/state` 新增 `usage.composer_files`（草稿区文件引用）与
+  `messages.recent[].ts`（历史消息时间戳）；自动化动作新增 `paste_files`（走
+  `paste_files_from_item` 这条真实粘贴入口）与 `send_composer`（走 `send_text` 这条真实
+  发送路径），`composer_clear` 一并清掉附件。`scripts/verify-gui-native.ps1` 新增 7 项断言
+  （粘贴文件后正文不含 `@file:` 原文 / 附件计数 / 清空后归零 / 历史消息带时间戳），
+  全套 **84 项断言全绿**。
+
+### Fixed
+- **历史消息时间戳（核实结论：一直有）**：实测 `GET /sessions/{id}/messages` 对最早与最新
+  消息都下发 `timestamp`（`101573f` 起由 `StructuredMessage.time.created` 转 RFC3339 →
+  `ChatMessage.timestamp`），前端 `parse_msg_row` 也解析它；`/state.messages.recent[].ts`
+  非空、历史会话轮末正常显示时刻。此前 `parse_msg_ts` 的注释与 `send_text` 里「后端
+  `timestamp` 恒空 / 历史消息不显示时间」的说法是错的，已按代码事实更正——这条链路自此由
+  验收脚本断言，不再靠翻历史看图。
+
 ### Changed
 - **「思考中…」移到输入卡片底部控件行最左**：原先在消息列表下方、紧贴最后一个强视觉块
   （如待办卡）8px，看起来像卡片的附属行（用户报「思考中在待办下面」）。四个原型

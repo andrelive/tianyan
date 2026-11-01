@@ -187,6 +187,56 @@ Check "界面已渲染（view 非空）" (-not [string]::IsNullOrEmpty($st.view)
 Check "内嵌 server 端口已上报" ($st.server_port -gt 0)
 $health = Invoke-RestMethod -Uri "$serverBase/health" -TimeoutSec 5
 Check "内嵌 server /health 正常" ($health.status -eq "ok")
+# ── 2b. 输入区附件：粘贴文件 → 草稿 chip（正文里不该出现 @file: 原文） ──────
+#
+# 为什么断言这一对：用户实测报的「粘贴文件在输入框没正确渲染」有两半 ——
+# ① 正文里塞进一长串 `` `@file:"F:\…"` `` 原文（Textarea 是纯文本编辑器，
+#    插文本就只能是文本）；② 附件区没有任何可见的「已引用」标记。
+# 所以既断言 composer_files 有值，也断言 composer_text **不含** `@file:`。
+Write-Host "`n[输入区附件]" -ForegroundColor Cyan
+Act @{ action = "composer_clear" } 150 | Out-Null
+$probeFile = $PSCommandPath # 用脚本自身当「被引用的文件」（真实存在的绝对路径）
+# 把文件放进剪贴板（= 资源管理器 Ctrl+C 的效果，CF_HDROP）。两条路都不直观点：
+# `Set-Clipboard -Path` 只在 Windows PowerShell 5.1 有；`Clipboard::SetFileDropList`
+# 又要求 **STA** 线程，而 `#requires` 强制本脚本跑在 pwsh 7（MTA）。所以转手一个
+# `powershell -STA` 子进程做这一件事——副作用只有一个子进程的启停。
+$setClip = Join-Path $env:TEMP "verify-set-clip.ps1"
+@"
+Add-Type -AssemblyName System.Windows.Forms
+`$col = New-Object System.Collections.Specialized.StringCollection
+`$col.Add('$probeFile')
+[System.Windows.Forms.Clipboard]::SetFileDropList(`$col)
+"@ | Set-Content -Path $setClip -Encoding utf8
+powershell -NoProfile -STA -ExecutionPolicy Bypass -File $setClip | Out-Null
+$r = Act @{ action = "paste_files" } 300
+$s = StateOf $r
+$files = @($s.usage.composer_files)
+Check "粘贴文件后草稿区有 1 个引用" ($files.Count -eq 1) "（实际 $($files.Count)）"
+Check "引用的路径就是剪贴板里那个" ($files.Count -eq 1 -and $files[0] -eq $probeFile)
+Check "正文里没有 @file: 原文（已改成 chip）" (-not ($s.usage.composer_text -like "*@file:*")) "（正文：$($s.usage.composer_text)）"
+Check "图片通道未受影响" ($s.usage.composer_images -eq 0)
+Act @{ action = "composer_clear" } 200 | Out-Null
+$s = Get-State
+Check "清空输入同时清掉附件" (@($s.usage.composer_files).Count -eq 0)
+
+# ── 2c. 历史消息时间戳 ─────────────────────────────────────────────────
+#
+# 这条链路的三个环节各错过一次（后端 DTO 不下发 / 前端不解析 / 渲染落点不对），
+# 只看截图没法定位是哪一环断的，所以断言放在**数据面**（`/state.messages.recent.ts`）。
+Write-Host "`n[历史时间戳]" -ForegroundColor Cyan
+$rows = @($s.sessions_data)
+if ($rows.Count -gt 0) {
+    $r = Act @{ action = "select_session"; id = $rows[0].id } 1200
+    $null = Wait-Until { (Get-State).messages.loaded -gt 0 } 15
+    $s = Get-State
+    $recent = @($s.messages.recent)
+    $withTs = @($recent | Where-Object { -not [string]::IsNullOrEmpty($_.ts) })
+    Check "历史消息已加载" ($s.messages.loaded -gt 0) "（实际 $($s.messages.loaded)）"
+    Check "历史消息带时间戳" ($withTs.Count -gt 0) "（$($withTs.Count)/$($recent.Count) 条有 ts）"
+} else {
+    Check "有会话可选（历史时间戳断言的前置）" $false
+}
+
 
 # ── 3. 设置页：14 个栏目逐个切 ─────────────────────────────────────────
 Write-Host "`n[设置页栏目]" -ForegroundColor Cyan

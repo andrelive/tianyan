@@ -218,6 +218,7 @@ impl ClientApp {
             dialog: None,
             zoomed_image: None,
             composer_images: Vec::new(),
+            composer_files: Vec::new(),
             inputs: Vec::new(),
             running_sessions: std::collections::HashSet::new(),
             offline: false,
@@ -1497,7 +1498,9 @@ impl ClientApp {
             let state = self.input.read(cx);
             (state.value().to_string(), state.cursor())
         };
-        if text.trim().is_empty() {
+        // 正文为空但草稿区有文件引用时**照样能发**（只发附件是合法用法，
+        // Web 版同样允许）；两者都空才是「没什么可发」。
+        if text.trim().is_empty() && self.composer_files.is_empty() {
             // 全是空白也要把输入框清掉：多行 Textarea 会把 Enter 插入成换行，
             // 而 Enter 的发送拦截若走了兜底路径（见 `PressEnter` 订阅），此刻框里
             // 就只剩那个换行 —— 不清掉用户会看到一个凭空的空行。
@@ -1533,6 +1536,26 @@ impl ClientApp {
         self.send_text(text, cx);
     }
 
+    /// 发草稿区当前内容（正文 + 附件），**不含** Enter 专有的换行清理。
+    ///
+    /// 只给自动化用：`send_current_input` 需要 `&mut Window`（清理要读光标位置），
+    /// 而自动化通道手上只有 `Context`。真正的发送语义（图片走 `images`、文件引用
+    /// 展开成 `@file:` 标记、乐观渲染、SSE 订阅）全在 `send_text` 里，这里不复制。
+    pub(crate) fn send_draft(&mut self, cx: &mut Context<Self>) -> Result<(), String> {
+        let text = self.input.read(cx).value().to_string();
+        if text.trim().is_empty()
+            && self.composer_files.is_empty()
+            && self.composer_images.is_empty()
+        {
+            return Err("输入框与附件都是空的".to_string());
+        }
+        self.send_text(text, cx);
+        // 与 `send_current_input` 同口径：发出去就清空输入框（否则自动化测完会在
+        // 输入区留下一条「已发送的正文」，下一条断言读到的是别的场景）
+        self.clear_composer(cx)?;
+        Ok(())
+    }
+
     /// 发送一段文本：`POST /chat/stream` 只是开关（ADR-028），输出走常驻 SSE。
     pub(crate) fn send_text(&mut self, text: String, cx: &mut Context<Self>) {
         if self.busy() {
@@ -1540,6 +1563,10 @@ impl ClientApp {
         }
         // 待发送图片随本条消息一起走（发送即清空草稿）
         let pending_images = std::mem::take(&mut self.composer_images);
+        // 文件引用同理：草稿区 chip 只活在界面里，发送时展开成 Web 版同一份
+        // `` `@file:"<路径>"` `` 标记（后端与模型侧零改动，模型读到的仍是完整路径）
+        let pending_files = std::mem::take(&mut self.composer_files);
+        let text = crate::msg::attach_file_refs(text, &pending_files);
         // 新会话：id 必须在发起前确定（事件按 session_id 路由）
         let session_id = match self.current_session.clone() {
             Some(sid) => sid,

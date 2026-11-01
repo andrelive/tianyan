@@ -11,6 +11,8 @@ use crate::format::*;
 use crate::theme::colors;
 use crate::types::View;
 use crate::types::*;
+// 文件引用 chip（草稿区附件条）：与消息区共用同一个形态
+use crate::widgets::file_chip;
 use gpui_kit::assets::IconName;
 use gpui_kit::component::input::Textarea;
 use gpui_kit::component::progress::ProgressCircle;
@@ -861,15 +863,16 @@ impl ClientApp {
                     // 两块（上面一个输入框 + 下面一排按钮），与 Tauri
                     // 版「按钮在输入框内」的形态不符。
                     .child({
-                        // 待发送图片缩略图：**在输入框上方**（对齐 vite `ChatInput`：
-                        // `{images.length > 0 && ...}` 渲染在 `<ComposerEditor>` 之前）。
-                        // 早先放在 Textarea 之后（= 下方），用户实测指出与 vite 不同。
-                        // 单独成函数：压 render_chat 栈帧。
-                        let attachments = if self.composer_images.is_empty() {
-                            None
-                        } else {
-                            Some(self.render_composer_attachments(cx))
-                        };
+                        // 待发送附件（图片缩略图 + 文件引用 chip）：**在输入框上方**
+                        // （对齐 vite `ChatInput`：`{images.length > 0 && ...}` 渲染在
+                        // `<ComposerEditor>` 之前）。早先放在 Textarea 之后（= 下方），
+                        // 用户实测指出与 vite 不同。单独成函数：压 render_chat 栈帧。
+                        let attachments =
+                            if self.composer_images.is_empty() && self.composer_files.is_empty() {
+                                None
+                            } else {
+                                Some(self.render_composer_attachments(cx))
+                            };
                         div()
                             .flex()
                             .flex_col()
@@ -890,7 +893,7 @@ impl ClientApp {
                                 Textarea::new(&self.input)
                                     .min_h(px(44.))
                                     .appearance(false)
-                                    .on_paste(move |item, window, cx| {
+                                    .on_paste(move |item, _window, cx| {
                                         let Some(w) = app.lock().ok().and_then(|g| g.clone())
                                         else {
                                             return false;
@@ -900,7 +903,7 @@ impl ClientApp {
                                             // 反过来会把「复制的 png」变成模型读不了的路径引用
                                             // （Web 版同一条结论，见 ChatInput.tsx 的图片通道注释）。
                                             this.paste_image_from_item(item, cx)
-                                                || this.paste_files_from_item(item, window, cx)
+                                                || this.paste_files_from_item(item, cx)
                                         })
                                         .unwrap_or(false)
                                     })
@@ -1464,7 +1467,10 @@ impl ClientApp {
         menu.into_any_element()
     }
 
-    /// 输入卡片里的附件缩略图条（每张带移除按钮）。
+    /// 输入卡片里的附件条：图片缩略图 + 文件引用 chip（每个都带移除按钮）。
+    ///
+    /// 图片在前、文件在后（同一 `flex_wrap` 行内混排：图片 64×64、chip 单行高，
+    /// 混排时按行对齐，不会出现两套列表）。
     ///
     /// 抽成独立方法只为**压 `render_chat` 的栈帧**（GPUI 递归 prepaint，单帧过大
     /// 会栈溢出）。
@@ -1520,6 +1526,37 @@ impl ClientApp {
                             .on_click(cx.listener(move |this, _, _w, cx| {
                                 if i < this.composer_images.len() {
                                     this.composer_images.remove(i);
+                                }
+                                cx.notify();
+                            })),
+                    ),
+            );
+        }
+        // 文件引用 chip：与图片同一行混排（图标 + 文件名 + ×），全路径只在发送时
+        // 进正文——草稿区不显示路径，避免一长串 `@file:"F:\work\…"` 撑满卡片
+        for (i, path) in self.composer_files.iter().enumerate() {
+            strip = strip.child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_1()
+                    .child(file_chip(path, false))
+                    .child(
+                        div()
+                            .id(("rm-file", i))
+                            .px_1()
+                            .rounded_md()
+                            .cursor_pointer()
+                            .child(
+                                svg()
+                                    .path(IconName::X.path())
+                                    .size(px(10.))
+                                    .text_color(rgb(colors::TEXT_TERTIARY())),
+                            )
+                            .on_click(cx.listener(move |this, _, _w, cx| {
+                                if i < this.composer_files.len() {
+                                    this.composer_files.remove(i);
                                 }
                                 cx.notify();
                             })),
@@ -1599,56 +1636,56 @@ impl ClientApp {
         false
     }
 
-    /// 剪贴板里的**文件**（资源管理器 Ctrl+C / 拖入）→ 光标处插入 `@file:"…"` 引用。
+    /// 剪贴板里的**文件**（资源管理器 Ctrl+C / 拖入）→ 草稿区文件 chip。
     ///
     /// 与 Web 版的「路径通道」同一口径：模型拿到路径，自己决定读不读——比塞 base64
     /// 省上下文，也避免「复制的 png 变成模型读不了的二进制块」。
-    /// 返回是否插入了东西（没有文件条目返回 `false`，纯文本粘贴照常走默认实现）。
+    ///
+    /// **不再往输入框插 `` `@file:"…"` `` 原文**：`Textarea` 是纯文本编辑器，插进去
+    /// 就是一长串反引号包着的路径（用户实测截图报的就是这条）。改为草稿区 chip
+    /// （图标 + 文件名 + ×，见 [`render_composer_attachments`]），发送时才展开成
+    /// 同一份 `@file:` 标记——序列化口径与 Web 版完全一致，后端零改动。
+    ///
+    /// 返回是否收下了东西（没有文件条目返回 `false`，纯文本粘贴照常走默认实现）。
     pub(crate) fn paste_files_from_item(
         &mut self,
         item: &gpui_kit::ClipboardItem,
-        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
-        let mut snippet = String::new();
+        let mut added = 0usize;
+        let mut overflow = false;
         for entry in &item.entries {
             let gpui_kit::ClipboardEntry::ExternalPaths(ext) = entry else {
                 continue;
             };
             for path in ext.paths() {
-                // 一次粘贴最多 20 个引用（与 Web 版同数）：超了只丢多余项，
-                // 已有内容与已插入的部分不动
-                if snippet.matches("@file:").count() >= MAX_COMPOSER_FILES {
-                    break;
+                let p = path.to_string_lossy().to_string();
+                // 去重：`Textarea::on_paste` 与外层 `on_key_down` 都可能命中，
+                // 同一份文件不能被引用两次
+                if self.composer_files.iter().any(|x| x == &p) {
+                    continue;
                 }
-                snippet.push_str(&format!("`@file:\"{}\"` ", path.to_string_lossy()));
+                // 一次粘贴最多 20 个引用（与 Web 版同数）：超了只丢多余项
+                if self.composer_files.len() >= MAX_COMPOSER_FILES {
+                    overflow = true;
+                    continue;
+                }
+                self.composer_files.push(p);
+                added += 1;
             }
         }
-        if snippet.is_empty() {
+        if added == 0 && !overflow {
             return false;
         }
-        let n = snippet.matches("@file:").count();
-        self.insert_into_composer(snippet, window, cx);
-        self.set_status(format!("已引用 {n} 个文件"));
+        if overflow {
+            self.set_status(format!(
+                "最多引用 {MAX_COMPOSER_FILES} 个文件（多余的没加进来）"
+            ));
+        } else {
+            self.set_status(format!("已引用 {added} 个文件"));
+        }
         cx.notify();
         true
-    }
-
-    /// 在输入框**光标处**插入一段文本（光标自动前移到插入内容之后）。
-    ///
-    /// 用 `TextareaState::insert` 而不是「读 value → 拼串 → `set_value`」：
-    /// `set_value` 会把选区重置到开头并清空撤销栈，用户接着打字的位置就丢了。
-    pub(crate) fn insert_into_composer(
-        &mut self,
-        text: String,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let input = self.input.clone();
-        input.update(cx, |state, cx| {
-            state.insert(text, window, cx);
-        });
-        cx.notify();
     }
 
     /// 清空输入框。
