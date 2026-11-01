@@ -917,6 +917,8 @@ impl ClientApp {
                 // 输入框正文（@ 引用插入后断言它含 `@file:"..."`；
                 // 走 `read(cx)` 拿实体真值，不是副本——副本会和实体漂移）
                 "composer_text": self.input.read(cx).value(),
+                // 上一帧排版出的视觉行数（断言「长文本是否真的换行」）
+                "composer_rows": self.input.read(cx).rows_cache.get(),
                 "ctx_compress": self.ctx_compress.as_ref().map(|(ok, m)| serde_json::json!({
                     "ok": ok, "message": m,
                 })),

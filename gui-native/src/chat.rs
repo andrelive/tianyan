@@ -887,7 +887,14 @@ impl ClientApp {
                                 // 输入区：自研编辑器（键盘 / IME / 粘贴分流都在
                                 // `ComposerState` 里；`min_h` 只是兜底，高度由
                                 // `ComposerBody` 按行数算）
-                                div().min_h(px(44.)).w_full().child(self.input.clone())
+                                // 内边距**由外层给**：自绘元素从 bounds 原点起画，不包一层
+                                // 就会像用户截图那样「光标贴着左边缘」
+                                div()
+                                    .min_h(px(44.))
+                                    .w_full()
+                                    .px_3()
+                                    .py_2()
+                                    .child(self.input.clone())
                             })
                     })
                     .child(

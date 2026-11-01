@@ -16,7 +16,7 @@
 //!   与 `Buffer.cursor` 同一口径），切点向下取整到字符边界；
 //! - 行高统一取 `window.line_height()`（不做行内多字号，输入框不需要）。
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::ops::Range;
 
 use crate::composer::{file_refs, Buffer};
@@ -61,6 +61,18 @@ pub(crate) struct ComposerState {
     origin: RefCell<(f32, f32)>,
     /// 最近一次粘贴的时刻（`Ctrl+V` 与平台 `paste` 可能同时到达，靠它去重）。
     last_paste: Option<std::time::Instant>,
+    /// 上一帧排版出的**真实视觉行数**（下一帧 `request_layout` 拿它定高）。
+    ///
+    /// 为什么需要：高度必须在布局阶段定，而软换行只有排版后才知道要几行。
+    /// 首帧按估算给、之后用真实值自愈 —— 少了这一步，长文本会「换行了但看不见」
+    /// （多出来的行被元素高度裁掉，用户看到的就是「不能自动换行」）。
+    pub(crate) rows_cache: Cell<usize>,
+    /// 上一帧的可用宽度（估算行数用；首帧用窗口宽近似）。
+    avail_cache: Cell<f32>,
+    /// 光标是否处于「亮」相位（闪烁）。
+    caret_on: Cell<bool>,
+    /// 闪烁任务（只启动一次）。
+    blink_task: Option<gpui_kit::Task<()>>,
 }
 
 impl ComposerState {
@@ -75,6 +87,10 @@ impl ComposerState {
             hits: RefCell::new(Vec::new()),
             origin: RefCell::new((0.0, 0.0)),
             last_paste: None,
+            rows_cache: Cell::new(0),
+            avail_cache: Cell::new(0.0),
+            caret_on: Cell::new(true),
+            blink_task: None,
         }
     }
 
@@ -130,20 +146,44 @@ impl ComposerState {
         }
     }
 
-    /// 估算可见行数（高度用；不做精确换行，避免在 request_layout 里 shaping）。
-    pub(crate) fn estimated_rows(&self, window: &mut Window) -> usize {
-        let hard = self.buffer.text.split('\n').count();
-        // 粗略估算：可用宽度按「窗口宽 − 两侧边距」算，字符宽按字号 0.6 倍
+    /// 估算可见行数（首帧用；之后由 [`Self::rows_cache`] 的真实值接管）。
+    ///
+    /// `avail` = 上一帧的可用宽度（≤ 0 时退化为「窗口宽 − 400」的粗估）。
+    pub(crate) fn estimated_rows(&self, window: &mut Window, avail: f32) -> usize {
         let font_size = f32::from(window.text_style().font_size.to_pixels(window.rem_size()));
-        let avail = f32::from(window.viewport_size().width) - 120.0;
         let per_char = (font_size * 0.6).max(6.0);
+        let avail = if avail > 32.0 {
+            avail
+        } else {
+            (f32::from(window.viewport_size().width) - 400.0).max(160.0)
+        };
         let mut rows = 0usize;
         for line in self.buffer.text.split('\n') {
             let w = line.chars().count() as f32 * per_char;
             rows += ((w / avail.max(per_char)).ceil() as usize).max(1);
         }
-        let _ = hard;
         rows.clamp(COMPOSER_MIN_ROWS, COMPOSER_MAX_ROWS)
+    }
+
+    /// 启动光标闪烁（530ms 一个相位；只在第一次渲染时起任务）。
+    fn start_caret_blink(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.blink_task.is_some() {
+            return;
+        }
+        self.blink_task = Some(cx.spawn_in(window, async move |this, cx| loop {
+            cx.background_executor()
+                .timer(std::time::Duration::from_millis(530))
+                .await;
+            let alive = this
+                .update(cx, |this, cx| {
+                    this.caret_on.set(!this.caret_on.get());
+                    cx.notify();
+                })
+                .is_ok();
+            if !alive {
+                break;
+            }
+        }));
     }
 
     /// 命中测试：**元素内坐标** → 正文字节位置（调用方先减去元素原点）。
@@ -244,7 +284,16 @@ impl Element for ComposerBody {
         window: &mut Window,
         cx: &mut App,
     ) -> (LayoutId, Self::RequestLayoutState) {
-        let rows = self.state.read(cx).estimated_rows(window);
+        // 高度：优先用上一帧排版出的**真实行数**，首帧才估算（见 `rows_cache`）
+        let rows = {
+            let st = self.state.read(cx);
+            let cached = st.rows_cache.get();
+            if cached > 0 {
+                cached.min(COMPOSER_MAX_ROWS)
+            } else {
+                st.estimated_rows(window, st.avail_cache.get())
+            }
+        };
         let line_height = window.line_height();
         let style = Style {
             size: size(relative(1.0).into(), (line_height * rows as f32).into()),
@@ -270,6 +319,10 @@ impl Element for ComposerBody {
             st.hits.replace(pre.hit_rows());
             st.origin
                 .replace((f32::from(bounds.origin.x), f32::from(bounds.origin.y)));
+            // 真实行数 / 宽度回写：下一帧 `request_layout` 据此定高（自愈 ——
+            // 少了这一步，长文本会「换行了但被元素高度裁掉」，看起来像不换行）
+            st.rows_cache.set(pre.rows.len().max(COMPOSER_MIN_ROWS));
+            st.avail_cache.set(f32::from(bounds.size.width));
         }
         pre
     }
@@ -383,8 +436,8 @@ impl Element for ComposerBody {
                 // 选区跨行的空行也要有可见宽度：交给上面的文本段处理，这里不额外画
             }
 
-            // 光标：只在聚焦时画（第一版不做闪烁）
-            if focused {
+            // 光标：聚焦时按 530ms 相位闪烁（用户实测指出「光标不闪，像卡住了」）
+            if focused && self.state.read(cx).caret_on.get() {
                 let (cx_pos, cy) = caret_position(prepaint, cursor, bounds, scroll);
                 paint_quad(window, cx_pos, cy, px(2.), line_height, accent);
             }
@@ -418,7 +471,9 @@ impl IntoElement for ComposerBody {
 }
 
 impl Render for ComposerState {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // 光标闪烁：第一次渲染时起一个 530ms 的相位任务
+        self.start_caret_blink(window, cx);
         div()
             .id("composer-root")
             .w_full()
