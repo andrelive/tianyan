@@ -198,7 +198,12 @@ pub(crate) fn attach_file_refs(text: String, files: &[String]) -> String {
 /// 记录）。所以这里手排：**按行**（保留换行语义）+ **行内 flex_wrap**（文本与 chip
 /// 混排），空行留一点高度，不至于把段间距吃掉。
 pub(crate) fn render_user_body(text: &str) -> AnyElement {
-    let mut col = div().flex().flex_col().gap_1();
+    // ⚠️ 这里的**每一层都必须带宽度约束**（`w_full` / 文本叶节点 `min_w_0`）：
+    // 改之前这里就是一句 `div().child(body_text)`，文本自然折行；改成「行内 chip 混排」
+    // 后每行都包进 `flex_row`，而 taffy 里 flex 子项的 `min-width` 默认是 `auto`
+    // （= 内容宽度），于是整行被文本撑到内容宽度、`flex_wrap` 永远不触发，
+    // 长句直接溢出气泡被裁掉 —— 用户实测「对话流里文本不换行，后面被切掉」。
+    let mut col = div().w_full().flex().flex_col().gap_1();
     for line in split_file_chips(text) {
         let empty = line.is_empty()
             || line
@@ -208,7 +213,20 @@ pub(crate) fn render_user_body(text: &str) -> AnyElement {
             col = col.child(div().h(px(6.)));
             continue;
         }
+        // 纯文本行（绝大多数）：**不做 flex 混排**，整段交给文本节点自己折行
+        if !line.iter().any(|p| matches!(p, InlinePiece::File(_))) {
+            let mut flat = String::new();
+            for piece in &line {
+                if let InlinePiece::Text(t) = piece {
+                    flat.push_str(t);
+                }
+            }
+            col = col.child(div().w_full().child(flat));
+            continue;
+        }
+        // 含文件引用：文本段与 chip 混排（宽度必须有约束，见上）
         let mut row = div()
+            .w_full()
             .flex()
             .flex_row()
             .flex_wrap()
@@ -217,7 +235,7 @@ pub(crate) fn render_user_body(text: &str) -> AnyElement {
             .min_w_0();
         for piece in line {
             row = row.child(match piece {
-                InlinePiece::Text(t) => div().child(t).into_any_element(),
+                InlinePiece::Text(t) => div().min_w_0().child(t).into_any_element(),
                 InlinePiece::File(p) => crate::widgets::file_chip(&p, true),
             });
         }
