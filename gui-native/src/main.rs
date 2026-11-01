@@ -268,15 +268,6 @@ struct ClientApp {
     pub(crate) zoomed_image: Option<std::sync::Arc<gpui_kit::Image>>,
     /// 待发送的图片（data URL 列表）：Ctrl+V 贴图进来，发送后清空
     pub(crate) composer_images: Vec<String>,
-    /// 待发送的**文件引用**（绝对路径列表）：Ctrl+V 粘贴文件（资源管理器复制的文件）
-    /// 进来，发送时展开成正文里的 `` `@file:"<路径>"` ``。
-    ///
-    /// 为什么不像 Web 版那样直接插进正文：`Textarea` 是纯文本编辑器，Web 版靠
-    /// Lexical 的自定义节点把引用画成 chip；GPUI 的文本控件没有行内自定义元素，
-    /// 直接插文本只会让用户看到一长串 `` `@file:"F:\work\…"` `` 原文（用户实测
-    /// 截图报的就是这条）。改为「草稿区 chip（图标 + 文件名 + ×）」，正文保持干净，
-    /// 语义与 Web 版完全一致（序列化仍是同一份 `@file:` 标记，后端零改动）。
-    pub(crate) composer_files: Vec<String>,
     /// 每会话一个**输入框实体**（`Entity<TextareaState>`）：光标位置、选区、undo
     /// 历史、IME 状态都随会话独立。
     ///
@@ -629,8 +620,6 @@ pub(crate) struct SessionSnapshot {
     // ── 输入区 ──
     /// 待发送图片（文本草稿在**每会话一个输入框实体**里，见 `ClientApp::inputs`）
     pub(crate) composer_images: Vec<String>,
-    /// 待发送的文件引用（绝对路径；发送时展开成正文里的 `@file:` 标记）
-    pub(crate) composer_files: Vec<String>,
     /// 会话级模型 / 思考强度（服务端权威，restore 后仍会被 `load_session_model` 刷新）
     pub(crate) session_model: Option<(String, String)>,
     pub(crate) thinking: Option<String>,

@@ -211,7 +211,6 @@ impl ClientApp {
             dialog: None,
             zoomed_image: None,
             composer_images: Vec::new(),
-            composer_files: Vec::new(),
             inputs: Vec::new(),
             running_sessions: std::collections::HashSet::new(),
             offline: false,
@@ -1543,9 +1542,9 @@ impl ClientApp {
         }
         let _ = &window;
         let text = self.input.read(cx).value();
-        // 正文为空但草稿区有文件引用时**照样能发**（只发附件是合法用法，
-        // Web 版同样允许）；两者都空才是「没什么可发」。
-        if text.trim().is_empty() && self.composer_files.is_empty() {
+        // 正文为空但有图片附件时**照样能发**（只发图是合法用法，Web 版同样允许）。
+        // 文件引用不需要单独判：它就是正文里的 `` `@file:"…"` `` chip，已经在 text 里。
+        if text.trim().is_empty() && self.composer_images.is_empty() {
             if !text.is_empty() {
                 self.input.update(cx, |state, cx| state.clear(cx));
             }
@@ -1567,10 +1566,7 @@ impl ClientApp {
     /// 展开成 `@file:` 标记、乐观渲染、SSE 订阅）全在 `send_text` 里，这里不复制。
     pub(crate) fn send_draft(&mut self, cx: &mut Context<Self>) -> Result<(), String> {
         let text = self.input.read(cx).value().to_string();
-        if text.trim().is_empty()
-            && self.composer_files.is_empty()
-            && self.composer_images.is_empty()
-        {
+        if text.trim().is_empty() && self.composer_images.is_empty() {
             return Err("输入框与附件都是空的".to_string());
         }
         self.send_text(text, cx);
@@ -1587,10 +1583,8 @@ impl ClientApp {
         }
         // 待发送图片随本条消息一起走（发送即清空草稿）
         let pending_images = std::mem::take(&mut self.composer_images);
-        // 文件引用同理：草稿区 chip 只活在界面里，发送时展开成 Web 版同一份
-        // `` `@file:"<路径>"` `` 标记（后端与模型侧零改动，模型读到的仍是完整路径）
-        let pending_files = std::mem::take(&mut self.composer_files);
-        let text = crate::msg::attach_file_refs(text, &pending_files);
+        // 文件引用**不需要在这里展开**：它一直是正文里的 `` `@file:"<路径>"` ``
+        // chip（自研输入框的行内原子块），发出去的就是编辑器里的那段文本。
         // 新会话：id 必须在发起前确定（事件按 session_id 路由）
         let session_id = match self.current_session.clone() {
             Some(sid) => sid,

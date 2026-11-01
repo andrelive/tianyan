@@ -302,7 +302,6 @@ impl ClientApp {
             has_more_history: std::mem::take(&mut self.has_more_history),
             loading_older: std::mem::take(&mut self.loading_older),
             composer_images: std::mem::take(&mut self.composer_images),
-            composer_files: std::mem::take(&mut self.composer_files),
             session_model: self.session_model.take(),
             thinking: self.thinking.take(),
             ctx_live: self.ctx_live.take(),
@@ -354,7 +353,6 @@ impl ClientApp {
         self.has_more_history = false;
         self.loading_older = false;
         self.composer_images.clear();
-        self.composer_files.clear();
         self.session_model = None;
         self.thinking = None;
         self.ctx_live = None;
@@ -435,7 +433,6 @@ impl ClientApp {
         self.has_more_history = snap.has_more_history;
         self.loading_older = snap.loading_older;
         self.composer_images = snap.composer_images;
-        self.composer_files = snap.composer_files;
         self.session_model = snap.session_model;
         self.thinking = snap.thinking;
         self.ctx_live = snap.ctx_live;
@@ -571,7 +568,6 @@ impl ClientApp {
         // 附件也按会话存草稿（上面已 save），这里清空后由 restore 填回本档的草稿
         // ——不会把上一会话的附件误发到新会话，也不会丢掉自己写了一半的内容
         self.composer_images.clear();
-        self.composer_files.clear();
         self.restore_input(window, cx);
         self.rebuild_session_rows(cx);
     }

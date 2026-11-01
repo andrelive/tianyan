@@ -881,10 +881,18 @@ impl ClientApp {
                 "zoomed_image": self.zoomed_image.is_some(),
                 // 待发送附件数（图片）
                 "composer_images": self.composer_images.len(),
-                // 待发送的**文件引用**（绝对路径）。两条回归都靠它断言：
-                // ① 粘贴文件后输入框正文里**不该**出现 `@file:` 原文（`composer_text`）；
-                // ② 附件条里有 N 个 chip（= 这里的长度），发送后清零。
-                "composer_files": &self.composer_files,
+                // 输入框里**行内文件 chip** 的路径（编辑器正文扫出来的，唯一真相源）。
+                // 断言靠它：① 粘贴文件后正文里的 `@file:` 标记数与这里一致；
+                // ② 清空/发送后归零。早先这里暴露的是附件区那份独立列表
+                // （`composer_files`）—— 已随死路径一起删除，见 `attach_files`。
+                "composer_file_refs": self
+                    .input
+                    .read(cx)
+                    .buffer
+                    .file_refs()
+                    .into_iter()
+                    .map(|r| r.path)
+                    .collect::<Vec<_>>(),
                 // 输入框高度不再由前端估算（改由 `TextareaState::auto_grow(1, 8)`
                 // 按真实字形测量），所以这里没有可断言的数值字段；多行输入是否真的
                 // 撑高，用截图/肉眼验（自动化侧可断言的是 `composer_text` 与
@@ -1717,10 +1725,10 @@ impl ClientApp {
             // 清空输入框（测试收尾；真实路径里发送成功后也会清）
             "composer_clear" => {
                 self.clear_composer(cx)?;
-                // 附件也算「草稿的一部分」：只清正文会留下上一轮的图片/文件引用，
-                // 验收脚本收尾清理后若还挂着附件，下一条断言就会被旧状态干扰
+                // 附件也算「草稿的一部分」：只清正文会留下上一轮的图片，验收脚本
+                // 收尾清理后若还挂着附件，下一条断言就会被旧状态干扰。
+                // （文件引用不用单独清：它就在正文里，`clear_composer` 已经清掉。）
                 self.composer_images.clear();
-                self.composer_files.clear();
                 cx.notify();
             }
             // 把一条外部事件直接喂给事件处理器 —— 只验证「事件 → 界面归约」这一段。

@@ -187,13 +187,16 @@ Check "界面已渲染（view 非空）" (-not [string]::IsNullOrEmpty($st.view)
 Check "内嵌 server 端口已上报" ($st.server_port -gt 0)
 $health = Invoke-RestMethod -Uri "$serverBase/health" -TimeoutSec 5
 Check "内嵌 server /health 正常" ($health.status -eq "ok")
-# ── 2b. 输入区附件：粘贴文件 → 草稿 chip（正文里不该出现 @file: 原文） ──────
+# ── 2b. 输入区文件引用：粘贴文件 → 行内 chip（与文字同一行） ────────────────
 #
-# 为什么断言这一对：用户实测报的「粘贴文件在输入框没正确渲染」有两半 ——
-# ① 正文里塞进一长串 `` `@file:"F:\…"` `` 原文（Textarea 是纯文本编辑器，
-#    插文本就只能是文本）；② 附件区没有任何可见的「已引用」标记。
-# 所以既断言 composer_files 有值，也断言 composer_text **不含** `@file:`。
-Write-Host "`n[输入区附件]" -ForegroundColor Cyan
+# 语义（2026-11 起与 vite 一致）：文件引用**就是正文里的行内 chip**，序列化后是
+# `` `@file:"<路径>"` ``——渲染层据此把它画成 chip，发送时原样发出（后端与模型
+# 零改动，模型读到的仍是完整路径）。早先是「附件区一份独立列表 + 正文干净」，
+# 那条路径已随 Ctrl+V 改走编辑器而收干（`composer_files` 删除）。
+#
+# 所以这里断言三件事：① 编辑器扫得到这个引用（`composer_file_refs`）；
+# ② 正文里确实是那条标记（不是别的形态）；③ 清空后两者一起归零。
+Write-Host "`n[输入区文件引用]" -ForegroundColor Cyan
 Act @{ action = "composer_clear" } 150 | Out-Null
 $probeFile = $PSCommandPath # 用脚本自身当「被引用的文件」（真实存在的绝对路径）
 # 直接给路径，**不碰系统剪贴板**：`Clipboard::SetFileDropList` 在剪贴板被别的程序
@@ -202,14 +205,14 @@ $probeFile = $PSCommandPath # 用脚本自身当「被引用的文件」（真�
 # 的验收清单），这里验的是「收下引用之后界面怎么表现」。
 $r = Act @{ action = "paste_files"; paths = @($probeFile) } 300
 $s = StateOf $r
-$files = @($s.usage.composer_files)
-Check "粘贴文件后草稿区有 1 个引用" ($files.Count -eq 1) "（实际 $($files.Count)）"
-Check "引用的路径就是剪贴板里那个" ($files.Count -eq 1 -and $files[0] -eq $probeFile)
-Check "正文里没有 @file: 原文（已改成 chip）" (-not ($s.usage.composer_text -like "*@file:*")) "（正文：$($s.usage.composer_text)）"
+$refs = @($s.usage.composer_file_refs)
+Check "粘贴文件后输入框里有 1 个行内引用" ($refs.Count -eq 1) "（实际 $($refs.Count)）"
+Check "引用的路径就是给的那个" ($refs.Count -eq 1 -and $refs[0] -eq $probeFile)
+Check "正文里是同一份 @file: 标记（渲染层据此画 chip）" ($s.usage.composer_text -like "*@file:*") "（正文：$($s.usage.composer_text)）"
 Check "图片通道未受影响" ($s.usage.composer_images -eq 0)
 Act @{ action = "composer_clear" } 200 | Out-Null
 $s = Get-State
-Check "清空输入同时清掉附件" (@($s.usage.composer_files).Count -eq 0)
+Check "清空输入同时清掉文件引用" (@($s.usage.composer_file_refs).Count -eq 0)
 
 # ── 2c. 历史消息时间戳 ─────────────────────────────────────────────────
 #

@@ -11,8 +11,6 @@ use crate::format::*;
 use crate::theme::colors;
 use crate::types::View;
 use crate::types::*;
-// 文件引用 chip（草稿区附件条）：与消息区共用同一个形态
-use crate::widgets::file_chip;
 use gpui_kit::assets::IconName;
 use gpui_kit::component::progress::ProgressCircle;
 use gpui_kit::list as gpui_list;
@@ -862,16 +860,14 @@ impl ClientApp {
                     // 两块（上面一个输入框 + 下面一排按钮），与 Tauri
                     // 版「按钮在输入框内」的形态不符。
                     .child({
-                        // 待发送附件（图片缩略图 + 文件引用 chip）：**在输入框上方**
-                        // （对齐 vite `ChatInput`：`{images.length > 0 && ...}` 渲染在
-                        // `<ComposerEditor>` 之前）。早先放在 Textarea 之后（= 下方），
-                        // 用户实测指出与 vite 不同。单独成函数：压 render_chat 栈帧。
-                        let attachments =
-                            if self.composer_images.is_empty() && self.composer_files.is_empty() {
-                                None
-                            } else {
-                                Some(self.render_composer_attachments(cx))
-                            };
+                        // 待发送**图片**缩略图：在输入框上方（对齐 vite `ChatInput` 的
+                        // `{images.length > 0 && ...}`）。文件引用不在这里 —— 它是正文
+                        // 行内的 chip，与文字同一行（vite 也是行内 FileChipNode）。
+                        let attachments = if self.composer_images.is_empty() {
+                            None
+                        } else {
+                            Some(self.render_composer_attachments(cx))
+                        };
                         div()
                             .flex()
                             .flex_col()
@@ -1520,37 +1516,6 @@ impl ClientApp {
                     ),
             );
         }
-        // 文件引用 chip：与图片同一行混排（图标 + 文件名 + ×），全路径只在发送时
-        // 进正文——草稿区不显示路径，避免一长串 `@file:"F:\work\…"` 撑满卡片
-        for (i, path) in self.composer_files.iter().enumerate() {
-            strip = strip.child(
-                div()
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap_1()
-                    .child(file_chip(path, false))
-                    .child(
-                        div()
-                            .id(("rm-file", i))
-                            .px_1()
-                            .rounded_md()
-                            .cursor_pointer()
-                            .child(
-                                svg()
-                                    .path(IconName::X.path())
-                                    .size(px(10.))
-                                    .text_color(rgb(colors::TEXT_TERTIARY())),
-                            )
-                            .on_click(cx.listener(move |this, _, _w, cx| {
-                                if i < this.composer_files.len() {
-                                    this.composer_files.remove(i);
-                                }
-                                cx.notify();
-                            })),
-                    ),
-            );
-        }
         strip.into_any_element()
     }
 
@@ -1662,27 +1627,42 @@ impl ClientApp {
     /// 剪贴板：`Clipboard::SetFileDropList` 在剪贴板被别的程序独占时会失败，那属于
     /// 环境问题，不该让界面断言假红。
     ///
+    /// 落点是**编辑器里的行内 chip**（`ComposerState::insert_file_ref`）——文件引用
+    /// 与文字同属一条正文流，序列化后就是 `` `@file:"…"` ``。早先这里写的是附件区的
+    /// 一份独立列表（`composer_files`）：`Ctrl+V` 改走编辑器之后，那份状态只剩自动化
+    /// 在写，界面却只显示编辑器里的 chip —— 两条路径各维护一份引用，收干不留第二份。
+    ///
     /// 返回是否真的收下了东西。
     pub(crate) fn attach_files(&mut self, paths: Vec<String>, cx: &mut Context<Self>) -> bool {
+        let input = self.input.clone();
         let mut added = 0usize;
         let mut overflow = false;
-        for p in paths {
-            if p.trim().is_empty() {
-                continue;
+        input.update(cx, |state, cx| {
+            let mut existing: Vec<String> = state
+                .buffer
+                .file_refs()
+                .into_iter()
+                .map(|r| r.path)
+                .collect();
+            for raw in paths {
+                let p = raw.trim().to_string();
+                if p.is_empty() {
+                    continue;
+                }
+                // 去重：粘贴与外层快捷键都可能命中，同一份文件不能被引用两次
+                if existing.contains(&p) {
+                    continue;
+                }
+                // 一次粘贴最多 20 个引用（与 Web 版同数）：超了只丢多余项
+                if existing.len() >= MAX_COMPOSER_FILES {
+                    overflow = true;
+                    continue;
+                }
+                state.insert_file_ref(&p, cx);
+                existing.push(p);
+                added += 1;
             }
-            // 去重：`Textarea::on_paste` 与外层 `on_key_down` 都可能命中，
-            // 同一份文件不能被引用两次
-            if self.composer_files.iter().any(|x| x == &p) {
-                continue;
-            }
-            // 一次粘贴最多 20 个引用（与 Web 版同数）：超了只丢多余项
-            if self.composer_files.len() >= MAX_COMPOSER_FILES {
-                overflow = true;
-                continue;
-            }
-            self.composer_files.push(p);
-            added += 1;
-        }
+        });
         if added == 0 && !overflow {
             return false;
         }

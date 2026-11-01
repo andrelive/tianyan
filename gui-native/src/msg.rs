@@ -169,28 +169,6 @@ pub(crate) fn split_file_chips(text: &str) -> Vec<Vec<InlinePiece>> {
         .collect()
 }
 
-/// 草稿区的文件引用 → 正文（`` `@file:"<路径>"` ``，与 Web 版序列化同口径）。
-///
-/// 追加在**正文末尾**而不是插入光标处：native 的文件引用是「草稿区附件」，正文里
-/// 没有插入点可依；末尾追加语义最直白（正文 → 引用），模型读到的顺序也自然。
-/// 正文为空时只发引用（只发附件是合法用法）。
-pub(crate) fn attach_file_refs(text: String, files: &[String]) -> String {
-    if files.is_empty() {
-        return text;
-    }
-    let refs = files
-        .iter()
-        .map(|p| format!("`@file:\"{p}\"`"))
-        .collect::<Vec<_>>()
-        .join(" ");
-    let body = text.trim_end();
-    if body.is_empty() {
-        refs
-    } else {
-        format!("{body}\n{refs}")
-    }
-}
-
 /// 用户消息正文（气泡内）：文本 + 行内文件 chip。
 ///
 /// 为什么不走 Markdown 渲染：用户气泡是强调色深底，`TextView::markdown` 用组件主题
@@ -2049,36 +2027,13 @@ mod file_ref_tests {
     //! ① 草稿区 chip 发送时若序列化漏掉反引号，消息区就认不出（用户看到一长串
     //!    路径原文）；② 行内匹配若把用户手打的 `把 @file:"x" 放这里` 也当引用，
     //!    正文会被悄悄吞掉。判据是纯函数，单测钉住比截图核对便宜得多。
-    use crate::msg::{attach_file_refs, split_file_chips, InlinePiece};
+    use crate::msg::{split_file_chips, InlinePiece};
 
     fn t(s: &str) -> InlinePiece {
         InlinePiece::Text(s.to_string())
     }
     fn f(s: &str) -> InlinePiece {
         InlinePiece::File(s.to_string())
-    }
-
-    #[test]
-    fn attached_refs_go_to_the_end_of_body() {
-        let out = attach_file_refs(
-            "看下这个\n".to_string(),
-            &[r"F:\work\a.docx".to_string(), r"F:\work\b.ts".to_string()],
-        );
-        assert_eq!(
-            out,
-            "看下这个\n`@file:\"F:\\work\\a.docx\"` `@file:\"F:\\work\\b.ts\"`"
-        );
-    }
-
-    #[test]
-    fn attached_refs_only_when_body_empty() {
-        // 只发附件（正文空）也合法
-        assert_eq!(
-            attach_file_refs(String::new(), &[r"C:\a b\c.pdf".to_string()]),
-            "`@file:\"C:\\a b\\c.pdf\"`"
-        );
-        // 没有附件时正文原样（一个字符都不动）
-        assert_eq!(attach_file_refs("原文\n\n".to_string(), &[]), "原文\n\n");
     }
 
     #[test]
