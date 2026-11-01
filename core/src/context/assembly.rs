@@ -7,7 +7,7 @@
 //!
 //! **为什么定义在 core 而不是 `server/src/assembly.rs`**：与 `TaskServices` 同一条
 //! 理由（ADR-049 期 2 序 5a）——本类型被**三方**同时引用：server 消费、装配包
-//! （`app` / `tauri`）生产工厂、插件（`tianyan-policy-context`）读取字段。若住在
+//! （`app`）生产工厂、插件（`tianyan-policy-context`）读取字段。若住在
 //! server，插件就必须依赖 `tianyan-server`，破 D2-1「插件只依赖 kernel-api」，也与
 //! `ToolContext` 住在 core 的先例不一致（内核定义能力集合、插件消费）。server 侧
 //! re-export 成插槽契约（`tianyan_server::{ContextServices, ContextFactory}`），对

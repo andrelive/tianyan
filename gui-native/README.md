@@ -4,6 +4,9 @@
 > 结论：**技术上可行，且比我预期好**——UI 层（渲染/IME/流式/虚拟列表/编辑器）与
 > 发布层（MSI 打包/静默升级）两块硬骨头都已实测通过。
 > 本文档记录**实测数据与踩坑**，是后续开发的最小背景材料。
+>
+> 📌 **文中「Tauri 版」指 2026-10 已删除的 tauri 壳**（它的 UI 代码是 `gui-vite/`，仍在仓库里）。
+> 保留这些对照是为了说明「这条行为对齐的依据是什么」——不是指向还能运行的代码。
 
 ## 这个 crate 是什么
 
@@ -11,8 +14,8 @@
 不参与主 workspace 的 `cargo clippy --workspace` / `cargo test --workspace`，
 也不进 rust-analyzer 的主索引。
 
-并存期意图：新客户端与 `gui-vite/` 同时存在，连同一个 axum server
-（同一套 HTTP/SSE 协议），逐页替换、随时回退。`tauri/` 在 gui-vite 退役前必须保留。
+发布形态：`gui-native` 是**唯一发布渠道**（单 exe + 内嵌 axum server）。
+`tauri/` 已于 2026-10 删除；`gui-vite/` 保留作对照前端（同一套 HTTP/SSE 协议），不随包发布。
 
 技术选型：**`gpui-kit 0.6`**（Longbridge 门面，绑 `gpui-pre 0.3.6` 快照）。
 不直接用官方 `gpui`（crates.io 停在 0.2.2、315 天未发版），也不用 `gpui-ce`（采用面小）。

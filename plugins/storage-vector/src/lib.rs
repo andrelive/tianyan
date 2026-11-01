@@ -15,7 +15,7 @@
 //!
 //! ## 装配：类型擦除的工厂（`VectorStorageFactory`）
 //!
-//! server 库不认识本 crate：装配层（`app` bin / `tauri` 桌面端）把
+//! server 库不认识本 crate：装配层（`app` bin / `gui-native` 桌面端）把
 //! [`LanceDbVectorStore::new`] 包成 `tianyan_server::VectorStorageFactory`
 //! （`Arc<dyn Fn(&StorageConfig) -> Pin<Box<dyn Future<Output = Result<Arc<dyn
 //! VectorStorage>>>>`>）注入启动入口——与本 crate 的依赖只出现在装配层，

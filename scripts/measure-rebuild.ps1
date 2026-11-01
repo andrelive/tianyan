@@ -10,7 +10,7 @@
 #   .\scripts\measure-rebuild.ps1 -Command check -Targets core/src/executor/web.rs
 #
 # 判据（ADR-049）：
-#   现状基线 = core+server+mcp+tauri 全量（源码口径 64,328 行，见 microkernel-baseline.md）
+#   现状基线 = core+server+mcp 全量（源码口径见 microkernel-baseline.md；tauri 壳已删除）
 #   闸门 A  = 改一行工具插件 ≤ 3,500 行源码（前提：插件独立 crate + 清单住 bin）
 
 param(
@@ -58,7 +58,6 @@ $crateLines = [ordered]@{
     'tianyan-core'      = Get-SourceLines 'core'
     'tianyan-server'    = Get-SourceLines 'server'
     'tianyan-mcp'       = Get-SourceLines 'mcp'
-    'tianyan-tauri'     = Get-SourceLines 'tauri'
     # 插件 crate（ADR-049 期 1）：重编带度量的主角——改工具只应命中它（+ bin）
     'tianyan-tools-fs'  = Get-SourceLines 'plugins/tools-fs'
     'tianyan-tools-code' = Get-SourceLines 'plugins/tools-code'

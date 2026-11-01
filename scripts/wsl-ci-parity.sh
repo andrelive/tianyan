@@ -30,7 +30,7 @@ step() {
 }
 
 step "fmt" cargo fmt --all -- --check
-step "clippy" cargo clippy --workspace --exclude tianyan-tauri --all-targets -- -D warnings
+step "clippy" cargo clippy --workspace --all-targets -- -D warnings
 step "core-lib-executor" cargo test -p tianyan-core --lib -- executor::
 step "core-lib-agent" cargo test -p tianyan-core --lib -- agent::
 step "core-lib-storage" cargo test -p tianyan-core --lib -- vfs:: session:: db::

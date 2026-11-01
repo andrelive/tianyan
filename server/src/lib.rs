@@ -674,7 +674,7 @@ async fn bind_listener(
 /// 使用调用方已绑定的 listener + 完整装配启动服务器。
 ///
 /// 监听 socket 由调用方提前绑定并传入，消除「探测端口 → 释放 → 重新绑定」的
-/// 竞态窗口（桌面端动态端口场景使用，见 `tauri::server::find_available_port`）。
+/// 竞态窗口（桌面端动态端口场景使用，见 `desktop` 的 `find_available_port`）。
 ///
 /// 装配是**必填**（见 [`start_server_with_assembly`] 的「为什么没有不带装配的
 /// `start_server`」）。
@@ -688,7 +688,7 @@ pub async fn start_server_with_listener_and_assembly(
 
 /// 桌面端：listener + 外部关闭信号 + 完整装配（**桌面端唯一启动入口**）。
 ///
-/// Tauri 退出时通过 watch channel 发送关闭信号，触发与 Ctrl+C / SIGTERM 相同的
+/// 桌面壳退出时通过 watch channel 发送关闭信号（`desktop` 的关闭信号同源），触发与 Ctrl+C / SIGTERM 相同的
 /// 优雅关停链（停止接收连接 → 停止调度器 → 等待 pending 任务，30s 超时）。
 pub async fn start_server_with_shutdown_signal_and_assembly(
     listener: tokio::net::TcpListener,
@@ -722,7 +722,7 @@ async fn start_server_inner(
     if !assembly.storage().has_storage_factory() {
         return Err(tianyan::TianyanError::invalid_input(
             "装配缺陷：启动服务器必须注入 StorageBackendFactory（结构化存储是启动必需项；\
-             缺失会静默使用进程内存后端 → 内容不落盘、重启即丢）。生产装配请用 app/tauri \
+             缺失会静默使用进程内存后端 → 内容不落盘、重启即丢）。生产装配请用 app/gui-native \
              的 assembly()；测试/嵌入式构造对象图请改用 create_app",
         ));
     }
@@ -739,7 +739,7 @@ async fn start_server_inner(
     if !assembly.policies().has_context_factory() {
         return Err(tianyan::TianyanError::invalid_input(
             "装配缺陷：启动服务器必须注入 ContextFactory（上下文策略是启动必需项；\
-             缺失会让 agent 失去全部 system 前缀且上下文永不压缩）。生产装配请用 app/tauri \
+             缺失会让 agent 失去全部 system 前缀且上下文永不压缩）。生产装配请用 app/gui-native \
              的 assembly()；测试/嵌入式构造对象图请改用 create_app",
         ));
     }

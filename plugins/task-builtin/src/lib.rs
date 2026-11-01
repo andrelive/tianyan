@@ -30,7 +30,7 @@
 //!
 //! ## 装配靠工厂（类型擦除）
 //!
-//! 装配层（`app` bin / `tauri`）把 [`tasks`] 包成
+//! 装配层（`app` bin / `gui-native`）把 [`tasks`] 包成
 //! `tianyan_server::TaskFactory`（`Arc<dyn Fn(&TaskServices) -> Vec<TaskRegistration>>`）
 //! 注入 `AssemblyServices`；server 只按返回顺序 `register_task`，不认识任何具体任务。
 //! 类型别名在 server 侧（本插件不能命名它——那需要依赖 server），装配层一行：

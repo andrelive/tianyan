@@ -6,7 +6,7 @@
 //! 服务层配置。它们原本寄居在 `plugins/storage-vector/examples/`，靠 5 条**插件间
 //! dev-dependency** 撑着（每个 Cargo.toml 都要解释一遍「只服务 examples」）。
 //!
-//! 本包是**终端消费者**（不被任何 crate 依赖）：依赖一切是合法的——与 `app` / `tauri`
+//! 本包是**终端消费者**（不被任何 crate 依赖）：依赖一切是合法的——与 `app` / `gui-native`
 //! 同类。插件之间因此连 dev 边都不再有（D2-2 的生产图与开发图都干净）。
 //!
 //! ## 为什么不能复用 `tianyan_assembly::full()`

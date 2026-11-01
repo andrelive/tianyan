@@ -1,7 +1,7 @@
 //! 任务装配原语（ADR-049 期 2 序 5a）。
 //!
 //! 内置定时任务的**实现**已搬出 core（`plugins/task-builtin`），但「任务插件如何把
-//! 自己的任务交给调度器」这件事必须有类型：装配层（`app` bin / `tauri`）把
+//! 自己的任务交给调度器」这件事必须有类型：装配层（`app` bin / `gui-native`）把
 //! [`TaskServices`]（能力集合）递给插件，插件返回 [`TaskRegistration`] 清单，server
 //! 逐条 `scheduler.register_task(TaskDefinition::new(name, display_name, interval, handler))`。
 //!

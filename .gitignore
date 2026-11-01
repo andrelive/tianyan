@@ -35,7 +35,7 @@ coverage/
 # Temporary workspace (audit notes, scratch plans)
 .scratch/
 
-# Tauri 签名密钥（私钥，禁止提交）
+# 签名密钥（私钥，禁止提交）
 *.key
 *.key.pub
 

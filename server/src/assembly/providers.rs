@@ -16,13 +16,13 @@ pub struct ProviderAssemblies {
 }
 
 impl ProviderAssemblies {
-    /// 装配聊天 / 视觉 provider 工厂（`app` / `tauri` 用：`tianyan-provider-llm`）。
+    /// 装配聊天 / 视觉 provider 工厂（`app` / `gui-native` 用：`tianyan-provider-llm`）。
     pub fn with_provider_llm_factory(mut self, factory: ProviderLlmFactory) -> Self {
         self.provider_llm_factory = Some(factory);
         self
     }
 
-    /// 装配嵌入 provider 工厂（`app` / `tauri` 用：`tianyan-provider-embed`）。
+    /// 装配嵌入 provider 工厂（`app` / `gui-native` 用：`tianyan-provider-embed`）。
     pub fn with_provider_embed_factory(mut self, factory: ProviderEmbedFactory) -> Self {
         self.provider_embed_factory = Some(factory);
         self

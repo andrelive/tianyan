@@ -37,7 +37,7 @@
 //! |---|---|
 //! | 内核（`core/src/config/mod.rs`） | `get_config()` 纯读槽位；未注入时回退 `TianyanConfig::default()`（保持「无配置文件也能跑」）；`set_config(cfg)` 只在未设置时生效并返回 `Result`（重复设置被拒并交还入参）；`try_get_config()`；`set_config_error` / `last_config_error`（诊断槽位，与配置槽位同生命周期） |
 //! | 服务层（本 crate） | [`load`] / [`load_from_file`] / [`load_and_install`] / [`save_to_file`] / [`generate_default_toml`] / 路径解析 / [`migration`] / [`validation`] / [`wizard`] |
-//! | 装配层（`app/src/main.rs`、`tauri/src/lib.rs`） | 启动时调用 [`load_and_install`]（**先注入再 `tianyan::init()`**，因为 `init()` 要读 `logging` 节），再把同一份配置交给 `start_server_*` |
+//! | 装配层（`app/src/main.rs`、`gui-native/src/main.rs`） | 启动时调用 [`load_and_install`]（**先注入再 `tianyan::init()`**，因为 `init()` 要读 `logging` 节），再把同一份配置交给 `start_server_*` |
 //!
 //! 为什么用槽位而不是让内核持一个 `dyn` 配置源：`get_config() -> &'static TianyanConfig`
 //! 是既有公开签名（`init()` 与下游都在用），`OnceLock` 是唯一能给出 `&'static` 且零成本的
@@ -62,7 +62,7 @@
 //! ## 公开面
 //!
 //! 本 crate 是**服务层 crate**（不是能力插件、没有插槽），消费者有三个：`tianyan-app`、
-//! `tianyan-tauri`、`tianyan-server`（迁移 API 与热更新写盘）。因此 ADR-049 的
+//! `tianyan-server`（迁移 API 与热更新写盘）。因此 ADR-049 的
 //! 「每插件 crate 公开符号 ≤ 15」这条反指标不适用于此处的符号面判据；导出集与迁移前
 //! `tianyan::config::{…}` 的对应项**逐个等价**（函数名从 `TianyanConfig::load` 这类
 //! 关联函数改成自由函数，语义与文案不变）。

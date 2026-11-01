@@ -61,10 +61,9 @@ cargo test -p tianyan-core vfs::backend::local -- --nocapture  # 指定测试模
 | `server/` | `tianyan-server` | Axum HTTP 服务（**不认识任何具体插件 crate**） |
 | `app/` | `tianyan-app` (bin: `tianyan-server`) | **装配器**：唯一 `use` 插件类型之处，装配清单住这里 |
 | `gui-vite/` | - | React TypeScript 前端（非 crate） |
-| `tauri/` | `tianyan-tauri` | Tauri 桌面包装（第二个装配器）| ⛔ **已冻结（2026-10）**：移出 workspace `members`，native（GPUI）是主发布渠道。代码目录保留、待 native 全覆盖后删除；`scripts/build.ps1` 同步退役 |
 | `mcp/` | `tianyan-mcp` | MCP 协议客户端 |
 | `service/config/` | `tianyan-service-config` | **服务层**：配置加载 / 持久化（段保全）/ 数据目录迁移 / 校验编排 / 向导 DTO（ADR-049 期 3-T4，753 生产行从 core 搬出）；**不含配置结构**（`TianyanConfig` 留 core——内核与插件的共同构造参数） |
-| `assembly/` | `tianyan-assembly` | **装配清单**：11 个插件工厂 + 两份清单（`full()` = 生产 11 插槽 / `policies()` = 集成测试的 9 插槽前缀）+ 跨插件顺序断言的**单一实现**（ADR-049 期 4）；全仓唯一 `use` 全部插件 crate 之处（改造前同一份清单在 `app` / `tauri` / `server/tests` / `app/tests` / `app/examples` 共 5 处副本） |
+| `assembly/` | `tianyan-assembly` | **装配清单**：11 个插件工厂 + 两份清单（`full()` = 生产 11 插槽 / `policies()` = 集成测试的 9 插槽前缀）+ 跨插件顺序断言的**单一实现**（ADR-049 期 4）；全仓唯一 `use` 全部插件 crate 之处（改造前同一份清单在 `app` / `gui-native` / `server/tests` / `app/tests` / `app/examples` 共 5 处副本） |
 | `tools-ops/` | `tianyan-tools-ops` | **运维工具**（ADR-049 期 4d）：服务停止后直接修数据的终端脚本（`skill_import` / `rebuild_overviews`），**不被任何 crate 依赖**；插件 crate 因此零 dev 边 |
 | `desktop/` | `tianyan-desktop` | **桌面启动编排（单 server 发现与复用）**：`ensure_server` / `discover_existing`（扫 `3000..=3100` + 校验 `/health` 的 `service` **与** `data_dir`）+ `find_available_port` / `start_axum_server`；`tauri/`（已冻结）与 `gui-native/` 共用这一份。**端口探测只避免端口冲突，不能避免数据目录双写**——实测撞上过「桌面版占 3000、gui-native 顺延 3001，两个 server 同写 `D:\tianyan`」（定时任务各跑一遍 + SQLite 并发写）。只经 `tianyan-assembly::full()` 取插件清单，**不直接认识插件 crate**（不是第二份装配清单） |
 | `plugins/tools-fs/` | `tianyan-tools-fs` | 插件：glob / list_dir / read_file / write_file / apply_edit / apply_patch / **view_image**（定义/门控/审批；实现暂留 core） |
@@ -86,7 +85,7 @@ cargo test -p tianyan-core vfs::backend::local -- --nocapture  # 指定测试模
 
 **依赖铁律**（破一条拆包收益全部回吐）：插件只依赖 `core`（kernel-api）；插件之间零互赖；
 `core`/`server` 不认识任何插件 crate。**认识具体插件 crate 的只有三处**：`assembly/`
-（清单与其唯一实现，ADR-049 期 4）+ `app/`（装配器，只写启动编排）——`tauri/` 原本是第二个装配器，**已冻结移出 workspace**（2026-10，解冻需加回 `members`）；
+（清单与其唯一实现，ADR-049 期 4）+ `app/`（装配器，只写启动编排）——`tauri/` 曾是第二个装配器，**已于 2026-10 删除**；
 `desktop/`（桌面启动编排）**不在此列**——它只调 `tianyan_assembly::full()`，不直接
 `use` 任何插件 crate，因此铁律不因它从三处变四处；
 另有一个**终端消费者** `tools-ops/`（运维脚本，依赖插件但**不被任何 crate 依赖**，
@@ -201,7 +200,7 @@ Harness 工程 → [`docs/harness核心思路/harness-engineering-overview.md`](
 | `events` | `core/src/events/` | 事件驱动触发（T1 路线：文件监听 + webhook → 事件总线 → 规则动作） | — |
 | `goals` | `core/src/goals/` | 长期目标 + 进度跟踪（与待办联动；运行期 `goals.json` 持久化） | ⚠️ 例外：运行期结构化产物 |
 | `todos` | `core/src/todos/` | 待办清单（会话绑定；运行期 `todos.json` 持久化） | ⚠️ 例外：运行期结构化产物 |
-| `notification` | `core/src/notification.rs` | 通知通道抽象（`NotificationSink`）；桌面实现 = gui-native 的 `notify.rs`（WinRT + AUMID 注册），tauri 版曾由插件注入（已冻结） | — |
+| `notification` | `core/src/notification.rs` | 通知通道抽象（`NotificationSink`）；桌面实现 = gui-native 的 `notify.rs`（WinRT + AUMID 注册），tauri 版曾由插件注入（随 tauri 删除） | — |
 
 > **注**：MCP 桥接（`server/src/mcp_bridge.rs`）返回的图片（浏览器截图等）落盘于 `{data_dir}/mcp_images/`，与 snapshot 同级运行时产物例外，不经 VFS（ADR-010）。
 >

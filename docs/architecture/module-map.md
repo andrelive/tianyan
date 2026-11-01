@@ -34,7 +34,6 @@
 | `app/` | `tianyan-app` (bin: `tianyan-server`) | 装配器（headless）：配置加载 + 日志 + 启动 + 搬迁重启；清单取自 `tianyan-assembly`（ADR-049 期 1 / 期 4） | `app/src/` |
 | `plugins/*` | `tianyan-{tools-fs,tools-code,tools-todo,tools-web,storage-vector,storage-sqlite,task-builtin,task-evolution,policy-approval,policy-context,policy-review,provider-client,provider-llm,provider-embed,tool-pipeline}` | 编译期插件（只依赖 `core`，彼此零互赖） | `plugins/*/src/` |
 | `gui-vite/` | - | React TS 前端 | `gui-vite/src/` |
-| ~~`tauri/`~~ | ~~`tianyan-tauri`~~ | **已退役（2026-10）**：目录已删除、移出 workspace `members`；native（`gui-native`）是唯一发布渠道，第二个装配器的职责由 `desktop/` + `gui-native` 承接 | — |
 | `desktop/` | `tianyan-desktop` | 桌面启动编排：**单 server 发现与复用**（`ensure_server` / `discover_existing`：扫 `3000..=3100` + 校验 `/health` 的 `service` 与 `data_dir`）+ `find_available_port` / `start_axum_server`；`tauri/` 与 `gui-native/` 共用（ADR-051） | `desktop/src/` |
 | `gui-native/` | `tianyan-gui-native` | **GPUI 原生客户端（第二个桌面壳）**：自带 `[workspace]`，**不进主 workspace**（零脚本/IDE/CI 污染，代价 = core+server 编两份）；与 `gui-vite` 并存、走同一套 HTTP/SSE 协议；启动编排同样走 `tianyan-desktop`（ADR-051） | `gui-native/src/` |
 | `mcp/` | `tianyan-mcp` | MCP 协议客户端 | `mcp/src/` |
@@ -68,7 +67,7 @@
 | `snapshot` | `core/src/snapshot/` | 工作区快照（回退/撤销回退，⚠️ ADR-006 VFS 例外）；重做子系统独立（`redo.rs`，与 capture/restore/diff/gc 正交） | `mod.rs`, `redo.rs` |
 | `events` | `core/src/events/` | 事件驱动触发（文件监听 + webhook → 事件总线 → 规则动作）。事件总线为**有界通道**（`EVENT_BUS_CAPACITY = 4096` + `try_send`）：订阅者积压时丢弃该事件并计入 `dropped_events()`（绝不阻塞发布方、不无限积压内存） | `mod.rs`, `bus.rs`, `watcher.rs`, `rules.rs` |
 | `goals` | `core/src/goals/` | 长期目标 + 进度跟踪（会话绑定；运行期 `goals.json`） | `mod.rs` |
-| `notification` | `core/src/notification.rs` | 通知通道抽象（`NotificationSink`；桌面实现由 tauri 注入） | `notification.rs` |
+| `notification` | `core/src/notification.rs` | 通知通道抽象（`NotificationSink`；桌面实现由 `gui-native` 的 `notify.rs` 注入） | `notification.rs` |
 | `todos` | `core/src/todos/` | 待办清单（会话绑定；运行期 `todos.json`） | `mod.rs` |
 | `vfs` | `core/src/vfs/` | 统一存储与检索层（**项目基础机制**）；只留 `StorageBackend` 契约（`vfs::StorageBackend` 公开路径不变）与 `UriMapper` 等机制；**后端实现已出 core**（ADR-049 序 4：`backend/sqlite.rs`、`backend/local.rs` → `plugins/storage-sqlite`，装配层经 `StorageBackendFactory` 注入；`backend/sqlite_db.rs` 仅 re-export 兼容，实体在 `db`）；向量实现同样已出 core（序 3：只留 `VectorStorage` 契约，LanceDB 在 `plugins/storage-vector`） | `traits.rs`, `vfs_impl.rs`, `backend/mod.rs`, `uri_mapper.rs`, `vector/traits.rs`, `summary/engine.rs` |
 

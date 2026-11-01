@@ -1,7 +1,7 @@
 # 发布：native MSI（GPUI 客户端）
 
 > **当前唯一发布渠道 = `gui-native`（GPUI 原生客户端，内嵌 server，单 exe）。**
-> `tauri/` 已于 2026-10 退役删除、`scripts/build.ps1` 同步退役；`gui-vite/` 保留做对照，**不随包发布**。
+> `tauri/` 已于 2026-10 删除，`scripts/build.ps1` / `build.sh`（tauri 打包脚本）一并删除；`gui-vite/` 保留做对照，**不随包发布**。
 > 本文替代 2026-10 之前的 Tauri 版发布文档（旧流程见 git 历史）。
 
 ## 1. 版本号只有一个源

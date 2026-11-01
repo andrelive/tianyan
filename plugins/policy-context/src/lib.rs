@@ -16,7 +16,7 @@
 //! - 加一个意图分类关键词（`category_keywords`）→ 同上；
 //! - 改 RRF 的 `memory_bias` / 新鲜度权重 → 同上。
 //!
-//! 搬进本 crate 后，这些改动只重编 **本 crate + 装配包**（`app` / `tauri`）；
+//! 搬进本 crate 后，这些改动只重编 **本 crate + 装配包**（`app` / `gui-native`）；
 //! 内核与通道层不动。这就是 ADR-049 承诺的「改策略不重编内核」，也是期 3 的主体收益
 //! （T1 审批策略只搬了 725 行；T2 搬 1,729 行生产代码 + 1,755 行测试）。
 //!
@@ -125,7 +125,7 @@ pub use context::{
 ///    `summary_model = chat_model`（迁移前在 `AgentBuilder::build` 里建）；
 /// 3. **管线**：`default_top_k` / `learned_rules_top_k` 取自配置（同上）。
 ///
-/// 三处装配（`app` / `tauri` / 集成测试的 `test_assembly()`）因此各写一行包装
+/// 三处装配（`app` / `gui-native` / 集成测试的 `test_assembly()`）因此各写一行包装
 /// （`|s| tianyan_policy_context::pipeline(s)`），不会各抄一份构造参数——那是
 /// 「两份口径同时漂移」的经典来源（与 `tianyan_policy_approval::gate` 同一手法）。
 ///

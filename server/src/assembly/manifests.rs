@@ -24,19 +24,19 @@ pub struct ManifestAssemblies {
 }
 
 impl ManifestAssemblies {
-    /// 装配插件工具清单工厂（`app` / `tauri` 用）。
+    /// 装配插件工具清单工厂（`app` / `gui-native` 用）。
     pub fn with_plugin_factory(mut self, factory: ToolPluginFactory) -> Self {
         self.plugin_factory = Some(factory);
         self
     }
 
-    /// 装配定时任务工厂（`app` / `tauri` 用：`tianyan-task-builtin` + `tianyan-task-evolution`）。
+    /// 装配定时任务工厂（`app` / `gui-native` 用：`tianyan-task-builtin` + `tianyan-task-evolution`）。
     pub fn with_task_factory(mut self, factory: TaskFactory) -> Self {
         self.task_factory = Some(factory);
         self
     }
 
-    /// 装配工具管线工厂（`app` / `tauri` 用：`tianyan-tool-pipeline`）。
+    /// 装配工具管线工厂（`app` / `gui-native` 用：`tianyan-tool-pipeline`）。
     ///
     /// 观测监听器（统计 / Trace / GEPA 执行记录 / 失败规则学习）与超预算输出落盘
     /// （ADR-047）的实现搬出 core 后由本插槽注入——`AgentBuilder::build` 按工厂返回的
@@ -90,7 +90,7 @@ impl ManifestAssemblies {
     ///
     /// 语义差异须知（迁移前后唯一的行为差）：迁移前 `start_server*`（不带装配）
     /// **会**注册这些任务（5 个内置 + 演化）；现在只有注入 [`TaskFactory`] 的装配
-    /// （`app` / `tauri` / 集成测试的 `test_assembly()`）才注册。`create_app` 路径迁移前后都**不**注册
+    /// （`app` / `gui-native` / 集成测试的 `test_assembly()`）才注册。`create_app` 路径迁移前后都**不**注册
     /// 任务（任务注册在 `start_server_inner` 里），因此 47 处 `create_app` 单测的
     /// 可观测行为不变。
     pub(crate) fn tasks(&self, services: &TaskServices) -> Vec<TaskRegistration> {

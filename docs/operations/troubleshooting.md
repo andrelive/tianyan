@@ -10,7 +10,7 @@
 
 | 取证对象 | 位置 | 说明 |
 | --- | --- | --- |
-| 应用文件日志（桌面端） | `%APPDATA%\com.tianyan.app\logs\tianyan_<YYYYMMDD_HHMMSS>.log`（轮转出 `….1.log` 等） | 由 `tauri/src/lib.rs::init_logging` 创建；按 `[logging].max_file_size` / `max_files` 轮转与清理 |
+| 应用文件日志（桌面端） | `%APPDATA%\com.tianyan.app\logs\tianyan_<YYYYMMDD_HHMMSS>.log`（轮转出 `….1.log` 等） | 由已删除的 tauri 壳 `init_logging` 创建（native 客户端尚未接入文件日志）；按 `[logging].max_file_size` / `max_files` 轮转与清理 |
 | 启动失败提示里的“详细日志”路径 | 同上 | `fatal_startup_error` 弹窗中给出同一目录 |
 | SQLite 权威数据 | `<data_dir>\tianyan.db`（+ `-wal`/`-shm`） | 默认 `data_dir = %LOCALAPPDATA%\tianyan` |
 | 向量库 | `<data_dir>\lancedb\` | LanceDB，表名 = `storage.vector.collection_name` |
@@ -20,6 +20,8 @@
 | 配置文件 | `~/.tianyan/tianyan.toml`（可用 `TIANYAN_CONFIG` 覆盖） | 固定位置，**不随数据目录搬迁** |
 
 ---
+
+> ⚠️ **§1 / §0 的日志路径描述的是已删除的 tauri 壳（2026-10 前）**。当前 native 客户端（`gui-native`）尚未接入文件日志落盘，日志仍走 tracing 控制台输出 —— 排查以控制台与 `/state` 为准。
 
 ## 1. 日志位置与命名（重要：与数据目录**不在一起**）
 
@@ -398,7 +400,6 @@ At line:1 char:1
 | 脚本 | 处理方式 |
 | --- | --- |
 | `scripts/test.ps1` | 顶部 `$ErrorActionPreference = "Continue"`；关键步骤一律显式检查 `$LASTEXITCODE`（失败才 `throw`） |
-| `scripts/build.ps1` | 顶部 `$ErrorActionPreference = "Continue"`；`npm install/build`、`cargo tauri build` 用 `2>&1` 捕获后**以 `$LASTEXITCODE` 判成败** |
 | `scripts/gen-tool-catalog.ps1` | 顶部 `$ErrorActionPreference = "Continue"`；`cargo run ...` 以 `$LASTEXITCODE` 判定 |
 
 **排障建议**

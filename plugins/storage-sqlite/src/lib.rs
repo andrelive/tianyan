@@ -30,7 +30,7 @@
 //!
 //! ## 装配：类型擦除的工厂（`StorageBackendFactory`）
 //!
-//! server 库不认识本 crate：装配层（`app` bin / `tauri` 桌面端）把
+//! server 库不认识本 crate：装配层（`app` bin / `gui-native` 桌面端）把
 //! [`SqliteBackend::new`] / [`LocalFileBackend::new`] 包成
 //! `tianyan_server::StorageBackendFactory`
 //! （`Arc<dyn Fn(&StorageConfig, Arc<Database>) -> Result<Arc<dyn StorageBackend>>>`）

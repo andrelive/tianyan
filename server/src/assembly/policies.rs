@@ -21,19 +21,19 @@ pub struct PolicyAssemblies {
 }
 
 impl PolicyAssemblies {
-    /// 装配审批门控工厂（`app` / `tauri` 用：`tianyan-policy-approval`）。
+    /// 装配审批门控工厂（`app` / `gui-native` 用：`tianyan-policy-approval`）。
     pub fn with_approval_factory(mut self, factory: ApprovalGateFactory) -> Self {
         self.approval_factory = Some(factory);
         self
     }
 
-    /// 装配上下文策略工厂（`app` / `tauri` 用：`tianyan-policy-context`）。
+    /// 装配上下文策略工厂（`app` / `gui-native` 用：`tianyan-policy-context`）。
     pub fn with_context_factory(mut self, factory: ContextFactory) -> Self {
         self.context_factory = Some(factory);
         self
     }
 
-    /// 装配任务结果自审器工厂（`app` / `tauri` 用：`tianyan-policy-review`）。
+    /// 装配任务结果自审器工厂（`app` / `gui-native` 用：`tianyan-policy-review`）。
     pub fn with_task_reviewer_factory(mut self, factory: TaskReviewerFactory) -> Self {
         self.task_reviewer_factory = Some(factory);
         self

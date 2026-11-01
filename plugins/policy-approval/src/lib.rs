@@ -8,7 +8,7 @@
 //! （ADR-049 D7：按「变化原因」切）——调一条黑名单、加一条自动放行规则、改超时默认值、
 //! 换风险定级口径，都不该重编 `tianyan-core`（42.4K 生产行）与 `tianyan-server`。
 //!
-//! 搬走之后，这些改动只重编本 crate + 装配包（`app` / `tauri`）；内核与通道层不动。
+//! 搬走之后，这些改动只重编本 crate + 装配包（`app` / `gui-native`）；内核与通道层不动。
 //!
 //! ## 为什么 `types` 留 core（**不是**遗漏）
 //!
@@ -35,7 +35,7 @@
 //!
 //! 本 crate 导出 [`gate`] 作为**装配期唯一入口**（把 `SecurityConfig` 翻成
 //! `ApprovalWorkflowConfig` 并接上挂起通知器的逻辑，从 `AgentBuilder::build` 搬到这里），
-//! 装配层（`app` bin / `tauri` / 集成测试）只做
+//! 装配层（`app` bin / `gui-native` / 集成测试）只做
 //! `Arc::new(|sec, ws, sink| tianyan_policy_approval::gate(sec, ws, sink))` 的类型擦除包装
 //! ——「配置 → 规则」的映射保持**单一事实源**在本插件内，三处装配不必各抄一份。
 //!

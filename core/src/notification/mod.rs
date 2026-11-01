@@ -1,13 +1,13 @@
 //! 系统通知通道（T1 路线：主动提醒 / 后台任务完成 / 审批挂起的桌面通知）。
 //!
 //! core 只定义通道抽象，不依赖桌面环境：默认 [`NoopNotificationSink`]
-//! （无操作）；Tauri 装配层注入真实实现（OS 原生通知）。
+//! （无操作）；桌面装配层（`gui-native` 的 `notify.rs`）注入真实实现（OS 原生通知）。
 
 use std::sync::Arc;
 
 /// 系统通知通道。
 ///
-/// 由装配层注入（Tauri 实现 → server → core 组件）；未注入时静默。
+/// 由装配层注入（`gui-native` 实现 → server → core 组件）；未注入时静默。
 pub trait NotificationSink: Send + Sync {
     /// 发送一条系统通知（非阻塞；实现方自行处理线程/队列）。
     fn notify(&self, title: &str, body: &str);

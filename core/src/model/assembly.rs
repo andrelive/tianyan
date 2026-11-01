@@ -11,7 +11,7 @@
 //! ## 为什么这两个结构住在 core（不是 `server/src/assembly.rs`）
 //!
 //! 与 [`tianyan::scheduler::TaskServices`] / [`tianyan::context::ContextServices`] 同一条
-//! 纪律：它们被**三方**同时引用——server 消费、装配包（`app` / `tauri` / 集成测试）生产、
+//! 纪律：它们被**三方**同时引用——server 消费、装配包（`app` / 集成测试）生产、
 //! 插件填充。住在 server 会让两个 provider 插件反向依赖 `tianyan-server`，破 D2-1
 //! 「插件只依赖 kernel-api」。
 //!

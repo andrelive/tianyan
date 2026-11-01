@@ -32,13 +32,13 @@ pub struct StorageAssemblies {
 }
 
 impl StorageAssemblies {
-    /// 装配结构化存储工厂（`app` / `tauri` 用：SQLite / 本地文件系统）。
+    /// 装配结构化存储工厂（`app` / `gui-native` 用：SQLite / 本地文件系统）。
     pub fn with_storage_factory(mut self, factory: StorageBackendFactory) -> Self {
         self.storage_factory = Some(factory);
         self
     }
 
-    /// 装配向量存储工厂（`app` / `tauri` 用：LanceDB）。
+    /// 装配向量存储工厂（`app` / `gui-native` 用：LanceDB）。
     pub fn with_vector_factory(mut self, factory: VectorStorageFactory) -> Self {
         self.vector_factory = Some(factory);
         self
@@ -109,7 +109,7 @@ impl StorageAssemblies {
     ///
     /// 未装配工厂时返回 [`NoopVectorStorage`]：VFS 仍可工作（内容读写/摘要/工具
     /// 全部正常），只是**没有**语义检索。这条路径服务于测试与嵌入式调用
-    /// （`create_app`）——生产装配（`app` / `tauri`）必须注入工厂，否则启动日志
+    /// （`create_app`）——生产装配（`app` / `gui-native`）必须注入工厂，否则启动日志
     /// 会有明确告警。
     pub(crate) async fn vector(
         &self,

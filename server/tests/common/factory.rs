@@ -126,7 +126,7 @@ pub fn test_tianyan_config_with_data_dir(data_dir: std::path::PathBuf) -> Tianya
 /// ## 期 4：这里不再手抄装配清单
 ///
 /// 期 4 之前本函数是**第二份**手抄的 9 个工厂（`app` bin 与 `tauri` 各一份，合计
-/// 三份副本），每份都靠注释「与 `app` / `tauri` 同一份插件实现」互相提醒——插槽
+/// 三份副本），每份都靠注释「与 `app` / `gui-native` 同一份插件实现」互相提醒——插槽
 /// 签名一变，先改的那份能编、后改的那份报错；而**顺序纪律**在某一份里被单独调整时
 /// 连编译都不会失败。期 4 把 11 个工厂与两份清单收敛到 `tianyan_assembly`（唯一
 /// 实现），本函数只取 [`tianyan_assembly::policies`]。

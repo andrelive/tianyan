@@ -12,7 +12,7 @@
 //! 因此清单本身也需要单一事实源。**依赖方向**（关键：不产生反向边）：
 //!
 //! ```text
-//!   app（bin: tianyan-server）              tauri（桌面端）
+//!   app（bin: tianyan-server）              gui-native（桌面端）
 //!         │                                     │
 //!         └──────────────┬──────────────────────┘
 //!                        ▼
@@ -40,7 +40,7 @@
 //!                 task_reviewer（policy-review）
 //!     providers : provider_llm（provider-llm）/ provider_embed（provider-embed）
 //!                        +
-//!   full()      = policies() + 2 个「环境相关」插槽  ← app / tauri 用它
+//!   full()      = policies() + 2 个「环境相关」插槽  ← app / gui-native 用它
 //!     manifests : plugin_factory     （动态工具清单；需真 ToolContext +
 //!                                      PluginServices 才能执行）
 //!     storage   : vector_factory     （LanceDB；集成测试走 NoopVectorStorage，
@@ -323,7 +323,7 @@ pub fn policies() -> AssemblyServices {
     }
 }
 
-/// **完整生产装配**（10 个插槽）：`app` bin 与 `tauri` 桌面端用它。
+/// **完整生产装配**（10 个插槽）：`app` bin 与 `gui-native` 桌面端用它。
 ///
 /// = [`policies`]（8 个） + 动态工具清单 + 向量存储。写成前缀关系是刻意的：
 /// 两份清单不可能分叉（加一个策略插槽只需改 `policies()`，两个消费者同时得到）。

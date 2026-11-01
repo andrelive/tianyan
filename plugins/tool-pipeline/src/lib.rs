@@ -24,7 +24,7 @@
 //! | 留 core 的东西 | 位置 | 为什么不能搬 |
 //! |---|---|---|
 //! | `ToolPostExecuteListener` / `ToolPreExecuteListener` / `ToolGuard` / `PreDecision` | `tianyan::agent::tool_registry::pipeline` | 管线本身是 **K1**（循环骨架的第 4 阶段）：注册表按注册顺序调用监听器、`execute_single` 在守卫之后跑它。契约搬走 ⇒ 内核反向 `use tianyan_tool_pipeline::…`，破 D2-1/D2-3 |
-//! | `ToolPipelineWiring` / `ToolPipelineFactory` | 同上 | 装配层（`app` / `tauri` / 集成测试）与内核共用的**接线形状**：装配层填、内核在 `AgentBuilder::build` 里调用工厂、插件据以构造监听器。三方共用 ⇒ 住 core |
+//! | `ToolPipelineWiring` / `ToolPipelineFactory` | 同上 | 装配层（`app` / `gui-native` / 集成测试）与内核共用的**接线形状**：装配层填、内核在 `AgentBuilder::build` 里调用工厂、插件据以构造监听器。三方共用 ⇒ 住 core |
 //! | `ToolCall` / `TianyanError` / `UsageStats` / `TraceCollector` / `ExecutionLog` / `RuleRecorder` / `ExecutionHistory` | `tianyan::{model,common,observability}` | 内核与多个插件共用的契约与数据层；本 crate 只**用**它们 |
 //! | `executor::truncate::truncate_spill_with` | `tianyan::executor` | 截断/落盘的**唯一实现**：`execute_command` 的后台日志落盘（`executor/command.rs`）也用同一份。复制进插件＝两份口径同时漂移 |
 //! | `ToolOutputConfig` / `TRACE_PARAMS_MAX_BYTES` | `tianyan::config` / `tianyan::agent` | 前者是 `TianyanConfig` 的字段形状（配置结构留 core，见 T4）；后者是**观测数据体积预算**，由内核在注册表侧声明（本 crate 与内核的 Trace 契约共用同一上限） |

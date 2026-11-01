@@ -318,7 +318,7 @@ impl AgentBuilder {
 
     /// 设置系统通知通道（后台任务全部完成/失败、审批挂起时桌面通知）。
     ///
-    /// 装配层（Tauri 实现）注入；未注入时通知静默（行为零变化）。
+    /// 装配层（`gui-native` 实现）注入；未注入时通知静默（行为零变化）。
     pub fn with_notification_sink(
         mut self,
         sink: crate::notification::SharedNotificationSink,

@@ -1,6 +1,6 @@
 # 产品版本一致性校验（`scripts/test.ps1 lint` 门禁的一步）
 #
-# 为什么需要它：天演有两个 workspace —— 主 workspace（core/server/plugins/tauri，
+# 为什么需要它：天演有两个 workspace —— 主 workspace（core/server/plugins，
 # 版本继承 `[workspace.package]`）与 `gui-native/`（独立 workspace，无法继承）。
 # 于是「产品版本」天然存在**多处副本**，实测已经漂过一次：
 #   主 workspace = 1.0.1（`/health` 报的是它）  而 gui-native = 1.1.0（exe 属性）
@@ -61,28 +61,7 @@ if ($rootVer -notmatch '^\d+\.\d+\.\d+$') {
 $guiVer = Get-TomlSectionVersion -Path (Join-Path $repoRoot 'gui-native/Cargo.toml') -Section 'package'
 Report -Name 'gui-native/Cargo.toml' -Value $guiVer -Expect $rootVer -Note '（决定 exe 的 FileVersion/ProductVersion）'
 
-# 3. tauri 壳（退役后目录消失 → 自动跳过）
-$tauriConf = Join-Path $repoRoot 'tauri/tauri.conf.json'
-if (Test-Path $tauriConf) {
-    $tauriVer = $null
-    try {
-        $tauriVer = (Get-Content $tauriConf -Raw -Encoding utf8 | ConvertFrom-Json).version
-    }
-    catch {
-        Write-Host "  [FAIL] 解析 tauri/tauri.conf.json 失败：$($_.Exception.Message)" -ForegroundColor Red
-        $fail++
-    }
-    if ($tauriVer) {
-        # tauri 的 version 允许 3 段；若写成 4 段（x.y.z.w）只比前三段
-        $tauriVer3 = ($tauriVer -split '\.' | Select-Object -First 3) -join '.'
-        Report -Name 'tauri/tauri.conf.json' -Value $tauriVer3 -Expect $rootVer -Note '（tauri 壳退役后本行自动消失）'
-    }
-}
-else {
-    Write-Host "  [SKIP] tauri/ 不存在（已退役）" -ForegroundColor DarkGray
-}
-
-# 4. MSI 清单不得硬编码版本（必须由 build-msi.ps1 注入）
+# 3. MSI 清单不得硬编码版本（必须由 build-msi.ps1 注入）
 $wxs = Join-Path $repoRoot 'gui-native/installer/tianyan.wxs'
 if (-not (Test-Path $wxs)) {
     Write-Host "  [FAIL] 找不到 $wxs" -ForegroundColor Red

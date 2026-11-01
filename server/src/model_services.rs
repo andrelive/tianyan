@@ -75,7 +75,7 @@ impl ModelServices {
     /// 调用即报“应用未配置”），服务端照常启动（前端显示配置向导），并 `warn!` 一次指路。
     ///
     /// 为什么允许降级而不 `Err`：`create_app`（构造对象图，约 60 处库单测 + 嵌入式调用）
-    /// 走 `AssemblyServices::default()`，硬失败等于删入口；而生产装配（`app` / `tauri` /
+    /// 走 `AssemblyServices::default()`，硬失败等于删入口；而生产装配（`app` / `gui-native` /
     /// 集成测试 `test_assembly()`）都已注入两个工厂——覆盖的是生产形态。
     pub(crate) fn from_factories(
         config: &ModelsConfig,
@@ -165,7 +165,7 @@ impl ModelServices {
 
 /// 根据配置创建模型服务（**装配层唯一的容器构造点**）。
 ///
-/// 两个 provider 插槽的工厂由装配层注入（`app` / `tauri` / 集成测试 `test_assembly()`），
+/// 两个 provider 插槽的工厂由装配层注入（`app` / `gui-native` / 集成测试 `test_assembly()`），
 /// 本函数只负责「取工厂 → 拼容器」——不认识任何具体 provider 实现（D5）。
 pub fn create_model_services(
     config: &tianyan::config::TianyanConfig,

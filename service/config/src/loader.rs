@@ -232,7 +232,7 @@ fn config_load_error(path: Option<&Path>, detail: TianyanError) -> TianyanError 
 /// → 返回生效配置。
 ///
 /// 这是「旧 `config::get_config()` 首次调用语义」（加载 → 失败时记错误并回退默认配置
-/// → 写入进程级单例）在分层之后的**唯一落点**。装配层（`app` / `tauri`）在日志初始化
+/// → 写入进程级单例）在分层之后的**唯一落点**。装配层（`app` / `gui-native`）在日志初始化
 /// **之前**调用它，内核侧只剩 `tianyan::config::get_config()`（纯读槽位）。
 ///
 /// 三处装配因此各写**一行**，而不是各抄一遍「加载 + 记错误 + 注入 + 回退默认」——后者

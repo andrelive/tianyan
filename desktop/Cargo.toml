@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
-description = "天演桌面端共享启动编排：内嵌 server 的单实例发现与复用（tauri / gui-native 共用）"
+description = "天演桌面端共享启动编排：内嵌 server 的单实例发现与复用（gui-native 用）"
 
 [dependencies]
 # 启动编排需要配置结构（构造参数）、server 入口与装配清单。

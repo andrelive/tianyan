@@ -55,7 +55,7 @@ Rust 下「契约 = 成本」：契约变更会穿透依赖图，改动成本随
 | 21 | `TaskRegistrar` | `server/src/scheduled_tasks/manager.rs:71` | assembly-manifest | 定时任务注册 |
 | 22 | `TaskResultSink` | `server/src/scheduled_tasks/manager.rs:33` | assembly-manifest | 任务结果回写 |
 | 23 | `TaskTrigger` | `server/src/api/events/processor.rs:20` | assembly-manifest | 事件规则触发任务 |
-| 24 | `NotificationSink` | `core/src/notification/mod.rs:11` | kernel-api | 桌面通知（tauri 注入） |
+| 24 | `NotificationSink` | `core/src/notification/mod.rs:11` | kernel-api | 桌面通知（`gui-native` 注入） |
 | 25 | `DocumentParser` | `core/src/knowledge/parser.rs:61` | plugins/tools-knowledge | 知识导入（PDF/DOCX/XLSX） |
 
 ### B 级 · 自由（12 个）
