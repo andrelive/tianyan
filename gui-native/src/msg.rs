@@ -1128,6 +1128,58 @@ pub(crate) fn render_user_footer(
     footer.into_any_element()
 }
 
+/// 消息项的上下留白（px）。三档，各有各的语义：
+///
+/// - **压缩点 16px**：它是分隔符（不是正文消息），上下都要有呼吸感，才看得出
+///   「上下文在这儿被压过」。曾经被算成上一轮的后续步骤 → 1px，实测紧贴上一轮的
+///   复制按钮和下方待办卡（2026-11 用户截图）；
+/// - **同轮后续步骤 1px**：一轮多工具/多步时卡片紧贴，不堆空白；
+/// - **其余 14px**：轮与轮的间隔（配合用户消息自身的 4px ≈ 18px）。
+pub(crate) fn msg_pad_y(compression: bool, is_continuation: bool) -> f32 {
+    if compression {
+        16.0
+    } else if is_continuation {
+        1.0
+    } else {
+        14.0
+    }
+}
+
+/// 这条消息是否属于**同一轮**的后续步骤（轮内第二步及以后）。
+///
+/// 判据：往前跳过 `tool` 消息，上一条非 `tool` 消息若是 `assistant`，即同轮后续
+/// ——一轮多步时每步都是独立 `MsgRow`，只有这种情况才压紧上下留白。
+///
+/// **压缩点（`compression_marker`）不参与这套判定**，两个方向都要挡住：
+/// - 它自己不是任何一轮的「下一步」——压缩点是分隔符，语义上划断上下文，
+///   但它 `role = user`（模型侧口径），照抄角色判定就会被当成「上一轮 assistant
+///   的后续」，套上 1px 紧凑间距（2026-11 用户截图：压缩点紧贴上一轮的复制按钮
+///   和下方待办卡，正是这条）；
+/// - 它也不能被穿越——压缩点之前的消息不属于它之后的轮。
+///
+/// 为什么单独成函数：这个判据只决定消息项的上下留白（同轮 1px / 跨轮 14px），
+/// 错了表现为「间距怪」，靠截图核对太贵；纯函数用单测钉住。
+pub(crate) fn same_turn_continuation(items: &[MsgRow], ix: usize) -> bool {
+    match items.get(ix) {
+        Some(m) if !m.compression => {}
+        _ => return false,
+    }
+    let mut j = ix;
+    while j > 0 {
+        j -= 1;
+        let prev = &items[j];
+        if prev.compression {
+            return false;
+        }
+        match prev.role.as_str() {
+            "tool" => continue,
+            "assistant" => return true,
+            _ => return false,
+        }
+    }
+    false
+}
+
 /// 每条消息是否**显示时间戳**（= 这一轮的时间锚点）。
 ///
 /// 口径（2026-11 用户拍板）：只留两端 ——
@@ -1549,7 +1601,9 @@ pub(crate) fn render_msg_body(
     // （见 `render_assistant_footer` 的注释：轮内不再报时刻，避免"每步都是独立
     // 回复"的错觉）。14px 与用户消息自身的 4px 相加 ≈ 18px，一轮结束后有明显
     // 空档，但仍比"一整屏"紧凑。
-    let pad_y = if is_continuation { 1.0 } else { 14.0 };
+    //
+    // 三档口径（含压缩点那一档）都在 [`msg_pad_y`] 一处。
+    let pad_y = msg_pad_y(msg.compression, is_continuation);
     div()
         .px_4()
         .py(px(pad_y))
@@ -1898,6 +1952,92 @@ mod ts_anchor_tests {
         // 只有 user、助手还没回 → 没有任何 assistant 锚点
         let items = vec![row("user", "刚发出")];
         assert!(flagged(&items).is_empty());
+    }
+}
+
+#[cfg(test)]
+mod same_turn_tests {
+    //! 「同轮后续步骤」判据（决定消息项上下留白：同轮 1px / 跨轮 14px）。
+    //!
+    //! 为什么用单测：判据错了只表现为「间距怪」——压缩点被算成上一轮的下一步后，
+    //! 它上下只剩 1px，紧贴复制按钮与待办卡（2026-11 用户截图）。这类问题靠截图
+    //! 一寸寸核对太贵，纯函数直接钉住。
+    use crate::msg::{msg_pad_y, same_turn_continuation};
+    use crate::types::MsgRow;
+
+    fn row(role: &str) -> MsgRow {
+        MsgRow {
+            id: String::new(),
+            seq: 0,
+            role: role.to_string(),
+            text: String::new().into(),
+            segs: Vec::new(),
+            tool_calls: Vec::new(),
+            compression: false,
+            usage: None,
+            images: Vec::new(),
+            ts: None,
+        }
+    }
+
+    /// 压缩点：`role = user`（模型侧口径）+ `compression_marker`。
+    fn marker() -> MsgRow {
+        MsgRow {
+            compression: true,
+            ..row("user")
+        }
+    }
+
+    #[test]
+    fn round_first_step_is_not_continuation() {
+        let items = vec![row("user"), row("assistant")];
+        assert!(!same_turn_continuation(&items, 1));
+        // 用户消息自己也不是（上面没有 assistant）
+        assert!(!same_turn_continuation(&items, 0));
+    }
+
+    #[test]
+    fn next_step_in_same_round_is_continuation() {
+        let items = vec![row("user"), row("assistant"), row("assistant")];
+        assert!(same_turn_continuation(&items, 2));
+    }
+
+    #[test]
+    fn tool_between_steps_still_continuation() {
+        // 一轮多步：assistant → tool → assistant，中间被 tool 隔开也仍是同轮后续
+        let items = vec![row("user"), row("assistant"), row("tool"), row("assistant")];
+        assert!(same_turn_continuation(&items, 3));
+    }
+
+    #[test]
+    fn compression_marker_is_never_continuation() {
+        // 压缩点紧跟上一轮的 assistant —— 曾经在这里被算成「同轮下一步」（1px）
+        let items = vec![row("user"), row("assistant"), marker()];
+        assert!(!same_turn_continuation(&items, 2));
+    }
+
+    #[test]
+    fn marker_breaks_scan_for_following_message() {
+        // 压缩点之后的 assistant 不属于压缩点之前那一轮
+        let items = vec![row("user"), row("assistant"), marker(), row("assistant")];
+        assert!(!same_turn_continuation(&items, 3));
+    }
+
+    #[test]
+    fn marker_after_user_is_not_continuation_either() {
+        // 压缩点落在轮首（刚发消息就压缩）同样不压紧
+        let items = vec![row("user"), marker()];
+        assert!(!same_turn_continuation(&items, 1));
+    }
+
+    #[test]
+    fn pad_y_keeps_three_tiers() {
+        // 压缩点一档（16）必须同时大于「跨轮 14」和「同轮 1」——它是分隔符，
+        // 上下都要看得出空档；一旦退回 1px，就是用户截图里那个「贴着待办」的形态。
+        assert_eq!(msg_pad_y(true, true), 16.0);
+        assert_eq!(msg_pad_y(true, false), 16.0);
+        assert_eq!(msg_pad_y(false, true), 1.0);
+        assert_eq!(msg_pad_y(false, false), 14.0);
     }
 }
 

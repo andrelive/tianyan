@@ -654,26 +654,10 @@ impl ClientApp {
                         let Some(m) = items.get(ix) else {
                             return div().into_any_element();
                         };
-                        // 这条是否属于**同一轮**的后续步骤：往前跳过 `tool` 消息，
-                        // 上一条非 tool 若是 assistant，说明同一个用户轮次里的下一步
-                        // （一轮多步 → 每步一条 assistant 消息）。用于弱化渲染：
-                        // 轮内后续不打时间戳，否则看起来像几条独立回复。
-                        let is_continuation = {
-                            let mut j = ix;
-                            let mut cont = false;
-                            while j > 0 {
-                                j -= 1;
-                                match items[j].role.as_str() {
-                                    "tool" => continue,
-                                    "assistant" => {
-                                        cont = true;
-                                        break;
-                                    }
-                                    _ => break,
-                                }
-                            }
-                            cont
-                        };
+                        // 这条是否属于**同一轮**的后续步骤（一轮多步 → 每步一条
+                        // assistant 消息），用于弱化渲染与压紧留白。判据（含压缩点
+                        // 例外）收敛在 `msg::same_turn_continuation` 一处。
+                        let is_continuation = same_turn_continuation(&items, ix);
                         // 本条是不是这一轮的时间锚点（预计算，见上方 `ts_flags`）。
                         let show_ts = ts_flags.get(ix).copied().unwrap_or(false);
                         // 段渲染口径见 `render_msg_body`（思考块 / 工具卡可折叠，
