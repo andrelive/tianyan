@@ -773,9 +773,17 @@ impl ClientApp {
         if !self.busy() {
             return false;
         }
+        // **两态都归这里**（首 token 前 `Below`、思考已开始 `Bubble`）：思考内容一出现
+        // 就把它挪到气泡内，会让提示从控件行「跳」到消息流末尾（左对齐 = 用户看到的
+        // 「左下角」）。落点恒定的唯一办法是只留一处 —— 判据仍由 `stream_pending` 单点给。
         self.messages
             .last()
-            .map(|m| stream_pending(m, true) == StreamPending::Below)
+            .map(|m| {
+                matches!(
+                    stream_pending(m, true),
+                    StreamPending::Below | StreamPending::Bubble
+                )
+            })
             .unwrap_or(false)
     }
 
@@ -784,10 +792,18 @@ impl ClientApp {
         if !self.hint_wanted() {
             return None;
         }
+        // 有思考内容就把字数带上（原来这条信息在气泡里，现在并到控件行）
+        let label = self
+            .messages
+            .last()
+            .map(thinking_chars)
+            .filter(|n| *n > 0)
+            .map(|n| format!("思考中 · {n} 字"))
+            .unwrap_or_else(|| "思考中…".to_string());
         Some(
             div()
                 .px_1()
-                .child(render_stream_hint("stream-hint-composer", "思考中…"))
+                .child(render_stream_hint("stream-hint-composer", label))
                 .into_any_element(),
         )
     }

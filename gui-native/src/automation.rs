@@ -919,6 +919,8 @@ impl ClientApp {
                 "composer_text": self.input.read(cx).value(),
                 // 上一帧排版出的视觉行数（断言「长文本是否真的换行」）
                 "composer_rows": self.input.read(cx).rows_cache.get(),
+                // 输入的选区（字节区间；断言「按住拖动能不能选中」）
+                "composer_selection": input_selection_json(&self.input, cx),
                 "ctx_compress": self.ctx_compress.as_ref().map(|(ok, m)| serde_json::json!({
                     "ok": ok, "message": m,
                 })),
@@ -1853,4 +1855,10 @@ impl ClientApp {
         }
         Ok(())
     }
+}
+
+/// 当前输入框的选区（字节区间；无选区为 None）——/state 断言用。
+fn input_selection_json(input: &Entity<crate::ComposerState>, cx: &App) -> Option<(usize, usize)> {
+    let sel = input.read(cx).buffer.selection();
+    (sel.start != sel.end).then_some((sel.start, sel.end))
 }

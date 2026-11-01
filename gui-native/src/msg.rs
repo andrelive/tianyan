@@ -1500,15 +1500,11 @@ pub(crate) fn render_msg_body(
     // 压缩点是**分隔符**，不是一条消息：正文不显示（见上方 `if msg.compression`
     // 的胶囊 + 分割线），那么复制按钮与时间戳同样不该出现 —— 一个「能复制但看不见
     // 内容」的按钮比没有更糟，用户实测提出「压缩点不显示任何内容」。
-    // 「思考中 · N 字」：正文还空、思考已经在长 → 挂在气泡内（vite 同位置：
-    // 正文之后、时间戳之前）。思考块折叠态虽然也显示最后一行，但那是「想什么」，
-    // 这条是「还在跑」——两者语义不同，用户实测缺的正是后者。
-    if pending == StreamPending::Bubble {
-        body = body.child(render_stream_hint(
-            format!("stream-hint-{mi}"),
-            format!("思考中 · {} 字", thinking_chars(msg)),
-        ));
-    }
+    // 「思考中」**只在输入卡片控件行**显示一处（2026-11 用户二次反馈：气泡内这行
+    // 在大模型开始输出思考内容后会冒出来，落点是被流式轮末尾的 assistant 气泡 ——
+    // 左对齐，看起来就像「思考中指到了对话流左下角」，与控件行那处形成「跳来跳去」）。
+    // 现在气泡内一律不画：状态行只属于控件行，落点恒定。
+    let _ = pending;
     if !msg.compression {
         body = body.child(render_assistant_footer(msg, mi, show_ts));
     }

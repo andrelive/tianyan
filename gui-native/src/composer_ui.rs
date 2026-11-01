@@ -71,6 +71,8 @@ pub(crate) struct ComposerState {
     avail_cache: Cell<f32>,
     /// 光标是否处于「亮」相位（闪烁）。
     caret_on: Cell<bool>,
+    /// 是否正在按住鼠标拖拽选区（on_mouse_down 置真、on_mouse_up 置假）。
+    dragging: bool,
     /// 闪烁任务（只启动一次）。
     blink_task: Option<gpui_kit::Task<()>>,
 }
@@ -90,6 +92,7 @@ impl ComposerState {
             rows_cache: Cell::new(0),
             avail_cache: Cell::new(0.0),
             caret_on: Cell::new(true),
+            dragging: false,
             blink_task: None,
         }
     }
@@ -439,7 +442,11 @@ impl Element for ComposerBody {
             // 光标：聚焦时按 530ms 相位闪烁（用户实测指出「光标不闪，像卡住了」）
             if focused && self.state.read(cx).caret_on.get() {
                 let (cx_pos, cy) = caret_position(prepaint, cursor, bounds, scroll);
-                paint_quad(window, cx_pos, cy, px(2.), line_height, accent);
+                // 光标高度：line_height 含 ascent+descent+行距，按整行画会显得偏长
+                // （用户实测「稍微长了那么一点点」）→ 取字形高度的 0.85 并垂直居中
+                let caret_h = line_height * 0.85;
+                let dy = (line_height - caret_h) * 0.5;
+                paint_quad(window, cx_pos, cy + dy, px(2.), caret_h, accent);
             }
             // IME 组合态下划线（组合中的文字位置）
             if let Some(m) = marked {
@@ -484,6 +491,8 @@ impl Render for ComposerState {
                 gpui_kit::MouseButton::Left,
                 cx.listener(Self::on_mouse_down),
             )
+            .on_mouse_move(cx.listener(Self::on_mouse_move))
+            .on_mouse_up(gpui_kit::MouseButton::Left, cx.listener(Self::on_mouse_up))
             .on_scroll_wheel(cx.listener(Self::on_scroll))
             .child(ComposerBody { state: cx.entity() })
     }
@@ -997,9 +1006,45 @@ impl ComposerState {
         let y = f32::from(ev.position.y) - oy;
         if let Some(pos) = self.hit_test(x, y) {
             self.buffer.set_cursor(pos, ev.modifiers.shift);
+            // 从这一刻起进入拖拽态：后续 move 会把选区从按下点拉过去
+            self.dragging = true;
         }
         cx.notify();
         window.invalidate_character_coordinates();
+    }
+
+    /// 鼠标移动：按住时**拖拽选择**（用户实测「不能按住拖动选文本」）。
+    ///
+    /// 锚点固定在按下点（set_cursor(.., true) 只在锚点为空时才设它），光标跟着走。
+    fn on_mouse_move(
+        &mut self,
+        ev: &gpui_kit::MouseMoveEvent,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.dragging {
+            return;
+        }
+        let (ox, oy) = *self.origin.borrow();
+        let x = f32::from(ev.position.x) - ox;
+        let y = f32::from(ev.position.y) - oy;
+        if let Some(pos) = self.hit_test(x, y) {
+            if self.buffer.anchor.is_none() {
+                self.buffer.anchor = Some(self.buffer.cursor);
+            }
+            self.buffer.set_cursor(pos, true);
+            cx.notify();
+        }
+    }
+
+    /// 鼠标松开：结束拖拽（选区留在原地）。
+    fn on_mouse_up(
+        &mut self,
+        _ev: &gpui_kit::MouseUpEvent,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) {
+        self.dragging = false;
     }
 
     /// 当前组合态在 UTF-16 下的范围（平台对账用）。
