@@ -37,6 +37,7 @@ mod api;
 mod app;
 mod automation;
 mod chat;
+mod composer;
 mod dialogs;
 mod format;
 mod hotkey;
