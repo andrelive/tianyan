@@ -45,8 +45,8 @@ use tokio::sync::{mpsc, oneshot};
 
 use crate::{
     decode_data_url, pages::settings::fields::FIELDS, stream_pending, thinking_chars,
-    tokens_per_sec, ClientApp, Dialog, FilePickPurpose, PickerTarget, Seg, SessionListRow,
-    SettingsTab, StreamPending, View, SERVER_HOST,
+    tokens_per_sec, ClientApp, Dialog, PickerTarget, Seg, SessionListRow, SettingsTab,
+    StreamPending, View, SERVER_HOST,
 };
 
 /// 自动化端口的环境变量名：存在且能解析成端口才监听。
@@ -328,7 +328,9 @@ impl ClientApp {
             Some(m) => (
                 match stream_pending(m, self.streaming) {
                     StreamPending::Bubble => "bubble",
-                    StreamPending::Below => "below",
+                    // 落点 = 输入卡片底部控件行最左（2026-11 从「消息区下方」改过去：
+                    // 那个位置紧贴末尾强视觉块，看起来像待办/工具卡的附属行）
+                    StreamPending::Below => "composer",
                     StreamPending::None => "none",
                 },
                 thinking_chars(m),
@@ -478,9 +480,6 @@ impl ClientApp {
                 let mut v = serde_json::json!({ "kind": d.key() });
                 if let Dialog::WorkspacePicker { target } = d {
                     v["target"] = serde_json::json!(target.key());
-                }
-                if let Dialog::FilePicker { purpose } = d {
-                    v["purpose"] = serde_json::json!(purpose.key());
                 }
                 // 搬迁确认框：把目标路径暴露出来，否则断言不了「选中的到底是哪一个目录」
                 if let Dialog::DataDirMigrate { target } = d {
@@ -1177,18 +1176,8 @@ impl ClientApp {
                 cx.notify();
             }
             // 模型下拉：`open` 显式指定，不带才取反（三个浮层同口径、互斥）
-            // 附加图片附件（OS 文件对话框不可自动化，这里直接给路径）
-            "attach_image" => {
-                let path = arg_str(cmd, "path")?;
-                match crate::image_path_to_data_url(std::path::Path::new(&path)) {
-                    Some(url) => {
-                        self.composer_images.push(url);
-                        cx.notify();
-                    }
-                    None => return Err(format!("不是受支持的图片或读取失败：{path}")),
-                }
-            }
-            // 从系统剪贴板贴图（= 用户截图后点「粘贴图片」的同一份实现）
+            // 从系统剪贴板贴图（= Ctrl+V 的同一份实现：`Textarea::on_paste` 的图片
+            // 分支最终也落到 `paste_image_from_clipboard` ⇒ `composer_images`）
             "paste_image" => {
                 if !self.paste_image_from_clipboard(cx) {
                     return Err("剪贴板里没有图片（先截图到剪贴板再试）".to_string());
@@ -1681,15 +1670,6 @@ impl ClientApp {
             "kb_open_picker" => {
                 // 打开文件选择弹窗（GPUI 自绘、非 OS 对话框）：默认定位到会话工作目录
                 self.open_kb_picker(cx);
-            }
-            // @ 文件引用：同一个弹窗，用途 = Mention（点中文件即插入输入框）
-            "mention_file" => {
-                self.open_file_picker(FilePickPurpose::Mention, cx);
-            }
-            // 点中一个文件（真实点击路径是弹窗里的文件行 → `mention_file`；
-            // 自动化没有 window，走 `mention_file_auto`，插入 API 同一个）
-            "mention_pick" => {
-                self.mention_file_auto(arg_str(cmd, "path")?, cx)?;
             }
             // 清空输入框（测试收尾；真实路径里发送成功后也会清）
             "composer_clear" => {

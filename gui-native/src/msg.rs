@@ -100,25 +100,6 @@ pub(crate) fn now_clock() -> String {
     chrono::Local::now().format("%H:%M:%S").to_string()
 }
 
-/// 本地图片文件 → data URL（`data:image/png;base64,...`）。
-///
-/// 后端 `ChatRequest.message.images` 收的就是这个形式（vite 直传 data URL）。
-/// 非图片扩展名 / 读失败 / 超过 8MB 返回 `None`（该张跳过，不阻断整批）。
-pub(crate) fn image_path_to_data_url(path: &std::path::Path) -> Option<String> {
-    let ext = path.extension()?.to_str()?.to_lowercase();
-    let mime = match ext.as_str() {
-        "png" => "image/png",
-        "jpg" | "jpeg" => "image/jpeg",
-        "webp" => "image/webp",
-        "gif" => "image/gif",
-        "bmp" => "image/bmp",
-        _ => return None,
-    };
-    let bytes = std::fs::read(path).ok()?;
-    let (mime, bytes) = normalize_image_for_api(mime, &bytes)?;
-    bytes_to_data_url(&mime, &bytes)
-}
-
 /// 后端接受的图片 MIME 白名单（与 `server/src/api/chat/types.rs` 的
 /// `ACCEPTED_IMAGE_DATA_URL_PREFIXES` 同一口径）。
 pub(crate) const ACCEPTED_IMAGE_MIMES: [&str; 5] = [
@@ -993,19 +974,66 @@ pub(crate) fn render_user_footer(
     footer.into_any_element()
 }
 
+/// 每条消息是否**显示时间戳**（= 这一轮的时间锚点）。
+///
+/// 口径（2026-11 用户拍板）：只留两端 ——
+/// - `user` 的时间在气泡内（[`render_user_footer`]），**恒显示**，不经过这里；
+/// - `assistant` 只在**该轮最后一条有正文的消息**上显示；
+/// - **兜底**：该轮所有 assistant 都没有正文（纯工具调用就结束），仍显示在**该轮
+///   最后一条 assistant** 上 —— 否则「这一轮什么时候结束的」彻底失去锚点；
+/// - `tool` 消息 / 压缩点 / 空轮：不显示。
+///
+/// 轮边界 = 下一条 `user` 消息（压缩点不打断轮）。
+///
+/// 为什么不再用「下一条不是 assistant」那句几何判据：`tool` 的 role 也不是
+/// `assistant`，于是「assistant → 工具结果」的中间步会被误判成轮末，一轮里冒出
+/// 好几个时刻；而真正的轮末落在工具卡（如待办）上时，时间戳挂在卡片下方 11px
+/// 灰字里，看起来就像「时间不见了」。
+pub(crate) fn ts_anchor_flags(items: &[MsgRow]) -> Vec<bool> {
+    fn flush(items: &[MsgRow], round: &[usize], flags: &mut [bool]) {
+        let assistants: Vec<usize> = round
+            .iter()
+            .copied()
+            .filter(|&i| items[i].role == "assistant" && !items[i].compression)
+            .collect();
+        let anchor = assistants
+            .iter()
+            .rev()
+            .find(|&&i| !items[i].text.trim().is_empty())
+            .or_else(|| assistants.last());
+        if let Some(&i) = anchor {
+            flags[i] = true;
+        }
+    }
+    let mut flags = vec![false; items.len()];
+    let mut round: Vec<usize> = Vec::new();
+    for (i, m) in items.iter().enumerate() {
+        if m.role == "user" {
+            flush(items, &round, &mut flags);
+            round.clear();
+        }
+        round.push(i);
+    }
+    flush(items, &round, &mut flags);
+    flags
+}
+
 /// assistant 消息末尾的操作行：复制 + 时间（低对比度小字）。
 ///
 /// 同 [`render_user_footer`]：拆出来只为压 `render_msg_body` 的栈帧。
 ///
-/// `show_ts` = 这条是**本轮最后一个步骤**（见 `render_msg_body`）。
+/// 每条消息是否**显示时间戳**（= 这一轮的时间锚点）。由 [`ts_anchor_flags`] 预计算。
 ///
-/// 时间戳只挂在轮末 —— 三次迭代的定稿（全为用户实测反馈）：
+/// 时间戳的落点四轮迭代（全为用户实测反馈）：
 /// ① 每步都打 → 「两个工具调用本该一轮、却被时间戳分开」；
-/// ② 只在轮首打 → 「轮与轮之间的时间不见了，难以区分轮次」（轮首常在正文处，
-///    滚到中段就完全看不到时间）；
+/// ② 只在轮首打 → 「轮与轮之间的时间不见了」（轮首常在正文处，滚到中段看不到时间）；
 /// ③ 每步浅色打 → 「同一轮为什么调用时间不一样」；
-/// ④ **定稿**：轮内一律不打（只保留工具耗时），**轮末**打一条 —— 轮边界 =
-///    上一轮的"结束时刻" + 下一轮用户消息的"发生时刻"，两头都有锚点，轮内干净。
+/// ④ 只挂"几何轮末"（下一条不是 assistant）→ **仍有缺口**：`tool` 的 role 也不是
+///    `assistant`，中间步会被误判成轮末；而真正的轮末落在工具卡（如待办）上时，
+///    时间戳挂在卡片下方 11px 灰字里，看起来像消失了。
+/// ⑤ **定稿（2026-11）**：只留两端 —— 用户消息（气泡内，恒显示）+ 该轮**最后一条
+///    有正文的 assistant**；整轮没有正文时兜底到该轮最后一条 assistant。
+///    轮内工具步、`tool` 消息、压缩点一律不显示。
 pub(crate) fn render_assistant_footer(msg: &MsgRow, mi: usize, show_ts: bool) -> AnyElement {
     let mut footer = div().w_full().flex().flex_row().items_center().gap_2();
     if !msg.text.trim().is_empty() {
@@ -1029,7 +1057,7 @@ pub(crate) fn render_assistant_footer(msg: &MsgRow, mi: usize, show_ts: bool) ->
         );
     }
     footer = footer.child(div().flex_1());
-    // 时间戳只在**轮末**（见上方 `show_ts` 的说明）
+    // 时间戳只在这一轮的时间锚点上（见上方 `show_ts` 的说明）
     if show_ts {
         if let Some(ts) = &msg.ts {
             footer = footer.child(
@@ -1065,10 +1093,10 @@ pub(crate) fn render_msg_body(
     // 判据由调用方（消息列表闭包）算：往前跳过 `tool` 消息，上一条非 tool 若为
     // assistant，则本条是同轮后续。
     is_continuation: bool,
-    // 这条是否是**本轮的最后一个步骤**（下一条不是 assistant / 已经是最后一条）。
-    // 时间戳只挂在轮末：既标出轮边界，又不在轮内制造"每条都是独立回复"的错觉
-    // （见 `render_assistant_footer` 里那段三次迭代的记录）。
-    is_round_end: bool,
+    // 这条是不是**这一轮的时间锚点**（该轮最后一条有正文的 assistant；整轮没有
+    // 正文则兜底到最后一条）。由 `ts_anchor_flags` 预计算，判据是语义而非几何位置
+    // （见 `render_assistant_footer` 里那段五轮迭代的记录）。
+    show_ts: bool,
     // 这条消息此刻的思考指示归属（`stream_pending` 单点判定）：只有本轮末尾的
     // assistant 在正文还空时才会是 `Bubble` / `Below`，其余一律 `None`。
     pending: StreamPending,
@@ -1354,7 +1382,7 @@ pub(crate) fn render_msg_body(
         ));
     }
     if !msg.compression {
-        body = body.child(render_assistant_footer(msg, mi, is_round_end));
+        body = body.child(render_assistant_footer(msg, mi, show_ts));
     }
     // 同一轮的**后续步骤**（工具步）压紧上下留白。
     //
@@ -1610,5 +1638,111 @@ mod image_layout_tests {
             .expect("编码 PNG");
         assert_eq!(image_dimensions(&buf), Some((2, 3)));
         assert_eq!(image_dimensions(b"not an image"), None);
+    }
+}
+
+#[cfg(test)]
+mod ts_anchor_tests {
+    //! 时间戳落点（2026-11 用户口径）：只留两端 —— 用户消息的时间在气泡内
+    //! （`render_user_footer`，恒显示，**不经过**这里）+ 该轮**最后一条有正文的
+    //! assistant**；整轮没有正文时兜底到该轮最后一条 assistant。
+    //!
+    //! 为什么用单测：上一版用的是「下一条不是 assistant」的**几何**判据，而 `tool`
+    //! 的 role 也不是 assistant ⇒ 中间工具步被误判成轮末（一轮冒出好几个时刻）；
+    //! 而真正的轮末落在工具卡（如待办）上时，时间挂在卡片下方 11px 灰字里，看起来
+    //! 像「时间不见了」。这类错误在界面上表现为「时间出现在奇怪的地方 / 该有的
+    //! 时候没有」，靠截图翻历史核对太贵，纯函数钉住最省。
+    use crate::msg::ts_anchor_flags;
+    use crate::types::MsgRow;
+
+    fn row(role: &str, text: &str) -> MsgRow {
+        MsgRow {
+            id: String::new(),
+            seq: 0,
+            role: role.to_string(),
+            text: text.to_string().into(),
+            segs: Vec::new(),
+            tool_calls: Vec::new(),
+            compression: false,
+            usage: None,
+            images: Vec::new(),
+            ts: Some("10:00:00".to_string()),
+        }
+    }
+
+    /// 返回被标记为「显示时间戳」的下标（便于断言，不必逐位比对）。
+    fn flagged(items: &[MsgRow]) -> Vec<usize> {
+        ts_anchor_flags(items)
+            .iter()
+            .enumerate()
+            .filter(|(_, &f)| f)
+            .map(|(i, _)| i)
+            .collect()
+    }
+
+    #[test]
+    fn only_last_text_assistant_of_round() {
+        // user → assistant(文本) → assistant(工具步) → tool → assistant(最终答复)
+        let items = vec![
+            row("user", "问题"),
+            row("assistant", "先说一句"),
+            row("assistant", ""),
+            row("tool", "工具输出"),
+            row("assistant", "最终答复"),
+        ];
+        assert_eq!(flagged(&items), vec![4]);
+    }
+
+    #[test]
+    fn fallback_to_last_assistant_when_round_has_no_text() {
+        // 整轮只有工具调用、没有正文 → 兜底到最后一条 assistant（否则这一轮彻底没锚点）
+        let items = vec![
+            row("user", "跑一下"),
+            row("assistant", ""),
+            row("tool", "输出"),
+            row("assistant", ""),
+            row("tool", "输出 2"),
+        ];
+        assert_eq!(flagged(&items), vec![3]);
+    }
+
+    #[test]
+    fn one_anchor_per_round() {
+        let items = vec![
+            row("user", "第一问"),
+            row("assistant", "第一答"),
+            row("user", "第二问"),
+            row("assistant", "中间步"),
+            row("tool", "t"),
+            row("assistant", "第二答"),
+        ];
+        assert_eq!(flagged(&items), vec![1, 5]);
+    }
+
+    #[test]
+    fn user_is_never_flagged() {
+        // 用户消息的时间在气泡内，不走这里
+        let items = vec![row("user", "只有提问"), row("assistant", "答复")];
+        let f = ts_anchor_flags(&items);
+        assert!(!f[0]);
+        assert!(f[1]);
+    }
+
+    #[test]
+    fn trailing_tool_does_not_steal_anchor() {
+        // 轮末落在工具消息上（如待办卡）→ 锚点仍在该轮最后一条有正文的 assistant
+        let items = vec![
+            row("user", "更新待办"),
+            row("assistant", "我来更新"),
+            row("tool", "todo 结果"),
+        ];
+        assert_eq!(flagged(&items), vec![1]);
+    }
+
+    #[test]
+    fn empty_round_has_no_anchor() {
+        // 只有 user、助手还没回 → 没有任何 assistant 锚点
+        let items = vec![row("user", "刚发出")];
+        assert!(flagged(&items).is_empty());
     }
 }

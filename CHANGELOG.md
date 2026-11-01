@@ -7,7 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-_（下批）_
+### Changed
+- **「思考中…」移到输入卡片底部控件行最左**：原先在消息列表下方、紧贴最后一个强视觉块
+  （如待办卡）8px，看起来像卡片的附属行（用户报「思考中在待办下面」）。四个原型
+  （列表下方 / 居中胶囊 / 卡片内顶部 / 控件行左侧）截图对比后由用户选定控件行左侧：
+  不占额外高度、输入卡片高度恒定不随「忙 / 闲」抖动、消息流末尾保持干净。判据仍收敛在
+  `stream_pending` 一处（三态互斥：首 token 前走这里，思考一开始转气泡内「思考中 · N 字」）。
+- **时间戳只留两端**：用户消息（气泡内，恒显示）+ 该轮**最后一条有正文的 assistant**；
+  整轮没有正文（纯工具调用就结束）时兜底到该轮最后一条 assistant。判据从「下一条不是
+  assistant」的**几何位置**改成**语义**——`tool` 的 role 也不是 assistant，旧判据会把
+  「assistant → 工具结果」的中间步误判成轮末（一轮冒出好几个时刻）；而真正的轮末落在
+  工具卡上时，时间挂在卡片下方 11px 灰字里，看起来像「时间不见了」。新增 6 个单测
+  （`msg::ts_anchor_tests`），并做过「先红后绿」判别力验证（去掉 `.rev()` 与去掉兜底
+  各让 2 个 / 1 个用例 FAIL）。
+
+### Removed
+- **输入框只保留 Ctrl+V 一条粘贴通道**：移除「插入图片」「插入文件（`@` 引用）」「从剪贴板
+  粘贴」三个按钮及其界面（OS 图片选择器、文件弹窗的 Mention 用途与 `FilePickPurpose`）。
+  同一能力开三个入口只会让人猜「该点哪个」；粘贴通道在 `Textarea::on_paste` 里已经覆盖
+  两种载荷（图片 → data URL 挂待发列表；文件路径 → `@file:"…"` 引用）。
+  `/state` 的 `stream_pending` 值随之由 `below` 改为 `composer`；自动化动作删
+  `attach_image` / `mention_file` / `mention_pick`（对应界面已不存在），`paste_image` 保留
+  （= Ctrl+V 的同一份实现）。
 
 ## [1.1.0] - 2026-10-31
 

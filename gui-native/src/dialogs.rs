@@ -3,8 +3,8 @@
 //! 全部是 **GPUI 自绘覆盖层**（不是 OS 对话框）：OS 级模态框自动化端口既点不到也
 //! 看不到（`/state` 里没有它的位置），自绘的才能被断言与驱动。
 //!
-//! 文件选择器一套 UI 服务两个用途（知识导入多选 / @ 引用单选），差别只在
-//! `FilePickPurpose` 决定的三处：标题、点文件动作、底部按钮组。
+//! 文件选择器现在只服务**知识导入**（多选 + 导入选中）。原「@ 引用单选」用途
+//! 已于 2026-11 随输入框的三个按钮一起移除 —— 图片 / 文件一律走 Ctrl+V。
 
 use crate::*;
 // 滚动扩展方法（.overflow_y_scrollbar()）来自这个 trait，必须 in scope
@@ -58,8 +58,8 @@ impl ClientApp {
             return self.render_workspace_picker_dialog(target, cx);
         }
         // 文件选择弹窗同理：列表 + 导航 + 选中动作，独立形态
-        if let Dialog::FilePicker { purpose } = dialog {
-            return self.render_file_picker_dialog(purpose, cx);
+        if let Dialog::FilePicker = dialog {
+            return self.render_file_picker_dialog(cx);
         }
         let (heading, message, confirm_label, danger) = match &dialog {
             Dialog::DeleteSession { title, .. } => (
@@ -77,7 +77,7 @@ impl ClientApp {
                 ("选择目录".to_string(), None, "选择".to_string(), false)
             }
             // 文件选择弹窗在 `render_dialog` 开头就分流了，走不到这里
-            Dialog::FilePicker { .. } => ("选择文件".to_string(), None, "确定".to_string(), false),
+            Dialog::FilePicker => ("选择文件".to_string(), None, "确定".to_string(), false),
             Dialog::ResetRole { name } => (
                 "回退内置种子".to_string(),
                 Some(format!(
@@ -217,7 +217,7 @@ impl ClientApp {
                                 Some(Dialog::RenameSession { .. }) => this.submit_rename(cx),
                                 Some(Dialog::WorkspacePicker { .. }) => {}
                                 // 文件选择弹窗同样是独立形态（不走这条骨架）
-                                Some(Dialog::FilePicker { .. }) => {}
+                                Some(Dialog::FilePicker) => {}
                                 Some(Dialog::ResetRole { name }) => {
                                     this.confirm_reset_role(name, cx)
                                 }
@@ -269,15 +269,8 @@ impl ClientApp {
     /// 形态与 workspace 目录选择器一致（遮罩 + 居中卡片 + 列表），因为它们是同一类
     /// 任务（在文件系统里定位）。弹窗而不是平铺：导入 tab 的主任务只有「选文件 +
     /// 导入」，把一张常驻的文件列表铺在页面上会把主次关系拉平。
-    /// 文件选择弹窗（知识导入 / @ 引用共用）。
-    ///
-    /// 两种用途的差别全部集中在本函数的三处 `purpose` 分支上：标题、点文件的
-    /// 动作、底部按钮组。其余（上级目录 / 过滤 / 隐藏项 / 大小）逐字共用。
-    pub(crate) fn render_file_picker_dialog(
-        &self,
-        purpose: FilePickPurpose,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
+    /// 文件选择弹窗（知识导入）。
+    pub(crate) fn render_file_picker_dialog(&self, cx: &mut Context<Self>) -> AnyElement {
         // 列表：上级目录 → 子目录 → 文件
         let mut list = div().flex().flex_col().gap_1().w_full();
         if !self.kb_browse_dir.is_empty() && self.kb_browse_dir != "浏览根" {
@@ -427,12 +420,9 @@ impl ClientApp {
                                     "○"
                                 }),
                         )
-                        .on_click(cx.listener(move |this, _, window, cx| {
+                        .on_click(cx.listener(move |this, _, _window, cx| {
                             if is_dir {
                                 this.load_kb_browse(dir.clone(), cx);
-                            } else if purpose == FilePickPurpose::Mention {
-                                // @ 引用单选：点中即插入并关闭，不要「勾选 + 确认」两步
-                                this.mention_file(picked_path.clone(), window, cx);
                             } else {
                                 this.toggle_kb_pick(picked_path.clone());
                                 cx.notify();
@@ -473,10 +463,7 @@ impl ClientApp {
                                 .flex_1()
                                 .text_size(px(14.))
                                 .text_color(rgb(colors::TEXT_PRIMARY()))
-                                .child(match purpose {
-                                    FilePickPurpose::KbIngest => "选择要导入知识库的文件",
-                                    FilePickPurpose::Mention => "选择要引用的文件（点中即插入）",
-                                }),
+                                .child("选择要导入知识库的文件"),
                         )
                         .child(
                             div()
@@ -625,42 +612,29 @@ impl ClientApp {
                                 .overflow_hidden()
                                 .text_size(px(11.))
                                 .text_color(rgb(colors::TEXT_TERTIARY()))
-                                .child(match purpose {
-                                    FilePickPurpose::Mention => {
-                                        "点目录进入，点文件即插入引用".to_string()
-                                    }
-                                    FilePickPurpose::KbIngest => {
-                                        if self.kb_picked.is_empty() {
-                                            "点目录进入，点文件勾选".to_string()
-                                        } else {
-                                            format!("已选 {} 个文件", self.kb_picked.len())
-                                        }
-                                    }
+                                .child(if self.kb_picked.is_empty() {
+                                    "点目录进入，点文件勾选".to_string()
+                                } else {
+                                    format!("已选 {} 个文件", self.kb_picked.len())
                                 }),
                         )
-                        // 「清空 / 导入选中」只属于多选的导入用途；引用是单选即插入，
-                        // 留着这两个按钮只会让人以为要先勾选
-                        .children(if purpose == FilePickPurpose::KbIngest {
-                            Some(
-                                div()
-                                    .id("kbp-clear")
-                                    .px_3()
-                                    .py_2()
-                                    .rounded_md()
-                                    .border_1()
-                                    .border_color(rgb(colors::BORDER()))
-                                    .cursor_pointer()
-                                    .text_size(px(11.))
-                                    .text_color(rgb(colors::TEXT_SECONDARY()))
-                                    .child("清空")
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.kb_picked.clear();
-                                        cx.notify();
-                                    })),
-                            )
-                        } else {
-                            None
-                        })
+                        .child(
+                            div()
+                                .id("kbp-clear")
+                                .px_3()
+                                .py_2()
+                                .rounded_md()
+                                .border_1()
+                                .border_color(rgb(colors::BORDER()))
+                                .cursor_pointer()
+                                .text_size(px(11.))
+                                .text_color(rgb(colors::TEXT_SECONDARY()))
+                                .child("清空")
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.kb_picked.clear();
+                                    cx.notify();
+                                })),
+                        )
                         .child(
                             div()
                                 .id("kbp-cancel")
@@ -678,27 +652,23 @@ impl ClientApp {
                                     cx.notify();
                                 })),
                         )
-                        .children(if purpose == FilePickPurpose::KbIngest {
-                            Some(
-                                div()
-                                    .id("kbp-confirm")
-                                    .px_4()
-                                    .py_2()
-                                    .rounded_md()
-                                    .bg(rgb(colors::ACCENT()))
-                                    .cursor_pointer()
-                                    .text_size(px(11.))
-                                    .text_color(rgb(colors::TEXT_PRIMARY()))
-                                    .child("导入选中")
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.import_kb_picked(cx);
-                                        this.dialog = None;
-                                        cx.notify();
-                                    })),
-                            )
-                        } else {
-                            None
-                        }),
+                        .child(
+                            div()
+                                .id("kbp-confirm")
+                                .px_4()
+                                .py_2()
+                                .rounded_md()
+                                .bg(rgb(colors::ACCENT()))
+                                .cursor_pointer()
+                                .text_size(px(11.))
+                                .text_color(rgb(colors::TEXT_PRIMARY()))
+                                .child("导入选中")
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.import_kb_picked(cx);
+                                    this.dialog = None;
+                                    cx.notify();
+                                })),
+                        ),
                 );
 
         div()
@@ -1084,12 +1054,12 @@ impl ClientApp {
     /// 直接落在盘符根是很糟的默认值 —— 一屏全是 `hiberfil.sys` / `pagefile.sys`
     /// 这类系统文件，既找不到东西也说明不了从哪开始找。
     pub(crate) fn open_kb_picker(&mut self, cx: &mut Context<Self>) {
-        self.open_file_picker(FilePickPurpose::KbIngest, cx);
+        self.open_file_picker(cx);
     }
 
     /// 打开文件选择弹窗（知识导入 / @ 引用共用一套浏览 UI）。
-    pub(crate) fn open_file_picker(&mut self, purpose: FilePickPurpose, cx: &mut Context<Self>) {
-        self.dialog = Some(Dialog::FilePicker { purpose });
+    pub(crate) fn open_file_picker(&mut self, cx: &mut Context<Self>) {
+        self.dialog = Some(Dialog::FilePicker);
         self.kb_picked.clear();
         let start = self.kb_picker_start_dir();
         self.load_kb_browse(start, cx);

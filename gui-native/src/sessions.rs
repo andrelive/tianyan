@@ -247,7 +247,7 @@ impl ClientApp {
                 | Some(Dialog::RenameSession { .. })
                 | Some(Dialog::RollbackMessage { .. })
                 | Some(Dialog::WorkspacePicker { .. })
-                | Some(Dialog::FilePicker { .. })
+                | Some(Dialog::FilePicker)
         ) {
             self.dialog = None;
             self.dialog_input = None;

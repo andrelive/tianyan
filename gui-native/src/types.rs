@@ -324,28 +324,6 @@ impl PickerTarget {
     }
 }
 
-/// 文件选择弹窗的用途：**同一套浏览 UI，选中之后做什么不同**。
-///
-/// 复用一个弹窗而不是写两个：目录导航 / 名称过滤 / 隐藏项开关 / 大小格式化
-/// 逐字相同，分叉只在「确认动作」上。多一个枚举比重写一遍弹窗安全。
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub(crate) enum FilePickPurpose {
-    /// 知识导入：多选，勾满后点「导入选中」，逐个 ingest
-    KbIngest,
-    /// @ 文件引用：单选，**点中即插入**输入框并关闭（不需要勾选 + 确认两步）
-    Mention,
-}
-
-impl FilePickPurpose {
-    /// 稳定标识（自动化 API 契约值；`state.file_picker.purpose`）。
-    pub(crate) fn key(self) -> &'static str {
-        match self {
-            FilePickPurpose::KbIngest => "kb_ingest",
-            FilePickPurpose::Mention => "mention",
-        }
-    }
-}
-
 #[derive(Clone)]
 /// 需要用户确认的模态对话框（自绘覆盖层，不依赖组件库 Dialog）。
 pub(crate) enum Dialog {
@@ -361,7 +339,7 @@ pub(crate) enum Dialog {
     /// 退役删除角色（`DELETE /roles/{name}`）
     DeleteRole { name: String },
     /// 文件选择弹窗（**GPUI 自绘**，不是 OS 对话框 —— 所以自动化点得到）
-    FilePicker { purpose: FilePickPurpose },
+    FilePicker,
     /// 回退到某条用户输入之前（`POST /sessions/{id}/messages/delete`，ADR-040 事务）
     RollbackMessage {
         session_id: String,
@@ -400,11 +378,7 @@ impl Dialog {
             Dialog::WorkspacePicker { .. } => "workspace_picker",
             Dialog::ResetRole { .. } => "reset_role",
             Dialog::DeleteRole { .. } => "delete_role",
-            // 用途直接体现在 kind 里：自动化断言要能区分「导入弹窗」与「引用弹窗」
-            Dialog::FilePicker { purpose } => match purpose {
-                FilePickPurpose::KbIngest => "kb_file_picker",
-                FilePickPurpose::Mention => "mention_file_picker",
-            },
+            Dialog::FilePicker => "kb_file_picker",
             Dialog::RollbackMessage { .. } => "rollback_message",
             Dialog::EditApproval { .. } => "edit_approval",
             Dialog::DataDirMigrate { .. } => "data_dir_migrate",

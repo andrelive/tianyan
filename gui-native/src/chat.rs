@@ -22,6 +22,21 @@ use gpui_kit::list as gpui_list;
 /// 切换会话时 `session_usage` 会被清空等新数据，若整行随之消失，
 /// 输入区高度就抖一下（用户实测「多会话切换上下抖动」）。
 const USAGE_LINE_H: f32 = 24.0;
+/// 开发期强制显示「思考中…」（`TIANYAN_GUI_HINT_FORCE=1`），供**静态截图核对位置**用
+/// （真实触发要等模型首 token 前的静默，时机不可控）。
+///
+/// **只在 debug 构建存在**：release 里函数恒 `false`，没有开关也没有这段代码。
+#[cfg(debug_assertions)]
+fn hint_forced() -> bool {
+    use std::sync::OnceLock;
+    static FORCED: OnceLock<bool> = OnceLock::new();
+    *FORCED.get_or_init(|| matches!(std::env::var("TIANYAN_GUI_HINT_FORCE").as_deref(), Ok("1")))
+}
+
+#[cfg(not(debug_assertions))]
+fn hint_forced() -> bool {
+    false
+}
 
 /// 待发图片张数上限（与 Web 版 `ChatInput.tsx` 同数：4 张）。
 ///
@@ -625,10 +640,15 @@ impl ClientApp {
                     // 回退需要会话 id（消息操作按钮用）
                     let sid = self.current_session.clone().unwrap_or_default();
                     // 「思考中」指示器的两个输入：本轮是否在跑、哪条是末尾。
-                    // 判定本身在 `msg::stream_pending` 一处（与下方
-                    // `render_stream_below` 共用），这里只负责把「是不是末尾」喂进去。
+                    // 判定本身在 `msg::stream_pending` 一处（气泡内与输入卡片控件行
+                    // 共用），这里只负责把「是不是末尾」喂进去。
                     let streaming = self.busy();
                     let tail_ix = self.messages.len().saturating_sub(1);
+                    // 时间戳落点预计算：本轮最后一条**有正文**的 assistant；整轮没有正文
+                    // （纯工具调用就结束）则兜底到最后一条 assistant。语义判据见
+                    // `msg::ts_anchor_flags` —— 不再用「下一条是不是 assistant」这句几何
+                    // 判据（`tool` 的 role 也不是 assistant，会把中间步误判成轮末）。
+                    let ts_flags = std::rc::Rc::new(ts_anchor_flags(&items));
                     gpui_list(self.msg_list_state.clone(), move |ix, _window, _cx| {
                         let Some(m) = items.get(ix) else {
                             return div().into_any_element();
@@ -653,14 +673,8 @@ impl ClientApp {
                             }
                             cont
                         };
-                        // 本条是否**本轮最后一步**：下一条不是 assistant（user / system）
-                        // 或已经没有下一条 → 是本轮收尾 → 只在它上面打时间戳。
-                        // 这样轮边界 = 「上一轮结束时刻 + 下一轮用户消息时刻」，两头
-                        // 都有锚点，而轮内保持干净（用户三次反馈的定稿，见 footer 注释）。
-                        let is_round_end = items
-                            .get(ix + 1)
-                            .map(|n| n.role != "assistant")
-                            .unwrap_or(true);
+                        // 本条是不是这一轮的时间锚点（预计算，见上方 `ts_flags`）。
+                        let show_ts = ts_flags.get(ix).copied().unwrap_or(false);
                         // 段渲染口径见 `render_msg_body`（思考块 / 工具卡可折叠，
                         // 结果按 `tool_calls` 的 id 关联）
                         render_msg_body(
@@ -670,7 +684,7 @@ impl ClientApp {
                             &app,
                             &sid,
                             is_continuation,
-                            is_round_end,
+                            show_ts,
                             stream_pending(m, streaming && ix == tail_ix),
                         )
                     })
@@ -738,36 +752,43 @@ impl ClientApp {
                     .max_w(px(colors::CHAT_MAX_W))
                     .child(self.render_todo_bar(cx)),
             )
-            .child(
-                div()
-                    .w_full()
-                    .max_w(px(colors::CHAT_MAX_W))
-                    .child(self.render_stream_below()),
-            )
             .into_any_element()
     }
 
-    /// 消息区下方的「思考中…」指示器（vite `ChatPanel` 的状态提示带同位置：
-    /// 消息区与输入区之间，不随列表滚动）。
+    /// 「思考中…」此刻该不该出现。
     ///
-    /// 只在**首 token 之前**出现：正文还空、思考也还没开始 —— 这是用户最容易
-    /// 误判成「没发出去」的那一段静默。一旦思考开始，指示器移到气泡内
-    /// （`stream_pending` 单点判定，见 `msg::StreamPending`），这里自动消失。
-    pub(crate) fn render_stream_below(&self) -> AnyElement {
+    /// 判据仍收敛在 `msg::stream_pending` 一处（三态互斥）：只有**首 token 之前**
+    /// （正文空、思考也空）算这里；思考内容一开始就切成气泡内的「思考中 · N 字」，
+    /// 本函数随即返回 `false`（`StreamPending::Bubble`）。
+    ///
+    /// 落点 = **输入卡片底部控件行最左**（模型 / 思考 / 上下文环那一行的左端；
+    /// 2026-11 用户从四个原型里选定）：① 不占额外高度；② 输入卡片高度恒定、
+    /// 不随「忙 / 闲」抖动；③ 消息流末尾保持干净 —— 待办、工具卡下面不再挂一行
+    /// 状态字（用户报的「思考中在待办下面」正是旧落点：列表下方、距卡片仅 8px）。
+    fn hint_wanted(&self) -> bool {
+        if hint_forced() {
+            return true;
+        }
         if !self.busy() {
-            return div().into_any_element();
+            return false;
         }
-        let Some(last) = self.messages.last() else {
-            return div().into_any_element();
-        };
-        if stream_pending(last, true) != StreamPending::Below {
-            return div().into_any_element();
+        self.messages
+            .last()
+            .map(|m| stream_pending(m, true) == StreamPending::Below)
+            .unwrap_or(false)
+    }
+
+    /// 输入卡片内部的「思考中…」一行（控件行最左）。
+    fn render_hint_inline(&self) -> Option<AnyElement> {
+        if !self.hint_wanted() {
+            return None;
         }
-        div()
-            .px_4()
-            .py_2()
-            .child(render_stream_hint("stream-hint-below", "思考中…"))
-            .into_any_element()
+        Some(
+            div()
+                .px_1()
+                .child(render_stream_hint("stream-hint-composer", "思考中…"))
+                .into_any_element(),
+        )
     }
 
     // 输入框高度**不再自己算**：`TextareaState::auto_grow(1, 8)` 按真实字形宽度测量
@@ -824,8 +845,8 @@ impl ClientApp {
                     // 就会「什么都没发生」。这里再挂一层 `on_key_down`：只有贴图成功
                     // 才吞事件，纯文本仍交给 Textarea。两条路径都命中时靠
                     // `paste_image_from_item` 里的去重保证不会贴两份。
-                    .on_key_down(cx.listener(
-                        |this, ev: &gpui_kit::KeyDownEvent, _window, cx| {
+                    .on_key_down(
+                        cx.listener(|this, ev: &gpui_kit::KeyDownEvent, _window, cx| {
                             let k = &ev.keystroke;
                             if k.modifiers.control
                                 && k.key == "v"
@@ -833,56 +854,57 @@ impl ClientApp {
                             {
                                 cx.stop_propagation();
                             }
-                        },
-                    ))
+                        }),
+                    )
                     // 编辑器自身不画边框与底色（`appearance(false)`），
                     // 由外层卡片充当「输入框」——否则会看成上下分离的
                     // 两块（上面一个输入框 + 下面一排按钮），与 Tauri
                     // 版「按钮在输入框内」的形态不符。
                     .child({
-                    // 待发送图片缩略图：**在输入框上方**（对齐 vite `ChatInput`：
-                    // `{images.length > 0 && ...}` 渲染在 `<ComposerEditor>` 之前）。
-                    // 早先放在 Textarea 之后（= 下方），用户实测指出与 vite 不同。
-                    // 单独成函数：压 render_chat 栈帧。
-                    let attachments = if self.composer_images.is_empty() {
-                        None
-                    } else {
-                        Some(self.render_composer_attachments(cx))
-                    };
-                    div()
-                        .flex()
-                        .flex_col()
-                        .gap_2()
-                        .children(attachments)
-                        .child({
-                        // Ctrl+V 的正解是 Textarea 自己的 `on_paste` 钩子（gpui-component
-                        // 专门为「粘贴图片 / 文件」留的，等价于 Web 的 `onPaste`），
-                        // **不是**外层 `on_key_down`：后者在冒泡阶段根本拿不到事件
-                        // （Textarea 内建的 paste action 先消费掉了），实测现象就是
-                        // 「焦点在输入框里按 Ctrl+V 没反应，只能点按钮」。
-                        // 返回 `false` 时文本粘贴照常走默认实现，不抢。
-                        let app = self.app_ref.clone();
-                        // ⚠️ **不要**再给 `.h(...)`：显式高度会盖掉 `auto_grow`
-                        // （那个能力是按真实字形宽度测量行数的，见 `ClientApp::new`）。
-                        // `min_h` 只设**下限**、不参与增长，所以留着它当兜底：
-                        // 万一 auto_grow 在某些布局下算不出高度，也不会塌成 0。
-                        Textarea::new(&self.input)
-                            .min_h(px(44.))
-                            .appearance(false)
-                            .on_paste(move |item, window, cx| {
-                                let Some(w) = app.lock().ok().and_then(|g| g.clone()) else {
-                                    return false;
-                                };
-                                w.update(cx, |this: &mut ClientApp, cx| {
-                                    // 分流顺序不可"优化"：图片优先，文件只兜底。
-                                    // 反过来会把「复制的 png」变成模型读不了的路径引用
-                                    // （Web 版同一条结论，见 ChatInput.tsx 的图片通道注释）。
-                                    this.paste_image_from_item(item, cx)
-                                        || this.paste_files_from_item(item, window, cx)
-                                })
-                                .unwrap_or(false)
+                        // 待发送图片缩略图：**在输入框上方**（对齐 vite `ChatInput`：
+                        // `{images.length > 0 && ...}` 渲染在 `<ComposerEditor>` 之前）。
+                        // 早先放在 Textarea 之后（= 下方），用户实测指出与 vite 不同。
+                        // 单独成函数：压 render_chat 栈帧。
+                        let attachments = if self.composer_images.is_empty() {
+                            None
+                        } else {
+                            Some(self.render_composer_attachments(cx))
+                        };
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap_2()
+                            .children(attachments)
+                            .child({
+                                // Ctrl+V 的正解是 Textarea 自己的 `on_paste` 钩子（gpui-component
+                                // 专门为「粘贴图片 / 文件」留的，等价于 Web 的 `onPaste`），
+                                // **不是**外层 `on_key_down`：后者在冒泡阶段根本拿不到事件
+                                // （Textarea 内建的 paste action 先消费掉了），实测现象就是
+                                // 「焦点在输入框里按 Ctrl+V 没反应，只能点按钮」。
+                                // 返回 `false` 时文本粘贴照常走默认实现，不抢。
+                                let app = self.app_ref.clone();
+                                // ⚠️ **不要**再给 `.h(...)`：显式高度会盖掉 `auto_grow`
+                                // （那个能力是按真实字形宽度测量行数的，见 `ClientApp::new`）。
+                                // `min_h` 只设**下限**、不参与增长，所以留着它当兜底：
+                                // 万一 auto_grow 在某些布局下算不出高度，也不会塌成 0。
+                                Textarea::new(&self.input)
+                                    .min_h(px(44.))
+                                    .appearance(false)
+                                    .on_paste(move |item, window, cx| {
+                                        let Some(w) = app.lock().ok().and_then(|g| g.clone())
+                                        else {
+                                            return false;
+                                        };
+                                        w.update(cx, |this: &mut ClientApp, cx| {
+                                            // 分流顺序不可"优化"：图片优先，文件只兜底。
+                                            // 反过来会把「复制的 png」变成模型读不了的路径引用
+                                            // （Web 版同一条结论，见 ChatInput.tsx 的图片通道注释）。
+                                            this.paste_image_from_item(item, cx)
+                                                || this.paste_files_from_item(item, window, cx)
+                                        })
+                                        .unwrap_or(false)
+                                    })
                             })
-                        })
                     })
                     .child(
                         div()
@@ -891,6 +913,8 @@ impl ClientApp {
                             .flex_row()
                             .items_center()
                             .gap_2()
+                            // 「思考中…」落在控件行最左（模型 / 思考 / 上下文环之前）
+                            .children(self.render_hint_inline())
                             .child(div().flex_1())
                             .child(
                                 div()
@@ -899,81 +923,12 @@ impl ClientApp {
                                     .items_center()
                                     .gap_1()
                                     // 控件顺序对齐 vite `ChatInput`：模型 → 思考 → 上下文环 → 发送
-                                    // @ 文件引用：弹窗选文件 → 光标处插入 `@file:"<路径>"`
-                                    // （序列化口径与 Web 版 `serializeInlineChip` 逐字一致）
-                                    .child(
-                                        div()
-                                            .id("mention-file")
-                                            .px_1()
-                                            .py_1()
-                                            .rounded_lg()
-                                            .cursor_pointer()
-                                            .child(
-                                                svg()
-                                                    .path(IconName::AtSign.path())
-                                                    .size(px(14.))
-                                                    .text_color(rgb(
-                                                        colors::TEXT_SECONDARY(),
-                                                    )),
-                                            )
-                                            .on_click(cx.listener(
-                                                |this, _, _window, cx| {
-                                                    this.open_file_picker(
-                                                        FilePickPurpose::Mention,
-                                                        cx,
-                                                    )
-                                                },
-                                            )),
-                                    )
-                                    // 附件（图片）：OS 选择器 → data URL 挂到待发送列表
-                                    .child(
-                                        div()
-                                            .id("attach-image")
-                                            .px_1()
-                                            .py_1()
-                                            .rounded_lg()
-                                            .cursor_pointer()
-                                            .child(
-                                                svg()
-                                                    .path(IconName::ImagePlus.path())
-                                                    .size(px(14.))
-                                                    .text_color(rgb(
-                                                        colors::TEXT_SECONDARY(),
-                                                    )),
-                                            )
-                                            .on_click(cx.listener(
-                                                |this, _, _window, cx| {
-                                                    this.pick_composer_images(cx)
-                                                },
-                                            )),
-                                    )
-                                    // 贴图：截图直接在剪贴板里时，比「附件 → 翻文件夹」短一步
-                                    .child(
-                                        div()
-                                            .id("paste-image")
-                                            .px_1()
-                                            .py_1()
-                                            .rounded_lg()
-                                            .cursor_pointer()
-                                            .child(
-                                                svg()
-                                                    .path(IconName::ClipboardPaste.path())
-                                                    .size(px(14.))
-                                                    .text_color(rgb(
-                                                        colors::TEXT_SECONDARY(),
-                                                    )),
-                                            )
-                                            .on_click(cx.listener(
-                                                |this, _, _window, cx| {
-                                                    if !this.paste_image_from_clipboard(cx) {
-                                                        this.status =
-                                                            "剪贴板里没有图片（截图后直接点这里即可贴上）"
-                                                                .to_string();
-                                                        cx.notify();
-                                                    }
-                                                },
-                                            )),
-                                    )
+                                    //
+                                    // 图片 / 文件一律走 **Ctrl+V**（2026-11 用户拍板）：这里不再放
+                                    // 「插入图片 / 插入文件 / 从剪贴板粘贴」三个按钮。同一能力开三个
+                                    // 入口只会让人猜「到底该点哪个」；而粘贴通道在 Textarea 的
+                                    // `on_paste` 里已经覆盖两种载荷（图片 → `paste_image_from_item`，
+                                    // 文件路径 → `paste_files_from_item` 转 `@file:"…"` 引用）。
                                     .child(
                                         // 模型选择：浮层挂在自己身上（`relative` 定位 +
                                         // `deferred` 延迟绘制）——这样它出现在**按钮正上方**，
@@ -988,15 +943,12 @@ impl ClientApp {
                                             .text_xs()
                                             .text_color(rgb(colors::TEXT_PRIMARY()))
                                             .child(self.current_model_label())
-                                            .on_click(cx.listener(
-                                                |this, _, _window, cx| {
-                                                    this.model_menu_open =
-                                                        !this.model_menu_open;
-                                                    this.thinking_menu_open = false;
-                                                    this.ctx_panel_open = false;
-                                                    cx.notify();
-                                                },
-                                            ))
+                                            .on_click(cx.listener(|this, _, _window, cx| {
+                                                this.model_menu_open = !this.model_menu_open;
+                                                this.thinking_menu_open = false;
+                                                this.ctx_panel_open = false;
+                                                cx.notify();
+                                            }))
                                             .children(if self.model_menu_open {
                                                 Some(deferred(self.render_model_menu(cx)))
                                             } else {
@@ -1021,106 +973,87 @@ impl ClientApp {
                                                 ProgressCircle::new("ctx-ring")
                                                     .value(ctx_pct as f32)
                                                     .size(px(30.))
-                                                    .color(Hsla::from(rgb(
-                                                        ctx_color,
-                                                    )))
+                                                    .color(Hsla::from(rgb(ctx_color)))
                                                     .child(
                                                         div()
                                                             .text_size(px(9.))
-                                                            .text_color(rgb(
-                                                                if ctx_has_usage {
-                                                                    colors::TEXT_SECONDARY()
-                                                                } else {
-                                                                    colors::TEXT_TERTIARY()
-                                                                },
-                                                            ))
-                                                            .child(
-                                                                ctx_center_text,
-                                                            ),
+                                                            .text_color(rgb(if ctx_has_usage {
+                                                                colors::TEXT_SECONDARY()
+                                                            } else {
+                                                                colors::TEXT_TERTIARY()
+                                                            }))
+                                                            .child(ctx_center_text),
                                                     ),
                                             )
-                                            .on_click(cx.listener(
-                                                |this, _, _window, cx| {
-                                                    this.ctx_panel_open =
-                                                        !this.ctx_panel_open;
-                                                    // 三个浮层互斥：开一个收另外两个
-                                                    this.model_menu_open = false;
-                                                    this.thinking_menu_open = false;
-                                                    if !this.ctx_panel_open {
-                                                        this.ctx_compress = None;
-                                                    }
-                                                    cx.notify();
-                                                },
-                                            ))
+                                            .on_click(cx.listener(|this, _, _window, cx| {
+                                                this.ctx_panel_open = !this.ctx_panel_open;
+                                                // 三个浮层互斥：开一个收另外两个
+                                                this.model_menu_open = false;
+                                                this.thinking_menu_open = false;
+                                                if !this.ctx_panel_open {
+                                                    this.ctx_compress = None;
+                                                }
+                                                cx.notify();
+                                            }))
                                             .children(if self.ctx_panel_open {
                                                 Some(deferred(self.render_ctx_panel(cx)))
                                             } else {
                                                 None
                                             }),
                                     )
-                            .child({
-                                let stopping = self.busy();
-                                div()
-                                    .id("send")
-                                    .px_3()
-                                    .py_1()
-                                    .rounded_xl()
-                                    .flex()
-                                    .flex_row()
-                                    .items_center()
-                                    .gap_1()
-                                    .bg(if stopping {
-                                        rgb(colors::ERROR())
-                                    } else {
-                                        rgb(colors::ACCENT())
-                                    })
-                                    .text_color(rgb(0xffffff))
-                                    .cursor_pointer()
-                                    // 与 Tauri 版 `ChatInput` 同形：图标 + 文案
-                                    // （发送 = lucide `Send`，停止 = 实心方块）
-                                    .child(
-                                        if stopping {
-                                            // vite 版是 `<Square className="fill-current" />`
-                                            // —— lucide 的描边矩形被 `fill-current` 填满，
-                                            // 看起来是**实心**方块。GPUI 这边 `svg()` 渲染的是
-                                            // lucide 原始 stroke 版（空心方框），改不了 fill，
-                                            // 所以直接画一个白方块。尺寸照抄 lucide 的几何：
-                                            // 24 视口里 `rect x=3 y=3 w=18 h=18 rx=2`，按 16px
-                                            // 渲染即 12×12 的实心块、1.3px 圆角（用 12px 与
-                                            // 1.5px 的圆角，放大截图核对过形状）。
-                                            div()
-                                                .w(px(12.))
-                                                .h(px(12.))
-                                                .rounded(px(1.5))
-                                                .bg(rgb(0xffffff))
-                                                .into_any_element()
-                                        } else {
-                                            svg()
-                                                .path(IconName::Send.path())
-                                                .size(px(14.))
-                                                .text_color(rgb(0xffffff))
-                                                .into_any_element()
-                                        },
-                                    )
-                                    .child(if stopping {
-                                        "停止"
-                                    } else {
-                                        "发送"
-                                    })
-                                    .on_click(cx.listener(
-                                        |this, _, window, cx| {
-                                            if this.busy() {
-                                                this.stop_current_turn(cx);
+                                    .child({
+                                        let stopping = self.busy();
+                                        div()
+                                            .id("send")
+                                            .px_3()
+                                            .py_1()
+                                            .rounded_xl()
+                                            .flex()
+                                            .flex_row()
+                                            .items_center()
+                                            .gap_1()
+                                            .bg(if stopping {
+                                                rgb(colors::ERROR())
                                             } else {
-                                                this.send_current_input(
-                                                    window, cx,
-                                                );
-                                            }
-                                        },
-                                    ))
-                            })
+                                                rgb(colors::ACCENT())
+                                            })
+                                            .text_color(rgb(0xffffff))
+                                            .cursor_pointer()
+                                            // 与 Tauri 版 `ChatInput` 同形：图标 + 文案
+                                            // （发送 = lucide `Send`，停止 = 实心方块）
+                                            .child(if stopping {
+                                                // vite 版是 `<Square className="fill-current" />`
+                                                // —— lucide 的描边矩形被 `fill-current` 填满，
+                                                // 看起来是**实心**方块。GPUI 这边 `svg()` 渲染的是
+                                                // lucide 原始 stroke 版（空心方框），改不了 fill，
+                                                // 所以直接画一个白方块。尺寸照抄 lucide 的几何：
+                                                // 24 视口里 `rect x=3 y=3 w=18 h=18 rx=2`，按 16px
+                                                // 渲染即 12×12 的实心块、1.3px 圆角（用 12px 与
+                                                // 1.5px 的圆角，放大截图核对过形状）。
+                                                div()
+                                                    .w(px(12.))
+                                                    .h(px(12.))
+                                                    .rounded(px(1.5))
+                                                    .bg(rgb(0xffffff))
+                                                    .into_any_element()
+                                            } else {
+                                                svg()
+                                                    .path(IconName::Send.path())
+                                                    .size(px(14.))
+                                                    .text_color(rgb(0xffffff))
+                                                    .into_any_element()
+                                            })
+                                            .child(if stopping { "停止" } else { "发送" })
+                                            .on_click(cx.listener(|this, _, window, cx| {
+                                                if this.busy() {
+                                                    this.stop_current_turn(cx);
+                                                } else {
+                                                    this.send_current_input(window, cx);
+                                                }
+                                            }))
+                                    }),
+                            ),
                     ),
-            )
             )
             .into_any_element()
     }
@@ -1701,50 +1634,6 @@ impl ClientApp {
         true
     }
 
-    /// 选择图片附件（OS 文件对话框）→ 读成 data URL 挂到待发送列表。
-    ///
-    /// 注：OS 模态框不可自动化（ADR-052），自动化验收走 `attach_image` 动作
-    /// 直接给路径（与知识导入「按路径导入」同一口径）。
-    pub(crate) fn pick_composer_images(&mut self, cx: &mut Context<Self>) {
-        let rx = cx.prompt_for_paths(gpui_kit::PathPromptOptions {
-            files: true,
-            directories: false,
-            multiple: true,
-            prompt: Some("选择图片".into()),
-        });
-        cx.spawn(async move |this, cx| {
-            let Ok(Ok(Some(paths))) = rx.await else {
-                return;
-            };
-            let urls: Vec<String> = paths
-                .iter()
-                .filter_map(|p| image_path_to_data_url(p))
-                .collect();
-            if urls.is_empty() {
-                return;
-            }
-            let _ = this.update(cx, |this, cx| {
-                // 与粘贴通道**同一个**上限（Web 版 4 张）。选图走的是 OS 多选，一次
-                // 可能带回来十几个——早先只有粘贴通道拦了，选图可以无限加（不一致，
-                // 实测：选 8 张就真进了 8 张）。
-                let mut dropped = 0usize;
-                for u in urls {
-                    if this.composer_images.len() < MAX_COMPOSER_IMAGES {
-                        this.composer_images.push(u);
-                    } else {
-                        dropped += 1;
-                    }
-                }
-                if dropped > 0 {
-                    this.status =
-                        format!("超出上限的 {dropped} 张未加入（最多 {MAX_COMPOSER_IMAGES} 张）");
-                }
-                cx.notify();
-            });
-        })
-        .detach();
-    }
-
     /// 在输入框**光标处**插入一段文本（光标自动前移到插入内容之后）。
     ///
     /// 用 `TextareaState::insert` 而不是「读 value → 拼串 → `set_value`」：
@@ -1760,51 +1649,6 @@ impl ClientApp {
             state.insert(text, window, cx);
         });
         cx.notify();
-    }
-
-    /// @ 文件引用：把选中的文件序列化成 `` `@file:"<绝对路径>"` `` 插入输入框并关闭弹窗。
-    ///
-    /// 序列化口径与 Web 版 **逐字一致**（`gui-vite/src/lib/attachments.ts` 的
-    /// `serializeInlineChip`：Markdown 行内代码 + 绝对路径）：
-    /// - 模型侧看到的是连贯句子里的行内 code，路径直白，`read_file` 直接可用；
-    /// - 消息区渲染不需要特殊处理（行内 code 是 markdown 原生语法）；
-    /// - 跨端复制粘贴、草稿恢复都只是纯文本。
-    ///
-    /// 末尾补一个空格：连续引用两个文件时 chip 之间不会粘在一起。
-    pub(crate) fn mention_file(
-        &mut self,
-        path: String,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let snippet = format!("`@file:\"{path}\"` ");
-        self.insert_into_composer(snippet, window, cx);
-        self.dialog = None;
-        cx.notify();
-    }
-
-    /// @ 文件引用（无 `&mut Window` 的入口：自动化端口）。
-    ///
-    /// `Context` 里拿不到 window，就用保存的窗口句柄现取；**最终仍调
-    /// `TextareaState::insert`**（与真实点击路径同一个 API），不复制插入逻辑。
-    pub(crate) fn mention_file_auto(
-        &mut self,
-        path: String,
-        cx: &mut Context<Self>,
-    ) -> Result<(), String> {
-        let handle = self.window_handle;
-        let input = self.input.clone();
-        let snippet = format!("`@file:\"{path}\"` ");
-        handle
-            .update(cx, move |_, window, cx| {
-                input.update(cx, |state, cx| {
-                    state.insert(snippet, window, cx);
-                });
-            })
-            .map_err(|e| format!("窗口已关闭，无法插入：{e}"))?;
-        self.dialog = None;
-        cx.notify();
-        Ok(())
     }
 
     /// 清空输入框。
