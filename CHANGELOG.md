@@ -7,7 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+_（下批）_
+
+## [1.1.1] - 2026-11-01
+
+> **本版定位**：把「日志找不到」和「粘贴文件显示成一长串路径」两个日常摩擦点补上——
+> 运行时日志与 panic 现场默认落到 `<data_dir>\logs\`，文件引用在输入框和消息气泡里都是
+> chip。产品版本 **1.1.1**（对外 3 段；MSI 内部 `ProductVersion` 仍是 `1.1.1.0`）。
+
 ### Added
+- **运行时日志默认落盘**：`[logging].file` 未配置时用 `<data_dir>/logs/tianyan.log`
+  （`init_logging_with_data_dir` + `default_log_file`）。桌面客户端的 release 构建是 GUI
+  subsystem、没有控制台，此前「不配 `file` 就等于一条日志都不留」——出问题只能靠猜。默认值
+  只在**运行时**生效、不写回 `tianyan.toml`，数据目录搬迁后日志跟着新目录走。三个启动点
+  （桌面客户端 / `tianyan-server` 二进制 / 库 `init()`）统一走这个入口。
+- **panic 现场与运行时日志同目录**：`panic_hook::install` 改接 `<data_dir>/logs/`（此前恒在
+  `%APPDATA%\com.tianyan.app\logs\`——那是系统应用数据根，与配置里的 `storage.data_dir` 无关，
+  旧注释还把它写成 `{data_dir}/…`，容易误读）。排查时只看一个目录。
 - **粘贴文件 → 草稿区文件 chip**：Ctrl+V 粘贴文件（资源管理器里复制的文件）不再往输入框
   里插 `` `@file:"<路径>"` `` 原文，而是变成输入卡片上方的**附件 chip**（图标 + 文件名 + ×，
   与图片缩略图同一行混排）；发送时才展开成同一份 `@file:` 标记（与 Web 版序列化口径一致，

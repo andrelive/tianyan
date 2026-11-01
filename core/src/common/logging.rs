@@ -110,6 +110,46 @@ impl LoggingConfig {
     }
 }
 
+/// 日志目录名（`{data_dir}/logs/`）。
+pub const LOG_DIR_NAME: &str = "logs";
+
+/// 默认日志文件名（`{data_dir}/logs/tianyan.log`）。
+pub const LOG_FILE_NAME: &str = "tianyan.log";
+
+/// 默认日志文件：`{data_dir}/logs/tianyan.log`。
+///
+/// 为什么需要默认值：桌面客户端的 release 构建是 `windows_subsystem = "windows"`
+/// （没有控制台），控制台 layer 写出去**没有任何落点**——`[logging].file` 不配就等于
+/// 一条日志都不留（用户实测：客户端出问题时数据目录下找不到任何日志文件）。
+pub fn default_log_file(data_dir: &Path) -> PathBuf {
+    data_dir.join(LOG_DIR_NAME).join(LOG_FILE_NAME)
+}
+
+/// 解析本次要用的日志文件：显式配置优先，否则 `{data_dir}/logs/tianyan.log`。
+pub fn resolve_log_file(config: &LoggingConfig, data_dir: &Path) -> PathBuf {
+    config
+        .file
+        .clone()
+        .unwrap_or_else(|| default_log_file(data_dir))
+}
+
+/// 初始化日志，并把「未配置 `[logging].file`」补成 `{data_dir}/logs/tianyan.log`。
+///
+/// 启动器（桌面客户端 / server 二进制 / 库 `init()`）都走这个入口——它们手里都有
+/// `storage.data_dir`，而 [`init_logging`] 只拿得到 `[logging]` 节。显式配置了 `file`
+/// 时行为与 [`init_logging`] 完全一致。
+///
+/// 注：只影响**运行时**，不会把默认路径写回 `tianyan.toml`——数据目录搬迁后日志跟着
+/// 新目录走，不会残留在旧路径上。
+pub fn init_logging_with_data_dir(config: &LoggingConfig, data_dir: &Path) -> Result<()> {
+    if config.file.is_some() {
+        return init_logging(config);
+    }
+    let mut effective = config.clone();
+    effective.file = Some(default_log_file(data_dir));
+    init_logging(&effective)
+}
+
 /// Initialize the logging system.
 ///
 /// 控制台 layer 恒装配；配置了 `[logging].file` 时额外装配**按大小轮转的文件 layer**
@@ -458,6 +498,32 @@ mod tests {
         assert_eq!(config.level, "info");
         assert_eq!(config.format, "text");
         assert!(config.include_timestamp);
+    }
+
+    /// 默认落盘位置：`{data_dir}/logs/tianyan.log`（GUI release 无控制台，必须有文件）。
+    #[test]
+    fn test_default_log_file_follows_data_dir() {
+        let dir = Path::new(r"D:\tianyan");
+        assert_eq!(
+            default_log_file(dir),
+            PathBuf::from(r"D:\tianyan\logs\tianyan.log")
+        );
+        let cfg = LoggingConfig::default();
+        assert!(cfg.file.is_none(), "默认配置故意不写 file，由启动器补");
+        assert_eq!(resolve_log_file(&cfg, dir), default_log_file(dir));
+    }
+
+    /// 显式配置优先：用户写了 `[logging].file` 就按他的来（不再拼 data_dir）。
+    #[test]
+    fn test_explicit_file_wins_over_default() {
+        let cfg = LoggingConfig {
+            file: Some(PathBuf::from(r"E:\logs\custom.log")),
+            ..Default::default()
+        };
+        assert_eq!(
+            resolve_log_file(&cfg, Path::new(r"D:\tianyan")),
+            PathBuf::from(r"E:\logs\custom.log")
+        );
     }
 
     #[test]

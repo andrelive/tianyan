@@ -1652,27 +1652,48 @@ impl ClientApp {
         item: &gpui_kit::ClipboardItem,
         cx: &mut Context<Self>,
     ) -> bool {
-        let mut added = 0usize;
-        let mut overflow = false;
+        let mut paths: Vec<String> = Vec::new();
         for entry in &item.entries {
             let gpui_kit::ClipboardEntry::ExternalPaths(ext) = entry else {
                 continue;
             };
             for path in ext.paths() {
-                let p = path.to_string_lossy().to_string();
-                // 去重：`Textarea::on_paste` 与外层 `on_key_down` 都可能命中，
-                // 同一份文件不能被引用两次
-                if self.composer_files.iter().any(|x| x == &p) {
-                    continue;
-                }
-                // 一次粘贴最多 20 个引用（与 Web 版同数）：超了只丢多余项
-                if self.composer_files.len() >= MAX_COMPOSER_FILES {
-                    overflow = true;
-                    continue;
-                }
-                self.composer_files.push(p);
-                added += 1;
+                paths.push(path.to_string_lossy().to_string());
             }
+        }
+        if paths.is_empty() {
+            return false;
+        }
+        self.attach_files(paths, cx)
+    }
+
+    /// 收下一批文件引用（**去重 + 上限 + 状态行**的唯一实现）。
+    ///
+    /// 两个入口共用：剪贴板粘贴（[`Self::paste_files_from_item`]）与自动化动作
+    /// （`paste_files` 带 `paths` 时直接进来）。后者存在的原因是断言不能依赖系统
+    /// 剪贴板：`Clipboard::SetFileDropList` 在剪贴板被别的程序独占时会失败，那属于
+    /// 环境问题，不该让界面断言假红。
+    ///
+    /// 返回是否真的收下了东西。
+    pub(crate) fn attach_files(&mut self, paths: Vec<String>, cx: &mut Context<Self>) -> bool {
+        let mut added = 0usize;
+        let mut overflow = false;
+        for p in paths {
+            if p.trim().is_empty() {
+                continue;
+            }
+            // 去重：`Textarea::on_paste` 与外层 `on_key_down` 都可能命中，
+            // 同一份文件不能被引用两次
+            if self.composer_files.iter().any(|x| x == &p) {
+                continue;
+            }
+            // 一次粘贴最多 20 个引用（与 Web 版同数）：超了只丢多余项
+            if self.composer_files.len() >= MAX_COMPOSER_FILES {
+                overflow = true;
+                continue;
+            }
+            self.composer_files.push(p);
+            added += 1;
         }
         if added == 0 && !overflow {
             return false;

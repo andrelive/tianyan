@@ -1,6 +1,6 @@
 # 天演运维排障手册（troubleshooting）
 
-> 适用版本：1.1.0（撰写起点 0.5.2 / HEAD `732e44c`；2026-11 按 native 客户端重校准日志与端口两节）
+> 适用版本：1.1.1（撰写起点 0.5.2 / HEAD `732e44c`；2026-11 按 native 客户端重校准日志与端口两节）
 > 面向：本机/内网部署天演的维护者与 QA。所有路径、命令、查询均取自当前代码，未核实项显式标注 **待核实**。
 > CI / GitHub Actions 流水线自身的问题（挂死、日志丢失、编译指纹）见 [`ci-pipeline.md`](ci-pipeline.md)。
 
@@ -10,8 +10,8 @@
 
 | 取证对象 | 位置 | 说明 |
 | --- | --- | --- |
-| 运行时日志（桌面端） | **默认没有文件**：`[logging].file` 未设时只走控制台，而 release 包无控制台 | 要取证就先给配置加 `[logging].file`（见 §1.1），再按 `max_file_size` / `max_files` 轮转 |
-| panic 日志（桌面端） | `%APPDATA%\com.tianyan.app\logs\panic.log` | `panic_hook::install` **恒落盘**（`dirs::data_dir()` = Roaming，不在数据目录下）；崩溃/闪退先看它 |
+| 运行时日志（桌面端） | `<data_dir>\logs\tianyan.log` | **默认就落盘**（`[logging].file` 未配置时用它）；按 `max_file_size`（10 MB）× `max_files`（5）轮转 |
+| panic 日志（桌面端） | `<data_dir>\logs\panic.log` | 与运行时日志**同目录**；崩溃/闪退先看它 |
 | SQLite 权威数据 | `<data_dir>\tianyan.db`（+ `-wal`/`-shm`） | 默认 `data_dir = %LOCALAPPDATA%\tianyan` |
 | 向量库 | `<data_dir>\lancedb\` | LanceDB，表名 = `storage.vector.collection_name` |
 | 统一事件流 | `GET /api/v1/events`（SSE 单连接） | 前端 EventSource 常驻，`http://127.0.0.1:3000` 起 |
@@ -21,54 +21,52 @@
 
 ---
 
-## 1. 日志在哪（三条通道，别找错地方）
+## 1. 日志在哪（默认落盘到 `<data_dir>\logs\`）
 
-### 1.1 桌面端运行时日志：默认不落文件
+### 1.1 运行时日志：`<data_dir>\logs\tianyan.log`（默认就有）
 
-`gui-native/src/main.rs` 在起 server 之前就调用 `tianyan::common::logging::init_logging(&config.logging)`，与后端**同一套**实现：
+桌面客户端与 server 二进制都用 `tianyan::common::logging::init_logging_with_data_dir(&config.logging, &config.storage.data_dir)`：
 
-- 控制台 layer **恒装配**；文件 layer **只在 `[logging].file` 有值时装配**（`core/src/common/logging.rs::init_logging`）。
-- `LoggingConfig::default().file = None`，`config.example.toml` 也没有这个字段 ⇒ **默认没有运行时日志文件**。
-- release 包是 GUI subsystem（`#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]`）⇒ **没有控制台**，stdout 无处可去；debug 版从终端启动才能看到 stdout。
+- 控制台 layer **恒装配**；文件 layer 的路径取 `[logging].file`，**未配置时默认
+  `<data_dir>/logs/tianyan.log`**（`core/src/common/logging.rs::default_log_file`）。
+  release 包是 GUI subsystem（`#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]`）
+  ⇒ 没有控制台，这条默认值是它能留下任何日志的前提。
+- 轮转：`[logging].max_file_size`（默认 10 MB）写满转出 `tianyan.1.log`…，`max_files`（默认 5）
+  保留最新 N 个；文件族前缀 = 文件名主体。
+- 默认值只在**运行时**生效，不写回 `tianyan.toml`；数据目录搬迁后日志跟着新目录走。
 
-所以要拿运行日志，给 `~/.tianyan/tianyan.toml` 加一段：
+要改级别 / 换位置 / 换格式，给 `~/.tianyan/tianyan.toml` 加一段（不写 `file` 就用默认路径）：
 
 ```toml
 [logging]
-level = "debug"
-file = "D:\\tianyan\\logs\\tianyan.log"
+level = "debug"                  # trace / debug / info / warn / error
+file = "D:\\logs\\tianyan.log"   # 可选：显式配置优先于默认路径
+format = "text"                  # text / json
+max_file_size = 10               # MB
+max_files = 5
 ```
 
-之后按 `[logging].max_file_size`（默认 10 MB）轮转出 `tianyan.1.log`…，按 `max_files`（默认 5）保留最新 N 个；文件族前缀 = `file` 的文件名主体。
+### 1.2 panic 日志：`<data_dir>\logs\panic.log`（与运行时日志同目录）
 
-### 1.2 panic 日志：唯一默认落盘的东西
-
-`core/src/common/panic_hook.rs::install` 把 panic 报告 append 到 `%APPDATA%\com.tianyan.app\logs\panic.log`（`dirs::data_dir()` = Roaming，**不在数据目录下**），目录不存在时尽力创建、写入失败静默。
+`core/src/common/panic_hook.rs::install` 把 panic 报告（时间 / 线程 / 位置 / 消息 / 回溯）append 到安装时给的目录；桌面端与 server 都传 `<data_dir>/logs`。目录不存在时尽力创建、写入失败静默（hook 内不得再失败）。
 
 桌面端崩溃、闪退、窗口没出来 —— **先看这个文件**，再看 §3 的 DB。
 
+`panic_hook::default_log_dir()` 仍保留，但那是**兜底**：`%APPDATA%\com.tianyan.app\logs\`
+（`dirs::data_dir()` = 系统应用数据根，与配置里的 `storage.data_dir` **不是同一个东西**），
+只有拿不到配置的宿主才用它。
+
 ### 1.3 独立后端（`cargo run -p tianyan-server`）
 
-`app/src/main.rs` 同样调 `init_logging`：
+`app/src/main.rs` 走同一个 `init_logging_with_data_dir`：
 
-- 前台运行，控制台输出可见；
-- 配了 `[logging].file` 时同时落文件（轮转规则同 §1.1）；
+- 前台运行，控制台输出可见（**同时**落 `<data_dir>/logs/tianyan.log`）；
 - 仓库根偶尔出现的 `server.log` / `server.err.log` 是**手动重定向**产物（`> server.log 2>&1`），不是应用自己写的。
 
 ### 1.4 日志级别
 
 - `RUST_LOG` 优先于 `[logging].level`（`EnvFilter::try_from_default_env()`），非法值回退配置级别。
 - 两个 layer 共用同一个全局过滤器 ⇒ 把 `RUST_LOG` 设成 `error` **文件里也只剩 error**（旧版 tauri 壳曾让文件层忽略 `RUST_LOG`，该实现已随壳删除）。
-
-### 1.3 独立后端的日志（与桌面端不同）
-
-独立启动（`cargo run -p tianyan-server`）走 `server/src/main.rs` → `tianyan::common::logging::init_logging`：
-
-- 该函数装配控制台 subscriber；配置了 `[logging].file` 时**同时装配文件 layer**（0.5.x 接线，
-  此前该字段未被使用）——文件按同一套 `max_file_size`/`max_files` 轮转，文件族前缀 =
-  文件名主体（如 `tianyan.log` 与轮转出的 `tianyan.1.log` 同族）。
-- 未配置 `[logging].file` 时独立后端**没有文件日志**；仓库根目录的 `server.log` /
-  `server.err.log` 是**手动重定向**的产物，不是应用自身写的。
 
 ---
 
@@ -93,8 +91,8 @@ file = "D:\\tianyan\\logs\\tianyan.log"
 
 **查什么**
 
-- 已配 `[logging].file` 时，搜关键词 `LLM 返回空响应，重试一次`、`唤醒轮空输出`
-  （该事故的原始证据是 tauri 时代的文件日志 `tianyan_20260912_124231.log` 05:07:18–05:07:22；未配 `file` 时只能靠下面的 DB 查询）。
+- 在 `<data_dir>\logs\tianyan.log`（默认就在）搜关键词 `LLM 返回空响应，重试一次`、`唤醒轮空输出`
+  （该事故的原始证据是 tauri 时代的文件日志 `tianyan_20260912_124231.log` 05:07:18–05:07:22）。
 - DB 查最近消息的 `finish` / tokens：
 
   ```sql
@@ -411,7 +409,7 @@ At line:1 char:1
 ## 附：本手册核实来源
 
 - `gui-native/src/main.rs`（`init_logging` 调用点、`panic_hook::install`、`windows_subsystem`、`ensure_server`）
-- `core/src/common/logging.rs`（`LoggingConfig` / `init_logging` / 轮转）、`core/src/common/panic_hook.rs`（`default_log_dir`）
+- `core/src/common/logging.rs`（`LoggingConfig` / `init_logging_with_data_dir` / `default_log_file` / 轮转）、`core/src/common/panic_hook.rs`（`install` / `default_log_dir`）
 - `desktop/src/`（`discover_existing` / `ensure_server` / `find_available_port`）
 - `server/src/main.rs`、`server/src/lib.rs`（`ServerConfig::default`）
 - `server/src/api/tasks/{routes,handlers}.rs`（`/events`、`/events/subscribe`、`/tasks/{id}/log`）

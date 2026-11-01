@@ -16,8 +16,17 @@ use std::any::Any;
 use std::panic::PanicHookInfo;
 use std::path::{Path, PathBuf};
 
-/// 默认日志目录：`{data_dir}/com.tianyan.app/logs/`（与桌面端日志目录一致；
-/// data_dir 不可得时退化为临时目录）。
+/// 兜底日志目录：`%APPDATA%\com.tianyan.app\logs\`（`dirs::data_dir()` 不可得时
+/// 退化为系统临时目录）。
+///
+/// ⚠️ 这里的 `dirs::data_dir()` 是**系统的**应用数据根（Windows = `%APPDATA%`），
+/// 与配置里的 `storage.data_dir`（默认 `%LOCALAPPDATA%/tianyan`，本机为 `D:\tianyan`）
+/// **不是同一个东西**——旧注释写成 `{data_dir}/com.tianyan.app/logs/` 极易被读成
+/// 「配置的数据目录」，实际路径里根本没有数据目录这一层。
+///
+/// 生产启动器（桌面客户端 / server 二进制）不调用本函数：它们把 panic 现场写到
+/// 与运行时日志**同一个目录**（`{storage.data_dir}/logs/`），排查时只看一处。
+/// 本函数留给拿不到配置的场景（示例程序 / 未来别的宿主）。
 pub fn default_log_dir() -> PathBuf {
     dirs::data_dir()
         .unwrap_or_else(std::env::temp_dir)

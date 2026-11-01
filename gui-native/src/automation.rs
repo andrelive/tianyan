@@ -1201,11 +1201,26 @@ impl ClientApp {
             // 的文件分支就是它），只是省掉 keystroke 派发（自动化端口不抢用户焦点）。
             // 与上面的 `paste_image` 同一手法：真实路径的函数 + 自动化触发。
             "paste_files" => {
-                let item = cx
-                    .read_from_clipboard()
-                    .ok_or_else(|| "剪贴板为空".to_string())?;
-                if !self.paste_files_from_item(&item, cx) {
-                    return Err("剪贴板里没有文件（先在资源管理器复制一个文件再试）".to_string());
+                // 给 `paths` 就直接收（验收脚本走这条：`Clipboard::SetFileDropList`
+                // 在剪贴板被别的程序独占时会失败，那是环境问题，不该让界面断言假红）；
+                // 不给则读真实剪贴板，走 Ctrl+V 的同一条 `paste_files_from_item`。
+                if let Some(arr) = cmd.get("paths").and_then(|v| v.as_array()) {
+                    let paths: Vec<String> = arr
+                        .iter()
+                        .filter_map(|v| v.as_str().map(str::to_string))
+                        .collect();
+                    if !self.attach_files(paths, cx) {
+                        return Err("paths 里没有可收的路径（空串或已引用过）".to_string());
+                    }
+                } else {
+                    let item = cx
+                        .read_from_clipboard()
+                        .ok_or_else(|| "剪贴板为空".to_string())?;
+                    if !self.paste_files_from_item(&item, cx) {
+                        return Err(
+                            "剪贴板里没有文件（先在资源管理器复制一个文件再试）".to_string()
+                        );
+                    }
                 }
             }
             // 图片放大（对齐 vite `ZoomableImage`）：不带 `open` 时取反；

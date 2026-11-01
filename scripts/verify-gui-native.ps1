@@ -196,19 +196,11 @@ Check "内嵌 server /health 正常" ($health.status -eq "ok")
 Write-Host "`n[输入区附件]" -ForegroundColor Cyan
 Act @{ action = "composer_clear" } 150 | Out-Null
 $probeFile = $PSCommandPath # 用脚本自身当「被引用的文件」（真实存在的绝对路径）
-# 把文件放进剪贴板（= 资源管理器 Ctrl+C 的效果，CF_HDROP）。两条路都不直观点：
-# `Set-Clipboard -Path` 只在 Windows PowerShell 5.1 有；`Clipboard::SetFileDropList`
-# 又要求 **STA** 线程，而 `#requires` 强制本脚本跑在 pwsh 7（MTA）。所以转手一个
-# `powershell -STA` 子进程做这一件事——副作用只有一个子进程的启停。
-$setClip = Join-Path $env:TEMP "verify-set-clip.ps1"
-@"
-Add-Type -AssemblyName System.Windows.Forms
-`$col = New-Object System.Collections.Specialized.StringCollection
-`$col.Add('$probeFile')
-[System.Windows.Forms.Clipboard]::SetFileDropList(`$col)
-"@ | Set-Content -Path $setClip -Encoding utf8
-powershell -NoProfile -STA -ExecutionPolicy Bypass -File $setClip | Out-Null
-$r = Act @{ action = "paste_files" } 300
+# 直接给路径，**不碰系统剪贴板**：`Clipboard::SetFileDropList` 在剪贴板被别的程序
+# 独占时会抛 "Requested Clipboard operation did not succeed"（实测踩过），那是环境
+# 问题，不该让界面断言假红。真实 Ctrl+V 的剪贴板通道由手工验收覆盖（见 release-msi
+# 的验收清单），这里验的是「收下引用之后界面怎么表现」。
+$r = Act @{ action = "paste_files"; paths = @($probeFile) } 300
 $s = StateOf $r
 $files = @($s.usage.composer_files)
 Check "粘贴文件后草稿区有 1 个引用" ($files.Count -eq 1) "（实际 $($files.Count)）"

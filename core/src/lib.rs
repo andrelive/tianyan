@@ -123,7 +123,8 @@ pub const NAME: &str = env!("CARGO_PKG_NAME");
 pub fn init() -> Result<()> {
     let config = config::get_config();
 
-    common::logging::init_logging(&config.logging)?;
+    // 日志落盘：`[logging].file` 未配置时默认 `{data_dir}/logs/tianyan.log`
+    common::logging::init_logging_with_data_dir(&config.logging, &config.storage.data_dir)?;
 
     tracing::info!("正在初始化 {} v{}", NAME, VERSION);
 

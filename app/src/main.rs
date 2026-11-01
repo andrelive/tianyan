@@ -65,10 +65,20 @@ async fn main() -> tianyan::common::error::Result<()> {
     // `load_and_install` 是这条语义的唯一落点（加载失败 → stderr + 诊断槽位 +
     // 回退默认配置），三处装配因此各写一行。
     let config = tianyan_service_config::load_and_install();
-    tianyan::common::logging::init_logging(&config.logging)?;
-    // panic hook（最后防线）：panic 现场写入 <日志目录>/panic.log
-    // （与桌面端同一目录：core::common::panic_hook::default_log_dir）。
-    tianyan::common::panic_hook::install(tianyan::common::panic_hook::default_log_dir());
+    // 日志落盘：`[logging].file` 未配置时默认 `{data_dir}/logs/tianyan.log`
+    // （与桌面客户端同一口径；server 二进制独立跑时同样需要落盘）
+    tianyan::common::logging::init_logging_with_data_dir(
+        &config.logging,
+        &config.storage.data_dir,
+    )?;
+    // panic hook（最后防线）：panic 现场写入 `{data_dir}/logs/panic.log`
+    // —— 与运行时日志同目录，与桌面客户端同一口径。
+    tianyan::common::panic_hook::install(
+        config
+            .storage
+            .data_dir
+            .join(tianyan::common::logging::LOG_DIR_NAME),
+    );
 
     // 主循环：数据目录搬迁后以新配置重启（搬迁由 start_server 关停后的
     // handle_pending_migration 执行；无搬迁时单次运行即退出）

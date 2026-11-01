@@ -851,10 +851,24 @@ fn start_hidden() -> bool {
 fn main() {
     hide_owned_console();
     let config = tianyan_service_config::load_and_install();
-    if let Err(e) = tianyan::common::logging::init_logging(&config.logging) {
+    // 日志落盘：`[logging].file` 未配置时默认 `{data_dir}/logs/tianyan.log`。
+    // release 构建是 `windows_subsystem = "windows"`（没有控制台），不落盘就等于
+    // 一条日志都没有——应用出问题时连「它到底做了什么」都查不到。
+    if let Err(e) = tianyan::common::logging::init_logging_with_data_dir(
+        &config.logging,
+        &config.storage.data_dir,
+    ) {
         eprintln!("日志初始化失败：{e}");
     }
-    tianyan::common::panic_hook::install(tianyan::common::panic_hook::default_log_dir());
+    // panic 现场与运行时日志**同目录**（`{data_dir}/logs/`）：出问题只看一个地方。
+    // 早先写死在 `%APPDATA%\com.tianyan.app\logs\`（系统 data_dir），与数据目录无关，
+    // 排查时要在两处来回找。
+    tianyan::common::panic_hook::install(
+        config
+            .storage
+            .data_dir
+            .join(tianyan::common::logging::LOG_DIR_NAME),
+    );
 
     // 数据目录搬迁的**执行侧**：`POST /config/migrate-data-dir` 只写请求文件并触发服务
     // 优雅关停，真正的「复制 → 校验 → 改配置 → 删源」必须在服务停掉之后做（SQLite /
