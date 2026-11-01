@@ -22,6 +22,7 @@ use std::ops::Range;
 use crate::composer::{file_refs, Buffer};
 use crate::theme::colors;
 use crate::*;
+use gpui_kit::assets::IconName;
 
 /// 输入框最少显示 1 行。
 pub(crate) const COMPOSER_MIN_ROWS: usize = 1;
@@ -31,6 +32,12 @@ pub(crate) const COMPOSER_MAX_ROWS: usize = 8;
 
 /// chip 左右内边距（像素）。
 const CHIP_PAD_X: f32 = 8.0;
+
+/// chip 内文件图标边长（像素）。
+const CHIP_ICON: f32 = 12.0;
+
+/// 图标与文件名之间的间距（像素）。
+const CHIP_ICON_GAP: f32 = 5.0;
 
 /// 输入框向宿主（`ClientApp`）发出的事件。
 #[derive(Clone, Debug)]
@@ -404,29 +411,57 @@ impl Element for ComposerBody {
                             );
                         }
                         PieceKind::Chip { shaped } => {
-                            let chip_h = line_height;
+                            // 盒子比行高收一圈（原来几乎顶满行高，显得笨重）
+                            let chip_h = line_height * 0.82;
                             let quad_bounds = Bounds::new(
-                                gpui_kit::point(x, y + px(1.)),
-                                gpui_kit::size(px(piece.width), px(f32::from(chip_h) - 2.)),
+                                gpui_kit::point(x, y + (line_height - chip_h) * 0.5),
+                                gpui_kit::size(px(piece.width), chip_h),
                             );
                             // 选区覆盖整个 chip（原子块被选中时整块高亮）
+                            // 底色/边框用**强调色的淡版**：BG_TERTIARY 与输入卡片底色几乎
+                            // 同色，画出来就是一块糊的米色（用户实测「chip 有点丑」）
+                            let accent_hsla = Hsla::from(rgb(colors::ACCENT()));
                             let bg = if selection.start < piece.byte.end
                                 && piece.byte.start < selection.end
                             {
                                 sel_bg
                             } else {
-                                Hsla::from(rgb(colors::BG_TERTIARY()))
+                                Hsla {
+                                    a: 0.13,
+                                    ..accent_hsla
+                                }
+                            };
+                            let border = Hsla {
+                                a: 0.42,
+                                ..accent_hsla
                             };
                             window.paint_quad(gpui_kit::PaintQuad {
                                 bounds: quad_bounds,
-                                corner_radii: gpui_kit::Corners::all(px(6.)),
+                                corner_radii: gpui_kit::Corners::all(px(5.)),
                                 background: bg.into(),
                                 border_widths: gpui_kit::Edges::all(px(1.)),
-                                border_color: Hsla::from(rgb(colors::BORDER())),
+                                border_color: border,
                                 border_style: gpui_kit::BorderStyle::Solid,
                             });
+                            // 文件图标（单色 svg，随主题色）：让 chip 一眼能认出是「文件」
+                            // 而不只是一块带字的色块（用户实测「chip 有点丑」）
+                            let icon_y = y + (line_height - px(CHIP_ICON)) * 0.5;
+                            let _ = window.paint_svg(
+                                Bounds::new(
+                                    gpui_kit::point(x + px(CHIP_PAD_X), icon_y),
+                                    gpui_kit::size(px(CHIP_ICON), px(CHIP_ICON)),
+                                ),
+                                IconName::FileText.path(),
+                                None,
+                                gpui_kit::TransformationMatrix::unit(),
+                                Hsla {
+                                    a: 0.75,
+                                    ..Hsla::from(rgb(colors::ACCENT()))
+                                },
+                                cx,
+                            );
                             let _ = shaped.paint(
-                                gpui_kit::point(x + px(CHIP_PAD_X), y),
+                                gpui_kit::point(x + px(CHIP_PAD_X + CHIP_ICON + CHIP_ICON_GAP), y),
                                 line_height,
                                 gpui_kit::TextAlign::Left,
                                 None,
@@ -577,7 +612,7 @@ fn layout_rows(text: &str, avail_w: Pixels, window: &mut Window, _cx: &mut App) 
             let name = file_name_of(&r.path);
             let label = format!(" {name} ");
             let shaped = shape_text(&label, font_size, font.clone(), color, window);
-            let chip_w = f32::from(shaped.width()) + CHIP_PAD_X * 2.0;
+            let chip_w = f32::from(shaped.width()) + CHIP_PAD_X * 2.0 + CHIP_ICON + CHIP_ICON_GAP;
             if x > 0.0 && x + chip_w > avail {
                 rows.push(std::mem::replace(
                     &mut cur,
@@ -596,7 +631,7 @@ fn layout_rows(text: &str, avail_w: Pixels, window: &mut Window, _cx: &mut App) 
                     shaped: Box::new(shaped),
                 },
             });
-            x += chip_w + 2.0;
+            x += chip_w + 4.0;
             seg_start = r.range.end;
         }
         if seg_start < hard.len() {
@@ -851,7 +886,15 @@ fn caret_position(
             if piece.byte.start <= byte && byte <= piece.byte.end {
                 let dx = match &piece.kind {
                     PieceKind::Text(shaped) => shaped.x_for_index(byte - piece.byte.start),
-                    PieceKind::Chip { .. } => px(0.),
+                    // 光标贴在这块 chip 上时**区分左右**：yte == 块尾 要落在右边缘
+                    // （原来一律取左边缘 —— 用户实测「粘贴后光标停在 chip 之前」）
+                    PieceKind::Chip { .. } => {
+                        if byte >= piece.byte.end {
+                            px(piece.width)
+                        } else {
+                            px(0.)
+                        }
+                    }
                 };
                 return (
                     bounds.origin.x + px(piece.x) + dx,

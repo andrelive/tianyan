@@ -457,6 +457,16 @@ mod tests {
         assert_eq!(b.text, "看这个 `@file:\"C:\\a b\\c.md\"`");
         assert_eq!(file_refs(&b.text).len(), 1);
     }
+    /// 粘贴文件后的光标必须落在**引用之后**（用户实测「光标停在 chip 之前」——
+    /// 那是绘制层把 chip 的左右端当成了同一个 x，与这里的游标位置无关，但两边都要钉住）。
+    #[test]
+    fn insert_file_ref_leaves_cursor_after_the_chip() {
+        let mut b = Buffer::new("好，我来粘贴一个文件，");
+        b.insert_file_ref(r"F:\work\git\tianyan\gui-native\build.rs");
+        assert_eq!(b.cursor, b.text.len(), "光标应在整段引用之后");
+        let refs = file_refs(&b.text);
+        assert_eq!(refs[0].range.end, b.cursor);
+    }
 
     #[test]
     fn line_start_end_are_newline_bounded() {
