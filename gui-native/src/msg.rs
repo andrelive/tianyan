@@ -203,6 +203,16 @@ pub(crate) fn render_user_body(text: &str) -> AnyElement {
     // 后每行都包进 `flex_row`，而 taffy 里 flex 子项的 `min-width` 默认是 `auto`
     // （= 内容宽度），于是整行被文本撑到内容宽度、`flex_wrap` 永远不触发，
     // 长句直接溢出气泡被裁掉 —— 用户实测「对话流里文本不换行，后面被切掉」。
+    //
+    // 含文件引用时**改走自绘**（[`crate::composer_ui::RichTextBody`]）：flex 的换行以
+    // item 为单位，chip 放不下就整块跳到下一行、把后面的文字一起带走（用户实测
+    // 「chip 后面换行了」）。行内绕排只有自绘能表达 —— 复用输入框那套排版。
+    if text.contains("`@file:\"") {
+        return crate::composer_ui::RichTextBody {
+            text: text.to_string(),
+        }
+        .into_any_element();
+    }
     let mut col = div().w_full().flex().flex_col().gap_1();
     for line in split_file_chips(text) {
         let empty = line.is_empty()
@@ -1355,7 +1365,9 @@ pub(crate) fn render_msg_body(
                     .chars()
                     .map(|c| if (c as u32) > 0x2E80 { 2 } else { 1 })
                     .sum();
-                if est_units > 60 {
+                // 含文件引用时也固定 640：正文走自绘排版（`RichTextBody`），
+                // 它的宽度必须由外层给定（`relative(1.0)` 在内容宽的气泡里无解）
+                if est_units > 60 || msg.text.contains("`@file:\"") {
                     bubble = bubble.w(px(640.)).min_w_0();
                 }
                 bubble

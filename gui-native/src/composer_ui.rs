@@ -322,7 +322,13 @@ impl Element for ComposerBody {
         cx: &mut App,
     ) -> Self::PrepaintState {
         let text = self.state.read(cx).buffer.text.clone();
-        let pre = layout_rows(&text, bounds.size.width, window, cx);
+        let pre = layout_rows(
+            &text,
+            bounds.size.width,
+            window.text_style().color,
+            window,
+            cx,
+        );
         // 命中表按「相对内容顶」记录，滚动偏移在命中时再加
         {
             let st = self.state.read(cx);
@@ -560,10 +566,15 @@ impl ComposerState {
 /// 把正文排成视觉行。
 ///
 /// `avail_w` 是可用宽度（元素宽）。文本段超宽时按字节二分切分（见文件头的口径）。
-fn layout_rows(text: &str, avail_w: Pixels, window: &mut Window, _cx: &mut App) -> Prelayout {
+fn layout_rows(
+    text: &str,
+    avail_w: Pixels,
+    color: Hsla,
+    window: &mut Window,
+    _cx: &mut App,
+) -> Prelayout {
     let font_size = window.text_style().font_size.to_pixels(window.rem_size());
     let font = window.text_style().font();
-    let color = window.text_style().color;
     let line_height = window.line_height();
     let avail = f32::from(avail_w).max(32.0);
 
@@ -1382,5 +1393,150 @@ impl gpui_kit::EntityInputHandler for ComposerState {
     ) {
         // 平台粘贴路径（输入法框架/系统菜单）：与 Ctrl+V 共用同一份分流逻辑
         self.handle_paste_item(item, window, cx);
+    }
+}
+
+// ── 只读富文本（消息气泡里的行内引用） ──────────────────────────────
+
+/// 气泡正文的可用宽度：含引用时气泡固定 640 宽，两侧各 16px 内边距。
+pub(crate) const BUBBLE_BODY_WIDTH: f32 = 608.0;
+
+/// 只读富文本：把「文本 + 行内文件 chip」按**软换行**排出来（消息气泡用）。
+///
+/// 为什么不用 lex_row 混排：flex 的换行以 **item 为单位**，chip 放不下时整块跳到
+/// 下一行、把它后面的文字也一起带走 —— 用户实测「chip 后面换行了」。行内绕排是
+/// inline formatting 的能力，GPUI 的 flex 做不到，所以复用输入框那套自绘排版
+/// （同一个 layout_rows），保证「chip 与文字同处一行、放不下才断字」。
+pub(crate) struct RichTextBody {
+    pub(crate) text: String,
+}
+
+impl IntoElement for RichTextBody {
+    type Element = Self;
+    fn into_element(self) -> Self::Element {
+        self
+    }
+}
+
+impl Element for RichTextBody {
+    type RequestLayoutState = Prelayout;
+    type PrepaintState = Prelayout;
+
+    fn id(&self) -> Option<ElementId> {
+        // 同一页可能有多条消息：id 必须唯一（文本长度 + 前 8 个字符）
+        let head: String = self.text.chars().take(8).collect();
+        Some(ElementId::Name(
+            format!("rich-body-{}-{head}", self.text.len()).into(),
+        ))
+    }
+
+    fn source_location(&self) -> Option<&'static std::panic::Location<'static>> {
+        None
+    }
+
+    fn request_layout(
+        &mut self,
+        _id: Option<&GlobalElementId>,
+        _inspector_id: Option<&InspectorElementId>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> (LayoutId, Self::RequestLayoutState) {
+        // 气泡在含引用时固定 640 宽（见 msg::render_user_body），按内容宽排版即可
+        let color = Hsla::from(rgb(colors::BUBBLE_TEXT()));
+        let pre = layout_rows(&self.text, px(BUBBLE_BODY_WIDTH), color, window, cx);
+        // 真实可用宽度只有 prepaint 才知道（气泡可能被窄列压缩），这里按 608 估行数
+        // 并**多留一行**：宁可多一行空白，也别把最后一行裁掉
+        let rows = pre.rows.len().max(1) + 1;
+        let style = Style {
+            size: size(
+                relative(1.0).into(),
+                (window.line_height() * rows as f32).into(),
+            ),
+            ..Default::default()
+        };
+        (window.request_layout(style, [], cx), pre)
+    }
+
+    fn prepaint(
+        &mut self,
+        _id: Option<&GlobalElementId>,
+        _inspector_id: Option<&InspectorElementId>,
+        bounds: Bounds<Pixels>,
+        _request_layout: &mut Self::RequestLayoutState,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Self::PrepaintState {
+        // 按**真实**可用宽度重排（气泡可能被窄列压缩，用常量的那份只用来估高度）
+        let color = Hsla::from(rgb(colors::BUBBLE_TEXT()));
+        layout_rows(&self.text, bounds.size.width, color, window, cx)
+    }
+
+    fn paint(
+        &mut self,
+        _id: Option<&GlobalElementId>,
+        _inspector_id: Option<&InspectorElementId>,
+        bounds: Bounds<Pixels>,
+        _request_layout: &mut Self::RequestLayoutState,
+        pre: &mut Self::PrepaintState,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        let white = Hsla::from(rgb(colors::BUBBLE_TEXT()));
+        let line_height = window.line_height();
+        window.with_content_mask(Some(ContentMask { bounds }), |window| {
+            for row in &pre.rows {
+                let y = bounds.origin.y + px(row.top);
+                for piece in &row.pieces {
+                    let x = bounds.origin.x + px(piece.x);
+                    match &piece.kind {
+                        PieceKind::Text(shaped) => {
+                            let _ = shaped.paint(
+                                gpui_kit::point(x, y),
+                                line_height,
+                                gpui_kit::TextAlign::Left,
+                                None,
+                                window,
+                                cx,
+                            );
+                        }
+                        PieceKind::Chip { shaped } => {
+                            // 气泡是深色底：chip 用白色半透明（与输入框内的强调色版本区分）
+                            let chip_h = line_height * 0.82;
+                            window.paint_quad(gpui_kit::PaintQuad {
+                                bounds: Bounds::new(
+                                    gpui_kit::point(x, y + (line_height - chip_h) * 0.5),
+                                    gpui_kit::size(px(piece.width), chip_h),
+                                ),
+                                corner_radii: gpui_kit::Corners::all(px(5.)),
+                                background: Hsla { a: 0.16, ..white }.into(),
+                                border_widths: gpui_kit::Edges::all(px(1.)),
+                                border_color: Hsla { a: 0.35, ..white },
+                                border_style: gpui_kit::BorderStyle::Solid,
+                            });
+                            let icon_y = y + (line_height - px(CHIP_ICON)) * 0.5;
+                            let _ = window.paint_svg(
+                                Bounds::new(
+                                    gpui_kit::point(x + px(CHIP_PAD_X), icon_y),
+                                    gpui_kit::size(px(CHIP_ICON), px(CHIP_ICON)),
+                                ),
+                                IconName::FileText.path(),
+                                None,
+                                gpui_kit::TransformationMatrix::unit(),
+                                Hsla { a: 0.8, ..white },
+                                cx,
+                            );
+                            let _ = shaped.paint(
+                                gpui_kit::point(x + px(CHIP_PAD_X + CHIP_ICON + CHIP_ICON_GAP), y),
+                                line_height,
+                                gpui_kit::TextAlign::Left,
+                                None,
+                                window,
+                                cx,
+                            );
+                        }
+                    }
+                }
+            }
+        });
     }
 }
