@@ -147,6 +147,15 @@ agent 没有 system 前缀、上下文只增不减，服务起得来但行为已
 - 所有错误用 `TianyanError`，禁止引入新错误类型。`TianyanError` 仅保留 4 个变体（`Io` / `Json` / `Toml` / `Custom`），模块内部错误通过 `Custom(String)` 传递，调用方在消息中携带"模块前缀：详情"，**严禁新增变体**
 - **错误分类用语义谓词**（ADR-014）：构造用 `not_found` / `conflict` / `invalid_input` / `permission` / `timeout`，判定用 `is_not_found` / `is_conflict` / `is_invalid_input` / `is_permission` / `is_timeout`。**禁止在调用方对错误消息做字符串匹配分类**（`starts_with` / `contains` 判定错误类别）——分类契约只在 `core/src/common/error.rs` 一处
 
+## 文档写作层次
+
+**对外文档 = 完整成果；缘由与代价 = ADR / CHANGELOG / 对话回复。** 不要混层。
+
+- `README.md`、`docs/` 面向使用者的部分只写**是什么、能做什么、怎么用、结构长相**——读它的人要拿走的是成果。
+- 选型缘由、方案对比、取舍与代价（"代价（诚实记账）""为什么不选 X""比 A 慢但…"）、自我辩护式说明，**一律不写进对外文档**：写进 ADR（决策记录本就承担取舍）、`CHANGELOG.md`（变更证据）或与会话中的口头解释（用户原话："咱们两个交互的时候，有时候要交代清楚缘由。但是对外的、统一的文档，是完整的成果，不要写那么多防御性描述"）。
+- 事实性数字（内存实测、包体大小、耗时）可以留在对外文档——它们是成果的一部分，**对比列、"已用实测数据换来的确定成本"这类论证框架不要**。
+- 反面样例（2026-11 用户指出）：根 README 曾有一节「为什么是「前后端同栈」」，用「典型 Electron/Tauri 应用 vs 天演」对比表 + 「代价（诚实记账）：GPUI 生态年轻…」段。正确形态是一节「全栈 Rust」：分层表 + 实测数字 + 同栈带来的 4 条事实，不含对比列与代价段。
+
 ## 协作纪律（多 agent / 并行工作）
 
 - **禁止全局 git 操作**：`git stash` / `git reset --hard` / `git checkout .` / `git clean` 会瞬间毁灭其他并行工作者的进行中编辑。只允许 `git diff` / `git status` / `git checkout <具体文件>` / `git log` / `git reflog`

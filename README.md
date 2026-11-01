@@ -5,30 +5,28 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)&nbsp;
 [![Rust](https://img.shields.io/badge/Rust-2021-orange.svg)](https://www.rust-lang.org/)
 
-## 为什么是「前后端同栈」
+## 全栈 Rust
 
-桌面 AI 应用通常是三段式：WebView 壳（Electron / Tauri）+ TypeScript 前端 + 另起的后端进程。天演把三段合成**一段**：
+界面、服务、智能体是三层职责，但只有**一份代码、一个进程、一个二进制**：
 
-| | 典型 Electron / Tauri 应用 | 天演 |
-|---|---|---|
-| 界面 | HTML/CSS/TS，跑在 WebView 里 | **GPUI 原生自绘（Rust）** |
-| 服务 | Node / Python / 另起的子进程 | **Axum（Rust），与界面同进程** |
-| 智能体与存储 | 再一个进程，或在云上 | **同一个进程里的 `core` 库** |
-| 发布的成品 | 安装器 + Node 运行时 + WebView2 | **一个 exe**（MSI 约 60 MB） |
-| 同一次会话的内存实测 | **837 MB**（主进程 113.5 + `msedgewebview2` × 6 共 725.6） | **76 MB** 空窗口 / **131 MB** 带 3000 行编辑器 + 5000 条列表 / 269 MB 打开 10 万行代码文件 |
+| 层 | 实现 |
+|---|---|
+| 界面 | GPUI 原生自绘（Rust，自绘管线，无 WebView） |
+| 服务 | Axum（Rust），与界面同进程 |
+| 智能体与存储 | 同一个进程里的 `core` 库 |
+| 发布物 | 单个 exe；Windows MSI 约 60 MB |
 
-同栈换来的不只是"少一个进程"：
+实测内存：76 MB 空窗口 · 131 MB 带 3000 行编辑器 + 5000 条列表 · 269 MB 打开 10 万行代码文件。
 
-- **改一个功能只动一处。** 工具定义、数据结构、错误类型在界面与后端之间**没有第二份** —— 不需要手写 IPC schema，也不需要让 `dto.ts` 跟服务端结构手工对齐。
-- **`cargo check` 就是全链路检查。** 界面与服务一起编译；字段名改错当场红，不用等运行时才发现。
-- **协议也共用一份类型。** 界面经**本地 HTTP / SSE** 与内嵌服务通信（同进程、不是跨进程 IPC，也不经 WebView 桥），两端由 `core` 的同一组类型生成。
-- **不依赖 WebView。** 不用 Edge WebView2 / Chromium，安装包里没有浏览器引擎，启动即窗口。
+同一份类型从界面贯通到存储：
 
-> **代价（诚实记账）**：GPUI 生态比 React 年轻，富文本渲染、IME、无障碍等细节需要自己补；Rust 编译比 TS 慢（本机增量约 2 秒/次，冷编译数分钟）。这两条都是"已用实测数据换来的确定成本"，不是猜测。
+- **改一个功能只动一处。** 工具定义、数据结构、错误类型在界面与后端之间**没有第二份**。
+- **`cargo check` 就是全链路检查。** 界面与服务一起编译，字段名改错当场红。
+- **协议共用一份类型。** 界面经**本地 HTTP / SSE** 与内嵌服务通信（同进程，走 TCP 回环），两侧由 `core` 的同一组类型生成。
+- **不依赖 WebView。** 安装包里没有浏览器引擎，启动即窗口。
 
 ## 核心特性
 
-- **全栈 Rust 桌面**：界面（GPUI）+ 服务（Axum）+ 智能体（core）同进程、同二进制；发布物是单个 exe（Windows 提供 MSI，perUser 静默安装）
 - **统一上下文（VFS）**：偏好 / 记忆 / 知识 / 技能同构存储与检索 —— L0/L1/L2 三层摘要 + 双向量 RRF 融合；上下文自动 / 手动压缩（ADR-001）
 - **自进化（ADR-017）**：单一「自演化综述」任务统一接管记忆 / 技能 / 规则 / 角色的归纳与淘汰（读用户原话 + 执行数据 + 技能使用统计，产出增删改计划并记账）；附 `planning` 等预置技能与技能导入工具
 - **工具系统**：50+ 内置与插件工具（文件读写 / 语义化编辑 / 代码结构 / 搜索 / 网页抓取 / 知识导入 / 待办与目标 / 委托 / 定时任务 / 剪贴板……），OpenAI function calling 兼容，支持动态注册（完整清单见 [tool-catalog](./docs/architecture/tool-catalog.md)）
@@ -55,7 +53,6 @@ cd .. && pwsh -File gui-native/installer/build-msi.ps1 -SkipBuild   # 打 MSI
 ```
 
 前置要求：Rust stable（由 `rust-toolchain.toml` 管理）；打 MSI 另需 WiX v6（`dotnet tool install --global wix --version 6.0.2`）。
-**不需要 Node.js** —— 那是 `gui-vite/`（保留作对照的 Web 前端）才需要的东西。
 
 ### 运行
 
@@ -74,7 +71,7 @@ cargo run -p tianyan-server                          # 只跑后端（默认 127
 
 配置文件固定 `~/.tianyan/tianyan.toml`（首次启动自动生成；`TIANYAN_CONFIG` 可覆盖路径）。数据目录与配置目录分离（ADR-023），**设置页里数据目录只读**、只能在「搬迁」入口整库搬走；完整配置见 [config.example.toml](./config.example.toml)。
 
-> 天演提供 **桌面应用 + HTTP API**，不支持 CLI 交互模式。
+使用形态：**桌面应用**（内嵌服务）+ **HTTP API**。
 
 ## 架构
 
@@ -132,7 +129,7 @@ cargo run -p tianyan-server                          # 只跑后端（默认 127
 本项目以**个人长期维护**的方式运作，不征集外部贡献：
 
 - 遇到问题或想要新功能，请提 [Issue](https://github.com/andrelive/tianyan/issues)
-- 想基于本项目做改造，欢迎 **Fork 后独立演进**（核心架构经大量迭代已适配自身开发方式，合并外部 PR 的协调成本大于收益）
+- 想基于本项目做改造，欢迎 **Fork 后独立演进**
 
 ## 许可证
 
