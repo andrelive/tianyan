@@ -423,6 +423,23 @@ impl tianyan::context::ContextPort for ContextPipeline {
     fn extract_marker_summary(&self, marker: &StructuredMessage) -> Option<String> {
         ContextPipeline::extract_marker_summary(marker)
     }
+
+    /// 上下文预算：直接取压缩器那份判定（窗口 / 阈值 / 临界阈值），
+    /// 占用用调用方给的实测值——压缩器自己是不知道「这次请求实际花了多少」的。
+    async fn compression_budget(
+        &self,
+        used_tokens: usize,
+    ) -> Option<tianyan::context::CompressionBudget> {
+        let status = self.compressor.lock().await.get_status(used_tokens);
+        Some(tianyan::context::CompressionBudget {
+            context_window: status.context_window as u64,
+            used_tokens: status.estimated_tokens as u64,
+            threshold_tokens: status.threshold as u64,
+            critical_tokens: status.critical_threshold as u64,
+            should_compress: status.should_compress,
+            is_critical: status.is_critical,
+        })
+    }
 }
 
 /// 读取会话绑定工作目录下的 AGENTS.md（项目指令前缀）。

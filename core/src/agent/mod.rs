@@ -15,6 +15,7 @@ pub mod working_set;
 mod agent_core;
 /// 后台任务支持（fire-and-forget 委托 + 完成通知 + join 信号）。
 pub mod background;
+pub mod context_report;
 mod builder;
 /// 取消等待原语（结构性取消：await 阻塞点与取消信号竞争）。
 mod cancel;
@@ -37,6 +38,7 @@ pub mod user_questions;
 pub use agent_core::Agent;
 pub use agent_core::AgentWakeForwarder;
 pub use builder::AgentBuilder;
+pub use context_report::ContextReport;
 pub use coordinator::AgentCoordinator;
 pub use r#loop::{AgentLoop, AgentLoopConfig, AgentLoopResult};
 pub use role_router::{RoleMatch, RoleRouter};

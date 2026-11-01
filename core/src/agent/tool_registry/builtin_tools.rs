@@ -18,9 +18,9 @@ use std::pin::Pin;
 use super::ToolRegistry;
 use crate::agent::tool_params::{
     AskUserParams, CallSkillParams, DelegateToAgentParams, DelegationStatsParams,
-    ExecuteCommandParams, ExecutionDetailParams, ExecutionStatsParams, KnowledgeIngestParams,
-    SearchVfsParams, SelfCheckParams, SessionRecallParams, SuggestRoleParams, TaskCancelParams,
-    TaskStatusParams, VfsListParams, VfsReadParams,
+    ContextStatusParams, ExecuteCommandParams, ExecutionDetailParams, ExecutionStatsParams,
+    KnowledgeIngestParams, SearchVfsParams, SelfCheckParams, SessionRecallParams,
+    SuggestRoleParams, TaskCancelParams, TaskStatusParams, VfsListParams, VfsReadParams,
 };
 use crate::model::types::{FunctionDefinition, ToolDefinition, ToolPresentation};
 
@@ -76,6 +76,16 @@ macro_rules! builtin_adapter {
             Box::pin(r.$method(args))
         }
     };
+    ($name:ident, $method:ident, session) => {
+        fn $name<'a>(
+            r: &'a ToolRegistry,
+            sid: &'a str,
+            _args: &'a str,
+            _sub: bool,
+        ) -> ToolFuture<'a> {
+            Box::pin(r.$method(sid))
+        }
+    };
     ($name:ident, $method:ident, args, session) => {
         fn $name<'a>(
             r: &'a ToolRegistry,
@@ -112,6 +122,7 @@ builtin_adapter!(exec_vfs_list, execute_vfs_list, args);
 builtin_adapter!(exec_call_skill, execute_call_skill, args);
 builtin_adapter!(exec_ask_user, execute_ask_user, args, session, sub);
 builtin_adapter!(exec_self_check, execute_self_check);
+builtin_adapter!(exec_context_status, execute_context_status, session);
 builtin_adapter!(exec_knowledge_ingest, execute_knowledge_ingest, args);
 builtin_adapter!(
     exec_delegate_to_agent,
@@ -207,6 +218,13 @@ fn def_self_check(name: &'static str) -> ToolDefinition {
     ToolDefinition::function(FunctionDefinition::from_schema::<SelfCheckParams>(
         name,
         "查询自身运行指标：执行次数、成功率、token 消耗、管线失败、规则有效性。当用户质疑你的表现时用于自我反思。",
+    ))
+}
+
+fn def_context_status(name: &'static str) -> ToolDefinition {
+    ToolDefinition::function(FunctionDefinition::from_schema::<ContextStatusParams>(
+        name,
+        "读取**当前会话**的上下文预算：窗口多大、已用多少 token（占比）、自动压缩阈值、距阈值还剩多少、距上次压缩有多少条消息、现在是否具备压缩条件。想知道「还有多少余量」时调它——凭感觉估通常偏差很大。注意：上下文紧张不代表要停手，把任务做完是第一位的。",
     ))
 }
 
@@ -315,6 +333,12 @@ pub(crate) static BUILTIN_TOOLS: &[BuiltinToolMeta] = &[
         def_self_check,
         ToolPresentation::Generic,
         exec_self_check,
+    ),
+    tool(
+        "context_status",
+        def_context_status,
+        ToolPresentation::Generic,
+        exec_context_status,
     ),
     tool(
         "knowledge_ingest",

@@ -281,6 +281,10 @@ pub struct TaskCancelParams {
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct SelfCheckParams {}
 
+/// 上下文状态参数（无参数 —— 查的是**当前会话**的上下文预算，会话由调用方确定）。
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct ContextStatusParams {}
+
 /// 知识导入参数。
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct KnowledgeIngestParams {

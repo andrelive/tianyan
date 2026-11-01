@@ -31,7 +31,7 @@ pub mod tool_images;
 
 pub use assembler::ContextAssembler;
 pub use assembly::ContextServices;
-pub use port::{ContextPort, NullContextPort};
+pub use port::{CompressionBudget, ContextPort, NullContextPort};
 pub use tool_images::SessionImages;
 
 // ── 测试期同源包含：策略实现的**唯一副本仍在插件里** ────────────────────────

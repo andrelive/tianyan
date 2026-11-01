@@ -311,6 +311,26 @@ impl ToolRegistry {
     pub fn context(&self) -> &crate::agent::tool_context::ToolContext {
         &self.ctx
     }
+
+    /// 刷新某会话的上下文状态快照（**Agent 每轮组装前调用**，工具只读）。
+    ///
+    /// 幂等、无副作用；`None` = 删除该会话的条目（会话切换 / 未装配上下文策略）。
+    /// 按会话分条存（见 `ToolContext::context_report` 的注释），多会话并发互不覆盖。
+    pub async fn set_context_report(
+        &self,
+        session_id: &str,
+        report: Option<crate::agent::context_report::ContextReport>,
+    ) {
+        let mut guard = self.ctx.context_report.lock().await;
+        match report {
+            Some(r) => {
+                guard.insert(session_id.to_string(), r);
+            }
+            None => {
+                guard.remove(session_id);
+            }
+        }
+    }
 }
 
 impl ToolRegistry {

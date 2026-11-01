@@ -416,6 +416,29 @@ impl ToolRegistry {
         Ok(health)
     }
 
+    /// 执行 context_status 工具：读**当前会话**的上下文预算快照。
+    ///
+    /// 数据来自 Agent 每轮刷新的 [`crate::agent::context_report::ContextReport`]
+    /// ——工具层拿不到 `SessionState`（见该模块文档），而占用口径必须与压缩判定同源，
+    /// 所以这里只读快照、不复算。
+    ///
+    /// 没有快照时说清原因，而不是「查询失败」：首轮尚未产生（第一次请求完成后才有
+    /// 真实占用）；若始终如此，则说明上下文策略未装配（没有压缩判定，也就没有余量）。
+    pub(crate) async fn execute_context_status(
+        &self,
+        session_id: &str,
+    ) -> Result<serde_json::Value, TianyanError> {
+        let guard = self.ctx.context_report.lock().await;
+        match guard.get(session_id) {
+            Some(report) => Ok(report.to_json()),
+            None => Err(TianyanError::Custom(
+                "tool: 执行失败：本会话尚未产生上下文快照（第一次请求完成后才有真实占用；\
+                 若始终如此，说明上下文策略未装配）"
+                    .to_string(),
+            )),
+        }
+    }
+
     /// 执行 delegate_to_agent 工具：委托子任务到隔离子 Agent。
     ///
     /// The LLM drives the loop: each turn it can either return a final answer

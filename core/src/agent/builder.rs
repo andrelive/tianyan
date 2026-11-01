@@ -793,6 +793,15 @@ mod tests {
         fn extract_marker_summary(&self, _marker: &StructuredMessage) -> Option<String> {
             Some(self.marker.to_string())
         }
+
+        /// 桩不给预算（`None`）：本桩只用于「端口是否被注入」的身份探针，
+        /// 上下文预算由 `context_report` 的单测覆盖。
+        async fn compression_budget(
+            &self,
+            _used_tokens: usize,
+        ) -> Option<crate::context::CompressionBudget> {
+            None
+        }
     }
 
     /// 端口身份探针（任意消息即可：桩不看内容）。

@@ -38,6 +38,7 @@ use crate::session::search::SessionRecall;
 use crate::session::store::SessionStore;
 use crate::session::SessionManager;
 use crate::vfs::VirtualFileSystem;
+use std::collections::HashMap;
 
 /// 工具执行上下文：工具域（fs / code / symbol / repo_map / knowledge /
 /// evolution）需要的全部依赖与共用操作。
@@ -75,6 +76,18 @@ pub struct ToolContext {
     /// 静默回退进程 cwd（服务安装目录），`apply_patch` / `execute_command`
     /// 会落到意外位置（安全风险）。
     pub default_working_directory: Option<std::path::PathBuf>,
+    /// 上下文状态快照（Agent 每轮组装前刷新，`context_status` 工具只读）。
+    ///
+    /// 为什么是「Agent 写、工具读」的共享槽位：工具层拿不到 `SessionState`
+    /// （见 [`crate::agent::context_report`] 的模块文档），而取数口径必须与压缩
+    /// 判定同源。
+    ///
+    /// **按会话分条**（`session_id → 快照`）：`ToolContext` 是全局共享的一份
+    /// （`ToolRegistry` 只有一个），若只存一条，多会话并发时后写的会覆盖先写的，
+    /// 工具就会报**别的会话**的占用。缺条 = 该会话尚未刷新（首轮 / 未装配策略），
+    /// 工具据此报「还没有真实占用」，而不是给假数字。
+    pub context_report:
+        Arc<Mutex<HashMap<String, crate::agent::context_report::ContextReport>>>,
 }
 
 impl ToolContext {
@@ -92,6 +105,7 @@ impl ToolContext {
             pending_approval_fingerprints: Arc::new(Mutex::new(Vec::new())),
             data_dir: None,
             default_working_directory: None,
+            context_report: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 

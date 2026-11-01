@@ -310,6 +310,10 @@ impl Agent {
                 }
             };
             let messages = self.prepare_wake_context(&state, session_id).await;
+            // 唤醒轮同样刷新上下文快照：这一轮也会调工具（可能就问 `context_status`），
+            // 不刷新的话工具会读到**上一轮**的占用（甚至别的会话的）。
+            self.refresh_context_report(&state, session_id, &self.default_model)
+                .await;
             let parent_id = {
                 let s = state.read().await;
                 s.structured_messages.last().map(|m| m.id.clone())
@@ -822,6 +826,57 @@ impl Agent {
     ///
     /// 返回压缩生成的摘要消息（`Some` = 发生了压缩；`None` = 无需压缩）。
     /// 自动压缩调用方忽略返回值（压缩检查只是副作用）；手动压缩透传给前端。
+    /// 刷新「上下文状态快照」（`context_status` 工具的数据源）。
+    ///
+    /// 调用点固定在**每轮组装完消息之后、跑循环之前**：占用取「最近一次请求的
+    /// prompt 侧 token」，与压缩判定（[`Self::maybe_compress_and_persist`]）同源
+    /// ——同一个 `prompt_side_tokens()`、同一个「跳过压缩点」规则。工具只读快照，
+    /// 自己不复算，所以两个地方不会给出两个数。
+    ///
+    /// 未装配上下文策略（`NullContextPort`）时删除该会话条目：工具据此报
+    /// 「未接入」，而不是拿旧数字糊弄。
+    async fn refresh_context_report(
+        &self,
+        state: &Arc<RwLock<SessionState>>,
+        session_id: &str,
+        model: &str,
+    ) {
+        let (message_count, messages_since_marker, used_tokens) = {
+            let s = state.read().await;
+            let start_idx = s
+                .structured_messages
+                .iter()
+                .rposition(|m| m.compression_marker)
+                .unwrap_or(0);
+            let since = &s.structured_messages[start_idx..];
+            let used = since
+                .iter()
+                .rev()
+                .find(|m| !m.compression_marker && (m.tokens.input > 0 || m.tokens.cache.read > 0))
+                .map(|m| m.prompt_side_tokens())
+                .unwrap_or(0);
+            (s.structured_messages.len(), since.len(), used)
+        };
+        let Some(budget) = self.context_pipeline.compression_budget(used_tokens).await else {
+            self.agent_loop
+                .tool_registry()
+                .set_context_report(session_id, None)
+                .await;
+            return;
+        };
+        let report = crate::agent::context_report::ContextReport {
+            model: model.to_string(),
+            message_count,
+            messages_since_marker,
+            min_messages_before_compression: MIN_MESSAGES_BEFORE_COMPRESSION,
+            budget,
+        };
+        self.agent_loop
+            .tool_registry()
+            .set_context_report(session_id, Some(report))
+            .await;
+    }
+
     pub(crate) async fn maybe_compress_and_persist(
         &self,
         state: &Arc<RwLock<SessionState>>,
@@ -1042,6 +1097,9 @@ impl Agent {
                 .finish_cancelled_early(session_id, state, start, &options.mode)
                 .await;
         };
+        // 刷新上下文快照（`context_status` 工具的数据源）：这一刻 messages 已组装
+        // 完、本轮还没发请求，工具在轮内读到的就是「本轮真实占用的基线」。
+        self.refresh_context_report(state, session_id, model).await;
 
         // 3. Run agent loop (internal persistence in AgentLoop)
         let parent_id = {

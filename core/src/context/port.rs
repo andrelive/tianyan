@@ -45,6 +45,30 @@ use async_trait::async_trait;
 use crate::common::error::Result;
 use crate::common::types::{InjectableContext, Message, StructuredMessage, WorkingDirectory};
 
+/// 上下文预算快照（压缩判定的**只读**入口）。
+///
+/// 数据源是策略侧那份 `CompressorConfig`（窗口 / 阈值 / 临界阈值），占用由调用方
+/// 传入——因为「用了多少」是**会话状态**，不是策略配置。消费方只有两处：
+/// `context_status` 工具（让模型看到真实数字）与「低余量尾部提示」。
+///
+/// 为什么放在 core 而不是直接暴露插件的 `CompressionStatus`：内核不认识策略实现
+/// （ADR-049），端口只传**形状**。
+#[derive(Debug, Clone, Copy)]
+pub struct CompressionBudget {
+    /// 模型上下文窗口（token）。
+    pub context_window: u64,
+    /// 当前占用（最近一次请求的 prompt 侧 token）。
+    pub used_tokens: u64,
+    /// 自动压缩阈值（`context_window × compression_threshold`）。
+    pub threshold_tokens: u64,
+    /// 临界阈值（当前实现取窗口的 80%）。
+    pub critical_tokens: u64,
+    /// 已越过自动压缩阈值。
+    pub should_compress: bool,
+    /// 已越过临界阈值。
+    pub is_critical: bool,
+}
+
 /// 上下文工程端口：可注入上下文的加载 + 会话压缩 + 压缩点摘要提取。
 ///
 /// 实现方必须保持的策略语义（这些是**行为契约**，迁移前后逐字一致）：
@@ -108,6 +132,12 @@ pub trait ContextPort: Send + Sync {
     /// 与 [`Self::compress_for_session`] 写出的包装格式是一对：两者同源，改格式不会
     /// 让提取静默失效。
     fn extract_marker_summary(&self, marker: &StructuredMessage) -> Option<String>;
+
+    /// 上下文预算（窗口 / 占用 / 阈值 / 临界阈值）。
+    ///
+    /// 只读查询，无副作用；`used_tokens` 由调用方给（见 [`CompressionBudget`] 文档）。
+    /// `None` = 该策略没有压缩判定（降级实现），调用方据此不展示「余量」。
+    async fn compression_budget(&self, used_tokens: usize) -> Option<CompressionBudget>;
 }
 
 /// 未装配上下文策略时的内存直通实现（**降级路径，不是功能实现**）。
@@ -159,6 +189,11 @@ impl ContextPort for NullContextPort {
     fn extract_marker_summary(&self, _marker: &StructuredMessage) -> Option<String> {
         // 本实现从不产生压缩点；即便链上存在旧压缩点（曾装配过真实实现），
         // 降级期的压缩也不会发生，返回 `None` 只是「没有可续用的摘要」。
+        None
+    }
+
+    async fn compression_budget(&self, _used_tokens: usize) -> Option<CompressionBudget> {
+        // 降级实现没有压缩判定，也就没有「阈值/余量」可报（工具据此说"未启用压缩"）
         None
     }
 }
