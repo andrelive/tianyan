@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.2.0] - 2026-11-02
+
+> **本版定位**：上下文不再由系统单方面"到点就压"。模型能读到真实占用、能主动压缩并
+> 留下交接，压缩完成后按「目标是否完成」自动续跑 —— 长任务跨压缩点连续推进，不再在
+> 压缩点处停住。产品版本 **1.2.0**（对外 3 段；MSI 内部 `ProductVersion` 为 `1.2.0.0`）。
+
 ### Added
 
 - **上下文自治（ADR-053：模型主动压缩 + 按目标自动续跑）**：模型过去对"还剩多少
@@ -31,6 +37,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **`handoff` 进摘要 prompt**：交接说明作为对话尾部一条「必须原样保留在摘要里」的 user 消息进压缩请求，压缩后模型据此接着干。
   - **`[agent] low_remaining_remind_ratio`**（默认 0.8）：低余量提醒线做成配置项，`0` = 关闭、`1` = 只在越过阈值后提醒。
 
+### Fixed
+
+- **压缩后的续跑唤醒改到会话锁之外生效**：模型 `compress_context` 之后，续跑唤醒原先
+  在轮内发起，而那一轮正持有会话锁 —— `wake_for_continuation` 的 `turn_try_lock` 必然
+  失败、被当成「已有 loop 在跑」静默丢弃（debug 级日志，info 级不可见）。症状是
+  「压缩点已落库、工具返回 `scheduled`，续跑轮永不出现」（隔离实例实测：等 240 秒零新轮）。
+  现在轮内只**登记意图**，由持锁方在释放锁之后 `flush_pending_continuation`（用户轮 /
+  唤醒轮 / 续跑轮三处出口全覆盖），事件顺序仍是 idle → running。回归测试按真实过滤语义
+  构造（锁感知 waker：拿不到会话锁就不计数），锁内唤醒会直接变红。
 
 ## [1.1.1] - 2026-11-01
 
