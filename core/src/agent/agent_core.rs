@@ -1077,19 +1077,14 @@ impl Agent {
         if budget.used_tokens < remind_at {
             return None;
         }
-        let pct = (budget.used_tokens as f64 / budget.threshold_tokens as f64 * 100.0).round();
-        let mut note = format!(
-            "【上下文提示】已用到自动压缩阈值的 {pct}%（当前约 {} / 阈值 {} token）。\
-             任务还长的话可以调 compress_context 压缩并继续（handoff 写清接下来要做什么）；\
-             系统也会在必要时兜底。不要为了省上下文而缩小工作范围。",
-            budget.used_tokens, budget.threshold_tokens
-        );
-        if since_marker < MIN_MESSAGES_BEFORE_COMPRESSION {
-            note.push_str(&format!(
-                "（注意：距上次压缩只有 {since_marker} 条消息，压缩可能因内容太少而被跳过。）"
-            ));
-        }
-        Some(note)
+        // 文案口径在 `context_report::low_remaining_note_text` 一处（百分比 =
+        // **窗口占比**，与界面上下文环同源）——早先这里写「阈值的 N%」，模型转述
+        // 时丢掉限定词说成「上下文已用到 89%」，与环上的 54% 直接打架。
+        Some(crate::agent::context_report::low_remaining_note_text(
+            &budget,
+            since_marker,
+            MIN_MESSAGES_BEFORE_COMPRESSION,
+        ))
     }
 
     /// 刷新「上下文状态快照」（`context_status` 工具的数据源）。

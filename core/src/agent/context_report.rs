@@ -93,6 +93,49 @@ impl ContextReport {
     }
 }
 
+/// 「低余量」尾部提示的文案（`Agent::low_remaining_note` 用）。
+///
+/// **百分比只有一个口径：窗口占比**——与 [`ContextReport::used_pct`]、与界面上下文环
+/// 完全同源。阈值一律用**绝对 token** 表达。
+///
+/// 为什么单独抽成函数、为什么口径必须统一：这段文案是**给模型读的**，而模型会把它
+/// 转述给用户。早先的写法是「已用到自动压缩阈值的 {pct}%」（分母 = 阈值，即窗口的
+/// 60%），模型转述时把「阈值」这个限定词丢掉、直接说「上下文已用到 89%」，而界面
+/// 环显示 54%（分母 = 窗口）—— 同一份占用被两种分母算成两个数（实测：used 536,891
+/// / 窗口 1,000,000 = 54%；/ 阈值 600,000 = 89%），用户直接质疑「才 54% 怎么就到
+/// 89%」。分母换成窗口之后，模型怎么转述都不会与环矛盾。
+///
+/// 紧迫感靠绝对余量（「还差 N 触发」）表达，不靠第二个百分比。
+pub fn low_remaining_note_text(
+    budget: &CompressionBudget,
+    since_marker: usize,
+    min_messages: usize,
+) -> String {
+    let window = budget.context_window.max(1);
+    let pct = (budget.used_tokens as f64 / window as f64 * 100.0).round() as u64;
+    let to_threshold = budget.threshold_tokens.saturating_sub(budget.used_tokens);
+    let threshold_note = if to_threshold == 0 {
+        format!("已越过自动压缩阈值 {} token", budget.threshold_tokens)
+    } else {
+        format!(
+            "自动压缩阈值 {} token（还差 {} 触发）",
+            budget.threshold_tokens, to_threshold
+        )
+    };
+    let mut note = format!(
+        "【上下文提示】上下文窗口已用 {pct}%（约 {} / {} token）；{threshold_note}。\
+         任务还长的话可以调 compress_context 压缩并继续（handoff 写清接下来要做什么）；\
+         系统也会在必要时兜底。不要为了省上下文而缩小工作范围。",
+        budget.used_tokens, budget.context_window
+    );
+    if since_marker < min_messages {
+        note.push_str(&format!(
+            "（注意：距上次压缩只有 {since_marker} 条消息，压缩可能因内容太少而被跳过。）"
+        ));
+    }
+    note
+}
+
 #[cfg(test)]
 mod tests {
     //! 口径单测：占用百分比、余量、可压缩前置、hint 分档。
@@ -181,5 +224,52 @@ mod tests {
         assert_eq!(v["now"], "2026-11-01 20:00:00 +08:00", "当前时间随快照带出");
         assert!(v["hint"].as_str().is_some());
         assert!(v["model"].as_str().is_some());
+    }
+
+    /// 回归（用户实测：「这个会话才 54% 的上下文，怎么就到了 89%？」）。
+    ///
+    /// 事故数字：窗口 1,000,000 / 阈值 600,000 / 实测占用 536,891。
+    /// 窗口占比 54%（界面环同源）、阈值占比 89%（旧文案的分母）—— 旧文案让模型
+    /// 说成「上下文已用到 89%」，与环矛盾。现在文案只给窗口口径。
+    #[test]
+    fn low_remaining_note_uses_window_pct_only() {
+        let b = CompressionBudget {
+            context_window: 1_000_000,
+            used_tokens: 536_891,
+            threshold_tokens: 600_000,
+            critical_tokens: 800_000,
+            should_compress: false,
+            is_critical: false,
+        };
+        let note = low_remaining_note_text(&b, 20, 6);
+        assert!(
+            note.contains("窗口已用 54%"),
+            "百分比必须是窗口口径（与界面环一致）：{note}"
+        );
+        assert!(
+            !note.contains("89%"),
+            "不能再出现「阈值的 89%」——模型转述时会丢掉限定词：{note}"
+        );
+        assert!(
+            note.contains("600000") && note.contains("还差 63109"),
+            "阈值与余量用绝对 token：{note}"
+        );
+    }
+
+    /// 越过阈值后文案切换为「已越过」，窗口占比照旧（不给第二个百分比）。
+    #[test]
+    fn low_remaining_note_marks_over_threshold() {
+        let b = CompressionBudget {
+            context_window: 1_000_000,
+            used_tokens: 700_000,
+            threshold_tokens: 600_000,
+            critical_tokens: 800_000,
+            should_compress: true,
+            is_critical: false,
+        };
+        let note = low_remaining_note_text(&b, 20, 6);
+        assert!(note.contains("窗口已用 70%"), "{note}");
+        assert!(note.contains("已越过自动压缩阈值"), "{note}");
+        assert!(!note.contains("还差"), "已越阈不应再给「还差」：{note}");
     }
 }

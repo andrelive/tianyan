@@ -5,6 +5,24 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- **「上下文已用到 89%」与界面环 54% 打架**：低余量的尾部提示原写「已用到自动压缩
+  阈值的 89%」——分母是**阈值**（窗口的 60% = 600K）。模型转述时丢掉「阈值」这个
+  限定词，直接说成「上下文已用到 89%」，而界面上下文环显示 54%（分母 = 窗口 1M）：
+  同一份占用被两种分母算成两个数（实测 used 536,891 → 窗口 54% / 阈值 89%），用户
+  直接质疑「才 54% 怎么就到 89%」。现在提示文案只有**一个百分比口径：窗口占比**
+  （与 `context_status.used_pct`、与界面环同源），阈值与余量改用**绝对 token**
+  （「自动压缩阈值 600000 token（还差 63109 触发）」）。文案生成集中到
+  `context_report::low_remaining_note_text`，2 项单测锁定「窗口已用 X%」且不再出现
+  第二个百分比。
+- **压缩日志的「原始大小」标明估算并补上实测**：`上下文压缩完成` 原只打
+  `original_tokens`（`TokenEstimator` 按字符 / 结构比推算，插件侧拿不到 tokenizer），
+  长会话里与实测能差一倍以上（实测 838,986 估 / 536,891 实），排查时容易被这个数字
+  带偏。现在两个都打（`original_tokens_est` / `original_tokens_actual`）。
+
 ## [1.2.1] - 2026-11-02
 
 > **本版定位**：把「切走再切回会话」这条最高频路径从「每次重拉一页」改成**本地投影 +

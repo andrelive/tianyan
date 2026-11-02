@@ -204,16 +204,23 @@ impl ContextPipeline {
             // 生产上表现为"上下文超阈值但压缩不生效"的静默失败（C2）。
             tracing::warn!(
                 compressed = result.compressed_count,
-                original_tokens = result.original_tokens,
+                original_tokens_est = result.original_tokens,
+                original_tokens_actual = recent_input_tokens,
                 "压缩摘要为空（模型空响应），本次压缩丢弃，下轮重试"
             );
             return Ok(None);
         }
 
         *conversation = result.messages;
+        // 两个「原大小」都打：`original_tokens` 是**估算**（`TokenEstimator` 按字符 /
+        // 结构比推算——插件侧拿不到 tokenizer），`recent_input_tokens` 是**实测**
+        // （最近一次请求的 prompt 侧 token，与压缩判定、界面环同源）。长会话里两者
+        // 能差一倍以上（实测 838,986 估 vs 536,891 实），只打估算值会让人以为
+        // 「上下文有 84 万」，排查时被这个数字带偏。
         tracing::info!(
             compressed = result.compressed_count,
-            original_tokens = result.original_tokens,
+            original_tokens_est = result.original_tokens,
+            original_tokens_actual = recent_input_tokens,
             compressed_tokens = result.compressed_tokens,
             "上下文压缩完成"
         );
