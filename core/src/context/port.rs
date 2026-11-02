@@ -118,6 +118,9 @@ pub trait ContextPort: Send + Sync {
     /// - `recent_input_tokens` — 真实上下文占用（最近一次请求的 prompt 侧 token）
     /// - `force` — 用户手动压缩：跳过窗口阈值
     /// - `existing_summary` — 本会话已有摘要（增量合并；`None` = 全量摘要）
+    /// - `handoff` — 交接说明（模型在 `compress_context(handoff: …)` 里写的「接下来
+    ///   做什么 / 已完成什么 / 注意什么」）。实现方**必须**把它作为「必须保留项」
+    ///   带进摘要：压缩后模型就是靠它接着干，丢了等于让它重新摸索。
     async fn compress_for_session(
         &self,
         messages: &[Message],
@@ -125,6 +128,7 @@ pub trait ContextPort: Send + Sync {
         recent_input_tokens: usize,
         force: bool,
         existing_summary: Option<&str>,
+        handoff: Option<&str>,
     ) -> Option<StructuredMessage>;
 
     /// 从压缩点消息提取**纯摘要文本**（剥去展示包装；无有效内容返回 `None`）。
@@ -182,6 +186,7 @@ impl ContextPort for NullContextPort {
         _recent_input_tokens: usize,
         _force: bool,
         _existing_summary: Option<&str>,
+        _handoff: Option<&str>,
     ) -> Option<StructuredMessage> {
         None
     }

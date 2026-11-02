@@ -42,6 +42,21 @@ pub struct CompressionOutcome {
     pub summary_usage: TokenUsage,
 }
 
+/// 把「交接说明」拼成对话尾部的一条**必须保留**的 user 消息。
+///
+/// 抽成纯函数只为可测：它决定「压缩后模型还能不能接着干」，而压缩请求本身要打
+/// 一次真实 LLM（测起来贵）。摘要模型很容易把这类附加文本当闲聊略过，所以措辞
+/// 用「必须原样保留在摘要里」。
+fn with_handoff(messages: &[Message], handoff: Option<&str>) -> Vec<Message> {
+    let mut out = messages.to_vec();
+    if let Some(h) = handoff.map(str::trim).filter(|h| !h.is_empty()) {
+        out.push(Message::user(format!(
+            "[交接说明 · 必须原样保留在摘要里] 压缩后要继续完成的工作：{h}"
+        )));
+    }
+    out
+}
+
 impl ContextPipeline {
     /// 创建新的上下文管线。
     ///
@@ -221,8 +236,11 @@ impl ContextPipeline {
         recent_input_tokens: usize,
         force: bool,
         existing_summary: Option<&str>,
+        handoff: Option<&str>,
     ) -> Option<StructuredMessage> {
-        let mut conversation = messages.to_vec();
+        // 交接说明作为**尾部一条 user 消息**进对话（见 `with_handoff`）：摘要 prompt
+        // 的形态是「对以下对话做摘要」+ 对话正文，尾部这条自然会被读到，不必改模板。
+        let mut conversation = with_handoff(messages, handoff);
 
         let outcome = match self
             .compress_if_needed(
@@ -408,6 +426,7 @@ impl tianyan::context::ContextPort for ContextPipeline {
         recent_input_tokens: usize,
         force: bool,
         existing_summary: Option<&str>,
+        handoff: Option<&str>,
     ) -> Option<StructuredMessage> {
         ContextPipeline::compress_for_session(
             self,
@@ -416,6 +435,7 @@ impl tianyan::context::ContextPort for ContextPipeline {
             recent_input_tokens,
             force,
             existing_summary,
+            handoff,
         )
         .await
     }
@@ -913,14 +933,14 @@ mod tests {
         // 非强制：100 token << 50 万阈值 → 不压缩
         let conv_auto = conv.clone();
         let summary_auto = pipeline
-            .compress_for_session(&conv_auto, "s1", 100, false, None)
+            .compress_for_session(&conv_auto, "s1", 100, false, None, None)
             .await;
         assert!(summary_auto.is_none(), "自动压缩低于阈值不应触发");
 
         // 强制（手动）：跳过阈值 → 压缩
         let conv_manual = conv.clone();
         let summary_manual = pipeline
-            .compress_for_session(&conv_manual, "s1", 100, true, None)
+            .compress_for_session(&conv_manual, "s1", 100, true, None, None)
             .await;
         assert!(summary_manual.is_some(), "手动压缩（force）应跳过窗口阈值");
     }
@@ -964,7 +984,7 @@ mod tests {
             Message::assistant("F"),
         ];
         let sm = pipeline
-            .compress_for_session(&conv, "s1", 100, true, None)
+            .compress_for_session(&conv, "s1", 100, true, None, None)
             .await
             .expect("手动压缩应触发");
 
@@ -1028,5 +1048,33 @@ mod tests {
             conversation[0].content, before[0].content,
             "对话内容保持原状"
         );
+    }
+}
+
+#[cfg(test)]
+mod handoff_tests {
+    //! 交接说明必须进压缩请求：压缩后模型靠它接着干，丢了等于让它重新摸索。
+    use super::with_handoff;
+    use tianyan::Message;
+
+    #[test]
+    fn handoff_is_appended_as_tail_message() {
+        let msgs = vec![Message::user("做 A"), Message::user("做 B")];
+        let out = with_handoff(&msgs, Some("继续做 C，注意别动 D"));
+        assert_eq!(out.len(), 3, "尾部多一条交接说明");
+        assert!(out[2].content.contains("继续做 C"), "内容必须原样带上");
+        assert!(
+            out[2].content.contains("必须原样保留"),
+            "措辞要拦住摘要模型把它当闲聊"
+        );
+    }
+
+    #[test]
+    fn no_handoff_keeps_conversation_untouched() {
+        let msgs = vec![Message::user("做 A")];
+        for h in [None, Some(""), Some("   ")] {
+            let out = with_handoff(&msgs, h);
+            assert_eq!(out.len(), 1, "无交接说明时一字不加（{h:?}）");
+        }
     }
 }

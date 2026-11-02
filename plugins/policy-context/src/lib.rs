@@ -235,7 +235,7 @@ mod pipeline_tests {
     async fn test_pipeline_port_smoke() {
         let port = pipeline(&services(None));
         assert!(
-            port.compress_for_session(&[], "s1", 0, false, None)
+            port.compress_for_session(&[], "s1", 0, false, None, None)
                 .await
                 .is_none(),
             "低于阈值不该压缩"

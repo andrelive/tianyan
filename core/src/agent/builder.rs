@@ -809,6 +809,7 @@ mod tests {
             _recent_input_tokens: usize,
             _force: bool,
             _existing_summary: Option<&str>,
+            _handoff: Option<&str>,
         ) -> Option<StructuredMessage> {
             None
         }
@@ -948,7 +949,7 @@ mod tests {
         assert!(
             agent
                 .context_pipeline
-                .compress_for_session(&[], "s1", usize::MAX, true, None)
+                .compress_for_session(&[], "s1", usize::MAX, true, None, None)
                 .await
                 .is_none(),
             "降级实现永不压缩（force 也不压缩）"

@@ -1346,7 +1346,7 @@ impl AgentLoop {
         }
         let split = messages.len() - KEEP_TAIL;
         let summary = compressor
-            .compress_for_session(&messages[..split], session_id, used, false, None)
+            .compress_for_session(&messages[..split], session_id, used, false, None, None)
             .await;
         let Some(marker) = summary else {
             // 摘要为空（模型空响应）：保持原上下文，下一轮再试（不阻塞任务）

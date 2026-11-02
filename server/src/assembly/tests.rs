@@ -567,6 +567,7 @@ impl ContextPort for StubContextPort {
         _recent_input_tokens: usize,
         _force: bool,
         _existing_summary: Option<&str>,
+        _handoff: Option<&str>,
     ) -> Option<tianyan::common::types::StructuredMessage> {
         None
     }

@@ -423,7 +423,7 @@ impl Agent {
                     .handle_compression_request(&state, session_id, &self.default_model)
                     .await;
             } else {
-                self.maybe_compress_and_persist(&state, session_id, false)
+                self.maybe_compress_and_persist(&state, session_id, false, None)
                     .await;
             }
             // 收尾：仅未取消时清理槽（与用户轮一致——已取消时保留标志，
@@ -917,7 +917,7 @@ impl Agent {
             tracing::info!(session = %session_id, handoff = %h, "压缩请求带交接说明");
         }
         let compressed = self
-            .maybe_compress_and_persist(state, session_id, true)
+            .maybe_compress_and_persist(state, session_id, true, request.handoff.as_deref())
             .await
             .is_some();
         if !compressed {
@@ -1097,6 +1097,7 @@ impl Agent {
         state: &Arc<RwLock<SessionState>>,
         session_id: &str,
         force: bool,
+        handoff: Option<&str>,
     ) -> Option<StructuredMessage> {
         let (messages_since_marker, existing_summary): (Vec<StructuredMessage>, Option<String>) = {
             let s = state.read().await;
@@ -1150,6 +1151,7 @@ impl Agent {
                 recent_input_tokens,
                 force,
                 existing_summary.as_deref(),
+                handoff,
             )
             .await?;
         let summary_sm = summary_sm.clone();
@@ -1294,7 +1296,7 @@ impl Agent {
                 //（下次自动压缩重算，幂等）；轮尚未启动 → 终止本轮。
                 let compressed = cancellable(
                     cancel,
-                    self.maybe_compress_and_persist(state, session_id, true),
+                    self.maybe_compress_and_persist(state, session_id, true, None),
                 )
                 .await;
                 if compressed.is_none() {
@@ -1382,7 +1384,7 @@ impl Agent {
             // 幂等）；轮结果（回答）已交付/已落库，不受影响。
             let _ = cancellable(
                 cancel,
-                self.maybe_compress_and_persist(state, session_id, false),
+                self.maybe_compress_and_persist(state, session_id, false, None),
             )
             .await;
         }
@@ -2293,7 +2295,7 @@ mod tests {
         }
 
         let summary = agent
-            .maybe_compress_and_persist(&state, "session-1", false)
+            .maybe_compress_and_persist(&state, "session-1", false, None)
             .await;
         assert!(summary.is_some(), "token 超阈值且消息数足够时应发生压缩");
         assert!(
@@ -2398,7 +2400,7 @@ mod tests {
         }
 
         let summary = agent
-            .maybe_compress_and_persist(&state, "session-1", false)
+            .maybe_compress_and_persist(&state, "session-1", false, None)
             .await;
         assert!(summary.is_none(), "消息不足不应压缩");
         assert!(
@@ -2444,7 +2446,7 @@ mod tests {
         }
 
         let summary = agent
-            .maybe_compress_and_persist(&state, "session-1", false)
+            .maybe_compress_and_persist(&state, "session-1", false, None)
             .await;
         assert!(
             summary.is_none(),
@@ -2497,7 +2499,7 @@ mod tests {
         }
 
         let summary = agent
-            .maybe_compress_and_persist(&state, "session-1", false)
+            .maybe_compress_and_persist(&state, "session-1", false, None)
             .await;
         assert!(
             summary.is_none(),
@@ -2624,7 +2626,7 @@ mod tests {
         }
 
         let summary = agent
-            .maybe_compress_and_persist(&state, "session-1", false)
+            .maybe_compress_and_persist(&state, "session-1", false, None)
             .await;
         let summary = summary.expect("真实占用 5100 > 触发线 5000：应发生压缩");
         assert!(summary.compression_marker, "压缩摘要消息应带压缩标记");
@@ -2678,7 +2680,7 @@ mod tests {
         }
 
         let summary = agent
-            .maybe_compress_and_persist(&state, "session-1", false)
+            .maybe_compress_and_persist(&state, "session-1", false, None)
             .await;
         assert!(summary.is_some(), "应触发压缩");
 
@@ -2789,7 +2791,7 @@ mod tests {
         assert_eq!(ws.message_count().await, 7);
 
         let summary = agent
-            .maybe_compress_and_persist(&state, "session-1", false)
+            .maybe_compress_and_persist(&state, "session-1", false, None)
             .await;
         assert!(summary.is_some(), "token 超阈值且消息数足够时应发生压缩");
 
@@ -2835,7 +2837,7 @@ mod tests {
         let state = agent.load_and_build_state("session-1").await.unwrap();
         let ws = agent.working_sets.get("session-1").await.unwrap();
         let summary = agent
-            .maybe_compress_and_persist(&state, "session-1", false)
+            .maybe_compress_and_persist(&state, "session-1", false, None)
             .await;
         assert!(summary.is_none(), "消息数不足不应压缩");
         assert_eq!(ws.start_seq(), 0, "未压缩不得收缩段");

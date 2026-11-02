@@ -437,7 +437,7 @@ impl AgentCoordinator for Agent {
             .with_session_exclusive(session_id, |ws| async move {
                 let state = ws.state();
                 Ok(self
-                    .maybe_compress_and_persist(&state, session_id, true)
+                    .maybe_compress_and_persist(&state, session_id, true, None)
                     .await)
             })
             .await

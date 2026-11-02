@@ -2302,6 +2302,7 @@ impl ContextPort for StubCompressor {
         _recent_input_tokens: usize,
         _force: bool,
         _existing: Option<&str>,
+        _handoff: Option<&str>,
     ) -> Option<StructuredMessage> {
         Some(StructuredMessage::system("s", "[对话摘要] SUMMARY-TEXT"))
     }
