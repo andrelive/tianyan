@@ -27,6 +27,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     需要多轮先建 `goal`、真紧张就压缩；占用超过阈值 80% 时在**历史消息之后**追加一句
     提示（与待办摘要同位置，不动 system 前缀）。
   - `AgentBuilder::with_goal_store` + server 装配注入（与 `goal` 工具 / REST API 同一实例）。
+  - **子代理的轮边界压缩**：子代理走 `run_stream` 直连、不经 `Agent::run_agent_turn`，长委托把工具结果一路堆到撞窗口时上游是**直接 400**。现在轮边界检查占用，越阈值就把前缀换成摘要、尾部保留 6 条（主 agent 不装，行为零变化）。
+  - **`handoff` 进摘要 prompt**：交接说明作为对话尾部一条「必须原样保留在摘要里」的 user 消息进压缩请求，压缩后模型据此接着干。
+  - **`[agent] low_remaining_remind_ratio`**（默认 0.8）：低余量提醒线做成配置项，`0` = 关闭、`1` = 只在越过阈值后提醒。
 
 
 ## [1.1.1] - 2026-11-01
