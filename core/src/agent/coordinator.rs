@@ -295,7 +295,7 @@ impl AgentCoordinator for Agent {
         let start = Instant::now();
 
         // ADR-013 串行化：单会话同一时刻只有一个活动轮（用户轮 / 唤醒轮互斥）
-        let _turn_guard = self.turn_guard(session_id).await;
+        let turn_guard = self.turn_guard(session_id).await;
 
         // 模型选择解析：请求参数 > 会话级选择 > Agent 默认配置（session.rs 单点合并）
         let header_selection = self.session_model_selection(session_id).await;
@@ -332,6 +332,10 @@ impl AgentCoordinator for Agent {
             )
             .await?;
 
+        // 锁释放后才 flush「压缩后续跑」：锁内唤醒会被 `turn_try_lock` 判为
+        // 「已有 loop 在跑」而丢弃（ADR-053 实测 bug）。
+        drop(turn_guard);
+        self.flush_pending_continuation(session_id).await;
         Ok(response)
     }
 
@@ -350,7 +354,7 @@ impl AgentCoordinator for Agent {
         // 锁必须先于状态加载：并发轮（如唤醒轮进行中又来用户消息）若在锁外
         // 加载状态，会拿到前一轮完成前的旧快照——上下文缺失前一轮消息，
         // 且状态与库分叉。非流式路径（process_message）已是锁内加载，此处对齐。
-        let _turn_guard = self.turn_guard(session_id).await;
+        let turn_guard = self.turn_guard(session_id).await;
 
         // 模型选择解析：请求参数 > 会话级选择 > Agent 默认配置（session.rs 单点合并）
         let header_selection = self.session_model_selection(session_id).await;
@@ -422,6 +426,10 @@ impl AgentCoordinator for Agent {
         // ADR-035 §9：轮状态 idle（与开头 running 配对）
         sender.send_turn_state(false, false).await;
 
+        // idle 之后再放锁、再 flush：前端先看到这一轮收尾，再看到下一轮开始
+        // （顺序与唤醒轮一致）；锁内唤醒会被 `turn_try_lock` 丢弃。
+        drop(turn_guard);
+        self.flush_pending_continuation(session_id).await;
         Ok(())
     }
 

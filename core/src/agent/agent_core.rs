@@ -151,6 +151,18 @@ pub struct Agent {
     /// 转——每轮压缩都要重发完整 prompt（真实花钱）。保险丝 60 次 / 1 小时，
     /// 正常任务碰不到。
     pub(crate) self_wake_chains: Arc<TokioMutex<std::collections::HashMap<String, (u32, Instant)>>>,
+    /// 「压缩已完成、待在**轮边界**续跑」的会话集合。
+    ///
+    /// 为什么不在压缩处理点直接唤醒：那一刻**当前轮仍持有会话锁**
+    /// （`process_message_stream` / `process_wake_locked` 全程持锁），
+    /// [`AgentWakeForwarder::wake_for_continuation`] 里的 `turn_try_lock` 必然
+    /// 失败并被当成「已有 loop 在跑」静默跳过 —— 结果是「压缩点已落库、续跑轮
+    /// 永不出现」（ADR-053 实测：`compress_context` 返回 `scheduled`、会话里
+    /// 出现压缩点，之后 240 秒无新轮）。
+    ///
+    /// 改为「轮内登记意图 + 锁释放后 flush」：不依赖重试与超时，事件顺序仍是
+    /// idle → running（前端先看到这一轮收尾，再看到下一轮开始）。
+    pub(crate) pending_continuation: Arc<TokioMutex<std::collections::HashSet<String>>>,
     /// 低余量提醒线（占自动压缩阈值的比例；由 `[agent] low_remaining_remind_ratio`
     /// 经 builder 注入，默认 0.8）。`0` = 不提醒。
     pub(crate) low_remaining_remind_ratio: f32,
@@ -196,6 +208,7 @@ impl Agent {
             goal_store: None,
             continuation_waker: Arc::new(TokioMutex::new(None)),
             self_wake_chains: Arc::new(TokioMutex::new(std::collections::HashMap::new())),
+            pending_continuation: Arc::new(TokioMutex::new(std::collections::HashSet::new())),
             low_remaining_remind_ratio: 0.8,
         }
     }
@@ -309,8 +322,11 @@ impl Agent {
     /// 任务再调用本方法）——唤醒轮期间事件实时流出；若先 await 本方法再
     /// 消费，输出会积压到轮结束（超过通道缓冲还会死锁：发送端等消费、
     pub(crate) async fn process_wake(&self, session_id: &str, sender: StreamEventSender) {
-        let _turn = self.turn_guard(session_id).await;
+        let turn = self.turn_guard(session_id).await;
         self.process_wake_locked(session_id, sender).await;
+        // 锁释放后才 flush 续跑（唤醒轮内也可能请求压缩；见 `pending_continuation`）
+        drop(turn);
+        self.flush_pending_continuation(session_id).await;
     }
 
     /// 唤醒轮主体（ADR-035 §4：**调用方须已持有会话锁**）。
@@ -391,7 +407,10 @@ impl Agent {
                         // 仍保留。
                         tracing::info!(session = %session_id, "唤醒轮空输出（模型无需回复/仅思考）");
                     } else {
-                        tracing::info!(session = %session_id, "唤醒轮完成：后台任务结果已汇总");
+                        // 唤醒轮的两种来源：后台任务全部完成（含子代理报告）、
+                        // 压缩后的续跑。日志不写死「后台任务」——否则续跑轮在
+                        // 日志里被读成「后台任务汇总」（实测排查时误导过）。
+                        tracing::info!(session = %session_id, "唤醒轮完成（后台任务汇总 / 压缩后续跑）");
                     }
                 }
                 Ok(AgentLoopResult::Cancelled { .. }) => {
@@ -428,10 +447,9 @@ impl Agent {
             //
             // 模型主动请求（`compress_context`）优先：唤醒轮里它同样可能请求压缩，
             // 处理完若目标仍未完成就再续一轮（自唤醒链的常见形态）。
-            let mut continue_after_compression = false;
             if self.has_compression_request(session_id) {
-                continue_after_compression = self
-                    .handle_compression_request(&state, session_id, &self.default_model)
+                // 续跑意图在内部**登记**，锁外由调用方 flush（本方法在持锁内运行）
+                self.handle_compression_request(&state, session_id, &self.default_model)
                     .await;
             } else {
                 self.maybe_compress_and_persist(&state, session_id, false, None)
@@ -446,11 +464,6 @@ impl Agent {
                     .await;
             }
             sender.send_turn_state(false, true).await;
-            // 续跑放在 idle 之后发：前端先看到这一轮收尾，再看到下一轮开始
-            // （与用户轮同一顺序语义）
-            if continue_after_compression {
-                self.wake_after_compression(session_id).await;
-            }
             return;
         }
         tracing::warn!(
@@ -901,18 +914,23 @@ impl Agent {
             .is_pending(session_id)
     }
 
-    /// 处理模型主动请求的压缩，返回**是否应该自唤醒继续**。
+    /// 处理模型主动请求的压缩，并把**续跑意图登记**到
+    /// [`Self::pending_continuation`]（由轮边界 flush 生效）。
     ///
     /// 三段硬顺序：
     /// 1. 真正压缩（`force = true`：模型自己判断的，跳过窗口阈值；仍受「≥6 条消息」保护）；
     /// 2. 压缩没发生（`None`：消息不足 / 摘要为空）→ **不续跑**——拿旧上下文继续只会白跑；
-    /// 3. goal 判据（有 active goal 才续跑）+ 保险丝（60 次 / 1 小时）。
+    /// 3. goal 判据（有 active goal 才续跑）+ 保险丝（60 次 / 1 小时）→ **登记**。
+    ///
+    /// 为什么登记而不是当场唤醒：本方法在**轮内**被调用（会话锁被当前轮持有），
+    /// 直接唤醒会被 `turn_try_lock` 挡住（见 [`Self::pending_continuation`] 的
+    /// 文档）。登记后由持有锁的一方在 `drop(turn_guard)` 之后 flush。
     async fn handle_compression_request(
         &self,
         state: &Arc<RwLock<SessionState>>,
         session_id: &str,
         model: &str,
-    ) -> bool {
+    ) {
         let Some(request) = self
             .agent_loop
             .tool_registry()
@@ -920,7 +938,7 @@ impl Agent {
             .compression_requests
             .take(session_id)
         else {
-            return false;
+            return;
         };
         // 交接说明目前只记日志：把它拼进摘要 prompt 需要扩 `ContextPort` 契约
         // （`compress_for_session` 加参数），留作后续；摘要本身的增量合并已能保住主线。
@@ -936,22 +954,42 @@ impl Agent {
                 session = %session_id,
                 "主动压缩未发生（消息不足或摘要为空），不续跑"
             );
-            return false;
+            return;
         }
         // 压缩后立即刷新快照：模型下一轮读到的余量必须是压缩后的数字
         self.refresh_context_report(state, session_id, model).await;
         if !self.has_active_goal(session_id).await {
             tracing::info!(session = %session_id, "压缩完成，但没有 active goal → 不自动续跑");
-            return false;
+            return;
         }
         if !self.allow_self_wake(session_id).await {
             tracing::warn!(
                 session = %session_id,
                 "自唤醒保险丝触发（60 次 / 1 小时），停止续跑"
             );
-            return false;
+            return;
         }
-        true
+        self.queue_continuation(session_id).await;
+    }
+
+    /// 登记「压缩完成后续跑」的意图（轮内调用，不唤醒）。
+    async fn queue_continuation(&self, session_id: &str) {
+        self.pending_continuation
+            .lock()
+            .await
+            .insert(session_id.to_string());
+    }
+
+    /// 轮边界 flush：**会话锁已释放**之后调用，把登记的续跑意图交给唤醒器。
+    ///
+    /// 调用点全部是「持锁函数的出口」：`process_message` /
+    /// `process_message_stream` / `process_wake`，以及唤醒轮 spawn 任务在
+    /// `drop(turn_guard)` 之后。放在锁外是硬要求——锁内唤醒会被
+    /// `turn_try_lock` 判为「已有 loop 在跑」而丢弃（ADR-053 实测 bug）。
+    pub(crate) async fn flush_pending_continuation(&self, session_id: &str) {
+        if self.pending_continuation.lock().await.remove(session_id) {
+            self.wake_after_compression(session_id).await;
+        }
     }
 
     /// 本会话是否有 active goal。
@@ -1390,10 +1428,11 @@ impl Agent {
         //
         // 顺序：先看有没有 `compress_context` 请求（force 压缩 + 可能续跑），没有
         // 再走原来的阈值检查。两条都跑只会让第二次徒劳（消息已不足 6 条）。
-        let mut continue_after_compression = false;
         if self.has_compression_request(session_id) {
-            continue_after_compression = self
-                .handle_compression_request(state, session_id, model)
+            // 续跑意图在内部**登记**：本方法在轮内（会话锁被当前轮持有），
+            // 此处唤醒必然被 `turn_try_lock` 判为「已有 loop 在跑」而丢弃。
+            // 由 `process_message*` 在 `drop(turn_guard)` 之后 flush。
+            self.handle_compression_request(state, session_id, model)
                 .await;
         } else if options.do_compress {
             // 压缩阶段可取消（结构性取消）：取消先到 → 跳过压缩（摘要下轮重算，
@@ -1404,12 +1443,6 @@ impl Agent {
             )
             .await;
         }
-        // 压缩成功、目标仍未完成 → 续跑（`wake_for_continuation` 绕过「无未消费
-        // 新消息就不唤醒」的过滤；幂等性由会话锁保证）
-        if continue_after_compression {
-            self.wake_after_compression(session_id).await;
-        }
-
         Ok(response)
     }
 
@@ -1755,7 +1788,7 @@ impl TaskWaker for AgentWakeForwarder {
         let session_id = session_id.to_string();
         tokio::spawn(async move {
             // 持锁跨越整个唤醒轮：与 loop 收尾判定同一临界区（无丢通知窗口）
-            let _guard = guard;
+            let turn_guard = guard;
             // 统一转发器：通道在唤醒轮**开始前**创建并立即开始消费——
             // 唤醒轮期间事件实时流出（此前先 await 整个唤醒轮再取 rx：
             // 输出积压到轮结束才转发，超过通道缓冲还会死锁——1151680）。
@@ -1764,6 +1797,10 @@ impl TaskWaker for AgentWakeForwarder {
             // 轮结束（sender 全部释放）→ 消费任务收尾：等待句柄确保
             // 尾部事件已送达（唤醒轮输出不丢最后一块）。
             agent.process_wake_locked(&session_id, sender).await;
+            // 唤醒轮里模型同样可能请求压缩续跑：flush 必须在**放锁之后**
+            // （锁内唤醒会被 `turn_try_lock` 丢弃；ADR-053 实测）。
+            drop(turn_guard);
+            agent.flush_pending_continuation(&session_id).await;
             let _ = forward_handle.await;
         });
     }
@@ -1789,10 +1826,13 @@ impl TaskWaker for AgentWakeForwarder {
         let deliver = self.deliver.clone();
         let session_id = session_id.to_string();
         tokio::spawn(async move {
-            let _guard = guard;
+            let turn_guard = guard;
             let (sender, forward_handle) =
                 spawn_stream_forwarder(session_id.clone(), mapper, deliver);
             agent.process_wake_locked(&session_id, sender).await;
+            // 续跑轮自身也可能再次请求压缩 → 同样只在放锁后 flush
+            drop(turn_guard);
+            agent.flush_pending_continuation(&session_id).await;
             let _ = forward_handle.await;
         });
     }
@@ -2386,6 +2426,169 @@ mod tests {
         assert!(
             text.contains("唤醒轮压缩摘要"),
             "压缩点内容应来自压缩调用: {text}"
+        );
+    }
+
+    /// 复刻 `AgentWakeForwarder` 的过滤语义：**拿不到会话锁 = 已有 loop 在跑 → 丢弃**。
+    ///
+    /// 这是下面两个续跑回归测试的判别力来源：只有「flush 发生在
+    /// `drop(turn_guard)` 之后」才能计到数，锁内唤醒一律计 0（与真实实现同构，
+    /// 所以修复前的代码会让它们变红）。
+    struct TurnLockAwareWaker {
+        agent: std::sync::Weak<Agent>,
+        hits: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl TaskWaker for TurnLockAwareWaker {
+        async fn wake(&self, _session_id: &str) {}
+
+        async fn wake_for_continuation(&self, session_id: &str) {
+            let Some(agent) = self.agent.upgrade() else {
+                return;
+            };
+            if agent.turn_try_lock(session_id).await.is_some() {
+                self.hits.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
+        }
+    }
+
+    /// 构造「真实会话存储 + 可选 active goal + 锁感知唤醒器」的 Agent。
+    ///
+    /// 返回的 `TempDir` 必须由调用方持有（goal 落盘目录，drop 即清理）。
+    async fn make_continuation_agent(
+        with_goal: bool,
+    ) -> (
+        Arc<Agent>,
+        Arc<std::sync::atomic::AtomicUsize>,
+        tempfile::TempDir,
+    ) {
+        let db = Database::open_in_memory().unwrap();
+        db.init_schemas().await.unwrap();
+        let store = crate::session::store::SessionStore::new(db).unwrap();
+        store
+            .create(
+                "session-1",
+                &crate::session::types::SessionHeader::default(),
+            )
+            .await
+            .unwrap();
+        // ≥ MIN_MESSAGES_BEFORE_COMPRESSION(6) 条：强制压缩的前提
+        for _ in 0..7 {
+            let sm = ContextAssembler::message_to_structured(
+                &Message::user("历史消息"),
+                "session-1",
+                None,
+                None,
+            );
+            store.append_message("session-1", &sm).await.unwrap();
+        }
+
+        let mut compress_mock = MockChatService::new();
+        compress_mock
+            .expect_chat_completion()
+            .returning(|_| Ok(response_with(Message::assistant("压缩摘要"))));
+        let mut turn_mock = MockChatService::new();
+        turn_mock
+            .expect_chat_completion()
+            .returning(|_| Ok(response_with(Message::assistant("本轮完成"))));
+
+        let dir = tempfile::tempdir().unwrap();
+        let mut agent = make_agent_with_working_sets(
+            store,
+            turn_mock,
+            compress_mock,
+            CompressionConfig {
+                context_window: 2000,
+                compression_threshold: 1.0,
+                ..CompressionConfig::default()
+            },
+        );
+        if with_goal {
+            let goal_store = Arc::new(crate::goals::GoalStore::new(dir.path()));
+            goal_store
+                .create(
+                    "长任务".to_string(),
+                    None,
+                    None,
+                    Some("session-1".to_string()),
+                )
+                .await
+                .unwrap();
+            agent = agent.with_goal_store(goal_store);
+        }
+
+        let agent = Arc::new(agent);
+        let hits = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        agent
+            .register_task_waker(Arc::new(TurnLockAwareWaker {
+                agent: Arc::downgrade(&agent),
+                hits: hits.clone(),
+            }))
+            .await;
+        (agent, hits, dir)
+    }
+
+    #[tokio::test]
+    async fn test_compression_continuation_flushes_after_turn_lock_released() {
+        // ADR-053 实测 bug 回归：压缩后的续跑唤醒原先在**轮内**发起，而那一轮
+        // 正持有会话锁 → `wake_for_continuation` 的 `turn_try_lock` 必然失败、
+        // 被当成「已有 loop 在跑」静默丢弃（debug 级日志，info 级不可见）。
+        //
+        // 实测症状（隔离实例、真实 LLM）：`compress_context` 返回 `scheduled`、
+        // 压缩点已写入会话，之后 240 秒没有新轮 —— 上下腾出来了，任务却停了。
+        // 修复：轮内只**登记**意图，会话锁释放后由轮边界 flush。
+        let (agent, hits, _dir) = make_continuation_agent(true).await;
+        // 模拟「模型已在本轮调用 compress_context」
+        agent
+            .agent_loop
+            .tool_registry()
+            .context()
+            .compression_requests
+            .request("session-1", Some("接着把活干完".to_string()));
+
+        agent
+            .process_message("session-1", &Message::user("继续"), None, None, None)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            hits.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "压缩后续跑必须在会话锁释放后生效（锁内唤醒会被丢弃 → 任务永久停摆）"
+        );
+        assert!(
+            !agent
+                .pending_continuation
+                .lock()
+                .await
+                .contains("session-1"),
+            "flush 后意图应清空，避免下一轮重复唤醒"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_compression_continuation_requires_active_goal() {
+        // 反向验证（用户口径「按 goal 完成判据决定是否继续」）：压缩成功但
+        // 没有 active goal → 不登记续跑。判据与修复前一致，防止修复把
+        // 「无条件自唤醒」顺带带进来。
+        let (agent, hits, _dir) = make_continuation_agent(false).await;
+        agent
+            .agent_loop
+            .tool_registry()
+            .context()
+            .compression_requests
+            .request("session-1", None);
+
+        agent
+            .process_message("session-1", &Message::user("继续"), None, None, None)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            hits.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "没有 active goal 就不该自唤醒（否则每轮压缩都空转一轮）"
         );
     }
 
