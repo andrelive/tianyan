@@ -32,6 +32,13 @@ pub struct AgentConfig {
     /// 终端命令（execute_command background）同时运行上限（ADR-026）。
     #[serde(default = "default_max_command_concurrency")]
     pub max_command_concurrency: usize,
+    /// 低余量提醒线：占「自动压缩阈值」的比例（默认 0.8）。
+    ///
+    /// 占用超过 `阈值 × 该比例` 时，在上下文**尾部**追加一句提醒（不动 system
+    /// 前缀——前缀每轮变化会打掉 DeepSeek 的前缀缓存）。`0` = 关闭提醒；
+    /// `>= 1` = 只在真正越过阈值后才提醒。
+    #[serde(default = "default_low_remaining_remind_ratio")]
+    pub low_remaining_remind_ratio: f32,
 }
 
 impl Default for AgentConfig {
@@ -45,6 +52,7 @@ impl Default for AgentConfig {
             max_background_concurrency: default_max_background_concurrency(),
             max_background_queue: default_max_background_queue(),
             max_command_concurrency: default_max_command_concurrency(),
+            low_remaining_remind_ratio: default_low_remaining_remind_ratio(),
         }
     }
 }
@@ -78,6 +86,14 @@ impl AgentConfig {
         if self.max_command_concurrency == 0 {
             return Err("max_command_concurrency 必须大于 0".to_string());
         }
+        // 低余量提醒线：0 = 关闭，1 = 只在越过阈值后提醒；给个上限防止误填成
+        // 一个「永远不提醒」的天文数字（那会让人以为功能坏了）
+        if !(0.0..=2.0).contains(&self.low_remaining_remind_ratio) {
+            return Err(format!(
+                "low_remaining_remind_ratio（{}）必须在 0.0 ~ 2.0 之间（0 = 关闭提醒）",
+                self.low_remaining_remind_ratio
+            ));
+        }
         Ok(())
     }
 }
@@ -108,6 +124,11 @@ fn default_max_background_queue() -> usize {
 
 fn default_max_command_concurrency() -> usize {
     16
+}
+
+/// 低余量提醒线默认值：占自动压缩阈值的 80%（越早提醒越从容，但别吵）。
+fn default_low_remaining_remind_ratio() -> f32 {
+    0.8
 }
 
 #[cfg(test)]

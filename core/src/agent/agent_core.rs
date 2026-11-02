@@ -151,6 +151,9 @@ pub struct Agent {
     /// 转——每轮压缩都要重发完整 prompt（真实花钱）。保险丝 60 次 / 1 小时，
     /// 正常任务碰不到。
     pub(crate) self_wake_chains: Arc<TokioMutex<std::collections::HashMap<String, (u32, Instant)>>>,
+    /// 低余量提醒线（占自动压缩阈值的比例；由 `[agent] low_remaining_remind_ratio`
+    /// 经 builder 注入，默认 0.8）。`0` = 不提醒。
+    pub(crate) low_remaining_remind_ratio: f32,
 }
 
 impl Agent {
@@ -193,6 +196,7 @@ impl Agent {
             goal_store: None,
             continuation_waker: Arc::new(TokioMutex::new(None)),
             self_wake_chains: Arc::new(TokioMutex::new(std::collections::HashMap::new())),
+            low_remaining_remind_ratio: 0.8,
         }
     }
 
@@ -211,6 +215,13 @@ impl Agent {
     /// 注入会话目标存储（供装配层直接调用；通常走 `AgentBuilder::with_goal_store`）。
     pub fn with_goal_store(mut self, store: Arc<crate::goals::GoalStore>) -> Self {
         self.goal_store = Some(store);
+        self
+    }
+
+    /// 注入低余量提醒线（`[agent] low_remaining_remind_ratio`：`1.0` = 只在越过阈值后
+    /// 才提醒，`0` = 关闭）。
+    pub fn with_low_remaining_remind_ratio(mut self, ratio: f32) -> Self {
+        self.low_remaining_remind_ratio = ratio.clamp(0.0, 2.0);
         self
     }
 
@@ -1018,8 +1029,13 @@ impl Agent {
         if budget.threshold_tokens == 0 {
             return None;
         }
-        // 80% 提醒线（与「临界阈值」无关：后者是硬警戒，这里只是提前打招呼）
-        let remind_at = budget.threshold_tokens * 4 / 5;
+        // 提醒线 = 阈值 × 配置比例（`[agent] low_remaining_remind_ratio`，默认 0.8）。
+        // 与「临界阈值」无关：后者是硬警戒，这里只是提前打招呼。比例 <= 0 = 关闭。
+        let ratio = self.low_remaining_remind_ratio;
+        if ratio <= 0.0 {
+            return None;
+        }
+        let remind_at = (budget.threshold_tokens as f64 * ratio as f64) as u64;
         if budget.used_tokens < remind_at {
             return None;
         }
