@@ -133,12 +133,6 @@ pub struct Agent {
     /// 不报错。装配后**必须**与 `todo` 工具、REST API 是**同一实例**（工具写的
     /// 待办要立刻出现在下一轮上下文里）——各自 `TodoStore` 的内存快照互不感知。
     pub(crate) todo_store: Option<Arc<crate::todos::TodoStore>>,
-    /// 会话目标存储（`goal` 工具 / REST API **同一实例**）。
-    ///
-    /// 用途只有一个：模型主动压缩后判断「这个任务还在进行吗」——**有 active goal
-    /// 才自动唤醒继续**（用户口径：以完成目标为最终判据，不设次数预算）。
-    /// `None` = 未装配 → 压缩后照常结束、不续跑（core 内单测等非会话场景）。
-    pub(crate) goal_store: Option<Arc<crate::goals::GoalStore>>,
     /// 续跑唤醒器（`register_task_waker` 时顺带存一份）。
     ///
     /// 为什么不复用 `background_tasks` 里那个：压缩后的续跑必须走
@@ -202,7 +196,6 @@ impl Agent {
             approval_gate,
             pending_approval_fingerprints,
             todo_store: None,
-            goal_store: None,
             continuation_waker: Arc::new(TokioMutex::new(None)),
             self_wake_chains: Arc::new(TokioMutex::new(std::collections::HashMap::new())),
             pending_continuation: Arc::new(TokioMutex::new(std::collections::HashSet::new())),
@@ -215,15 +208,6 @@ impl Agent {
     /// 调用；未装配时 [`Agent::assemble_context`] 不注入待办段。
     pub(crate) fn with_todo_store(mut self, store: Arc<crate::todos::TodoStore>) -> Self {
         self.todo_store = Some(store);
-        self
-    }
-
-    /// 注入会话目标存储（`goal` 工具 / REST API **同一实例**）。
-    ///
-    /// 传副本等于「刚建的 goal 压缩后看不见」——压缩续跑的判据会永远说不。
-    /// 注入会话目标存储（供装配层直接调用；通常走 `AgentBuilder::with_goal_store`）。
-    pub fn with_goal_store(mut self, store: Arc<crate::goals::GoalStore>) -> Self {
-        self.goal_store = Some(store);
         self
     }
 
@@ -906,7 +890,14 @@ impl Agent {
     /// 三段硬顺序：
     /// 1. 真正压缩（`force = true`：模型自己判断的，跳过窗口阈值；仍受「≥6 条消息」保护）；
     /// 2. 压缩没发生（`None`：消息不足 / 摘要为空）→ **不续跑**——拿旧上下文继续只会白跑；
-    /// 3. goal 判据（有 active goal 才续跑）+ 保险丝（60 次 / 1 小时）→ **登记**。
+    /// 3. 保险丝（60 次 / 1 小时）→ **登记**续跑。
+    ///
+    /// **不再用 goal 判据**（用户口径变更，2026-11）：模型主动调 `compress_context`
+    /// 本身就是「我还要继续」的明确表达 —— 它压缩完就该接着干，而不是停下来等用户
+    /// 再发一句。原来的「有 active goal 才续跑」在实测里表现为：模型压完、交接说明也
+    /// 写好了，系统却因为会话没有 goal 直接不续（日志 `压缩完成，但没有 active goal
+    /// → 不自动续跑`），任务凭空停住。**自动压缩（轮末兜底）仍不续跑** —— 那条路径
+    /// 没有模型意图，继续跑只会白烧 token。
     ///
     /// 为什么登记而不是当场唤醒：本方法在**轮内**被调用（会话锁被当前轮持有），
     /// 直接唤醒会被 `turn_try_lock` 挡住（见 [`Self::pending_continuation`] 的
@@ -944,10 +935,6 @@ impl Agent {
         }
         // 压缩后立即刷新快照：模型下一轮读到的余量必须是压缩后的数字
         self.refresh_context_report(state, session_id, model).await;
-        if !self.has_active_goal(session_id).await {
-            tracing::info!(session = %session_id, "压缩完成，但没有 active goal → 不自动续跑");
-            return;
-        }
         if !self.allow_self_wake(session_id).await {
             tracing::warn!(
                 session = %session_id,
@@ -976,20 +963,6 @@ impl Agent {
         if self.pending_continuation.lock().await.remove(session_id) {
             self.wake_after_compression(session_id).await;
         }
-    }
-
-    /// 本会话是否有 active goal。
-    ///
-    /// 归属判定：`session_id` 相同，或 goal 未绑会话（全局目标）也算——前者是常态，
-    /// 后者避免"全局目标跑到一半被压缩后不续跑"。
-    async fn has_active_goal(&self, session_id: &str) -> bool {
-        let Some(store) = self.goal_store.as_ref() else {
-            return false;
-        };
-        store.list().await.iter().any(|g| {
-            g.status == crate::goals::GoalStatus::Active
-                && (g.session_id.is_none() || g.session_id.as_deref() == Some(session_id))
-        })
     }
 
     /// 保险丝：同一条自唤醒链连续 60 次或累计 1 小时 → 拒绝续跑。
@@ -2399,12 +2372,10 @@ mod tests {
         }
     }
 
-    /// 构造「真实会话存储 + 可选 active goal + 锁感知唤醒器」的 Agent。
+    /// 构造「真实会话存储 + 锁感知唤醒器」的 Agent。
     ///
-    /// 返回的 `TempDir` 必须由调用方持有（goal 落盘目录，drop 即清理）。
-    async fn make_continuation_agent(
-        with_goal: bool,
-    ) -> (
+    /// 返回的 `TempDir` 必须由调用方持有（临时落盘目录，drop 即清理）。
+    async fn make_continuation_agent() -> (
         Arc<Agent>,
         Arc<std::sync::atomic::AtomicUsize>,
         tempfile::TempDir,
@@ -2440,7 +2411,7 @@ mod tests {
             .returning(|_| Ok(response_with(Message::assistant("本轮完成"))));
 
         let dir = tempfile::tempdir().unwrap();
-        let mut agent = make_agent_with_working_sets(
+        let agent = make_agent_with_working_sets(
             store,
             turn_mock,
             compress_mock,
@@ -2450,20 +2421,6 @@ mod tests {
                 ..CompressionConfig::default()
             },
         );
-        if with_goal {
-            let goal_store = Arc::new(crate::goals::GoalStore::new(dir.path()));
-            goal_store
-                .create(
-                    "长任务".to_string(),
-                    None,
-                    None,
-                    Some("session-1".to_string()),
-                )
-                .await
-                .unwrap();
-            agent = agent.with_goal_store(goal_store);
-        }
-
         let agent = Arc::new(agent);
         let hits = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         agent
@@ -2484,7 +2441,7 @@ mod tests {
         // 实测症状（隔离实例、真实 LLM）：`compress_context` 返回 `scheduled`、
         // 压缩点已写入会话，之后 240 秒没有新轮 —— 上下腾出来了，任务却停了。
         // 修复：轮内只**登记**意图，会话锁释放后由轮边界 flush。
-        let (agent, hits, _dir) = make_continuation_agent(true).await;
+        let (agent, hits, _dir) = make_continuation_agent().await;
         // 模拟「模型已在本轮调用 compress_context」
         agent
             .agent_loop
@@ -2514,11 +2471,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_compression_continuation_requires_active_goal() {
-        // 反向验证（用户口径「按 goal 完成判据决定是否继续」）：压缩成功但
-        // 没有 active goal → 不登记续跑。判据与修复前一致，防止修复把
-        // 「无条件自唤醒」顺带带进来。
-        let (agent, hits, _dir) = make_continuation_agent(false).await;
+    async fn test_compression_continuation_needs_no_goal() {
+        // 用户口径（2026-11 变更）：**模型主动调 compress_context 就续跑**，
+        // 不看会话有没有 goal —— 它压缩本身就是要继续干的表达。实测事故：
+        // 模型写好 handoff 压缩完，系统因为「没有 active goal」直接不续，
+        // 任务凭空停住（日志 `压缩完成，但没有 active goal → 不自动续跑`）。
+        // 自动压缩（轮末兜底）仍然不续跑：那条路径没有模型意图。
+        let (agent, hits, _dir) = make_continuation_agent().await;
         agent
             .agent_loop
             .tool_registry()
@@ -2533,8 +2492,8 @@ mod tests {
 
         assert_eq!(
             hits.load(std::sync::atomic::Ordering::SeqCst),
-            0,
-            "没有 active goal 就不该自唤醒（否则每轮压缩都空转一轮）"
+            1,
+            "模型主动压缩后必须续跑（无 goal 也一样）"
         );
     }
 

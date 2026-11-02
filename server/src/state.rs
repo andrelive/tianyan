@@ -596,7 +596,6 @@ impl AppState {
             task_event_tx.clone(),
             working_sets.clone(),
             todo_store.clone(),
-            goal_store.clone(),
             approval_gate.clone(),
             context_port,
             task_reviewer,
@@ -861,8 +860,6 @@ impl AppState {
             // 待办存储跨热重载复用：新 Agent 的上下文注入必须看到同一个 store
             // （重建副本 = 工具写的待办在下一轮上下文里消失）
             self.todo_store.clone(),
-            // 目标存储同样跨热重载复用（压缩续跑判据读的就是这一份）
-            self.goal_store.clone(),
             approval_gate,
             context_port,
             task_reviewer,

@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **模型主动压缩后一定会续跑（不再看 goal）**：原来「压缩后是否继续」的判据是
+  「本会话有 active goal」——实测失败模式很直接：模型写好 `handoff` 压缩完正要接着干，
+  系统因为会话里没有 goal **直接不续**（日志 `压缩完成，但没有 active goal → 不自动续跑`），
+  用户看到的就是「它自己压了一次，然后就不动了」。现在的判据是**谁发起的压缩**：
+
+  | 谁发起 | 压缩后 |
+  |---|---|
+  | 模型主动调 `compress_context` | **总是续跑**（它压缩本身就表示「我还要继续」） |
+  | 系统自动（轮末兜底、非 force） | **不续跑**（没有模型意图，继续跑只会白烧 token） |
+
+  `Agent` 侧的 `goal_store` / `has_active_goal` 与 builder / server 装配链一并删除
+  （没有消费者的字段会让人误以为存在判据）；保险丝（60 次 / 1 小时）不变。系统提示同步：
+  「调 `compress_context` 压缩后系统会自动继续你这一轮，不用等用户再发一句」。
+
 ### Fixed
 
 - **上下文占用的提示方式重做：轮内按阈值提醒 + `context_status` 实时值，删掉尾部提示**。
