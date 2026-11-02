@@ -259,6 +259,27 @@ self.tokens.input.max(self.tokens.cache.read)
 - 前端入口：`ContextRing` 详情面板「压缩会话」按钮（`gui-vite/src/components/chat/ContextRing.tsx:129-160`）。
 - 向导模式（未装配 Agent）返回 `Ok(None)`（`server/src/agent_builder.rs:380-386`）。
 
+### 5.1 模型主动压缩与续跑（ADR-053）
+
+除阈值触发与用户手动触发，还有第三条路径：**模型自己判断**。两个工具，都不看窗口阈值：
+
+| 工具 | 用途 | 产物 |
+|---|---|---|
+| `context_status`（只读） | 想知道「还剩多少」时取实测值 | 窗口 / 已用 token（占比）/ 自动压缩阈值 / 临界阈值 / 距阈值余量 / 距压缩点条数 / 是否具备压缩条件 / `now` |
+| `compress_context(handoff?)`（写） | 任务还长、需要提前腾空间 | 登记压缩请求，**本轮收尾**（不再输出正文） |
+
+- **只登记、不压缩**：压缩会改写会话链，必须发生在轮末安全点——正在跑的 `AgentLoop`
+  手里是 `Vec<Message>` 快照，轮内压缩对它不生效。请求进 `CompressionRequests`
+  （按会话分条、后写覆盖先写），`AgentLoop` 在工具执行后看到请求即结束本轮。
+- 轮末 `handle_compression_request`：`force=true` 压缩（仍受 6 条下限保护）→ 刷新
+  `context_status` 快照（下一轮读到的是压缩后的数字）→ **有 active goal 才续跑** →
+  保险丝 60 次 / 1 小时。
+- **续跑只在会话锁之外生效**：轮内只登记意图（`Agent::pending_continuation`），由持锁方在
+  `drop(turn_guard)` 之后 `flush_pending_continuation`。就地唤醒会被 `turn_try_lock`
+  判成「已有 loop 在跑」而丢弃（ADR-053 实测症状：压缩点已落库、续跑轮不出现）。
+- `ContextPort::compression_budget` 是内核只认形状的读口：策略插件把窗口 / 阈值翻出来给
+  `context_status` 用，内核不认识 `CompressionConfig`。
+
 ---
 
 ## 6. 上下文构成的量化方法
