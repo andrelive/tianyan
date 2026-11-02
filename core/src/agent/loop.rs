@@ -977,6 +977,9 @@ impl AgentLoop {
         let mut total_tokens = TokenUsage::default();
         // 实测输入恢复（T6 动态 max_tokens 校准）：口径见 recover_last_input_usage。
         let mut last_input_usage = self.recover_last_input_usage(session_id, model).await;
+        // 本轮已提示过的上下文档位（与 `report.budget` 的 [阈值, 临界阈值] 对齐；
+        // 每跑一次 loop 就重置 —— 一轮内每档最多提示一次）
+        let mut notified = [false; 2];
 
         for turn in 0..self.config.max_turns {
             // 轮顶取消检查：工具执行结束后、进入下一轮 LLM 调用前响应取消
@@ -993,6 +996,18 @@ impl AgentLoop {
             // 异步事件通知）追加到本轮上下文尾部（前缀不变，仅尾部追加 → 缓存
             // 友好；「读到哪了」由工作集消费水位推导，无旁路记账）
             self.inject_pending_if_any(messages, session_id).await;
+
+            // 上下文占用**轮内**维护（用户裁定：按阈值提示，不做连续刷新）。
+            //
+            // 位置在**请求之前**，用「上一次请求的实测占用」判断：跨过窗口 60% / 80%
+            // 时追加一条 system 提示（每档每轮一次），让它随**本次**请求发出去。
+            // 为什么不能放请求之后：那时追加的提示只能等下一步被看到，而下一步可能
+            // 就是终轮（不再发请求）—— 实测有一轮末步已到 77%，提示就这么静默了。
+            // 顺带：这里也把实时占用写进共享槽位，`context_status` 据此给「现在多少」。
+            if let Some((_, used)) = last_input_usage.as_ref() {
+                self.push_context_notice_if_crossed(messages, session_id, *used, &mut notified)
+                    .await;
+            }
             let turn_start = std::time::Instant::now();
             if let Some(ref trace) = self.trace {
                 trace.set_current_turn(session_id, turn as i64);
@@ -1316,6 +1331,51 @@ impl AgentLoop {
                 true,
             );
         }
+    }
+
+    /// 轮内上下文维护：写实时占用 + 跨线时追加一条提示（每档每轮一次）。
+    ///
+    /// 线的来源是**策略侧快照**（`ContextPort::compression_budget` 给出的
+    /// `threshold_tokens` / `critical_tokens`），所以改压缩阈值不会让这里漂移。
+    ///
+    /// 追加的是 `Message::system`：与 ADR-035 §4 的轮边界注入同形态（末尾追加，
+    /// 不动前缀）。它**不落库**——下一轮组装会重新产出自己的上下文，不会越积越多。
+    async fn push_context_notice_if_crossed(
+        &self,
+        messages: &mut Vec<Message>,
+        session_id: &str,
+        used: usize,
+        notified: &mut [bool; 2],
+    ) {
+        self.tool_registry
+            .set_context_live_used(session_id, used)
+            .await;
+        let Some(report) = self.tool_registry.context_report(session_id).await else {
+            return;
+        };
+        let lines = [
+            report.budget.threshold_tokens,
+            report.budget.critical_tokens,
+        ];
+        if lines[0] == 0 || lines[1] == 0 {
+            return;
+        }
+        if crate::agent::context_report::crossed_notice_line(used as u64, &lines, notified)
+            .is_none()
+        {
+            return;
+        }
+        let window = report.budget.context_window;
+        let remaining = window.saturating_sub(used as u64);
+        messages.push(Message::system(
+            crate::agent::context_report::threshold_notice_text(used as u64, window, remaining),
+        ));
+        tracing::info!(
+            session = %session_id,
+            used,
+            window,
+            "轮内上下文跨线提示已追加（每档每轮一次）"
+        );
     }
 
     /// 轮边界压缩（**子代理专用**）：占用越过阈值时把上下文压到窗口以下，原地改写

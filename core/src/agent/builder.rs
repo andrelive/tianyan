@@ -111,8 +111,6 @@ pub struct AgentBuilder {
     todo_store: Option<Arc<crate::todos::TodoStore>>,
     /// 会话目标存储（压缩后续跑判据；与 `goal` 工具同一实例）。
     goal_store: Option<Arc<crate::goals::GoalStore>>,
-    /// 低余量提醒线（占自动压缩阈值的比例，默认 0.8；0 = 关闭）。
-    low_remaining_remind_ratio: f32,
 }
 
 impl AgentBuilder {
@@ -156,7 +154,6 @@ impl AgentBuilder {
             task_event_sink: None,
             todo_store: None,
             goal_store: None,
-            low_remaining_remind_ratio: 0.8,
         }
     }
 
@@ -480,12 +477,6 @@ impl AgentBuilder {
     /// 传副本等于「刚建的 goal 压缩后看不见」，续跑判据会永远说不。
     pub fn with_goal_store(mut self, store: Arc<crate::goals::GoalStore>) -> Self {
         self.goal_store = Some(store);
-        self
-    }
-
-    /// 注入低余量提醒线（`[agent] low_remaining_remind_ratio`；`0` = 关闭）。
-    pub fn with_low_remaining_remind_ratio(mut self, ratio: f32) -> Self {
-        self.low_remaining_remind_ratio = ratio;
         self
     }
 

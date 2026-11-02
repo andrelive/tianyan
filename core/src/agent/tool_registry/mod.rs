@@ -332,6 +332,36 @@ impl ToolRegistry {
         }
     }
 
+    /// 轮内**实时**占用（每步 LLM 返回后由 `AgentLoop` 写入）。
+    ///
+    /// `context_status` 据此给出「现在多少」——快照本身只在轮边界刷新，而占用几乎
+    /// 全部增长在轮内。只更新一个标量：窗口 / 阈值 / 条数在轮内不变。
+    ///
+    /// 未装配上下文策略（没有该会话的快照）时静默忽略：那种情况下工具本来就会报
+    /// 「未接入」，不该在这里造第二条数据源。
+    pub async fn set_context_live_used(&self, session_id: &str, used: usize) {
+        let mut guard = self.ctx.context_report.lock().await;
+        if let Some(r) = guard.get_mut(session_id) {
+            r.live_used_tokens = Some(used as u64);
+        }
+    }
+
+    /// 读某会话的上下文快照（克隆一份；`None` = 没刷新过 / 未装配上下文策略）。
+    ///
+    /// 给 `AgentLoop` 在轮内取「两条提示线」（阈值 / 临界阈值）用——比例只在策略侧
+    /// 定义一处，loop 不硬编码 0.6 / 0.8。
+    pub async fn context_report(
+        &self,
+        session_id: &str,
+    ) -> Option<crate::agent::context_report::ContextReport> {
+        self.ctx
+            .context_report
+            .lock()
+            .await
+            .get(session_id)
+            .cloned()
+    }
+
     /// 注入上下文工程端口（**子代理压缩用**：`delegate_to_agent` 构造子代理
     /// `AgentLoop` 时挂上轮边界压缩器）。
     ///

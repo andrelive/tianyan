@@ -163,9 +163,6 @@ pub struct Agent {
     /// 改为「轮内登记意图 + 锁释放后 flush」：不依赖重试与超时，事件顺序仍是
     /// idle → running（前端先看到这一轮收尾，再看到下一轮开始）。
     pub(crate) pending_continuation: Arc<TokioMutex<std::collections::HashSet<String>>>,
-    /// 低余量提醒线（占自动压缩阈值的比例；由 `[agent] low_remaining_remind_ratio`
-    /// 经 builder 注入，默认 0.8）。`0` = 不提醒。
-    pub(crate) low_remaining_remind_ratio: f32,
 }
 
 impl Agent {
@@ -209,7 +206,6 @@ impl Agent {
             continuation_waker: Arc::new(TokioMutex::new(None)),
             self_wake_chains: Arc::new(TokioMutex::new(std::collections::HashMap::new())),
             pending_continuation: Arc::new(TokioMutex::new(std::collections::HashSet::new())),
-            low_remaining_remind_ratio: 0.8,
         }
     }
 
@@ -228,13 +224,6 @@ impl Agent {
     /// 注入会话目标存储（供装配层直接调用；通常走 `AgentBuilder::with_goal_store`）。
     pub fn with_goal_store(mut self, store: Arc<crate::goals::GoalStore>) -> Self {
         self.goal_store = Some(store);
-        self
-    }
-
-    /// 注入低余量提醒线（`[agent] low_remaining_remind_ratio`：`1.0` = 只在越过阈值后
-    /// 才提醒，`0` = 关闭）。
-    pub fn with_low_remaining_remind_ratio(mut self, ratio: f32) -> Self {
-        self.low_remaining_remind_ratio = ratio.clamp(0.0, 2.0);
         self
     }
 
@@ -793,14 +782,11 @@ impl Agent {
             }
             None => None,
         };
-        // 低余量提示：与待办摘要**同一位置**（历史消息之后），不改 system 前缀
-        // ——前缀每轮变化会打掉 DeepSeek 的前缀缓存。
-        let tail_summary = match (todos_summary, self.low_remaining_note(state).await) {
-            (Some(t), Some(n)) => Some(format!("{t}\n\n{n}")),
-            (Some(t), None) => Some(t),
-            (None, Some(n)) => Some(n),
-            (None, None) => None,
-        };
+        // 尾部摘要只剩待办。低余量提示**不再在这里出现**：它在轮起点算一次，而占用
+        // 的增长全在轮内（多步工具），数字到下一步就过期；提示改为**轮内按阈值追加**
+        // （`AgentLoop::push_context_notice_if_crossed`：跨 60% / 80% 各一次），
+        // 模型需要时还可以自己调 `context_status` 查实时值。
+        let tail_summary = todos_summary;
 
         let s = state.read().await;
         let sid = s.session_id.clone();
@@ -1039,54 +1025,6 @@ impl Agent {
         }
     }
 
-    /// 「低余量提示」：占用超过自动压缩阈值的 80% 时，在**尾部**加一句话。
-    ///
-    /// 为什么放尾部而不是系统提示：改 system 前缀会让**每一轮前缀都变**，直接
-    /// 打掉 DeepSeek 的前缀缓存（真实成本与首包延迟）。尾部追加（与待办摘要同
-    /// 位置）不影响前缀匹配。
-    ///
-    /// 文案不给「省着用」的建议，而是给**出路**：任务做完优先，真紧张就压缩。
-    async fn low_remaining_note(&self, state: &Arc<RwLock<SessionState>>) -> Option<String> {
-        let (used, since_marker) = {
-            let s = state.read().await;
-            let start_idx = s
-                .structured_messages
-                .iter()
-                .rposition(|m| m.compression_marker)
-                .unwrap_or(0);
-            let since = &s.structured_messages[start_idx..];
-            let used = since
-                .iter()
-                .rev()
-                .find(|m| !m.compression_marker && (m.tokens.input > 0 || m.tokens.cache.read > 0))
-                .map(|m| m.prompt_side_tokens())
-                .unwrap_or(0);
-            (used, since.len())
-        };
-        let budget = self.context_pipeline.compression_budget(used).await?;
-        if budget.threshold_tokens == 0 {
-            return None;
-        }
-        // 提醒线 = 阈值 × 配置比例（`[agent] low_remaining_remind_ratio`，默认 0.8）。
-        // 与「临界阈值」无关：后者是硬警戒，这里只是提前打招呼。比例 <= 0 = 关闭。
-        let ratio = self.low_remaining_remind_ratio;
-        if ratio <= 0.0 {
-            return None;
-        }
-        let remind_at = (budget.threshold_tokens as f64 * ratio as f64) as u64;
-        if budget.used_tokens < remind_at {
-            return None;
-        }
-        // 文案口径在 `context_report::low_remaining_note_text` 一处（百分比 =
-        // **窗口占比**，与界面上下文环同源）——早先这里写「阈值的 N%」，模型转述
-        // 时丢掉限定词说成「上下文已用到 89%」，与环上的 54% 直接打架。
-        Some(crate::agent::context_report::low_remaining_note_text(
-            &budget,
-            since_marker,
-            MIN_MESSAGES_BEFORE_COMPRESSION,
-        ))
-    }
-
     /// 刷新「上下文状态快照」（`context_status` 工具的数据源）。
     ///
     /// 调用点固定在**每轮组装完消息之后、跑循环之前**：占用取「最近一次请求的
@@ -1134,6 +1072,10 @@ impl Agent {
             messages_since_marker,
             min_messages_before_compression: MIN_MESSAGES_BEFORE_COMPRESSION,
             budget,
+            // 新的一轮还没跑第一步：实时值先清空，第一步请求回来后由 `AgentLoop`
+            // 写入（`push_context_notice_if_crossed`）。留着上一轮的值会让
+            // `context_status` 在「本轮第一步之前」报一个不属于本轮的占用。
+            live_used_tokens: None,
         };
         self.agent_loop
             .tool_registry()

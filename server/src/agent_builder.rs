@@ -172,9 +172,7 @@ impl AgentBuilderFactory {
             .with_working_sets(working_sets)
             // 会话待办存储（P0）：与 `todo` 工具 / REST API **同一实例**——工具
             // 写进去的待办要立刻出现在下一轮上下文里（传副本 = 刚写完就忘）。
-            .with_todo_store(todo_store)
-            // 低余量提醒线（`[agent] low_remaining_remind_ratio`，默认 0.8；0 = 关闭）
-            .with_low_remaining_remind_ratio(config.agent.low_remaining_remind_ratio);
+            .with_todo_store(todo_store);
         let agent = agent.with_goal_store(goal_store);
         let agent = match snapshot_manager {
             Some(sm) => agent.with_snapshot_manager(sm),

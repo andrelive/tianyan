@@ -31,14 +31,26 @@ pub struct ContextReport {
     pub min_messages_before_compression: usize,
     /// 策略侧给出的预算（窗口 / 占用 / 阈值 / 临界阈值）。
     pub budget: CompressionBudget,
+    /// 轮内**实时**占用（每步 LLM 返回后由 `AgentLoop` 写入；`None` = 还没有本轮实测）。
+    ///
+    /// 为什么需要它：这份快照本身只在**轮边界**刷新（用户轮组装后 / 唤醒轮前 / 压缩后），
+    /// 而占用几乎全部增长在轮内（多步工具）。不带上实时值，模型在轮内问
+    /// `context_status` 拿到的永远是本轮起点的数字——它据此判断"还很宽裕"，
+    /// 然后一路涨到请求发不出去。
+    pub live_used_tokens: Option<u64>,
 }
 
 impl ContextReport {
+    /// 本次请求实际应报给模型的占用：优先轮内实时值，没有则用轮边界快照。
+    pub fn effective_used(&self) -> u64 {
+        self.live_used_tokens.unwrap_or(self.budget.used_tokens)
+    }
+
     /// 距自动压缩阈值还剩多少 token（已越过则为 0）。
     pub fn remaining_to_threshold(&self) -> u64 {
         self.budget
             .threshold_tokens
-            .saturating_sub(self.budget.used_tokens)
+            .saturating_sub(self.effective_used())
     }
 
     /// 距**窗口上限**还剩多少 token（已越过则为 0）。
@@ -49,7 +61,7 @@ impl ContextReport {
     pub fn remaining_window(&self) -> u64 {
         self.budget
             .context_window
-            .saturating_sub(self.budget.used_tokens)
+            .saturating_sub(self.effective_used())
     }
 
     /// 占用百分比（四舍五入；窗口为 0 时按 0 处理）。
@@ -57,8 +69,17 @@ impl ContextReport {
         if self.budget.context_window == 0 {
             return 0;
         }
-        ((self.budget.used_tokens as f64 / self.budget.context_window as f64) * 100.0).round()
-            as u64
+        ((self.effective_used() as f64 / self.budget.context_window as f64) * 100.0).round() as u64
+    }
+
+    /// 是否已越过自动压缩阈值（按**实时**占用判定）。
+    pub fn should_compress(&self) -> bool {
+        self.effective_used() > self.budget.threshold_tokens
+    }
+
+    /// 是否已越过临界阈值（按**实时**占用判定）。
+    pub fn is_critical(&self) -> bool {
+        self.effective_used() > self.budget.critical_tokens
     }
 
     /// 现在是否可以发起压缩（消息数够了）。
@@ -70,9 +91,9 @@ impl ContextReport {
     fn hint(&self) -> &'static str {
         if !self.compressible() {
             "上下文还很新（距上次压缩的消息不足），现在压缩没有可压的内容"
-        } else if self.budget.is_critical {
+        } else if self.is_critical() {
             "已越过临界阈值：建议尽快压缩（系统只在本轮收尾兜底，轮内不会触发）"
-        } else if self.budget.should_compress {
+        } else if self.should_compress() {
             "已越过自动压缩阈值：系统会在本轮收尾时兜底压缩；你先做完当前步骤再压也可以"
         } else {
             "上下文充裕，继续工作即可"
@@ -88,14 +109,14 @@ impl ContextReport {
             "model": self.model,
             "now": self.now,
             "context_window": self.budget.context_window,
-            "used_tokens": self.budget.used_tokens,
+            "used_tokens": self.effective_used(),
             "used_pct": self.used_pct(),
             "remaining_window": self.remaining_window(),
             "threshold_tokens": self.budget.threshold_tokens,
             "critical_tokens": self.budget.critical_tokens,
             "remaining_to_threshold": self.remaining_to_threshold(),
-            "should_compress": self.budget.should_compress,
-            "is_critical": self.budget.is_critical,
+            "should_compress": self.should_compress(),
+            "is_critical": self.is_critical(),
             "message_count": self.message_count,
             "messages_since_marker": self.messages_since_marker,
             "min_messages_before_compression": self.min_messages_before_compression,
@@ -105,43 +126,51 @@ impl ContextReport {
     }
 }
 
-/// 「低余量」尾部提示的文案（`Agent::low_remaining_note` 用）。
+/// 轮内跨过提示线时追加给模型的那条提示的文案。
 ///
-/// ## 只给两个数：窗口占比 + 距窗口上限的绝对余量
+/// ## 为什么是「跨线时一次」而不是「每步刷新数字」
 ///
-/// **不再提「自动压缩阈值」**。它是**系统自动兜底**的策略参数，而且**只在轮收尾时
-/// 生效**——一轮里连续跑很多步（工具链）时它根本不会触发。把它报给模型有两个坏处：
+/// 占用的增长全部发生在**轮内**（多步工具），而轮内既不触发自动压缩、轮起点组装的
+/// 那份尾部提示也不再更新。模型需要的不是连续数值，而是「现在该决定要不要压缩了」这个
+/// **信号**；每步灌一遍数字既占 token，也会把历史刷成一堆重复文本。
 ///
-/// 1. **口径打架**：早先的文案是「已用到自动压缩阈值的 {pct}%」（分母 = 阈值 = 窗口
-///    的 60%），模型转述时把「阈值」这个限定词丢掉、说成「上下文已用到 89%」，而界面
-///    上下文环显示 54%（分母 = 窗口）——同一份占用两个数（实测 used 536,891：
-///    54% vs 89%），用户直接质疑「才 54% 怎么就到 89%」。
-/// 2. **给出错误的依赖**：模型看到「距阈值还差 63K」会以为「还有系统兜底」，而在
-///    轮内（它真正会撞墙的时段）兜底并不存在。
+/// ## 为什么只讲窗口口径、不提「自动压缩阈值」
 ///
-/// 所以这里只报**物理事实**（窗口占用 + 余量），并明确告知兜底的时机；要不要提前
-/// 压缩由模型自己判断（ADR-053：判断权归模型，系统只兜底）。
-pub fn low_remaining_note_text(
-    budget: &CompressionBudget,
-    since_marker: usize,
-    min_messages: usize,
-) -> String {
-    let window = budget.context_window.max(1);
-    let pct = (budget.used_tokens as f64 / window as f64 * 100.0).round() as u64;
-    let remaining = budget.context_window.saturating_sub(budget.used_tokens);
-    let mut note = format!(
-        "【上下文提示】上下文窗口已用 {pct}%（约 {} / {} token），距窗口上限还剩 {}。\
-         系统的自动压缩**只在本轮收尾时**兜底（轮内不会触发）——这一轮如果还要跑很多步，\
-         余量得你自己盯。任务还长可以调 compress_context 压缩并继续（handoff 写清接下来\
-         要做什么）；不要为了省上下文而缩小工作范围。",
-        budget.used_tokens, budget.context_window, remaining
-    );
-    if since_marker < min_messages {
-        note.push_str(&format!(
-            "（注意：距上次压缩只有 {since_marker} 条消息，压缩可能因内容太少而被跳过。）"
-        ));
+/// 1. **口径打架**：早先的文案是「已用到自动压缩阈值的 {pct}%」（分母 = 阈值 = 窗口的
+///    60%），模型转述时把限定词丢掉、说成「上下文已用到 89%」，而界面环显示 54%
+///    （分母 = 窗口）——同一份占用两个数（实测 used 536,891：54% vs 89%）。
+/// 2. **错误的依赖**：阈值只在轮收尾生效；轮内报它，模型会以为「还有系统兜底」，
+///    而这正是它真正会撞墙的时段。
+///
+/// 文案里保留「兜底只在本轮收尾」这句：它是**能力边界**（不是数字），让模型知道
+/// 轮内只有它自己能管。
+pub fn threshold_notice_text(used: u64, window: u64, remaining: u64) -> String {
+    let pct = if window == 0 {
+        0
+    } else {
+        (used as f64 / window as f64 * 100.0).round() as u64
+    };
+    format!(
+        "【上下文提示】上下文窗口已用 {pct}%（约 {used} / {window} token），距窗口上限还剩 {remaining}。\
+         建议现在调用 compress_context 压缩并继续（handoff 写清接下来要做什么）——\
+         系统的自动压缩只在本轮收尾时兜底，轮内不会触发。"
+    )
+}
+
+/// 跨线判定（`lines` = 升序的**绝对 token** 提示线；`notified` 与之一一对应）。
+///
+/// 返回首个「已越过且尚未提示」的**最高档**下标，并把该档及以下一并标记为已提示
+/// （一步跨两档时只补一条提示，不连发两条）。`None` = 本次不用提示。
+pub fn crossed_notice_line(used: u64, lines: &[u64], notified: &mut [bool]) -> Option<usize> {
+    for ix in (0..lines.len()).rev() {
+        if used >= lines[ix] && !notified[ix] {
+            for slot in notified.iter_mut().take(ix + 1) {
+                *slot = true;
+            }
+            return Some(ix);
+        }
     }
-    note
+    None
 }
 
 #[cfg(test)]
@@ -162,6 +191,7 @@ mod tests {
             message_count: since,
             messages_since_marker: since,
             min_messages_before_compression: 6,
+            live_used_tokens: None,
             budget: CompressionBudget {
                 context_window: window,
                 used_tokens: used,
@@ -240,20 +270,12 @@ mod tests {
 
     /// 回归（用户实测：「这个会话才 54% 的上下文，怎么就到了 89%？」）。
     ///
-    /// 事故数字：窗口 1,000,000 / 阈值 600,000 / 实测占用 536,891。
-    /// 窗口占比 54%（界面环同源）、阈值占比 89%（旧文案的分母）—— 旧文案让模型
-    /// 说成「上下文已用到 89%」，与环矛盾。现在文案只给窗口口径与窗口余量。
+    /// 事故数字：窗口 1,000,000 / 实测占用 536,891。窗口占比 54%（界面环同源）；
+    /// 旧文案用「阈值 600,000」作分母 → 89%，模型转述成「上下文已用到 89%」。
+    /// 现在文案只给窗口口径 + 距上限余量，并点明兜底时机。
     #[test]
-    fn low_remaining_note_uses_window_pct_only() {
-        let b = CompressionBudget {
-            context_window: 1_000_000,
-            used_tokens: 536_891,
-            threshold_tokens: 600_000,
-            critical_tokens: 800_000,
-            should_compress: false,
-            is_critical: false,
-        };
-        let note = low_remaining_note_text(&b, 20, 6);
+    fn threshold_notice_uses_window_pct_only() {
+        let note = threshold_notice_text(536_891, 1_000_000, 463_109);
         assert!(
             note.contains("窗口已用 54%"),
             "百分比必须是窗口口径（与界面环一致）：{note}"
@@ -262,10 +284,7 @@ mod tests {
             !note.contains("89%"),
             "不能再出现「阈值的 89%」——模型转述时会丢掉限定词：{note}"
         );
-        assert!(
-            note.contains("还剩 463109"),
-            "余量按**窗口**算（1,000,000 − 536,891）：{note}"
-        );
+        assert!(note.contains("还剩 463109"), "余量按窗口算：{note}");
         assert!(
             !note.contains("自动压缩阈值 600000"),
             "阈值是系统兜底参数（且只在轮收尾生效），不该报给模型当依据：{note}"
@@ -276,23 +295,29 @@ mod tests {
         );
     }
 
-    /// 余量吃紧时口径不变（仍是窗口占比 + 绝对余量），不给第二个百分比、也不给阈值。
+    /// 跨线判定：每档每轮最多提示一次；一步跨两档只补一条（最高档）。
     #[test]
-    fn low_remaining_note_keeps_single_pct_when_tight() {
-        let b = CompressionBudget {
-            context_window: 1_000_000,
-            used_tokens: 960_000,
-            threshold_tokens: 600_000,
-            critical_tokens: 800_000,
-            should_compress: true,
-            is_critical: true,
-        };
-        let note = low_remaining_note_text(&b, 20, 6);
-        assert!(note.contains("窗口已用 96%"), "{note}");
-        assert!(note.contains("还剩 40000"), "{note}");
-        assert!(
-            !note.contains("阈值 600000"),
-            "余量吃紧也不报阈值（口径仍是窗口）：{note}"
+    fn crossed_notice_line_fires_each_tier_once() {
+        let lines = [600_000u64, 800_000u64];
+        let mut notified = [false, false];
+        // 未跨线
+        assert_eq!(crossed_notice_line(500_000, &lines, &mut notified), None);
+        // 跨第一档 → 提示一次
+        assert_eq!(crossed_notice_line(620_000, &lines, &mut notified), Some(0));
+        // 同档重复 → 不再提示
+        assert_eq!(crossed_notice_line(640_000, &lines, &mut notified), None);
+        // 跨第二档 → 提示一次
+        assert_eq!(crossed_notice_line(810_000, &lines, &mut notified), Some(1));
+        assert_eq!(crossed_notice_line(900_000, &lines, &mut notified), None);
+
+        // 一步从线下直接跨两档：只提示最高档，低档一并标记（不连发两条）
+        let mut fresh = [false, false];
+        assert_eq!(crossed_notice_line(850_000, &lines, &mut fresh), Some(1));
+        assert_eq!(
+            fresh,
+            [true, true],
+            "一步跨两档时低档也要标记，否则下一步回落到低档区间会补发一条"
         );
+        assert_eq!(crossed_notice_line(700_000, &lines, &mut fresh), None);
     }
 }
