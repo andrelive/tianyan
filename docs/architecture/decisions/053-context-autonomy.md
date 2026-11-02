@@ -42,6 +42,14 @@
 ### 5. 续跑走专用唤醒通道
 
 新增 `TaskWaker::wake_for_continuation`：与 `wake` 同路径，**只去掉「无未消费新消息就跳过」那道过滤**——压缩点由系统写入并立刻标记已消费（`reshape_after_compression`），用"有新消息"当判据会把续跑永远挡在门外。幂等性仍由会话锁保证（`turn_try_lock`）。
+**续跑必须发生在会话锁之外（轮边界 flush）**。`turn_try_lock` 的语义是"该会话已有 loop 在跑"，
+而压缩处理点（`run_agent_turn` / `process_wake_locked` 的轮末）**正在那一轮里**、锁被当前轮持有
+——就地唤醒必然拿不到锁，被当作"已有 loop"静默丢弃（debug 级日志，info 级看不见）。症状很隐蔽：
+压缩点已落库、`compress_context` 返回 `scheduled`，续跑轮却永不出现（实测：隔离实例等 240 秒零新轮）。
+因此轮内只**登记意图**（`Agent::pending_continuation`），由持锁的一方在 `drop(turn_guard)` 之后
+调 `flush_pending_continuation`（用户轮 / 唤醒轮 / 续跑轮三处出口全覆盖）。这样唤醒发生在锁外，
+事件顺序仍是 idle → running，前端看到的是"这一轮收尾、下一轮开始"。
+
 
 ### 6. 提示不走 system 前缀
 
