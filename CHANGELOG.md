@@ -9,6 +9,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **追问卡片（`ask_user`）改成 vite 版的分步 tab**：native 原先是「所有问题平铺在一张卡里」，
+  问题一多就成一片，也没有自定义回答的入口。现在与 `ClarificationBubble` 同构：
+  - `[问题 1][问题 2]…[补充信息]` 分步 tab（已答的打 ✓），**点选项自动跳到下一屏**，也能点回任意一屏改；
+  - 每屏一个问题 + 选项行（圆形序号）+ **自定义回答编辑框**（每问一个独立编辑框：切屏只换显示哪一个，
+    共享一个会把上一题的草稿冲掉——vite 用受控 textarea 数组天然没这问题）；
+  - 最后一屏「补充信息」（可选，随 `extra` 一并回给模型）；
+  - 全部问题答完才可提交（`还有 N 个问题未回答` → `全部问题已回答`），载荷形态与 vite 完全一致
+    （`{answers:[{question,answer}], extra}`）。
+  - 自动化端口新增两个动作（都复用真实点击路径，ADR-052）：`pick_clarify_option{index}`
+    （点某题某选项 → 写入答案并跳下一屏）、`clarify_tab{tab}`（切屏）；`/state` 增加
+    `clarify_tab` / `clarify_extra` / 每题 `custom`。
+  - 回归实测（隔离实例 + 内置截图）：点「Rust」→ tab 0→1；再点「不要」→ tab 1→2（补充信息）；
+    切回问题 1 显示「✓ 问题 1 ✓ 问题 2」+ Rust 高亮 + `全部问题已回答`，提交按钮转亮。
+
 - **模型主动压缩后一定会续跑（不再看 goal）**：原来「压缩后是否继续」的判据是
   「本会话有 active goal」——实测失败模式很直接：模型写好 `handoff` 压缩完正要接着干，
   系统因为会话里没有 goal **直接不续**（日志 `压缩完成，但没有 active goal → 不自动续跑`），

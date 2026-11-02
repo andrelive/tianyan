@@ -353,6 +353,7 @@ impl ClientApp {
             pending_approvals: std::mem::take(&mut self.pending_approvals),
             clarification: self.clarification.take(),
             clarify_answers: std::mem::take(&mut self.clarify_answers),
+            clarify_tab: std::mem::take(&mut self.clarify_tab),
             ws_root: std::mem::take(&mut self.ws_root),
             ws_path: std::mem::take(&mut self.ws_path),
             ws_entries: std::mem::take(&mut self.ws_entries),
@@ -405,6 +406,8 @@ impl ClientApp {
         self.pending_approvals.clear();
         self.clarification = None;
         self.clarify_answers.clear();
+        self.clarify_tab = 0;
+        self.clarify_inputs.clear();
         self.ws_root.clear();
         self.ws_path.clear();
         self.ws_entries.clear();
@@ -499,6 +502,10 @@ impl ClientApp {
         self.pending_approvals = snap.pending_approvals;
         self.clarification = snap.clarification;
         self.clarify_answers = snap.clarify_answers;
+        self.clarify_tab = snap.clarify_tab;
+        // 编辑框实体不进快照（Entity 不是可序列化/可复制的状态）：清空后由调用方
+        // 的 `ensure_clarify_inputs(cx)` 按当前问题数重建（它需要 cx，而本函数只有 &mut self）
+        self.clarify_inputs.clear();
         self.ws_root = snap.ws_root;
         self.ws_path = snap.ws_path;
         self.ws_entries = snap.ws_entries;
@@ -709,6 +716,8 @@ impl ClientApp {
         self.subscribe_session(sid_for_subscribe, !use_projection && history_empty, cx);
         // 选中态与「当前会话始终可见」都体现在左栏行上
         self.restore_input(window, cx);
+        // 追问编辑框按恢复出来的问题数补齐（切回一个挂起追问的会话时要能继续答）
+        self.ensure_clarify_inputs(cx);
         self.rebuild_session_rows(cx);
     }
 

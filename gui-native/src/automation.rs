@@ -567,9 +567,14 @@ impl ClientApp {
             "clarification": self.clarification.as_ref().map(|qs| {
                 qs.iter().enumerate().map(|(i, (q, opts))| serde_json::json!({
                     "question": q, "options": opts,
-                    "answer": self.clarify_answers.get(i),
+                    // 最终答案口径与提交一致（编辑框优先、其次点选）
+                    "answer": self.clarify_answer_of(i, cx),
+                    "custom": self.clarify_inputs.get(i).map(|ed| ed.read(cx).value().to_string()),
                 })).collect::<Vec<_>>()
             }),
+            // 追问分步 tab（0..问题数 = 问题屏；== 问题数 = 「补充信息」屏）
+            "clarify_tab": self.clarify_tab,
+            "clarify_extra": self.clarify_extra_of(cx),
             "tools": {
                 "count": self.tools.len(),
                 "query": &self.tools_query,
@@ -1295,6 +1300,31 @@ impl ClientApp {
                     "deny" => self.respond_approval(request_id, "deny", None, cx),
                     other => return Err(format!("decision 只能是 approve / deny：{other}")),
                 }
+            }
+            // 点追问某题的某个选项（复用真实点击路径：会写入答案并自动跳到下一屏）
+            "pick_clarify_option" => {
+                let qi: usize = arg_str(cmd, "index")?
+                    .parse()
+                    .map_err(|_| "index 必须是数字".to_string())?;
+                let Some(questions) = self.clarification.clone() else {
+                    return Err("当前没有待回答的追问".to_string());
+                };
+                let tab = self.clarify_tab.min(questions.len().saturating_sub(1));
+                let option = questions[tab]
+                    .1
+                    .get(qi)
+                    .cloned()
+                    .ok_or_else(|| format!("第 {} 题没有第 {} 个选项", tab + 1, qi + 1))?;
+                self.pick_clarify_option(tab, option, cx);
+            }
+            // 切追问的某一屏（0..问题数 = 问题屏；== 问题数 = 补充信息）
+            "clarify_tab" => {
+                let tab: usize = arg_str(cmd, "tab")?
+                    .parse()
+                    .map_err(|_| "tab 必须是数字".to_string())?;
+                let max = self.clarification.as_ref().map(|q| q.len()).unwrap_or(0);
+                self.clarify_tab = tab.min(max);
+                cx.notify();
             }
             "answer_clarification" => {
                 let answers: Vec<String> = cmd

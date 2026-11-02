@@ -483,7 +483,18 @@ struct ClientApp {
     /// 待回答的追问（`ask_user` 同步工具挂起时）：`(问题, 选项)`
     pub(crate) clarification: Option<Vec<(String, Vec<String>)>>,
     /// 已选答案（与 `clarification` 等长；空串 = 未答）
+    ///
+    /// 只存**点选项**的结果；用户自己打的文本在 `clarify_inputs` 的编辑框里
+    /// （`clarify_answer_of` 负责合并两者，语义与 vite `selected ?? customs` 一致）。
     pub(crate) clarify_answers: Vec<String>,
+    /// 追问卡片当前的分步 tab（`0..questions.len()`；最后一屏 = 补充信息）
+    pub(crate) clarify_tab: usize,
+    /// 追问的自定义回答编辑框（**每问题一个** + 末尾一个补充信息框）
+    ///
+    /// 为什么不是一个共享框：切 tab 只是换显示哪一个，共享框会把上一个问题的草稿
+    /// 冲掉（vite 用受控 textarea 数组天然没有这个问题）。实体由
+    /// `ensure_clarify_inputs` 按当前问题数补齐。
+    pub(crate) clarify_inputs: Vec<Entity<TextareaState>>,
     /// 设置页：provider 列表（含 endpoint / api_key，供编辑回填）
     pub(crate) providers: Vec<ProviderRow>,
     /// 设置页：正在编辑的 provider（None = 未打开编辑器）
@@ -670,6 +681,8 @@ pub(crate) struct SessionSnapshot {
     pub(crate) pending_approvals: Vec<ApprovalRow>,
     pub(crate) clarification: Option<Vec<(String, Vec<String>)>>,
     pub(crate) clarify_answers: Vec<String>,
+    /// 追问卡片停在哪一屏（切回时回到同一屏；编辑框实体不随快照走，restore 后重建）
+    pub(crate) clarify_tab: usize,
     // ── 文件页（按会话绑定的工作目录解析）──
     pub(crate) ws_root: String,
     pub(crate) ws_path: String,

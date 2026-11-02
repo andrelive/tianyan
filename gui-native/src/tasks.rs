@@ -524,6 +524,13 @@ impl ClientApp {
     /// `answers` 是 `ask_user` 工具的返回值（直接回给模型）：
     /// `{ answers: [{question, answer}], extra }`——与 Tauri 版 `ClarificationBubble`
     /// 的序列化口径一致，模型侧看到的形态不因客户端不同而变。
+    /// 提交追问回答（`POST /api/v1/chat/answer`）。
+    ///
+    /// 载荷形态与 vite 版 `ClarificationBubble` 完全一致（模型侧看到的形态不因客户端
+    /// 不同而变）：`{ answers: [{question, answer}], extra }`。
+    ///
+    /// 答案取值见 `clarify_answer_of`：**编辑框里有字就用编辑框的**（等价 vite 的
+    /// `selected ?? customs.trim()`），否则用点选的选项。
     pub(crate) fn submit_clarification(&mut self, cx: &mut Context<Self>) {
         let Some(questions) = self.clarification.clone() else {
             return;
@@ -537,17 +544,18 @@ impl ClientApp {
             .map(|(i, (q, _))| {
                 serde_json::json!({
                     "question": q,
-                    "answer": self.clarify_answers.get(i).cloned().unwrap_or_default(),
+                    "answer": self.clarify_answer_of(i, cx),
                 })
             })
             .collect();
+        let extra = self.clarify_extra_of(cx);
         let port = self.port;
         self.set_status("正在提交回答…".to_string());
         cx.spawn(async move |this, cx| {
             let url = format!("http://{SERVER_HOST}:{port}/api/v1/chat/answer");
             let body = serde_json::json!({
                 "session_id": sid,
-                "answers": { "answers": answers, "extra": "" },
+                "answers": { "answers": answers, "extra": extra },
             });
             let res = post_json(url, body).await;
             let _ = this.update(cx, |this, cx| {
@@ -556,6 +564,8 @@ impl ClientApp {
                         this.set_status("回答已提交".to_string());
                         this.clarification = None;
                         this.clarify_answers.clear();
+                        this.clarify_tab = 0;
+                        this.clarify_inputs.clear();
                     }
                     Err(e) => this.set_error(format!("提交回答失败：{e}")),
                 }
@@ -565,23 +575,125 @@ impl ClientApp {
         .detach();
     }
 
+    /// 某问题的最终答案：编辑框优先，其次点选的选项（语义 = vite `selected ?? customs`）。
+    ///
+    /// 为什么要合并两个来源：native 的编辑框没有 `on_change` 回调（组件的取值是
+    /// 拉取式的），所以「用户正在自己写」这件事只能在读的时候判断——写在框里的字
+    /// 非空就压过选项。
+    pub(crate) fn clarify_answer_of(&self, i: usize, cx: &gpui_kit::App) -> String {
+        if let Some(ed) = self.clarify_inputs.get(i) {
+            let text = ed.read(cx).value().trim().to_string();
+            if !text.is_empty() {
+                return text;
+            }
+        }
+        self.clarify_answers.get(i).cloned().unwrap_or_default()
+    }
+
+    /// 「补充信息」那一屏的文本（可选；空串 = 没填）。
+    pub(crate) fn clarify_extra_of(&self, cx: &gpui_kit::App) -> String {
+        let n = self.clarification.as_ref().map(|q| q.len()).unwrap_or(0);
+        self.clarify_inputs
+            .get(n)
+            .map(|ed| ed.read(cx).value().trim().to_string())
+            .unwrap_or_default()
+    }
+
+    /// 按当前追问（N 个问题 + 1 屏补充信息）准备好编辑框实体。
+    ///
+    /// 走 `window_handle.update` 新建：这条路径**不需要 `&mut Window`**，所以
+    /// `open_session`（有窗口）和自动化动作（没有窗口）都能调（与 `restore_input`
+    /// 的自动化分支同一手法）。数量不匹配时清空，由下一次调用重建。
+    pub(crate) fn ensure_clarify_inputs(&mut self, cx: &mut Context<Self>) {
+        use gpui_kit::component::input::TextareaState;
+
+        let need = self
+            .clarification
+            .as_ref()
+            .map(|q| q.len() + 1)
+            .unwrap_or(0);
+        if need == 0 {
+            self.clarify_inputs.clear();
+            return;
+        }
+        if self.clarify_inputs.len() == need {
+            return;
+        }
+        let handle = self.window_handle;
+        let mut created: Vec<Entity<TextareaState>> = Vec::new();
+        for i in 0..need {
+            let placeholder = if i + 1 == need {
+                "补充其他信息（可选）…"
+            } else {
+                "或输入自定义回答…"
+            };
+            let ok = handle
+                .update(cx, |_, window, cx| {
+                    created
+                        .push(cx.new(|cx| TextareaState::new(window, cx).placeholder(placeholder)));
+                })
+                .is_ok();
+            if !ok {
+                break;
+            }
+        }
+        if created.len() == need {
+            self.clarify_inputs = created;
+        } else {
+            self.clarify_inputs.clear();
+        }
+    }
+
     /// 追问卡片（`ask_user` 挂起时显示在输入区上方）。
     ///
     /// 对齐 Tauri 版 `ClarificationBubble` 的**语义**（不是像素）：问题 + 选项，
     /// 全部答完才可提交。第一版只做「点选项作答」；无选项的问题给出提示让用户
     /// 用输入框里的原话补（避免为极少数场景先造一个多行富文本表单）。
+    /// 选中某题的某个选项：写入答案 **并自动跳到下一屏**（与 vite 同款交互）。
+    ///
+    /// 点击路径与自动化动作都走这一处（ADR-052：动作必须复用真实点击路径），否则
+    /// 「点一下会不会自动跳屏」在自动化下面根本测不到。
+    pub(crate) fn pick_clarify_option(
+        &mut self,
+        qi: usize,
+        option: String,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(questions) = self.clarification.as_ref() else {
+            return;
+        };
+        let n = questions.len();
+        if qi >= n {
+            return;
+        }
+        if let Some(slot) = self.clarify_answers.get_mut(qi) {
+            *slot = option;
+        }
+        // 选完自动进下一屏（最后一题 → 「补充信息」屏）
+        self.clarify_tab = (qi + 1).min(n);
+        cx.notify();
+    }
+
+    /// 追问卡片（`ask_user` 挂起时接管输入区）：**分步 tab**，与 vite 版
+    /// `ClarificationBubble` 同构（此前 native 是「所有问题平铺」）。
+    ///
+    /// 形态：`[问题 1][问题 2]…[补充信息]` 分步 tab，每屏一个问题；点选项**自动跳到
+    /// 下一屏**（vite 同款交互），也可以在每屏下方自己写回答；最后一屏是「补充信息」
+    /// （可选）。全部问题答完才可提交——与 vite 的 `canSubmit` 口径一致。
     pub(crate) fn render_clarification(&self, cx: &mut Context<Self>) -> AnyElement {
-        let Some(questions) = &self.clarification else {
+        let Some(questions) = self.clarification.clone() else {
             return div().into_any_element();
         };
-        let all_answered = !questions.is_empty()
-            && self
-                .clarify_answers
-                .iter()
-                .take(questions.len())
-                .all(|a| !a.trim().is_empty());
-        // 卡片本体（**不带外层 padding**）：它现在替换输入框，边距由
-        // `render_composer` 的容器统一给 —— 两处都加会出现双份留白。
+        let n = questions.len();
+        let extra_tab = n; // 最后一屏 = 补充信息
+        let tab = self.clarify_tab.min(extra_tab);
+        let is_extra = tab == extra_tab;
+        let answered: Vec<bool> = (0..n)
+            .map(|i| !self.clarify_answer_of(i, cx).trim().is_empty())
+            .collect();
+        let unanswered = answered.iter().filter(|a| !**a).count();
+        let all_answered = n > 0 && unanswered == 0;
+
         let mut card = div()
             .w_full()
             .max_w(px(896.))
@@ -598,74 +710,154 @@ impl ClientApp {
                 div()
                     .text_sm()
                     .text_color(rgb(colors::ACCENT()))
-                    .child("模型在向你确认（回答后它继续执行）"),
+                    .child("AI 需要确认（回答后它继续执行）"),
             );
-        for (qi, (question, options)) in questions.iter().enumerate() {
-            let answered = self
-                .clarify_answers
-                .get(qi)
-                .map(|a| !a.trim().is_empty())
-                .unwrap_or(false);
-            let q_title = if answered {
-                format!("✓ {}. {}", qi + 1, question)
+
+        // ── 分步 tab：每个问题一个 + 末尾「补充信息」 ──
+        let mut tabs = div().flex().flex_row().items_center().gap_1().flex_wrap();
+        for (i, done) in answered.iter().enumerate() {
+            let active = tab == i;
+            let mut pill = div()
+                .id(("clarify-tab", i))
+                .px_3()
+                .py_1()
+                .rounded_full()
+                .border_1()
+                .text_xs()
+                .cursor_pointer();
+            pill = if active {
+                pill.border_color(rgb(colors::ACCENT()))
+                    .bg(rgb(colors::BG_HOVER()))
+                    .text_color(rgb(colors::ACCENT()))
             } else {
-                format!("{}. {}", qi + 1, question)
+                pill.border_color(rgb(colors::BORDER()))
+                    .text_color(rgb(colors::TEXT_SECONDARY()))
             };
-            let mut q_block = div().flex().flex_col().gap_1().child(
-                div()
-                    .text_xs()
-                    .text_color(if answered {
-                        rgb(colors::SUCCESS())
-                    } else {
-                        rgb(colors::TEXT_PRIMARY())
-                    })
-                    .child(q_title),
+            let label = if *done {
+                format!("✓ 问题 {}", i + 1)
+            } else {
+                format!("问题 {}", i + 1)
+            };
+            tabs = tabs.child(
+                pill.child(label)
+                    .on_click(cx.listener(move |this, _, _w, cx| {
+                        this.clarify_tab = i;
+                        cx.notify();
+                    })),
             );
-            if options.is_empty() {
-                q_block = q_block.child(
+        }
+        let mut extra_pill = div()
+            .id("clarify-tab-extra")
+            .px_3()
+            .py_1()
+            .rounded_full()
+            .border_1()
+            .text_xs()
+            .cursor_pointer();
+        extra_pill = if is_extra {
+            extra_pill
+                .border_color(rgb(colors::ACCENT()))
+                .bg(rgb(colors::BG_HOVER()))
+                .text_color(rgb(colors::ACCENT()))
+        } else {
+            extra_pill
+                .border_color(rgb(colors::BORDER()))
+                .text_color(rgb(colors::TEXT_SECONDARY()))
+        };
+        tabs = tabs.child(extra_pill.child("补充信息").on_click(cx.listener(
+            move |this, _, _w, cx| {
+                this.clarify_tab = extra_tab;
+                cx.notify();
+            },
+        )));
+        card = card.child(tabs);
+
+        // ── 当前屏 ──
+        if is_extra {
+            card = card
+                .child(
                     div()
                         .text_xs()
                         .text_color(rgb(colors::TEXT_TERTIARY()))
-                        .child("（该问题没有选项：把你输入框里写的原话作为回答）"),
-                );
-            }
-            for (oi, option) in options.iter().enumerate() {
-                let selected = self
-                    .clarify_answers
-                    .get(qi)
-                    .map(|a| a == option)
-                    .unwrap_or(false);
-                let mut chip = div()
-                    .id(("clarify", qi * 100 + oi))
-                    .px_2()
-                    .py_1()
-                    .rounded_md()
-                    .border_1()
-                    .border_color(rgb(colors::BORDER()))
-                    .cursor_pointer()
-                    .text_xs();
-                if selected {
-                    chip = chip
-                        .bg(rgb(colors::ACCENT()))
-                        .border_color(rgb(colors::ACCENT()))
-                        .text_color(rgb(0xffffff));
-                } else {
-                    chip = chip
-                        .bg(rgb(colors::BG_HOVER()))
-                        .text_color(rgb(colors::TEXT_PRIMARY()));
+                        .child("补充其他信息（可选）"),
+                )
+                .child(self.render_clarify_editor(extra_tab));
+        } else {
+            let (question, options) = questions[tab].clone();
+            card = card.child(
+                div()
+                    .text_sm()
+                    .text_color(rgb(colors::TEXT_PRIMARY()))
+                    .child(question),
+            );
+            // 编辑框里有字 = 用户在自己写 → 选项不高亮（等价 vite 打字即取消选中）
+            let custom_empty = self
+                .clarify_inputs
+                .get(tab)
+                .map(|ed| ed.read(cx).value().trim().is_empty())
+                .unwrap_or(true);
+            if !options.is_empty() {
+                let mut list = div().flex().flex_col().gap_1();
+                for (oi, option) in options.iter().enumerate() {
+                    let selected = custom_empty
+                        && self
+                            .clarify_answers
+                            .get(tab)
+                            .map(|a| a == option)
+                            .unwrap_or(false);
+                    let mut row = div()
+                        .id(("clarify-opt", tab * 100 + oi))
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap_2()
+                        .px_3()
+                        .py_1()
+                        .rounded_xl()
+                        .border_1()
+                        .cursor_pointer();
+                    row = if selected {
+                        row.border_color(rgb(colors::ACCENT()))
+                            .bg(rgb(colors::BG_HOVER()))
+                    } else {
+                        row.border_color(rgb(colors::BORDER()))
+                    };
+                    let mut badge = div()
+                        .w(px(18.))
+                        .h(px(18.))
+                        .rounded_full()
+                        .border_1()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .text_xs();
+                    badge = if selected {
+                        badge
+                            .border_color(rgb(colors::ACCENT()))
+                            .bg(rgb(colors::ACCENT()))
+                            .text_color(rgb(0xffffff))
+                    } else {
+                        badge
+                            .border_color(rgb(colors::BORDER()))
+                            .text_color(rgb(colors::TEXT_TERTIARY()))
+                    };
+                    let answer = option.clone();
+                    row = row.child(badge.child(format!("{}", oi + 1))).child(
+                        div()
+                            .text_xs()
+                            .text_color(rgb(colors::TEXT_PRIMARY()))
+                            .child(option.clone()),
+                    );
+                    list = list.child(row.on_click(cx.listener(move |this, _, _w, cx| {
+                        this.pick_clarify_option(tab, answer.clone(), cx);
+                    })));
                 }
-                let answer = option.clone();
-                q_block = q_block.child(chip.child(option.clone()).on_click(cx.listener(
-                    move |this, _, _w, cx| {
-                        if let Some(slot) = this.clarify_answers.get_mut(qi) {
-                            *slot = answer.clone();
-                        }
-                        cx.notify();
-                    },
-                )));
+                card = card.child(list);
             }
-            card = card.child(q_block);
+            card = card.child(self.render_clarify_editor(tab));
         }
+
+        // ── 底栏：进度 + 提交 ──
         let mut submit = div()
             .id("clarify-submit")
             .px_3()
@@ -689,9 +881,9 @@ impl ClientApp {
                         .text_xs()
                         .text_color(rgb(colors::TEXT_TERTIARY()))
                         .child(if all_answered {
-                            "已全部作答".to_string()
+                            "全部问题已回答".to_string()
                         } else {
-                            format!("还有 {} 个问题未回答", questions.len())
+                            format!("还有 {unanswered} 个问题未回答")
                         }),
                 )
                 .child(div().flex_1())
@@ -699,13 +891,39 @@ impl ClientApp {
                     submit
                         .child("提交回答")
                         .on_click(cx.listener(move |this, _, _w, cx| {
-                            if this.clarify_answers.iter().all(|a| !a.trim().is_empty()) {
-                                this.submit_clarification(cx);
+                            if this.clarification.is_some() {
+                                let n = this.clarification.as_ref().map(|q| q.len()).unwrap_or(0);
+                                let ok = (0..n)
+                                    .all(|i| !this.clarify_answer_of(i, cx).trim().is_empty());
+                                if ok {
+                                    this.submit_clarification(cx);
+                                }
                             }
                         })),
                 ),
         )
         .into_any_element()
+    }
+
+    /// 追问的编辑框（第 `ix` 屏）：`ix == questions.len()` 时是「补充信息」那屏。
+    ///
+    /// 实体缺失（还没建/已清空）时返回空元素 —— 渲染期是 `&self`，不能现造实体，
+    /// 只能等 `ensure_clarify_inputs` 补上（它由事件处理与 `open_session` 调）。
+    fn render_clarify_editor(&self, ix: usize) -> AnyElement {
+        let Some(ed) = self.clarify_inputs.get(ix) else {
+            return div().into_any_element();
+        };
+        div()
+            .w_full()
+            .h(px(64.))
+            .rounded_xl()
+            .border_1()
+            .border_color(rgb(colors::BORDER()))
+            .bg(rgb(colors::BG_PRIMARY()))
+            .px_2()
+            .py_1()
+            .child(gpui_kit::component::input::Textarea::new(ed).appearance(false))
+            .into_any_element()
     }
 
     /// 拉取本会话的待审批操作（`GET /api/v1/approval/status`）。

@@ -270,6 +270,8 @@ impl ClientApp {
             pending_approvals: Vec::new(),
             clarification: None,
             clarify_answers: Vec::new(),
+            clarify_tab: 0,
+            clarify_inputs: Vec::new(),
             providers: Vec::new(),
             editing_provider: None,
             edit_endpoint: endpoint_input,
@@ -977,7 +979,10 @@ impl ClientApp {
                         let questions = parse_ask_user(&parsed);
                         if !questions.is_empty() {
                             self.clarify_answers = vec![String::new(); questions.len()];
+                            self.clarify_tab = 0;
                             self.clarification = Some(questions);
+                            // 编辑框按问题数补齐（渲染期是 `&self`，不能在那里造实体）
+                            self.ensure_clarify_inputs(cx);
                         }
                     }
                 }
