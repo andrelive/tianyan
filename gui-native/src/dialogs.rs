@@ -916,7 +916,20 @@ impl ClientApp {
         self.picker_parent = None;
         self.picker_entries.clear();
         self.picker_status = "正在读取目录…".to_string();
-        self.load_picker_dirs(String::new(), cx);
+        // 「新建会话」默认停在**当前会话的目录**：点 `+` → 直接确认就能建到同一个
+        // 工作区（不想换的人少点两次），想换再往上/往下浏览。
+        // 其它目标（数据目录搬迁 / 会话换目录）从浏览根开始 —— 那两处本来就该显式选。
+        let start = if matches!(target, PickerTarget::NewSession) {
+            self.sessions_data
+                .iter()
+                .find(|s| Some(s.id.as_str()) == self.current_session.as_deref())
+                .map(|s| s.working_directory.clone())
+                .filter(|d| !d.trim().is_empty())
+                .unwrap_or_default()
+        } else {
+            String::new()
+        };
+        self.load_picker_dirs(start, cx);
         cx.notify();
     }
 

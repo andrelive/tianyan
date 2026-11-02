@@ -442,6 +442,14 @@ impl ClientApp {
                             .overflow_hidden()
                             .child(self.status.clone()),
                     )
+                    // 新建会话 = **先选工作目录**（目录在首条消息时随
+                    // `working_directory` 下发并固化）。
+                    //
+                    // 早先这里是两个按钮：`+` 直接新建（落配置里的默认工作目录）、
+                    // `📁+` 才弹目录选择器 —— 结果用户点 `+` 会"凭空"多出一个绑在
+                    // 默认目录的会话，看起来像"没法选工作区"（实测反馈）。合并成一个：
+                    // 点 `+` 就进选择器，且默认停在**当前会话的目录**上（一次确认
+                    // 即可快速新建，想换目录再浏览）。
                     .child(
                         div()
                             .id("new-session")
@@ -454,27 +462,6 @@ impl ClientApp {
                             .child(
                                 svg()
                                     .path(IconName::Plus.path())
-                                    .size(px(14.))
-                                    .text_color(rgb(colors::TEXT_SECONDARY())),
-                            )
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.start_new_session(Some(window), cx);
-                            })),
-                    )
-                    // 「＋新目录」：新建一个绑定指定工作目录的会话（目录在
-                    // 首条消息时随 `working_directory` 下发并固化）
-                    .child(
-                        div()
-                            .id("new-workspace")
-                            .size(px(22.))
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .rounded_md()
-                            .cursor_pointer()
-                            .child(
-                                svg()
-                                    .path(IconName::FolderPlus.path())
                                     .size(px(14.))
                                     .text_color(rgb(colors::TEXT_SECONDARY())),
                             )

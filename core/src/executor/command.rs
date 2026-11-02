@@ -1856,13 +1856,14 @@ mod tests {
     async fn test_background_kill_marks_cancelled() {
         let _g = CHILD_REGISTRY_LOCK.lock().await; // 与 kill_all 类测试互斥（见常量注释）
         let manager = CommandManager::new(None);
-        // 慢命令用 waitfor 而非 ping：ping 是网络程序，启动时须加载 ws2_32/iphlpapi，
-        // 在装了安全软件内核 hook（HIPS/NDIS/WFP）的机器上会偶发 DLL 初始化失败
-        // （0xc0000142），由 CSRSS 弹 HardError 对话框，且进程挂在框上不退出——
-        // 既污染开发机，也可能占住并发许可。waitfor 是 Windows 自带、不依赖网络栈
-        // 与控制台窗口的纯等待工具，语义确定（约 N 秒后超时退出，退出码 1）。
+        // 慢命令**不能用 `ping`、也不要用 `waitfor`**：ping 要加载网络栈
+        // （ws2_32/iphlpapi），waitfor 在某些环境同样会触发 0xc0000142 由 CSRSS
+        // 弹 HardError 对话框（用户实测：跑本模块的 `cargo test` 时又见到那个
+        // 弹窗）；进程挂在框上不退出，既污染开发机也占住并发许可。
+        // 改用 PowerShell 的 `Start-Sleep`：纯托管等待、不碰网络栈、不起窗口，
+        // 代价只是多约 1 秒的解释器启动（`wait_terminal` 上限 15 秒，足够）。
         let cmd = if cfg!(target_os = "windows") {
-            "waitfor /t 20 TianyanKillTest"
+            "powershell -NoProfile -Command \"Start-Sleep -Seconds 20\""
         } else {
             "sleep 30"
         };
@@ -1892,9 +1893,9 @@ mod tests {
     async fn test_max_concurrent_commands_gates_spawn() {
         let _g = CHILD_REGISTRY_LOCK.lock().await; // 与 kill_all 类测试互斥（见常量注释）
         let manager = CommandManager::new(None).with_max_concurrent(1);
-        // 同上：用 waitfor 避开 ping 的网络栈初始化（0xc0000142 弹窗来源）
+        // 同上：慢命令一律走 `Start-Sleep`（`ping` / `waitfor` 都会触发 0xc0000142 弹窗）
         let long_cmd = if cfg!(target_os = "windows") {
-            "waitfor /t 5 TianyanGateTest"
+            "powershell -NoProfile -Command \"Start-Sleep -Seconds 5\""
         } else {
             "sleep 4"
         };
