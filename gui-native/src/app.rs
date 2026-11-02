@@ -1745,7 +1745,7 @@ impl ClientApp {
     }
 
     pub(crate) fn load_messages(&mut self, session_id: String, cx: &mut Context<Self>) {
-        self.load_messages_with(session_id, MESSAGE_PAGE, None, cx);
+        self.load_messages_with(session_id, MESSAGE_BASE, None, cx);
     }
 
     /// [`Self::load_messages`] 的完整版：自带分页条数与滚动锚点。
@@ -1759,17 +1759,17 @@ impl ClientApp {
     pub(crate) fn load_messages_with(
         &mut self,
         session_id: String,
-        limit: usize,
+        base: usize,
         anchor_seq: Option<i64>,
         cx: &mut Context<Self>,
     ) {
         let port = self.port;
-        println!("[消息] 加载会话 {session_id}（limit={limit}）");
+        println!("[消息] 加载会话 {session_id}（base={base}）");
         // 发起时的世代号：落地前必须没变过（期间若快照 replace 过，这一页就是旧的）
         let epoch_at_request = self.messages_epoch;
         cx.spawn(async move |this, cx| {
             let url = format!(
-                "http://{SERVER_HOST}:{port}/api/v1/sessions/{session_id}/messages?limit={limit}"
+                "http://{SERVER_HOST}:{port}/api/v1/sessions/{session_id}/messages?base={base}"
             );
             match fetch_json(url).await {
                 Ok(body) => {
@@ -1863,7 +1863,7 @@ impl ClientApp {
 
     /// 上滚加载更早一页（`?before_seq=<oldest_seq>`），前插并保持阅读位置。
     ///
-    /// 与 Web 版 `use-session-history.loadOlder` 同口径：页长 [`MESSAGE_PAGE`]、
+    /// 与 Web 版 `use-session-history.loadOlder` 同口径：页基准量 [`MESSAGE_BASE`]、
     /// 游标用服务端下发的 `next_before_seq`、`has_more=false` 就不再请求。
     /// 早先的做法是「一次拉 200 条、只渲染 60 条」——更早的历史永远看不到，
     /// 拉回来的 140 条还白费。
@@ -1890,7 +1890,7 @@ impl ClientApp {
         self.set_status("正在加载更早的消息…".to_string());
         cx.spawn(async move |this, cx| {
             let url = format!(
-                "http://{SERVER_HOST}:{port}/api/v1/sessions/{sid}/messages?limit={MESSAGE_PAGE}&before_seq={cursor}"
+                "http://{SERVER_HOST}:{port}/api/v1/sessions/{sid}/messages?base={MESSAGE_BASE}&before_seq={cursor}"
             );
             let res = fetch_json(url).await;
             let _ = this.update(cx, |this, cx| {

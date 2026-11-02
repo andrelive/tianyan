@@ -68,7 +68,7 @@ pub(crate) use types::*;
 
 pub(crate) const SERVER_HOST: &str = "127.0.0.1";
 pub(crate) const PREFERRED_PORT: u16 = 3000;
-/// 消息分页页长（`?limit=`）—— 与 vite `use-session-history.ts` 的 `PAGE_SIZE`
+/// 消息分页**基准量**（`?base=`）—— 与 vite `use-session-history.ts` 的 `PAGE_SIZE`
 /// 同值，**不要为了「一轮消息多」而加大它**。
 ///
 /// 为什么 50 就够（这条是 vite 版积累的关键细节）：页边界**不由前端保证**，
@@ -81,7 +81,7 @@ pub(crate) const PREFERRED_PORT: u16 = 3000;
 /// - 同时避免「user 消息太近、一页占不满屏」。
 ///
 /// 前端要做的只有一件事：**永远按 `next_before_seq` 当游标**，别自己数条数。
-pub(crate) const MESSAGE_PAGE: usize = 50;
+pub(crate) const MESSAGE_BASE: usize = 50;
 
 /// 前插累积的硬上限：超过就不再往上加载（提示已到上限）。
 ///

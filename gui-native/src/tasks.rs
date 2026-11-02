@@ -494,7 +494,7 @@ impl ClientApp {
         let port = self.port;
         cx.spawn(async move |this, cx| {
             let url =
-                format!("http://{SERVER_HOST}:{port}/api/v1/sessions/{task_id}/messages?limit=20");
+                format!("http://{SERVER_HOST}:{port}/api/v1/sessions/{task_id}/messages?base=20");
             if let Ok(body) = fetch_json(url).await {
                 let arr = body
                     .get("messages")

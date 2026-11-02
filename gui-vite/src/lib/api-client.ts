@@ -350,11 +350,11 @@ export async function fetchSessionMessages(sessionId: string): Promise<SessionMe
 export async function fetchSessionMessagesPage(
   sessionId: string,
   beforeSeq?: number,
-  limit?: number,
+  base?: number,
 ): Promise<SessionMessagesResponse> {
   const params = new URLSearchParams();
   if (beforeSeq !== undefined) params.set('before_seq', String(beforeSeq));
-  if (limit !== undefined) params.set('limit', String(limit));
+  if (base !== undefined) params.set('base', String(base));
   const qs = params.toString();
   return apiGet<SessionMessagesResponse>(
     `/sessions/${encodeURIComponent(sessionId)}/messages${qs ? `?${qs}` : ''}`,

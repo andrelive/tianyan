@@ -16,7 +16,7 @@ import { useAppStore } from '@/lib/store';
 import { subscribeSession } from '@/hooks/use-unified-events';
 
 /** 首载与上滚共用的页大小（对齐服务端默认；上限 200）。 */
-const PAGE_SIZE = 50;
+const PAGE_SIZE = 50; // 分页**基准量**（?base=）：一页实际返回 >= 它（页首继续向前找 user）
 
 /**
  * 懒加载会话历史（唯一入口，SessionList 与其它调用方共用）：按会话 id

@@ -124,8 +124,11 @@ pub struct SessionMessagesResponse {
 pub struct SessionMessagesQuery {
     /// 上滚游标：取 seq 严格小于该值的最近一页（省略 = 最近一页）。
     pub before_seq: Option<i64>,
-    /// 单页条数（默认 50，上限 200）。
-    pub limit: Option<usize>,
+    /// 分页**基准量**（默认 50，上限 200）：先取这么多条，再继续向前对齐到一条真
+    /// user 为止。一页实际返回条数因此**一定 ≥ base**（除链头收束）。
+    ///
+    /// 刻意不叫 `limit`：它不是"最多返回几条"，而是"先往前取多少条作基准"。
+    pub base: Option<usize>,
 }
 
 /// 会话详情响应

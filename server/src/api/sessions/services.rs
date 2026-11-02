@@ -10,12 +10,17 @@ use crate::api::sessions::types::{
 };
 use crate::api::shared::error::ApiError;
 use crate::api::shared::types::ChatMessage;
-use tianyan::common::types::{MessageRole, StructuredMessage};
 use tianyan::snapshot::SnapshotManager;
-/// 分段加载默认单页条数（ADR-035 §8）。
-const DEFAULT_MESSAGE_PAGE: usize = 50;
-/// 分段加载单页条数上限（防超大页拖垮前端渲染）。
-const MAX_MESSAGE_PAGE: usize = 200;
+/// 分页**基准量**（`?base=`，ADR-035 §8）：先取这么多条，再继续向前对齐到 user。
+///
+/// 刻意不叫 `limit` —— 一页实际返回条数**一定 ≥ base**（除链头收束），因为页首
+/// 还要继续向前找到一条真 user 为止（见 `get_messages_page` 的页首对齐）。
+const DEFAULT_MESSAGE_BASE: usize = 50;
+/// 请求的基准量上限（`?base=` 的合法上界）。
+const MAX_MESSAGE_BASE: usize = 200;
+/// 一页**实际返回**条数的硬上限（对齐扩展时用）：两个 user 之间隔了超长工具段时，
+/// 宁可退化为「不对齐」也不返回一个几 MB 的页。
+const MAX_MESSAGE_PAGE_ROWS: usize = 1000;
 
 /// 会话服务，管理对话会话
 pub struct SessionService {
@@ -171,41 +176,37 @@ impl SessionService {
         &self,
         session_id: &str,
         before_seq: Option<i64>,
-        limit: Option<usize>,
+        base: Option<usize>,
     ) -> Result<SessionMessagesResponse, ApiError> {
         if !self.session_manager.session_exists(session_id).await? {
             return Err(ApiError::NotFound(format!("会话未找到: {session_id}")));
         }
-        let page_limit = limit
-            .unwrap_or(DEFAULT_MESSAGE_PAGE)
-            .clamp(1, MAX_MESSAGE_PAGE);
+        let base = base
+            .unwrap_or(DEFAULT_MESSAGE_BASE)
+            .clamp(1, MAX_MESSAGE_BASE);
         let last_seq = self.session_manager.last_seq(session_id).await?;
         let before = before_seq.unwrap_or(last_seq + 1);
-        // 基准窗口（最近 page_limit 条）
+        // 基准窗口（`seq < before` 里最近 base 条）
         let window = self
             .session_manager
-            .load_before(session_id, before, page_limit)
+            .load_before(session_id, before, base)
             .await?;
-        // 页首对齐（ADR-035 §8 修订，2026-11 重定语义）：**以窗口起点为界向前找
-        // 最近的一条「真 user」**，而不是「窗口内最早的那条 user」。
+        // 页首对齐（ADR-035 §8，2026-11 定稿语义）：**基准窗口只是起点** ——
+        // 不管窗口里有没有 user、有几个 user，都要**继续向前**找到最近的一条
+        // 「真 user」为止，页从它起。
         //
-        // 旧语义（窗口内最早 user）有两个毛病，都在实测里咬过人：
-        // 1. 页首取决于「窗口里恰好有什么」——窗口里若有 user，页会比 page_limit
-        //    短一截，且页起点随窗口滑动漂移；
-        // 2. **压缩点也是 user 锚定**（ADR-053：全 system 请求会被上游拒），压缩点
-        //    之后还没有新消息时，窗口里唯一的 user 就是压缩点 → 整页被切成「只剩
-        //    压缩点一条」，前面几十条历史全丢（用户实测：切回会话只剩一张摘要卡）。
+        // 因此一页实际条数**一定 ≥ base**（除链头收束：向前找不到 user 时从链头起，
+        // 那时页就是「链头..窗口尾」）。
         //
-        // 新语义：窗口第一条本身就是真 user 时不动；否则**向前**找最近的真 user
-        // （`last_user_seq_before` 已排除压缩点），页从它起。页长因此可能超过
-        // page_limit，上限由 `MAX_MESSAGE_PAGE` 兜底（超长工具段时才可能触顶）。
-        let starts_with_real_user = window
-            .first()
-            .map(|(_, m)| m.role == MessageRole::User && !m.compression_marker)
-            .unwrap_or(false);
+        // 为什么必须"继续向前"、而不是"窗口里有 user 就用它"：
+        // 1. 页首会随窗口滑动漂移 —— 同样是"最新一页"，两次请求可能从不同 user 起；
+        // 2. 窗口里的 user 可能全是**压缩点**（ADR-053：压缩点 user 锚定），压缩点
+        //    之后还没有新消息时，旧实现整页塌成「只剩压缩点一条」，前面几十条历史
+        //    全丢（用户实测：切回会话只剩一张摘要卡）。
+        //
+        // `last_user_seq_before` 已排除压缩点；链头无 user → `lo = 0` → 整段从链头起。
+        // 两个 user 相隔超过 `MAX_MESSAGE_PAGE_ROWS`（超长工具段）时触顶退化。
         let rows = match window.first().map(|(seq, _)| *seq) {
-            Some(_) if starts_with_real_user => window,
-            // 向前找最近的真 user；到链头仍无 user → 整段（链头..窗口尾）兜底。
             Some(head) => {
                 let lo = self
                     .session_manager
@@ -214,7 +215,7 @@ impl SessionService {
                     .unwrap_or(0);
                 let span = (before - lo).max(1) as usize;
                 self.session_manager
-                    .load_before(session_id, before, span.min(MAX_MESSAGE_PAGE))
+                    .load_before(session_id, before, span.min(MAX_MESSAGE_PAGE_ROWS))
                     .await?
             }
             // 空窗口（无更早消息）
@@ -769,43 +770,35 @@ mod tests {
             None,
         );
 
-        // 第一页（无游标 = 最近一页）：seq 3,4
+        // 第一页（无游标 = 最近一页）：base=2 先取 [3,4]，再**继续向前**对齐到
+        // 最近的 user(2) → 页 [2,3,4]（3 条 > base，页首对齐的必然结果）
         let p1 = service
             .get_messages_page("s1", None, Some(2))
             .await
             .expect("第一页");
         assert_eq!(p1.last_seq, 4);
-        assert_eq!(p1.messages.len(), 2);
-        assert_eq!(p1.messages[0].seq, Some(3), "每条消息携带链上位置");
-        assert_eq!(p1.messages[1].seq, Some(4));
+        assert_eq!(p1.messages.len(), 3, "页必须 > base（页首继续向前找 user）");
+        assert_eq!(p1.messages[0].seq, Some(2), "页首 = 真 user(2)");
+        assert_eq!(p1.messages[1].seq, Some(3), "每条消息携带链上位置");
+        assert_eq!(p1.messages[2].seq, Some(4));
         assert!(p1.has_more);
-        assert_eq!(p1.next_before_seq, Some(3), "游标 = 本页最早一条的 seq");
+        assert_eq!(p1.next_before_seq, Some(2), "游标 = 本页最早一条的 seq");
 
-        // 第二页：seq 1,2
+        // 第二页：before=2 → base 取 [0,1] → 向前已到链头（无更早 user）→ 页 [0,1]
         let p2 = service
             .get_messages_page("s1", p1.next_before_seq, Some(2))
             .await
             .expect("第二页");
         assert_eq!(
             p2.messages.iter().map(|m| m.seq).collect::<Vec<_>>(),
-            vec![Some(1), Some(2)]
+            vec![Some(0), Some(1)]
         );
-        assert_eq!(p2.next_before_seq, Some(1));
-
-        // 第三页：seq 0（到链首 → 无更早）
-        let p3 = service
-            .get_messages_page("s1", p2.next_before_seq, Some(2))
-            .await
-            .expect("第三页");
-        assert_eq!(p3.messages.len(), 1);
-        assert_eq!(p3.messages[0].seq, Some(0));
-        assert!(!p3.has_more, "到链首后无更早历史");
-        assert_eq!(p3.next_before_seq, None);
+        assert!(!p2.has_more, "页首 0 = 已到链首，无更早历史");
+        assert_eq!(p2.next_before_seq, None);
 
         // 拼接（由早到晚）== 全量
         let full = service.get_messages("s1").await.expect("全量");
         let mut walked: Vec<Option<i64>> = Vec::new();
-        walked.extend(p3.messages.iter().map(|m| m.seq));
         walked.extend(p2.messages.iter().map(|m| m.seq));
         walked.extend(p1.messages.iter().map(|m| m.seq));
         let full_seqs: Vec<Option<i64>> = full.messages.iter().map(|m| m.seq).collect();
@@ -969,7 +962,10 @@ mod tests {
         assert_eq!(p2.next_before_seq, None, "页首 0 = 已到链首");
         assert!(!p2.has_more);
     }
-    /// 窗口内最早 user 恰在窗口头 → 页 = 整个窗口（不缩水）。
+    /// 基准窗口头恰好是 user，也要**继续向前**找（窗口内的 user 不作数）。
+    ///
+    /// 链：u0,a1,a2,u3,a4,a5；base=3 → 基准窗口 [3,4,5]。旧实现"窗口里有 user
+    /// 就用它"会停在 3；新语义必须越过它继续往前，找到真 user(0) → 页 = 全链。
     #[tokio::test]
     async fn test_get_messages_page_user_at_window_head() {
         use tianyan::session::store::SessionStore;
@@ -995,14 +991,15 @@ mod tests {
             tianyan::session::PersistentSessionManager::new(store.clone()),
         );
         let service = SessionService::new(manager, None, None);
-        // 窗口 [3,4,5]，最早 user = 3（窗口头）→ 页保持 [3,4,5]
+        // 基准窗口 [3,4,5]（头是 user 3）→ 继续向前找到 user(0) → 页 = [0..5]
         let p = service
             .get_messages_page("s1", None, Some(3))
             .await
             .unwrap();
         let seqs: Vec<i64> = p.messages.iter().filter_map(|m| m.seq).collect();
-        assert_eq!(seqs, vec![3, 4, 5]);
-        assert_eq!(p.next_before_seq, Some(3));
+        assert_eq!(seqs, vec![0, 1, 2, 3, 4, 5], "页首必须是更早的那条真 user");
+        assert!(!p.has_more, "页首已经到链头");
+        assert_eq!(p.next_before_seq, None);
     }
     /// 全链无 user（无用户消息的会话）→ 整段兜底 + 到链首。
     #[tokio::test]

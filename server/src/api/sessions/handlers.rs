@@ -83,7 +83,7 @@ pub async fn get_session_messages(
     // 25 MB，是会话切换卡顿的根源）；全量读取仅保留在服务内部
     //（回退/重做响应等，`SessionService::get_messages`）。
     let result = service
-        .get_messages_page(&session_id, query.before_seq, query.limit)
+        .get_messages_page(&session_id, query.before_seq, query.base)
         .await;
     result
         .inspect_err(|e| error!("获取会话消息失败: {}", e))

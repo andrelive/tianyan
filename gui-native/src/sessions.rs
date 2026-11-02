@@ -620,7 +620,7 @@ impl ClientApp {
         // 某条事件丢了，快照就永久停在旧位置，而「不重拉」会让它一直显示下去。
         //
         // 页边界不靠前端兜：服务端 `get_messages_page` 会把页首对齐到 user 消息
-        // （整轮不会被切开，见 [`MESSAGE_PAGE`] 的注释），前端只要按
+        // （整轮不会被切开，见 [`MESSAGE_BASE`] 的注释），前端只要按
         // `next_before_seq` 游标走。
         //
         // `anchor_seq` = 恢复出来的窗口**顶部**那条消息的 seq：重拉后按它找回
@@ -635,7 +635,7 @@ impl ClientApp {
         // （vite `useSessionHistory` 的 `needForce` 同口径）。
         let history_empty = self.messages.is_empty();
         let _ = restored;
-        self.load_messages_with(id, MESSAGE_PAGE, anchor_seq, cx);
+        self.load_messages_with(id, MESSAGE_BASE, anchor_seq, cx);
         self.load_session_usage(cx);
         self.load_todos_goals(cx);
         self.load_approvals(cx);
