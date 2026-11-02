@@ -187,8 +187,17 @@ impl SessionService {
             .load_before(session_id, before, page_limit)
             .await?;
         let head_seq = window.first().map(|(seq, _)| *seq);
-        // 窗口内由远及近第一条 user
-        let user_pos = window.iter().position(|(_, m)| m.role == MessageRole::User);
+        // 窗口内由远及近第一条**真** user（压缩点也是 user 锚定的，见 ADR-053，
+        // 但它不是「用户发言」）。
+        //
+        // 为什么必须排除：页首对齐到 user 是为了「页从用户发言开始」；压缩点
+        // （`compression_marker`）是系统写的摘要，user 锚定只是为了让上游接受
+        // 全 system 请求。不排除的后果（用户实测「长时间不看再切回，页面只剩
+        // 压缩点」）：压缩点之后还没有新消息时，窗口里唯一的 user 就是压缩点 →
+        // 整页切成「只有压缩点一条」，前面几十条历史全被丢掉。
+        let user_pos = window
+            .iter()
+            .position(|(_, m)| m.role == MessageRole::User && !m.compression_marker);
         let rows = match (user_pos, head_seq) {
             // 窗口内找到 user：页从它起（截取尾部，页长 ≤ 窗口）
             (Some(pos), _) => window
@@ -843,6 +852,54 @@ mod tests {
             time: PartTime::default(),
         }];
         msg
+    }
+
+    /// 回归（用户实测：「长时间不看再切回，整个页面只剩压缩点」）。
+    ///
+    /// 压缩点是 **user 锚定**的（ADR-053：全 system 请求会被上游拒），但它不是
+    /// 「用户发言」。页首对齐到 user 时必须跳过它 —— 否则压缩点之后还没有新消息
+    /// 时，窗口里唯一的 user 就是压缩点，整页被切成「只有压缩点一条」，前面几十
+    /// 条历史全被丢掉（`has_more` 虽有值，用户看到的就是一片空 + 一张摘要卡）。
+    #[tokio::test]
+    async fn test_get_messages_page_does_not_align_to_compression_marker() {
+        use tianyan::session::store::SessionStore;
+        use tianyan::session::SessionHeader;
+        let db = tianyan::db::Database::open_in_memory().unwrap();
+        db.init_schemas().await.unwrap();
+        let store = SessionStore::new(db).unwrap();
+        store.create("s1", &SessionHeader::default()).await.unwrap();
+        let registry = tianyan::agent::working_set::WorkingSetRegistry::new(Some(store.clone()));
+        let ws = registry.ensure("s1").await.unwrap();
+        let mut marker = StructuredMessage::user("s1", "[对话摘要] 以下是摘要");
+        marker.compression_marker = true;
+        let chain = [
+            StructuredMessage::user("s1", "u0"),      // seq 0
+            StructuredMessage::assistant("s1", "a1"), // seq 1
+            StructuredMessage::user("s1", "u2"),      // seq 2
+            StructuredMessage::assistant("s1", "a3"), // seq 3
+            marker,                                   // seq 4：压缩点（user 锚定）
+            StructuredMessage::assistant("s1", "a5"), // seq 5
+        ];
+        for m in &chain {
+            ws.append(m, true).await.unwrap();
+        }
+        let manager: Arc<dyn SessionManager> = Arc::new(
+            tianyan::session::PersistentSessionManager::new(store.clone()),
+        );
+        let service = SessionService::new(manager, None, None);
+        // 窗口 [3,4,5] 里唯一的 user 是压缩点(4)：必须跳过它、向前对齐到真 user(2)，
+        // 把压缩点之前的历史一并带出来。
+        let p1 = service
+            .get_messages_page("s1", None, Some(3))
+            .await
+            .unwrap();
+        let seqs: Vec<i64> = p1.messages.iter().filter_map(|m| m.seq).collect();
+        assert_eq!(
+            seqs,
+            vec![2, 3, 4, 5],
+            "页首必须是真 user(2) 而不是压缩点(4)（修复前是 [4, 5]）"
+        );
+        assert!(p1.has_more, "压缩点之前还有更早历史，必须可上滚");
     }
 
     /// 分段加载 user 对齐（ADR-035 §8 修订）：页首恒为 user；"调用|结果"对

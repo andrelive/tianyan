@@ -559,7 +559,19 @@ impl SessionStore {
     ) -> Result<Option<i64>, TianyanError> {
         let conn = self.db.lock().await;
         conn.query_row(
-            "SELECT MAX(seq) FROM session_messages WHERE session_id = ?1 AND role = 'user' AND seq < ?2",
+            // 压缩点也要排除：它是 user 锚定的（ADR-053，全 system 请求会被上游
+            // 拒绝），但不是「用户发言」。不排除时「页首对齐 user」会落在压缩点上，
+            // 压缩点之前的历史被整段切掉（用户实测：切回会话只剩一条压缩点）。
+            //
+            // ⚠️ `session_messages` **没有** `compression_marker` 列 —— 整条
+            // `StructuredMessage` 序列化在 `content_parts`（JSON）里，标记取
+            // `$.compression_marker`。裸写列名会在运行时 "no such column"。
+            "SELECT MAX(seq) FROM session_messages \
+             WHERE session_id = ?1 AND role = 'user' \
+             AND (CASE WHEN json_valid(content_parts) \
+                       THEN json_extract(content_parts, '$.compression_marker') \
+                       ELSE 0 END) = 0 \
+             AND seq < ?2",
             rusqlite::params![session_id, before_seq],
             |r| r.get::<_, Option<i64>>(0),
         )

@@ -1459,7 +1459,13 @@ impl ClientApp {
         }
         let row = parse_msg_row(msg);
         let mut next: Vec<MsgRow> = (*self.messages).clone();
-        next.push(row);
+        // **按 `seq` 插入，不是 push**：压缩点 / System 通知的推送与后续消息的到达
+        // 顺序并不保证（切回会话时的事件重放、`落库即推` 与流式的交错）。无条件
+        // 追加会让压缩点落到**它之后**的消息下面 —— 用户实测看到的「这一轮没有
+        // 结束 / 时间倒挂」就是这样：压缩点(06:48) 显示在 14:53 的工具卡之下、
+        // 14:52 的用户消息之上，看起来像这一轮被劈成两半。
+        let pos = boundary_insert_pos(&next, row.seq);
+        next.insert(pos, row);
         // 与流式追加同一口径：超窗口丢最早的（压缩点的补齐由 `render_window` 负责）
         self.trim_loaded_front(&mut next);
         self.messages = Rc::new(next);
@@ -2338,6 +2344,19 @@ pub(crate) enum BoundaryMessageAction {
     Ignore,
 }
 
+/// 边界消息（压缩点 / System 通知）的插入位置：按 `seq` 升序插入。
+///
+/// 本地的「未落库占位」（`seq == 0`，流式期间刚开的那一行）永远排在末尾 ——
+/// 它们是这一轮**最新**的内容，任何已落库消息（seq > 0）都在它们之前。
+pub(crate) fn boundary_insert_pos(rows: &[MsgRow], seq: i64) -> usize {
+    if seq <= 0 {
+        return rows.len();
+    }
+    rows.iter()
+        .position(|m| m.seq == 0 || m.seq > seq)
+        .unwrap_or(rows.len())
+}
+
 /// 权威 assistant 消息该落到哪一行（`None` = 不动）。
 ///
 /// 为什么不能盲取「最后一条 assistant」：一轮多步里 `message` 边界可能**晚于**
@@ -2425,7 +2444,8 @@ mod step_boundary_tests {
     // `#[test]` 宏展开时直接撞 `recursion_limit`（实测报
     // “recursion limit reached while expanding `#[test]`”）。只显式导入需要的类型。
     use crate::app::{
-        authoritative_target, classify_boundary_message, merge_tool_results, BoundaryMessageAction,
+        authoritative_target, boundary_insert_pos, classify_boundary_message, merge_tool_results,
+        BoundaryMessageAction,
     };
     use crate::types::{MsgRow, Seg, ToolCall};
     use crate::ClientApp;
@@ -2455,6 +2475,33 @@ mod step_boundary_tests {
             images: Vec::new(),
             ts: None,
         }
+    }
+    fn row_seq(seq: i64) -> MsgRow {
+        let mut m = row(Vec::new(), Vec::new());
+        m.seq = seq;
+        m
+    }
+
+    /// 回归（用户实测：切回会话后「这一轮没有结束 / 时间倒挂」）。
+    ///
+    /// 压缩点事件可能**晚于**它之后的消息到达（切回时的事件重放、落库即推与流式
+    /// 交错）。早先 `append_boundary_message` 无条件 push 到末尾 → 压缩点落在
+    /// 它之后的消息下面，看起来像把这一轮劈成了两半。
+    #[test]
+    fn boundary_message_inserts_by_seq_not_append() {
+        let mut rows = vec![row_seq(4400), row_seq(4450)];
+        let pos = boundary_insert_pos(&rows, 4436);
+        assert_eq!(pos, 1, "压缩点(4436) 必须落在 4450 之前，而不是追加到末尾");
+        rows.insert(pos, row_seq(4436));
+        let seqs: Vec<i64> = rows.iter().map(|m| m.seq).collect();
+        assert_eq!(seqs, vec![4400, 4436, 4450], "插入后整表保持 seq 升序");
+    }
+
+    #[test]
+    fn boundary_message_stays_before_local_placeholder() {
+        // 本地未落库占位（seq=0）代表「这一轮最新内容」→ 边界消息插在它之前
+        let rows = vec![row_seq(4400), row_seq(0)];
+        assert_eq!(boundary_insert_pos(&rows, 4436), 1);
     }
 
     #[test]
