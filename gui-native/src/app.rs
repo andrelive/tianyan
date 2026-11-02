@@ -305,6 +305,8 @@ impl ClientApp {
             usage_msg: String::new(),
             health_info: None,
             health_msg: String::new(),
+            executor_shell: None,
+            executor_shell_msg: String::new(),
             models_msg: String::new(),
             models_msg_err: false,
             model_form_open: false,

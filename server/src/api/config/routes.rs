@@ -9,8 +9,8 @@ use crate::api::config::discovery_handlers::{
     add_provider_model, list_provider_presets, scan_provider_models, test_provider_connection,
 };
 use crate::api::config::handlers::{
-    get_config, get_config_section, get_config_status, get_models, migrate_data_dir, switch_model,
-    test_connection, update_config,
+    get_config, get_config_section, get_config_status, get_executor_shell, get_models,
+    migrate_data_dir, switch_model, test_connection, update_config,
 };
 use crate::api::config::mcp_handlers::{
     add_mcp_server, list_mcp_servers, remove_mcp_server, test_mcp_server, toggle_mcp_server,
@@ -25,6 +25,9 @@ pub fn routes() -> Router<Arc<AppState>> {
     Router::new()
         .route("/config", get(get_config).put(update_config))
         .route("/config/status", get(get_config_status))
+        // 命令执行底层的事实（与 `/config/{section}` 的静态/参数共存：
+        // 路由匹配静态优先，`executor` 不会被当成配置节名）。
+        .route("/config/executor", get(get_executor_shell))
         .route("/config/{section}", get(get_config_section))
         .route("/config/models", get(get_models))
         .route("/config/models/switch", post(switch_model))

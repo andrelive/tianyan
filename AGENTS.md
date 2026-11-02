@@ -171,6 +171,7 @@ agent 没有 system 前缀、上下文只增不减，服务起得来但行为已
 ## 协作纪律（多 agent / 并行工作）
 
 - **禁止全局 git 操作**：`git stash` / `git reset --hard` / `git checkout .` / `git clean` 会瞬间毁灭其他并行工作者的进行中编辑。只允许 `git diff` / `git status` / `git checkout <具体文件>` / `git log` / `git reflog`
+- **禁止按进程名批量杀进程**：`Get-Process tianyan-gui-native | Stop-Process -Force`（以及任何按名字过滤的 `taskkill /IM`、`killall`）会连同**用户正在用的桌面客户端**一起杀掉；更糟的是 agent 自己就跑在那个 server 上——实测 2026-11-02 两次「命令被中断」正是自伤（把宿主连同用户界面一起杀了）。杀进程**只按 PID**，且只杀**本会话自己启动并记录过**的 PID（后台命令用 `background:true` 时返回的 `pid`）。需要「让 exe 不被占用才能重编译」时，先确认那个 PID 是自己起的，再 `Stop-Process -Id <pid>`；判断「某端口有没有服务」不要只看 `Get-NetTCPConnection`（可能取不到数据而误报「无人监听」），用 `/health` 直连确认
 - 发现"文件被神秘回滚/修改"时：先 `git reflog -5` + `git stash list` 排查**内部**操作痕迹，再怀疑外部进程
 - 验证"干净树是否编译"用 `git worktree` 或临时克隆，**不要用 stash 切换**
 

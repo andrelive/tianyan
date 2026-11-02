@@ -3,6 +3,7 @@
 
 use crate::*;
 
+pub(crate) mod agent;
 pub(crate) mod fields;
 pub(crate) mod mcp;
 pub(crate) mod models;
@@ -16,6 +17,37 @@ use crate::theme::colors;
 use crate::types::*;
 
 impl ClientApp {
+    /// 切到某个设置栏目，并按该栏目的数据源做懒加载。
+    ///
+    /// **界面点击与自动化 `settings_tab` 共用这一条路径**：此前两处各写一份同样的
+    /// match，新增一个「有自己的接口」的栏目时极易只改一处——自动化验收就会看到
+    /// 「界面有数据、脚本拿到空」。配置段与字段回填也在这里（回填判据见
+    /// `backfill_settings_fields` 的注释）。
+    pub(crate) fn enter_settings_tab(&mut self, tab: SettingsTab, cx: &mut Context<Self>) {
+        self.settings_tab = tab;
+        // 配置段懒加载：没拉过就拉；拉过但还没回填进编辑器（例如 `load_models`
+        // 顺手设了 `raw_config`）就补一次回填——编辑器是空的话，保存会把所有
+        // 文本字段当成「被清空」。
+        if tab.config_key().is_some() {
+            if self.raw_config.is_none() {
+                self.load_config_summary(cx);
+            } else if !self.settings_backfilled {
+                self.backfill_settings_fields(cx);
+            }
+        }
+        // 各栏目的数据源不同，同样懒加载。执行底层（Agent）是运行时事实：
+        // 配置写 auto 时它才是「真正在跑的那个」，数据源是 `/config/executor`。
+        match tab {
+            SettingsTab::Usage => self.load_settings_usage(cx),
+            SettingsTab::Soul => self.load_soul(cx),
+            SettingsTab::Mcp => self.load_mcp_servers(cx),
+            SettingsTab::Connection | SettingsTab::About => self.load_health(cx),
+            SettingsTab::Agent => self.load_executor_shell(cx),
+            _ => {}
+        }
+        cx.notify();
+    }
+
     /// 设置页（对齐 `gui-vite` 的 `SettingsPanel`）：左侧 14 个二级栏目 + 右侧内容。
     ///
     /// 之前是一个长页面（外观 → 提供商 → 模型全部堆在一起），用户一进去找不到东西，
@@ -102,27 +134,10 @@ impl ClientApp {
                             .text_color(rgb(icon_fg)),
                     )
                     .child(tab.label())
+                    // 切栏目 + 该栏目的懒加载只有一条路径（自动化 `settings_tab`
+                    // 调同一个方法，见 `enter_settings_tab`）。
                     .on_click(cx.listener(move |this, _, _window, cx| {
-                        this.settings_tab = tab;
-                        // 配置段懒加载：没拉过就拉；拉过但还没回填进编辑器（例如
-                        // `load_models` 顺手设了 `raw_config`）就补一次回填——
-                        // 编辑器是空的话，保存会把所有文本字段当成「被清空」。
-                        if tab.config_key().is_some() {
-                            if this.raw_config.is_none() {
-                                this.load_config_summary(cx);
-                            } else if !this.settings_backfilled {
-                                this.backfill_settings_fields(cx);
-                            }
-                        }
-                        // 各栏目的数据源不同：用量/人设/MCP 各有自己的接口，同样懒加载
-                        match tab {
-                            SettingsTab::Usage => this.load_settings_usage(cx),
-                            SettingsTab::Soul => this.load_soul(cx),
-                            SettingsTab::Mcp => this.load_mcp_servers(cx),
-                            SettingsTab::Connection | SettingsTab::About => this.load_health(cx),
-                            _ => {}
-                        }
-                        cx.notify();
+                        this.enter_settings_tab(tab, cx);
                     })),
             );
         }

@@ -557,6 +557,13 @@ struct ClientApp {
     pub(crate) health_info: Option<HealthInfo>,
     /// 探活状态行（失败文案）
     pub(crate) health_msg: String,
+    // ── 设置页「Agent / 命令执行」 ──
+    /// `GET /config/executor` 的**生效** shell 事实（`None` = 未拉取或拉取失败）。
+    /// 与 `raw_config` 里的 `executor.shell` 是两件事：配置写 `auto` 时，
+    /// 这里是探测命中的那个具体 shell。
+    pub(crate) executor_shell: Option<ExecutorShellInfo>,
+    /// 生效 shell 的加载状态行（失败文案）
+    pub(crate) executor_shell_msg: String,
     // ── 设置页「模型服务」 ──
     /// 提供商/模型增删改的状态行（本栏目独立于整页 `settings_status`）
     pub(crate) models_msg: String,

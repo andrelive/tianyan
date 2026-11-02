@@ -712,6 +712,16 @@ impl ClientApp {
                     })
                 ).collect::<Vec<_>>(),
             },
+            // 命令执行底层（**运行时事实**，不是配置值）：自动化断言「切 shell 真的
+            // 生效了」看这里——配置写 auto 时 `configured` 与 `kind` 本来就不同。
+            "executor_shell": self.executor_shell.as_ref().map(|s| serde_json::json!({
+                "configured": &s.configured,
+                "kind": &s.kind,
+                "executable": &s.executable,
+                "args": &s.args,
+                "shell_program": &s.shell_program,
+                "msg": &self.executor_shell_msg,
+            })),
             "settings_extras": {
                 "soul": {
                     "loaded": self.soul_loaded,
@@ -1443,24 +1453,9 @@ impl ClientApp {
                             .join(" / ")
                     )
                 })?;
-                self.settings_tab = tab;
-                // 与界面点击同一条懒加载 + 回填路径
-                if tab.config_key().is_some() {
-                    if self.raw_config.is_none() {
-                        self.load_config_summary(cx);
-                    } else if !self.settings_backfilled {
-                        self.backfill_settings_fields(cx);
-                    }
-                }
-                // 与界面点击同一套懒加载（自动化路径不得分叉）
-                match tab {
-                    SettingsTab::Usage => self.load_settings_usage(cx),
-                    SettingsTab::Soul => self.load_soul(cx),
-                    SettingsTab::Mcp => self.load_mcp_servers(cx),
-                    SettingsTab::Connection | SettingsTab::About => self.load_health(cx),
-                    _ => {}
-                }
-                cx.notify();
+                // 与界面点击**同一条**路径（切栏目 + 懒加载 + 回填）；自动化路径
+                // 不得分叉，否则新增栏目时总有一边漏掉。
+                self.enter_settings_tab(tab, cx);
             }
             // ---- 设置页字段引擎（写操作与界面共用同一条保存管线）----
             // ---- 设置页「模型服务」（偏好切换 / 增删）----

@@ -7,7 +7,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **设置页可以自己选命令执行 Shell，并看到「当前生效」到底是什么**：`[executor].shell` 一直
+  只能改 `tianyan.toml`，而 `auto` 探测到的结果只写在启动日志里。实测踩过一次：本机装了
+  PowerShell 7，报错里却出现 5.1 的行为，翻日志才排除「auto 选错」（真因是别处裸写了
+  `powershell`，与 auto 无关）——但用户没有任何界面证据可用。
+  - **Agent 栏目新增「命令执行」分组**（排在栏目最前）：`[executor].shell`
+    （自动 / PowerShell 7+ / PS 5.1 / cmd / bash / sh / 自定义）+ `[executor].shell_program`
+    （pwsh 没进 PATH 时填绝对路径）。
+  - **栏目顶部新增「命令执行环境（当前生效）」卡片**：Shell 身份、可执行绝对路径、参数模板，
+    每行可复制、可刷新。数据源是新接口 `GET /api/v1/config/executor`，它返回的是**服务进程里
+    已安装的 spec**（`shell::current()`），不是前端按配置值二次推算——配置写 `auto` 时两者本就
+    不同，而用户要的正是「实际在跑什么」。
+  - 保存后卡片立刻刷新（服务端 resolve + install 是热生效，不需要重启应用）。
+  - 自动化：`/state` 增加 `executor_shell`（configured / kind / executable / args），
+    「切换真的生效了」不再只能靠截图判断；设置页「切栏目 + 懒加载」抽成
+    `enter_settings_tab`，界面点击与 `/act settings_tab` 走同一条路径（此前两处各写一份 match）。
+
 ### Fixed
+
+- **切 shell 后「模型看到的平台事实」滞后一次重建**：`persist_and_reload` 里
+  `shell::install(spec)` 原本排在 `update_config`（重建 Agent）**之后**。Agent 重建时
+  `register_builtin_tools` 会读 `shell::current_hint()` 生成 `execute_command` 描述 ——
+  于是新 Agent 拿到的是**上一个** shell 的平台事实。实测：`auto → powershell` 保存后
+  `/api/v1/config/executor` 已是 5.1，而 `/api/v1/tools` 里那句描述仍是「PowerShell 7+」，
+  要等下一次重建才纠正（表现为「我明明切了 5.1，模型还在用 7 的语法规则」）。
+  修法：install 提到 `update_config` 之前，但仍排在 `persist_config` **之后**（写盘失败时
+  不该已经换掉全局执行底层）。验证：`powershell` → `tools=powershell(5.1)` 立即生效；
+  改回 `auto` → `tools=pwsh(7+)` 立即生效。
+
+- **e2e 分页断言落后于 `base` 语义**：`test_e2e_messages_default_is_latest_page` 仍在断言
+  「无参返回 ≤50 条」并用旧参数名 `limit`，与 1.2.1 定稿的「`base` 只是基准量、页首无条件
+  向前对齐真 user、一页必 ≥ base」矛盾（实测同一场景 52 条，被当成「全量口子回归」）。
+  改为断言条数下界 = base + 一次对齐量，参数名同步 `base`。
+
+- **装配顺序断言漂移成假红（`goal` 凭空消失）**：`assembly` 的
+  `test_tool_order_is_fs_code_todo_web` 里那份 `expected_head` 数组**既是期望值、
+  又是「取前 N 项」的比较窗口**。`view_image` 加进 `plugins/tools-fs`（ADR-050）时数组
+  没跟着加，窗口整体错位一格——把第 12 位的 `goal` 挤出了比较范围，报错文案指向
+  「工具注册顺序必须是 fs → code → todo/goal」，而实际清单 14 个、`goal` 就在第 12 位
+  （真因是断言，不是注册顺序）。修法：数组补 `view_image`，并在注释里写明这份数组同时
+  是切片窗口——少一项就整体错位。
 
 - **`powershell.exe - Application Error 0xc0000142` 弹窗（跑测试/构建时偶发）**：这个框不是
   天演弹的，是某个 `powershell.exe` 子进程在**初始化阶段**就崩掉、由 CSRSS 弹的 HardError。

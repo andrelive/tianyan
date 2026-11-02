@@ -48,6 +48,29 @@ pub struct ProviderPresetHit {
     pub endpoint_from_preset: bool,
 }
 
+/// 当前生效的命令执行底层（`GET /config/executor`）。
+///
+/// **为什么要有这个接口**：`[executor].shell = "auto"` 时「实际用的是哪个
+/// shell」此前只写在启动日志里。实测发生过一次排查——用户装了 PowerShell 7
+/// 却看到 5.1 的报错，翻日志才排除 auto 选错（真因是别处裸写了 `powershell`，
+/// 与 auto 无关）。把**进程内已安装的 spec** 原样吐出来，界面显示的就是真正
+/// 在跑的那个（同源，不是按配置值二次推算）。
+#[derive(Debug, Serialize)]
+pub struct ExecutorShellResponse {
+    /// 配置里的选择（`[executor].shell`，可能是 `auto`）。
+    pub configured: String,
+    /// 配置里的可执行覆盖（`[executor].shell_program`）。
+    pub shell_program: Option<String>,
+    /// 生效的 shell 标识（`pwsh` / `powershell` / `cmd` / `bash` / `sh` / `custom`）。
+    pub kind: String,
+    /// 生效的可执行绝对路径（`auto` 探测命中即为探测结果）。
+    pub executable: String,
+    /// 固定参数模板（命令串追加在最后）。
+    pub args: Vec<String>,
+    /// 注入 `execute_command` 工具描述的平台事实（模型看到的那一句）。
+    pub hint: String,
+}
+
 /// 更新配置请求 — 接受完整的 TianyanConfig
 #[derive(Debug, Deserialize)]
 pub struct UpdateConfigRequest {

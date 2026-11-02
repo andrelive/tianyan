@@ -298,18 +298,24 @@ impl ConfigService {
     async fn persist_and_reload(&self, config: TianyanConfig) -> Result<(), ApiError> {
         tianyan_service_config::validate(&config).map_err(ApiError::Config)?;
         // 命令执行底层（ADR-037）：先解析验证（失败 → 拒绝保存，错误分类保真
-        // 含修复指引），保存/热重载成功后安装生效。切换的提示词后果（一次前缀
-        // 重建 + 一次主动压缩）由工具表指纹机制自动吸收——见 [executor] 注释。
+        // 含修复指引）。切换的提示词后果（一次前缀重建 + 一次主动压缩）由工具表
+        // 指纹机制自动吸收——见 [executor] 注释。
         let shell_spec =
             tianyan::executor::shell::resolve(&config.executor).map_err(ApiError::from)?;
         self.persist_config(&config).await?;
+        // **安装必须在热重载之前**：Agent 重建时 `register_builtin_tools` 会读
+        // `shell::current_hint()` 生成 `execute_command` 描述——若先重建后安装，
+        // 新 Agent 拿到的是**上一个** shell 的平台事实（实测：改 auto→powershell
+        // 后 `/config/executor` 已是 5.1，而 `/tools` 里的描述仍是 7+，要等下一次
+        // 重建才纠正）。这里也不能放到 `persist_config` 之前：写盘失败时不该
+        // 已经换掉全局执行底层。
+        tianyan::executor::shell::install(shell_spec);
         self.state
             .update_config(config)
             .await
             // ? 传播：From<TianyanError> 语义谓词映射（热重载失败非 500 专属，
             // not_found/invalid_input 等保持原分类，ADR-014）
             ?;
-        tianyan::executor::shell::install(shell_spec);
         Ok(())
     }
 

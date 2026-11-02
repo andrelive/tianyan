@@ -82,11 +82,21 @@ spec**——"执行什么"与"告诉模型什么"同源产出，从结构上杜�
 - **启动**：`server/lib.rs` 装配段 resolve + install（失败阻止启动，日志含
   kind/executable）；
 - **热更新**：`persist_and_reload`（配置更新唯一序列）内先 resolve 验证 →
-  保存 → install；验证失败返回配置类错误（分类保真，含修复指引）；
+  保存 → **install → 再热重载**；验证失败返回配置类错误（分类保真，含修复指引）。
+  **install 必须排在 `update_config`（重建 Agent）之前**：Agent 重建时
+  `register_builtin_tools` 读 `current_hint()` 写进 `execute_command` 描述，先重建
+  后 install 会让新 Agent 拿到**上一个** shell 的平台事实（实测：切成 5.1 后
+  `/config/executor` 已是 5.1，`/tools` 里那句描述仍是 7+，要等下一次重建才纠正）。
+  也不能放到 `persist_config` 之前——写盘失败时不该已经换掉全局执行底层；
+- **可观测**：`GET /api/v1/config/executor` 返回进程内**已安装**的 spec
+  （configured / kind / executable / args / hint），设置页 Agent 栏目顶部的
+  「命令执行环境（当前生效）」卡片就读它——`auto` 时配置值与生效值本就不同，
+  用户需要看到的是后者；
 - 未装配场景（example / 测试）：lazy 按默认配置 auto 探测（极端环境兜底不 panic）。
 
 ## 非目标
 
 - 细粒度 env 注入（`[executor.env]`）——等真实需求（登录环境可用 custom
   `bash -lc` 表达）；
-- GUI 配置控件（TOML 直接配置为本期形态；配置页如自动渲染新节即随之可见）。
+- ~~GUI 配置控件~~（**2026-11 已提供**）：设置页 Agent 栏目「命令执行」分组可选
+  `shell` / 填 `shell_program`，保存走既有 `PUT /api/v1/config`（热生效，无需重启）。

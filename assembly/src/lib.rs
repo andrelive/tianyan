@@ -444,10 +444,14 @@ mod tests {
         let tools = plugin_factory()(&ctx, services);
         let names: Vec<String> = tools.iter().map(|t| t.tool_name()).collect();
 
-        // 前 11 个是 fs(6) + code(3) + todo/goal(2)：无条件注册，逐位断言。
+        // 前 12 个是 fs(7) + code(3) + todo/goal(2)：无条件注册，逐位断言。
         // 顺序以**实测注册顺序**为准（不是源码里的函数排列顺序）：fs 域内部是
         // read/write/edit/patch → glob/list_dir（与 `ToolPresentation` 表的枚举顺序
         // 和迁移前 `MIGRATED_TOOL_PRESENTATIONS` 一致）。
+        //
+        // **`view_image` 必须在表里**（ADR-050 把它加进 `plugins/tools-fs`）：这份
+        // 数组同时是「取前 N 项」的比较窗口，少一项就整体错位一格——实测表现为
+        // 「`goal` 不见了」的假红（插件清单其实有 14 个、`goal` 在第 12 位）。
         let expected_head = [
             "read_file",
             "write_file",
@@ -455,6 +459,7 @@ mod tests {
             "apply_patch",
             "glob",
             "list_dir",
+            "view_image",
             "symbol_outline",
             "repo_map",
             "grep",

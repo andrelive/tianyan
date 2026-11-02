@@ -6,7 +6,8 @@ use tracing::{error, info, warn};
 
 use crate::api::config::services::ConfigService;
 use crate::api::config::types::{
-    ConfigResponse, ModelsResponse, SwitchModelRequest, UpdateConfigRequest, UpdateConfigResponse,
+    ConfigResponse, ExecutorShellResponse, ModelsResponse, SwitchModelRequest, UpdateConfigRequest,
+    UpdateConfigResponse,
 };
 use crate::api::shared::error::ApiError;
 use crate::state::AppState;
@@ -74,6 +75,31 @@ pub async fn get_config_section(
     };
 
     Ok(Json(value))
+}
+
+/// 当前生效的命令执行底层（`GET /config/executor`）。
+///
+/// 数据源是**进程内已安装的 spec**（`shell::current()`：启动期 install、
+/// 配置热更新时重装），不是按配置值二次推算——配置写 `auto` 时两者本就不同，
+/// 而用户想知道的正是「实际在跑什么」。
+pub async fn get_executor_shell(State(state): State<Arc<AppState>>) -> Json<ExecutorShellResponse> {
+    // `config()` 返回 owned `Arc`，`read()` 借用它会是临时值——用 `read_owned`
+    // 让 guard 自己持有 Arc（否则 E0716：临时值在语句末尾就被释放）。
+    let config = state.config().read_owned().await;
+    let (configured, shell_program) = (
+        config.executor.shell.clone(),
+        config.executor.shell_program.clone(),
+    );
+    drop(config);
+    let spec = tianyan::executor::shell::current();
+    Json(ExecutorShellResponse {
+        configured,
+        shell_program,
+        kind: spec.kind.as_str().to_string(),
+        executable: spec.executable.display().to_string(),
+        args: spec.args.clone(),
+        hint: spec.hint.clone(),
+    })
 }
 
 /// 获取模型服务列表及默认模型

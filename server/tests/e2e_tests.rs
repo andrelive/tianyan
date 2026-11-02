@@ -469,9 +469,11 @@ async fn test_e2e_unified_event_push_message() {
     server.shutdown();
 }
 
-/// 消息端点分页语义（ADR-035 §8 收尾）：**无参 = 最近一页 + 上滚游标**
+/// 消息端点分页语义（ADR-035 §8，2026-11 定稿）：**无参 = 最近一页 + 上滚游标**
 /// （不再返回全量——大会话全量可达数十 MB，实测 1650 条消息 25 MB，
-/// 是会话切换卡顿的根源）；带 `limit` 取显式页大小。
+/// 是会话切换卡顿的根源）；`base` 只是**基准量**，页首无条件向前对齐到最近的
+/// 「真 user」，因此一页实际条数 **≥ base**（对齐量 = 窗口首行到上一个真 user
+/// 的距离；交替 user/assistant 的场景为 2 条）。
 #[tokio::test]
 async fn test_e2e_messages_default_is_latest_page() {
     let dir = tempdir().expect("创建临时目录失败");
@@ -503,16 +505,19 @@ async fn test_e2e_messages_default_is_latest_page() {
         ws.append(&msg, false).await.expect("落库失败");
     }
 
-    // 无参：最近一页（≤50 条）+ has_more + 上滚游标——全量口子回归即失败
+    // 无参：最近一页（≥ 基准 50 条）+ has_more + 上滚游标——全量口子回归即失败
     let resp = server
         .get(&format!("/api/v1/sessions/{session_id}/messages"))
         .await;
     assert_eq!(resp.status(), 200);
     let body: serde_json::Value = resp.json().await.unwrap();
     let msgs = body["messages"].as_array().expect("messages 应为数组");
+    // 条数**下界**是 base（页首对齐只会往前扩、不会缩）；上界取基准 + 一次对齐
+    // （本场景 user/assistant 严格交替，对齐量恒为 2）。「取到全量」这个回归由
+    // 下面的 `has_more == true` 抓——返回全量时它必然是 false。
     assert!(
-        msgs.len() <= 50,
-        "无参应返回最近一页（≤50 条），实际 {} 条（全量口子回归？）: {body}",
+        msgs.len() >= 50 && msgs.len() <= 52,
+        "无参应返回最近一页（基准 50 + 对齐 2），实际 {} 条: {body}",
         msgs.len()
     );
     assert!(!msgs.is_empty(), "有 120 条消息的会话不应返回空页: {body}");
@@ -531,16 +536,16 @@ async fn test_e2e_messages_default_is_latest_page() {
         "分页应带上滚游标 next_before_seq: {body}"
     );
 
-    // 显式 limit：按页大小取（页边界对齐 user，页长 ≤ limit）
+    // 显式 base：按基准量取（页首仍对齐 user，页长 ≥ base）
     let resp = server
-        .get(&format!("/api/v1/sessions/{session_id}/messages?limit=10"))
+        .get(&format!("/api/v1/sessions/{session_id}/messages?base=10"))
         .await;
     assert_eq!(resp.status(), 200);
     let body: serde_json::Value = resp.json().await.unwrap();
     let msgs = body["messages"].as_array().expect("messages 应为数组");
     assert!(
-        msgs.len() <= 10,
-        "limit=10 页长应 ≤10，实际 {}: {body}",
+        msgs.len() >= 10 && msgs.len() <= 12,
+        "base=10 页长应 ≥10（对齐只扩不缩，交替场景 +2），实际 {}: {body}",
         msgs.len()
     );
 

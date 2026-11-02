@@ -457,6 +457,13 @@ P5: oft.PowerShell.ConsoleControl+<>c.<.cctor>b__106_1
 - 执行底层默认 `auto`（优先 pwsh 7）—— 5.1 只在你显式配 `[executor].shell = "powershell"`
   或机器没有 pwsh 时才会用到。
 
+**「到底用的是哪个 shell」怎么一眼确认（别再翻日志）**：设置页 → Agent 栏目顶部
+「命令执行环境（当前生效）」卡片，显示 Shell 身份 + 可执行**绝对路径** + 参数模板
+（读的是服务进程里已安装的 spec，不是配置值）。等价的接口是
+`GET /api/v1/config/executor`；`auto` 时它给出的 `kind`/`executable` 即探测命中结果。
+想换：同一栏目的「命令执行」分组选 `shell`（或填 `shell_program` 指向绝对路径），
+保存即热生效；`/api/v1/tools` 里 `execute_command` 描述同一次保存就跟着变。
+
 **处置**：看到这个弹窗，先按上面的命令取 WER 报告确认是不是 powershell；若确实是，检查
 是否有脚本/命令在调 5.1，改成 `pwsh`。弹窗本身无法由调用方拦下（HardError 由系统弹），
 只能从「不产生这种子进程」入手。
@@ -469,6 +476,8 @@ P5: oft.PowerShell.ConsoleControl+<>c.<.cctor>b__106_1
 - `server/src/main.rs`、`server/src/lib.rs`（`ServerConfig::default`）
 - `server/src/api/tasks/{routes,handlers}.rs`（`/events`、`/events/subscribe`、`/tasks/{id}/log`）
 - `server/src/api/config/services.rs`（`persist_and_reload`）
+- `server/src/api/config/handlers.rs`（`get_executor_shell`：生效执行底层）、
+  `gui-native/src/pages/settings/agent.rs`（设置页「命令执行环境」卡片）
 - `core/src/common/types/structured_message.rs`（`prompt_side_tokens`、`compression_marker`）
 - `core/src/agent/{agent_core,loop}.rs`、`core/src/model/spec.rs`（`dynamic_max_tokens`）
 - `core/src/config/storage.rs`、`core/src/config/mod.rs`（数据目录/配置路径）

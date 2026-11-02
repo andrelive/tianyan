@@ -695,6 +695,78 @@ impl HealthInfo {
     }
 }
 
+/// 命令执行底层的事实（`GET /api/v1/config/executor`）。
+///
+/// `kind` / `executable` 是**服务进程里已安装**的 spec（`auto` 时即探测结果），
+/// `configured` 是配置里写的值——两者不同正是「我填 auto，到底选了哪个」的答案。
+/// 只查这个接口，不在前端按平台二次推算：探测逻辑只能有一份（core 的
+/// `executor::shell::resolve`）。
+#[derive(Clone, Debug, Default)]
+pub(crate) struct ExecutorShellInfo {
+    /// 配置里的选择（可能是 `auto`）。
+    pub(crate) configured: String,
+    /// 配置里的可执行覆盖。
+    pub(crate) shell_program: Option<String>,
+    /// 生效的 shell 标识（`pwsh` / `powershell` / `cmd` / …）。
+    pub(crate) kind: String,
+    /// 生效的可执行绝对路径。
+    pub(crate) executable: String,
+    /// 固定参数模板。
+    pub(crate) args: Vec<String>,
+}
+
+impl ExecutorShellInfo {
+    /// 从接口响应解析（字段缺失一律回落空串，界面按「未知」处理）。
+    pub(crate) fn from_json(v: &serde_json::Value) -> Self {
+        let args = v
+            .get("args")
+            .and_then(|x| x.as_array())
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(|a| a.as_str().map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default();
+        Self {
+            configured: v
+                .get("configured")
+                .and_then(|x| x.as_str())
+                .unwrap_or_default()
+                .to_string(),
+            shell_program: v
+                .get("shell_program")
+                .and_then(|x| x.as_str())
+                .map(str::to_string),
+            kind: v
+                .get("kind")
+                .and_then(|x| x.as_str())
+                .unwrap_or_default()
+                .to_string(),
+            executable: v
+                .get("executable")
+                .and_then(|x| x.as_str())
+                .unwrap_or_default()
+                .to_string(),
+            args,
+        }
+    }
+
+    /// 展示名（`pwsh` → PowerShell 7+；未知标识原样返回）。
+    pub(crate) fn kind_label(&self) -> String {
+        match self.kind.as_str() {
+            "pwsh" => "PowerShell 7+（pwsh）".to_string(),
+            "powershell" => "Windows PowerShell 5.1".to_string(),
+            "cmd" => "cmd.exe".to_string(),
+            "bash" => "bash".to_string(),
+            "sh" => "sh".to_string(),
+            "custom" => "自定义".to_string(),
+            "" => "未知".to_string(),
+            other => other.to_string(),
+        }
+    }
+}
+
 /// 调度器任务状态（`GET /scheduler/status` 的 `tasks[]`）。
 #[derive(Clone, Debug)]
 pub(crate) struct SchedStatusRow {

@@ -220,6 +220,48 @@ pub(crate) const FIELDS: &[FieldDef] = &[
         restart: true,
     },
     // ── Agent 行为 ──
+    // ── 命令执行（ADR-037：shell 是环境事实，也让用户能自己定） ──
+    //
+    // 排在 Agent 栏目**最前**：它与栏目顶部的「命令执行环境（当前生效）」卡片
+    // 是同一件事（卡片是事实、这两项是选择），中间插一堆无关调参会让「上面写着
+    // pwsh、下面的选择器却在屏幕外」。
+    FieldDef {
+        tab: SettingsTab::Agent,
+        section: "命令执行",
+        path: "executor.shell",
+        label: "Shell",
+        // 为什么给用户选：`auto` 按 PATH 探测（Windows：pwsh → powershell），
+        // 探测结果此前只写在启动日志里。用户装了 PowerShell 7 却看到 5.1 的行为时，
+        // 既看不到「到底选了哪个」，也没法自己指定。这里把选择权交出来，
+        // 生效值由上方卡片显示（读的是服务进程里真正装着的 spec）。
+        hint: "auto = 优先 PowerShell 7+（pwsh），找不到再退回 Windows PowerShell 5.1。\
+               切换后工具描述里的平台事实随之变化（模型下一轮就看到新 shell）。",
+        kind: FieldKind::Enum(&[
+            ("auto", "自动"),
+            ("pwsh", "PowerShell 7+"),
+            ("powershell", "PS 5.1"),
+            ("cmd", "cmd"),
+            ("bash", "bash"),
+            ("sh", "sh"),
+            ("custom", "自定义"),
+        ]),
+        restart: false,
+    },
+    FieldDef {
+        tab: SettingsTab::Agent,
+        section: "命令执行",
+        path: "executor.shell_program",
+        label: "可执行路径",
+        hint: "留空 = 在 PATH 里找该 shell 的默认程序；pwsh 没加进 PATH 时填绝对路径\
+               （如 C:\\Program Files\\PowerShell\\7\\pwsh.exe）。选「自定义」时必填。",
+        kind: FieldKind::Text {
+            // 单行编辑器只有 240px 宽，完整路径放不下会被裁成
+            // `C:\Program Files\PowerShell\7\`——占位符给能看见的示意，完整写法在 hint 里
+            placeholder: "…\\PowerShell\\7\\pwsh.exe",
+            empty_as: EmptyAs::Null,
+        },
+        restart: false,
+    },
     FieldDef {
         tab: SettingsTab::Agent,
         section: "回合与检索",
@@ -1028,6 +1070,11 @@ impl ClientApp {
                          重读一次配置，避免冲掉别处刚改的东西）。带「需重启」的项在重启客户端后生效。",
                     ),
             );
+        // 「命令执行」栏目的页首事实卡片：只读，数据来自 `/config/executor`
+        // （服务进程里**已安装**的 spec）——不是配置值，所以不进字段表。
+        if tab == SettingsTab::Agent {
+            col = col.child(self.render_executor_shell_card(cx));
+        }
         for (section, items) in groups {
             let mut card = div()
                 .rounded_lg()
@@ -1128,6 +1175,10 @@ impl ClientApp {
                 let mut seg = div()
                     .flex()
                     .flex_row()
+                    // 允许换行：分段控件的容器只有 240px，而 shell 有 7 个选项
+                    // （「PowerShell 7+」这类长标签放不下）——不换行会被裁掉一半，
+                    // 用户看不到也点不到后面几项。
+                    .flex_wrap()
                     .rounded_md()
                     .border_1()
                     .border_color(rgb(colors::BORDER()))
@@ -1426,6 +1477,10 @@ impl ClientApp {
                     });
                     // 模型服务栏目依赖 provider 列表，顺带刷新（无害）
                     let _ = this.update(cx, |this, cx| this.load_models(cx));
+                    // 保存时服务端会 resolve + install 新的执行底层（ADR-037），
+                    // 让「当前生效」卡片立刻跟上——否则用户改完 shell 看到的
+                    // 还是切换前的旧值，会以为没生效。
+                    let _ = this.update(cx, |this, cx| this.load_executor_shell(cx));
                 }
                 Err(e) => {
                     let _ = this.update(cx, |this, cx| {
