@@ -217,6 +217,45 @@ CI 的 clippy 立刻红（`doc_lazy_continuation`：doc 注释里列表项后紧
 python -c "import yaml; d=yaml.safe_load(open('.github/workflows/quality.yml',encoding='utf-8')); print('OK', len(d['jobs']['quality']['steps']))"
 ```
 
+### 5.1 跨平台断言：Windows 本地绿 / Linux CI 红（tag v1.1.1 实发）
+
+**路径断言不要写字面分隔符**。反例（`3b2105d` 修）：
+```rust
+// ❌ Windows 本地绿、ubuntu runner 必红：`join` 在 Linux 用 `/`
+assert_eq!(default_log_file(Path::new(r"D:\tianyan")),
+           PathBuf::from(r"D:\tianyan\logs\tianyan.log"));
+// ✅ 平台无关：期望值同样用 join 组合，再补组件级断言
+let p = default_log_file(dir);
+assert_eq!(p, dir.join(LOG_DIR_NAME).join(LOG_FILE_NAME));
+assert_eq!(p.parent().and_then(|d| d.file_name()).and_then(|n| n.to_str()),
+           Some(LOG_DIR_NAME));
+```
+
+纯字符串处理的路径不受影响（`normalize_path_for_check` 去 `\\?\` 前缀那类测试比较的是
+字符串，与平台无关）。事故成本：Quality 门禁在 `common` 组就红 → 后续 18 个模块组没跑 →
+`release.yml` 的 `needs: quality` 挡住出包，tag 打了却没有 Release 产物。
+
+### 5.2 本地验 Linux 门禁：WSL + 离线复用 Windows registry
+
+WSL 里的 Ubuntu 通常**出不了网**（cargo 镜像 `static.crates.io` / aliyun / tuna / rsproxy
+全部超时），但可以离线复用 Windows 侧已下载的 registry（约 3.1 GB）：
+
+```bash
+# 源码同步到 WSL 原生盘（DrvFs 上编译慢）
+rsync -a --delete --exclude target/ --exclude 'gui-native/target/' \
+      --exclude 'gui-vite/node_modules/' --exclude .git/ \
+      /mnt/<盘符>/<仓库路径>/ /root/tianyan-ci/
+cd /root/tianyan-ci
+CARGO_HOME=/mnt/c/Users/<user>/.cargo CARGO_TARGET_DIR=/root/tianyan-target \
+  cargo test -p tianyan-core --lib --no-run --offline     # 冷编译 ~3 分钟（16 核）
+CARGO_HOME=/mnt/c/Users/<user>/.cargo CARGO_TARGET_DIR=/root/tianyan-target \
+  cargo test -p tianyan-core --lib -- --test-threads=2    # 1170 项 17.9s
+```
+
+前置：WSL 里已有 `rustc` / `cargo` / `protoc`（protoc 是 lance-encoding 的构建依赖，缺了
+编译第一步就报 "Could not find protoc"）。`--offline` 成立的前提是 `Cargo.lock` 与
+Windows 侧一致（同一份源码树）。
+
 ---
 
 ## 6. rust-cache 行为（决定 CI 时长）
