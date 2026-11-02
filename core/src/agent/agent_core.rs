@@ -769,6 +769,14 @@ impl Agent {
             }
             None => None,
         };
+        // 低余量提示：与待办摘要**同一位置**（历史消息之后），不改 system 前缀
+        // ——前缀每轮变化会打掉 DeepSeek 的前缀缓存。
+        let tail_summary = match (todos_summary, self.low_remaining_note(state).await) {
+            (Some(t), Some(n)) => Some(format!("{t}\n\n{n}")),
+            (Some(t), None) => Some(t),
+            (None, Some(n)) => Some(n),
+            (None, None) => None,
+        };
 
         let s = state.read().await;
         let sid = s.session_id.clone();
@@ -784,14 +792,14 @@ impl Agent {
                     &s.structured_messages,
                     &injectable,
                     Some(&images),
-                    todos_summary.as_deref(),
+                    tail_summary.as_deref(),
                 )
             }
             None => ContextAssembler::assemble_with(
                 &s.structured_messages,
                 &injectable,
                 None,
-                todos_summary.as_deref(),
+                tail_summary.as_deref(),
             ),
         };
 
@@ -980,6 +988,54 @@ impl Agent {
                 "压缩后无法续跑：未装配唤醒器（服务端未调用 register_task_waker）"
             ),
         }
+    }
+
+    /// 「低余量提示」：占用超过自动压缩阈值的 80% 时，在**尾部**加一句话。
+    ///
+    /// 为什么放尾部而不是系统提示：改 system 前缀会让**每一轮前缀都变**，直接
+    /// 打掉 DeepSeek 的前缀缓存（真实成本与首包延迟）。尾部追加（与待办摘要同
+    /// 位置）不影响前缀匹配。
+    ///
+    /// 文案不给「省着用」的建议，而是给**出路**：任务做完优先，真紧张就压缩。
+    async fn low_remaining_note(&self, state: &Arc<RwLock<SessionState>>) -> Option<String> {
+        let (used, since_marker) = {
+            let s = state.read().await;
+            let start_idx = s
+                .structured_messages
+                .iter()
+                .rposition(|m| m.compression_marker)
+                .unwrap_or(0);
+            let since = &s.structured_messages[start_idx..];
+            let used = since
+                .iter()
+                .rev()
+                .find(|m| !m.compression_marker && (m.tokens.input > 0 || m.tokens.cache.read > 0))
+                .map(|m| m.prompt_side_tokens())
+                .unwrap_or(0);
+            (used, since.len())
+        };
+        let budget = self.context_pipeline.compression_budget(used).await?;
+        if budget.threshold_tokens == 0 {
+            return None;
+        }
+        // 80% 提醒线（与「临界阈值」无关：后者是硬警戒，这里只是提前打招呼）
+        let remind_at = budget.threshold_tokens * 4 / 5;
+        if budget.used_tokens < remind_at {
+            return None;
+        }
+        let pct = (budget.used_tokens as f64 / budget.threshold_tokens as f64 * 100.0).round();
+        let mut note = format!(
+            "【上下文提示】已用到自动压缩阈值的 {pct}%（当前约 {} / 阈值 {} token）。\
+             任务还长的话可以调 compress_context 压缩并继续（handoff 写清接下来要做什么）；\
+             系统也会在必要时兜底。不要为了省上下文而缩小工作范围。",
+            budget.used_tokens, budget.threshold_tokens
+        );
+        if since_marker < MIN_MESSAGES_BEFORE_COMPRESSION {
+            note.push_str(&format!(
+                "（注意：距上次压缩只有 {since_marker} 条消息，压缩可能因内容太少而被跳过。）"
+            ));
+        }
+        Some(note)
     }
 
     /// 刷新「上下文状态快照」（`context_status` 工具的数据源）。

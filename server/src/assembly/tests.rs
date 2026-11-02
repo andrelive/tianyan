@@ -577,6 +577,15 @@ impl ContextPort for StubContextPort {
     ) -> Option<String> {
         Some(self.marker.to_string())
     }
+
+    /// 桩不给预算（`None`）：本桩只用于「工厂是否被使用」的插槽测试，
+    /// 上下文预算由 core 的 `context_report` 单测覆盖。
+    async fn compression_budget(
+        &self,
+        _used_tokens: usize,
+    ) -> Option<tianyan::context::CompressionBudget> {
+        None
+    }
 }
 
 /// 构造上下文装配能力集合（VFS / 模型服务 / 统计全为最小替身）。

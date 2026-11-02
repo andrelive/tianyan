@@ -1,6 +1,6 @@
 # 架构决策记录（ADR）索引
 
-> 共 52 份。**正文不改**：决策变了在文末加「后续演进」，或新开一份并在旧文标注 superseded。
+> 共 53 份。**正文不改**：决策变了在文末加「后续演进」，或新开一份并在旧文标注 superseded。
 > 被否决的方向（避免重复讨论）→ [REJECTED.md](REJECTED.md)
 
 ## 怎么用
@@ -63,3 +63,4 @@
 | 050 | 工具结果携带图片（`view_image` 直通） | [050-tool-result-images.md](050-tool-result-images.md) |
 | 051 | 桌面端单 server 复用（`desktop/` 启动编排段） | [051-desktop-single-server-reuse.md](051-desktop-single-server-reuse.md) |
 | 052 | GUI 自动化端口（`GET /state` + `POST /act`） | [052-gui-automation-port.md](052-gui-automation-port.md) |
+| 053 | 上下文自治：模型主动压缩 + 按目标自动续跑 | [053-context-autonomy.md](053-context-autonomy.md) |
