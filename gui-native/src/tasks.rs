@@ -1265,11 +1265,38 @@ impl ClientApp {
                 })
                 .into_any_element();
         }
-        let mut list = div().max_h(px(360.)).flex().flex_col().gap_1().w_full();
+        let mut list = div().flex().flex_col().gap_1().w_full();
+        let row_count = rows.len();
+        let expanded = self.expand.borrow().activity.is_some();
         for (ix, row) in rows.into_iter().enumerate() {
             list = list.child(self.render_activity_row(ix, row, cx));
         }
-        list.overflow_y_scrollbar().into_any_element()
+        // 限高 + 可滚动：`max_h` **不能**放在被 `overflow_y_scrollbar()` 包裹的
+        // 同一个元素上 —— `Scrollable` 会把尺寸样式复制到外层 root，元素自己仍带
+        // `max_h`，内容高度被压到上限内 → 没有溢出 → 滚不动（用户实测：委托卡片
+        // 只能看到最上面几行，滚轮没反应）。
+        //
+        // 正确形状 = 外层**确定高度** + 内层滚动。行数少且没有展开行时保持自然
+        // 高度（固定 360 会在内容短时留一大片空白）。
+        let need_scroll = row_count > 12 || expanded;
+        if need_scroll {
+            // 滚动状态按 **task_id 稳定哈希** 分条：同调用点每个任务一个滚动位置
+            // （`ElementId` 只支持 `(&str, u64)` 这类组合，直接传 `&str` 会撞 id）。
+            let scroll_key = {
+                use std::hash::{Hash, Hasher};
+                let mut h = std::collections::hash_map::DefaultHasher::new();
+                task_id.hash(&mut h);
+                h.finish()
+            };
+            div()
+                .h(px(360.))
+                .min_h_0()
+                .w_full()
+                .child(list.id(("act-scroll", scroll_key)).overflow_y_scrollbar())
+                .into_any_element()
+        } else {
+            list.into_any_element()
+        }
     }
 
     /// 活动流的一行：收起态一行（图标 + 标签 + 摘要 + meta + 箭头），展开态一块原文。

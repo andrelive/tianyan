@@ -1469,18 +1469,34 @@ pub(crate) fn render_msg_body(
             head
         });
         if open && has_text {
-            body = body.child(
-                div()
-                    .rounded_lg()
-                    .border_1()
-                    .border_color(rgb(colors::BORDER()))
-                    .bg(rgb(colors::BG_SECONDARY()))
-                    .px_3()
-                    .py_2()
-                    .max_h(px(320.))
-                    .overflow_y_scrollbar()
-                    .child(TextView::markdown(("compress-body", mi), msg.text.clone())),
-            );
+            // 限高 + 可滚动。**不能**把 `max_h` 放在被 `overflow_y_scrollbar()`
+            // 包裹的同一个元素上：`Scrollable` 会把尺寸样式复制到外层 root，而元素
+            // 自己**仍带着** `max_h` → 内容高度被压到上限之内，「没有溢出」于是滚不
+            // 动（用户实测：展开后只能看到摘最顶部一段，滚轮没反应）。
+            //
+            // 正确形状 = **外层给确定高度、内层滚动**（与 `dialogs.rs` 目录选择器
+            // 同一条结论）。短摘要不套滚动容器：固定 320 高会留一大片空白。
+            const MAX_H: f32 = 320.0;
+            // 中文约 15px/字、卡片宽 640 → 约 20 行；按字数粗估（摘要是纯文本，
+            // 不会像代码块那样行数暴涨）。
+            let long = msg.text.chars().count() > 800;
+            let card = div()
+                .rounded_lg()
+                .border_1()
+                .border_color(rgb(colors::BORDER()))
+                .bg(rgb(colors::BG_SECONDARY()))
+                .px_3()
+                .py_2();
+            body = body.child(if long {
+                card.h(px(MAX_H)).min_h_0().child(
+                    div()
+                        .id(("compress-scroll", mi))
+                        .overflow_y_scrollbar()
+                        .child(TextView::markdown(("compress-body", mi), msg.text.clone())),
+                )
+            } else {
+                card.child(TextView::markdown(("compress-body", mi), msg.text.clone()))
+            });
         }
         // 摘要已在上面按卡片画过，正文分支不再走
     } else if msg.segs.is_empty() {

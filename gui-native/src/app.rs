@@ -885,9 +885,15 @@ impl ClientApp {
         {
             "answer" => {
                 let delta = ev.get("delta").and_then(|v| v.as_str()).unwrap_or_default();
-                // 工具步收尾后的第一段正文 = 新的一步（新消息），与库里的「每步一条」对齐
-                self.start_new_step_after_tools();
-                self.append_delta(delta);
+                // 空 delta 帧（取消收尾 / provider 的空块）**不能**新开行：那会凭空
+                // 多出一条空消息，随后被权威消息填成与上一行重复的工具卡（用户实测：
+                // 点「停止」后出现两份「思考过程 + 执行命令」）。usage 仍要处理，
+                // 所以这里只跳过「开新步 + 追加正文」两件事。
+                if !delta.is_empty() {
+                    // 工具步收尾后的第一段正文 = 新的一步（新消息），与库里「每步一条」对齐
+                    self.start_new_step_after_tools();
+                    self.append_delta(delta);
+                }
                 // 上下文占用（`ContextRing` 的数据源）：usage 随 answer 块下发。
                 // 分子取 `prompt_tokens`（本轮上下文）——`total_tokens` 含输出，
                 // 当占用会偏高；分母优先用模型声明的窗口，这里只记流式兜底值。
@@ -1396,16 +1402,25 @@ impl ClientApp {
     /// 靠 Markdown 引用块近似，而引用块会把紧随其后的正文第一段并进去
     /// （lazy continuation）。顺带把 `id` 补上，否则流式结束后的消息仍然没有
     /// 回退入口（占位消息的 id 是空串）。
+    ///
+    /// **落点是算出来的，不是「最后一条」**：一轮多步里权威消息可能晚于下一步的
+    /// `thought` 到达，盲替换会把下一步的思考占位覆盖成上一步的工具卡（见
+    /// [`authoritative_target`]）。
     pub(crate) fn apply_authoritative_message(&mut self, msg: &serde_json::Value) {
-        if self.messages.last().map(|m| m.role.as_str()) != Some("assistant") {
-            return;
-        }
         let (segs, tool_calls) = parse_segments(msg);
+        let incoming_id = msg
+            .get("id")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty());
+        let tool_ids: Vec<String> = tool_calls.iter().map(|t| t.id.clone()).collect();
+        let Some(idx) = authoritative_target(&self.messages, incoming_id, &tool_ids) else {
+            return;
+        };
         let mut next: Vec<MsgRow> = (*self.messages).clone();
-        let idx = next.len() - 1;
+        let merged = merge_tool_results(tool_calls, &next[idx].tool_calls);
         next[idx].text = segments_body_text(msg).into();
         next[idx].segs = segs;
-        next[idx].tool_calls = tool_calls;
+        next[idx].tool_calls = merged;
         if let Some(u) = parse_msg_usage(msg) {
             next[idx].usage = Some(u);
         }
@@ -2323,6 +2338,71 @@ pub(crate) enum BoundaryMessageAction {
     Ignore,
 }
 
+/// 权威 assistant 消息该落到哪一行（`None` = 不动）。
+///
+/// 为什么不能盲取「最后一条 assistant」：一轮多步里 `message` 边界可能**晚于**
+/// 下一步的 `thought` 到达（思考先流、落库推送后到），此时最后一条是「下一步的
+/// 思考占位」；盲替换会把它覆盖成上一步的工具卡 —— 上一步的流式行残留、下一步
+/// 的思考丢失，界面表现为**同一轮重复显示**（用户实测：点「停止」后多出一份
+/// 「思考过程 + 执行命令」，且多出那份的工具卡停在 `...`）。
+///
+/// 匹配优先级：
+/// 1. `id` 相同（重放 / 快照重推，天然幂等）；
+/// 2. `tool_call` id 集合相同（同一步的本地流式行）；
+/// 3. 最后一条是**空占位**（无 segs、无工具）；
+/// 4. 其余 → 不动（宁可这次少更新，也不覆盖别的步骤）。
+pub(crate) fn authoritative_target(
+    rows: &[MsgRow],
+    id: Option<&str>,
+    tool_ids: &[String],
+) -> Option<usize> {
+    if let Some(id) = id {
+        if let Some(ix) = rows.iter().position(|m| !m.id.is_empty() && m.id == id) {
+            return Some(ix);
+        }
+    }
+    if !tool_ids.is_empty() {
+        if let Some(ix) = rows.iter().rposition(|m| {
+            m.role == "assistant"
+                && m.tool_calls.len() == tool_ids.len()
+                && m.tool_calls
+                    .iter()
+                    .all(|t| tool_ids.iter().any(|i| i == &t.id))
+        }) {
+            return Some(ix);
+        }
+    }
+    let last = rows.len().checked_sub(1)?;
+    let m = &rows[last];
+    if m.role == "assistant" && m.segs.is_empty() && m.tool_calls.is_empty() {
+        return Some(last);
+    }
+    None
+}
+
+/// 权威消息里的工具**不带结果**（服务端把结果存成独立的 `tool` 消息），而本地
+/// 已通过 `observation` 事件回填过耗时 / 错误 —— 直接覆盖会让工具卡退回「进行中」
+/// （`...`）。这里只补空位，权威侧已有的值优先。
+pub(crate) fn merge_tool_results(incoming: Vec<ToolCall>, local: &[ToolCall]) -> Vec<ToolCall> {
+    incoming
+        .into_iter()
+        .map(|mut t| {
+            if let Some(prev) = local.iter().find(|p| p.id == t.id) {
+                if t.result.is_none() {
+                    t.result = prev.result.clone();
+                }
+                if t.duration_ms.is_none() {
+                    t.duration_ms = prev.duration_ms;
+                }
+                if t.error.is_none() {
+                    t.error = prev.error.clone();
+                }
+            }
+            t
+        })
+        .collect()
+}
+
 /// 判定一条 `message` 事件的落点。
 pub(crate) fn classify_boundary_message(role: &str, is_marker: bool) -> BoundaryMessageAction {
     if role == "assistant" {
@@ -2344,7 +2424,9 @@ mod step_boundary_tests {
     // ⚠️ 不要写 `use super::*`：bin crate 根是 `main.rs`，glob 会拉进整棵模块树，
     // `#[test]` 宏展开时直接撞 `recursion_limit`（实测报
     // “recursion limit reached while expanding `#[test]`”）。只显式导入需要的类型。
-    use crate::app::{classify_boundary_message, BoundaryMessageAction};
+    use crate::app::{
+        authoritative_target, classify_boundary_message, merge_tool_results, BoundaryMessageAction,
+    };
     use crate::types::{MsgRow, Seg, ToolCall};
     use crate::ClientApp;
 
@@ -2414,6 +2496,61 @@ mod step_boundary_tests {
             classify_boundary_message("user", false),
             BoundaryMessageAction::Ignore
         );
+    }
+    /// 取消场景的回归（用户实测：点「停止」后多出一份「思考过程 + 执行命令」）。
+    ///
+    /// 时序：上一步的工具卡（A）已回填结果 → 取消收尾若推一条正文，前端会按
+    /// 「工具步已收尾」新开一行（B）→ 随后上一步的权威消息若盲替换「最后一条」，
+    /// 就落到 B 上，B 变成与 A 相同内容的工具卡（且无耗时）。修复后：权威消息按
+    /// tool_call id 集合找到 A，B 不再被污染。
+    #[test]
+    fn authoritative_targets_same_tool_step_not_the_newer_placeholder() {
+        let rows = vec![
+            row(
+                vec![Seg::Tool {
+                    id: "c1".into(),
+                    name: "execute_command".into(),
+                    arguments: "{}".into(),
+                    presentation: "terminal".into(),
+                }],
+                vec![tool("c1", true)],
+            ),
+            row(Vec::new(), Vec::new()), // 取消收尾误开的新行
+        ];
+        let target = authoritative_target(&rows, None, &["c1".to_string()]);
+        assert_eq!(target, Some(0), "权威消息必须落到同一步，而不是最后一条");
+    }
+
+    #[test]
+    fn authoritative_falls_back_to_empty_placeholder() {
+        // 没有工具的一步：本地只有一条空占位 → 用它
+        let rows = vec![row(Vec::new(), Vec::new())];
+        assert_eq!(authoritative_target(&rows, None, &[]), Some(0));
+    }
+
+    #[test]
+    fn authoritative_does_not_clobber_unrelated_step() {
+        // 最后一条是「下一步的思考行」（有内容、无工具），且与权威消息不是同一步
+        // → 不动（盲替换会把它覆盖成上一步的工具卡）
+        let rows = vec![
+            row(vec![Seg::Text("上一轮答案".into())], Vec::new()),
+            row(vec![Seg::Thinking("下一步在想".into())], Vec::new()),
+        ];
+        assert_eq!(authoritative_target(&rows, None, &[]), None);
+    }
+
+    #[test]
+    fn merge_keeps_local_tool_result_when_authoritative_has_none() {
+        // 服务端的 assistant 消息只带调用（结果在独立 tool 消息里）：合并后
+        // 本地已回填的耗时 / 结果必须留着，否则工具卡退回「进行中」
+        let mut authoritative = tool("c1", false);
+        authoritative.duration_ms = None;
+        authoritative.result = None;
+        let local = vec![tool("c1", true)];
+        let merged = merge_tool_results(vec![authoritative], &local);
+        assert_eq!(merged.len(), 1);
+        assert_eq!(merged[0].duration_ms, Some(12), "耗时不能被清掉");
+        assert_eq!(merged[0].result.as_deref(), Some("ok"), "结果不能被清掉");
     }
 
     #[test]

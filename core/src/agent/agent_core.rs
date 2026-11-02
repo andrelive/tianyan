@@ -1564,8 +1564,17 @@ impl Agent {
                         start,
                     ),
                     TurnMode::Stream { sender } => {
+                        // 取消**不推正文**：界面上「这一轮停在这里」由状态行
+                        // （`turn_state(idle)` → 空闲）与工具卡上的失败结果表达。
+                        // 早先推一句「任务已取消」会作为一条 `answer` 增量被前端
+                        // 当成**新的一步**（`start_new_step_after_tools` 见上一步
+                        // 工具已出结果即新开行），随后上一步的权威消息又把这条新行
+                        // 覆盖成同一张工具卡 —— 用户实测的现象正是「点停止后多出
+                        // 一份重复的『思考过程 + 执行命令』」。
+                        // 非流式（`Plain`）仍返回 "任务已取消"：HTTP 响应需要一个
+                        // 人类可读的结果，且它不进会话列表。
                         sender
-                            .send_complete("任务已取消", StreamChunkType::Answer, None, None, None)
+                            .send_complete("", StreamChunkType::Answer, None, None, None)
                             .await;
                         finalize_response(
                             AgentResponse::simple("任务已取消".to_string()),
