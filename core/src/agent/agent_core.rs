@@ -866,6 +866,9 @@ impl Agent {
         };
         let report = crate::agent::context_report::ContextReport {
             model: model.to_string(),
+            now: chrono::Local::now()
+                .format("%Y-%m-%d %H:%M:%S %:z")
+                .to_string(),
             message_count,
             messages_since_marker,
             min_messages_before_compression: MIN_MESSAGES_BEFORE_COMPRESSION,

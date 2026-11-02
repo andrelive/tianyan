@@ -439,6 +439,32 @@ impl ToolRegistry {
         }
     }
 
+    /// 执行 compress_context 工具：登记一次主动压缩请求。
+    ///
+    /// **只登记、不压缩**：压缩会改写会话链，必须发生在轮末安全点（正在跑的循环
+    /// 手里是 `Vec<Message>` 快照，轮内压缩对它不生效）。登记后 `AgentLoop` 看到
+    /// 待处理请求就**收尾本轮**，Agent 在轮末压缩并按 goal 状态决定是否唤醒继续
+    /// （见 [`crate::agent::compression_request`] 的模块文档）。
+    ///
+    /// 返回值刻意写清"别再输出正文"：模型很容易在工具结果后继续补一段总结，
+    /// 那一段会落在**压缩前**的旧上下文里，白花 token。
+    pub(crate) async fn execute_compress_context(
+        &self,
+        arguments: &str,
+        session_id: &str,
+    ) -> Result<serde_json::Value, TianyanError> {
+        let params: crate::agent::tool_params::CompressContextParams = parse_params(arguments)?;
+        let handoff = params.handoff.filter(|h| !h.trim().is_empty());
+        self.ctx
+            .compression_requests
+            .request(session_id, handoff.clone());
+        Ok(serde_json::json!({
+            "status": "scheduled",
+            "handoff_recorded": handoff.is_some(),
+            "note": "已登记压缩请求。本轮到此结束——系统会在轮末压缩上下文，然后自动唤醒你继续；现在不要再输出正文或调用其它工具。",
+        }))
+    }
+
     /// 执行 delegate_to_agent 工具：委托子任务到隔离子 Agent。
     ///
     /// The LLM drives the loop: each turn it can either return a final answer

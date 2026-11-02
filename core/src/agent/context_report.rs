@@ -16,6 +16,13 @@ use crate::context::CompressionBudget;
 pub struct ContextReport {
     /// 当前会话使用的模型名。
     pub model: String,
+    /// 生成这份快照的时刻（本地时区，`YYYY-MM-DD HH:MM:SS +08:00`）。
+    ///
+    /// 为什么塞在这里：模型对「现在几点」没有内建概念（系统提示里不写时间——
+    /// 那会让**每轮前缀都变**，直接打掉 DeepSeek 的前缀缓存），而它做时间相关判断
+    /// （今天几号 / 这个文件的时间戳算不算旧 / 任务跑了多久）时又需要它。
+    /// 挂在工具返回上：按需取、零缓存代价。
+    pub now: String,
     /// 会话消息总条数（含压缩点）。
     pub message_count: usize,
     /// 距最近一次压缩点之后的消息条数——压缩的前置条件之一。
@@ -29,7 +36,9 @@ pub struct ContextReport {
 impl ContextReport {
     /// 距自动压缩阈值还剩多少 token（已越过则为 0）。
     pub fn remaining_to_threshold(&self) -> u64 {
-        self.budget.threshold_tokens.saturating_sub(self.budget.used_tokens)
+        self.budget
+            .threshold_tokens
+            .saturating_sub(self.budget.used_tokens)
     }
 
     /// 占用百分比（四舍五入；窗口为 0 时按 0 处理）。
@@ -37,7 +46,8 @@ impl ContextReport {
         if self.budget.context_window == 0 {
             return 0;
         }
-        ((self.budget.used_tokens as f64 / self.budget.context_window as f64) * 100.0).round() as u64
+        ((self.budget.used_tokens as f64 / self.budget.context_window as f64) * 100.0).round()
+            as u64
     }
 
     /// 现在是否可以发起压缩（消息数够了）。
@@ -65,6 +75,7 @@ impl ContextReport {
     pub fn to_json(&self) -> serde_json::Value {
         serde_json::json!({
             "model": self.model,
+            "now": self.now,
             "context_window": self.budget.context_window,
             "used_tokens": self.budget.used_tokens,
             "used_pct": self.used_pct(),
@@ -87,9 +98,16 @@ mod tests {
     //! 口径单测：占用百分比、余量、可压缩前置、hint 分档。
     use super::*;
 
-    fn report(used: u64, window: u64, threshold: u64, critical: u64, since: usize) -> ContextReport {
+    fn report(
+        used: u64,
+        window: u64,
+        threshold: u64,
+        critical: u64,
+        since: usize,
+    ) -> ContextReport {
         ContextReport {
             model: "test-model".to_string(),
+            now: "2026-11-01 20:00:00 +08:00".to_string(),
             message_count: since,
             messages_since_marker: since,
             min_messages_before_compression: 6,
@@ -115,7 +133,11 @@ mod tests {
     #[test]
     fn remaining_saturates_after_threshold() {
         let r = report(700_000, 1_000_000, 600_000, 800_000, 20);
-        assert_eq!(r.remaining_to_threshold(), 0, "越过阈值后余量归零，不给负数");
+        assert_eq!(
+            r.remaining_to_threshold(),
+            0,
+            "越过阈值后余量归零，不给负数"
+        );
         assert!(r.budget.should_compress);
         assert!(!r.budget.is_critical);
     }
@@ -135,11 +157,19 @@ mod tests {
     #[test]
     fn hint_ranks_by_state() {
         // 消息太少优先（此时压缩没内容可压）
-        assert!(report(900_000, 1_000_000, 600_000, 800_000, 2).hint().contains("很新"));
+        assert!(report(900_000, 1_000_000, 600_000, 800_000, 2)
+            .hint()
+            .contains("很新"));
         // 临界优先于普通阈值
-        assert!(report(900_000, 1_000_000, 600_000, 800_000, 20).hint().contains("临界"));
-        assert!(report(700_000, 1_000_000, 600_000, 800_000, 20).hint().contains("自动压缩阈值"));
-        assert!(report(1000, 1_000_000, 600_000, 800_000, 20).hint().contains("充裕"));
+        assert!(report(900_000, 1_000_000, 600_000, 800_000, 20)
+            .hint()
+            .contains("临界"));
+        assert!(report(700_000, 1_000_000, 600_000, 800_000, 20)
+            .hint()
+            .contains("自动压缩阈值"));
+        assert!(report(1000, 1_000_000, 600_000, 800_000, 20)
+            .hint()
+            .contains("充裕"));
     }
 
     #[test]
@@ -148,6 +178,7 @@ mod tests {
         assert_eq!(v["used_pct"], 20);
         assert_eq!(v["remaining_to_threshold"], 400_000);
         assert_eq!(v["compressible"], true);
+        assert_eq!(v["now"], "2026-11-01 20:00:00 +08:00", "当前时间随快照带出");
         assert!(v["hint"].as_str().is_some());
         assert!(v["model"].as_str().is_some());
     }

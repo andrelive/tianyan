@@ -86,8 +86,12 @@ pub struct ToolContext {
     /// （`ToolRegistry` 只有一个），若只存一条，多会话并发时后写的会覆盖先写的，
     /// 工具就会报**别的会话**的占用。缺条 = 该会话尚未刷新（首轮 / 未装配策略），
     /// 工具据此报「还没有真实占用」，而不是给假数字。
-    pub context_report:
-        Arc<Mutex<HashMap<String, crate::agent::context_report::ContextReport>>>,
+    pub context_report: Arc<Mutex<HashMap<String, crate::agent::context_report::ContextReport>>>,
+    /// 上下文压缩请求队列（模型经 `compress_context` 登记，轮末由 Agent 消费）。
+    ///
+    /// 与 `AgentLoop` / `Agent` 共享同一份 Arc：循环用它作**收尾判据**（本轮立刻
+    /// 结束，别拿旧上下文继续生成），Agent 用它取出交接说明去压缩。
+    pub compression_requests: Arc<crate::agent::compression_request::CompressionRequests>,
 }
 
 impl ToolContext {
@@ -106,6 +110,9 @@ impl ToolContext {
             data_dir: None,
             default_working_directory: None,
             context_report: Arc::new(Mutex::new(HashMap::new())),
+            compression_requests: Arc::new(
+                crate::agent::compression_request::CompressionRequests::new(),
+            ),
         }
     }
 

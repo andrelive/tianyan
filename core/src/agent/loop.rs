@@ -1460,6 +1460,27 @@ impl AgentLoop {
                 }
             }
 
+            // 模型主动请求了上下文压缩（`compress_context`）→ **本轮立即收尾**。
+            //
+            // 为什么不能继续：压缩要等轮末由 Agent 层做，此刻再跑一轮只是拿**旧**
+            // 上下文重发一次完整请求——白花 token，而它请求压缩的原因正是上下文紧张。
+            // 返回 `Some(Answer)` 而不是 `None`：`run_turns` 见到 `Some` 即收尾，
+            // 轮边界照常落库（`persisted` 就是刚才这条带 tool_calls 的 assistant）。
+            if self
+                .tool_registry()
+                .context()
+                .compression_requests
+                .is_pending(ctx.session_id)
+            {
+                return Ok(Some(AgentLoopResult::Answer {
+                    content: assistant_msg.content.clone(),
+                    total_tokens: ctx.total_tokens.clone(),
+                    last_turn_usage: turn_usage.clone(),
+                    turns: ctx.turn + 1,
+                    persisted_message: Box::new(persisted),
+                }));
+            }
+
             Ok(None)
         } else if assistant_msg.content.is_empty() {
             // 空输出 = 正常结束（对齐 DSH：无工具调用即 completed，内容空不空

@@ -285,6 +285,19 @@ pub struct SelfCheckParams {}
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct ContextStatusParams {}
 
+/// 请求压缩上下文（`compress_context`）。
+///
+/// 调用即**收尾本轮**：系统在轮末压缩，压缩成功后自动唤醒继续。
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct CompressContextParams {
+    /// 交接说明：接下来要做什么 / 已完成什么 / 注意什么。
+    ///
+    /// 会作为**必须保留项**拼进压缩摘要（压缩后你据此继续）。写具体一点——
+    /// 这是压缩后唯一能保证留下来的"我在干什么"。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub handoff: Option<String>,
+}
+
 /// 知识导入参数。
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct KnowledgeIngestParams {

@@ -17,10 +17,11 @@ use std::pin::Pin;
 
 use super::ToolRegistry;
 use crate::agent::tool_params::{
-    AskUserParams, CallSkillParams, DelegateToAgentParams, DelegationStatsParams,
-    ContextStatusParams, ExecuteCommandParams, ExecutionDetailParams, ExecutionStatsParams,
-    KnowledgeIngestParams, SearchVfsParams, SelfCheckParams, SessionRecallParams,
-    SuggestRoleParams, TaskCancelParams, TaskStatusParams, VfsListParams, VfsReadParams,
+    AskUserParams, CallSkillParams, CompressContextParams, ContextStatusParams,
+    DelegateToAgentParams, DelegationStatsParams, ExecuteCommandParams, ExecutionDetailParams,
+    ExecutionStatsParams, KnowledgeIngestParams, SearchVfsParams, SelfCheckParams,
+    SessionRecallParams, SuggestRoleParams, TaskCancelParams, TaskStatusParams, VfsListParams,
+    VfsReadParams,
 };
 use crate::model::types::{FunctionDefinition, ToolDefinition, ToolPresentation};
 
@@ -123,6 +124,12 @@ builtin_adapter!(exec_call_skill, execute_call_skill, args);
 builtin_adapter!(exec_ask_user, execute_ask_user, args, session, sub);
 builtin_adapter!(exec_self_check, execute_self_check);
 builtin_adapter!(exec_context_status, execute_context_status, session);
+builtin_adapter!(
+    exec_compress_context,
+    execute_compress_context,
+    args,
+    session
+);
 builtin_adapter!(exec_knowledge_ingest, execute_knowledge_ingest, args);
 builtin_adapter!(
     exec_delegate_to_agent,
@@ -224,7 +231,14 @@ fn def_self_check(name: &'static str) -> ToolDefinition {
 fn def_context_status(name: &'static str) -> ToolDefinition {
     ToolDefinition::function(FunctionDefinition::from_schema::<ContextStatusParams>(
         name,
-        "读取**当前会话**的上下文预算：窗口多大、已用多少 token（占比）、自动压缩阈值、距阈值还剩多少、距上次压缩有多少条消息、现在是否具备压缩条件。想知道「还有多少余量」时调它——凭感觉估通常偏差很大。注意：上下文紧张不代表要停手，把任务做完是第一位的。",
+        "读取**当前会话**的上下文预算：窗口多大、已用多少 token（占比）、自动压缩阈值、距阈值还剩多少、距上次压缩有多少条消息、现在是否具备压缩条件；顺带给出**当前时间**（你本身没有时钟，做时间相关判断时以它为准）。想知道「还有多少余量」时调它——凭感觉估通常偏差很大。注意：上下文紧张不代表要停手，把任务做完是第一位的；真需要腾空间时用 compress_context。",
+    ))
+}
+
+fn def_compress_context(name: &'static str) -> ToolDefinition {
+    ToolDefinition::function(FunctionDefinition::from_schema::<CompressContextParams>(
+        name,
+        "请求压缩当前会话的上下文。**调用即表示本轮到此结束**：系统会在轮末压缩，压缩成功后自动唤醒你继续（当且仅当会话里有活跃的 goal）。所以调用后不要再输出正文或调用其它工具。handoff 写上「接下来要做什么 / 已完成什么 / 注意什么」——它会作为必须保留项进摘要，压缩后你据此接着干。何时用：context_status 显示余量紧张、或任务还很长需要提前腾空间。",
     ))
 }
 
@@ -339,6 +353,12 @@ pub(crate) static BUILTIN_TOOLS: &[BuiltinToolMeta] = &[
         def_context_status,
         ToolPresentation::Generic,
         exec_context_status,
+    ),
+    tool(
+        "compress_context",
+        def_compress_context,
+        ToolPresentation::Generic,
+        exec_compress_context,
     ),
     tool(
         "knowledge_ingest",
