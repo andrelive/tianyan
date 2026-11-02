@@ -503,10 +503,25 @@ mod tests {
     /// 默认落盘位置：`{data_dir}/logs/tianyan.log`（GUI release 无控制台，必须有文件）。
     #[test]
     fn test_default_log_file_follows_data_dir() {
-        let dir = Path::new(r"D:\tianyan");
+        // 断言必须**平台无关**：期望值一律用 `join` 组合，不写字面 `\`。
+        // 反例（tag v1.1.1 实发）：`PathBuf::from(r"D:\tianyan\logs\tianyan.log")`
+        // 在 Windows 上与本地产物相等，在 ubuntu runner 上 `join` 用 `/` 拼接 →
+        // 断言失败、Quality 门禁红、Release 不出包（"本地绿 / CI 红"的典型写法）。
+        let dir = Path::new("data-root");
+        let p = default_log_file(dir);
+        assert_eq!(p, dir.join(LOG_DIR_NAME).join(LOG_FILE_NAME));
+        assert!(p.starts_with(dir), "默认日志必须落在 data_dir 下：{p:?}");
         assert_eq!(
-            default_log_file(dir),
-            PathBuf::from(r"D:\tianyan\logs\tianyan.log")
+            p.file_name().and_then(|n| n.to_str()),
+            Some(LOG_FILE_NAME),
+            "文件名固定为 tianyan.log"
+        );
+        assert_eq!(
+            p.parent()
+                .and_then(|d| d.file_name())
+                .and_then(|n| n.to_str()),
+            Some(LOG_DIR_NAME),
+            "日志目录固定为 logs/"
         );
         let cfg = LoggingConfig::default();
         assert!(cfg.file.is_none(), "默认配置故意不写 file，由启动器补");
