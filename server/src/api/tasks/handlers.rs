@@ -40,6 +40,13 @@ const SSE_KEEPALIVE_SECS: u64 = 15;
 /// 上滚经 `GET /sessions/{id}/messages?before_seq=` 补齐）。
 const SNAPSHOT_PAGE: usize = 100;
 
+/// 快照对齐扩展的**行数上限**（比 [`SNAPSHOT_PAGE`] 宽、比不分页接口的 1000 窄）。
+///
+/// 上限的存在理由：首屏体积直接决定「打开会话」的观感，而首屏不必一次给全 ——
+/// 更早历史本来就由上滚补齐。超出即退化为「页首未对齐」（ADR-035 §8：宁可退化，
+/// 也不返回一个几 MB 的页）。
+const SNAPSHOT_MAX_ROWS: usize = 300;
+
 /// 构造订阅快照 payload（ADR-029 + ADR-035 §8）：**最近 N 条**（ChatMessage
 /// 展示格式，带 seq）+ cursor + `has_more`（更早历史是否可上滚）。
 ///
@@ -110,9 +117,17 @@ pub async fn subscribe_events(
     // 读取失败不得折叠为空快照：前端 applySnapshot 是 replace 语义，推空快照
     // 会静默清空界面消息（无提示）；读错误照常上抛（映射 500，快照不推）
     let last_seq = state.session_store().last_seq(&request.session_id).await?;
-    let page = session_manager
-        .load_before(&request.session_id, last_seq + 1, SNAPSHOT_PAGE)
-        .await?;
+    // 窗口边界与分页接口**共用**同一份实现（`load_aligned_page`：页首对齐到真
+    // user）。各自取窗的实测后果见该函数文档：首屏首条不是 user、压缩点被切掉，
+    // 且与「上滚补回来的页」边界错位。
+    let page = crate::api::sessions::services::load_aligned_page(
+        &session_manager,
+        &request.session_id,
+        last_seq + 1,
+        SNAPSHOT_PAGE,
+        SNAPSHOT_MAX_ROWS,
+    )
+    .await?;
     let has_more = page.first().map(|(seq, _)| *seq > 0).unwrap_or(false);
     // 轮状态权威（快照校正，纯通知模型）：用户轮 = Stream 租约在跑；自动轮
     // （唤醒轮/后台轮）= Agent 活动轮槽（不经过用户轮租约）。二者互斥（轮锁）。

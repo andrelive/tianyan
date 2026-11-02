@@ -22,6 +22,54 @@ const MAX_MESSAGE_BASE: usize = 200;
 /// 宁可退化为「不对齐」也不返回一个几 MB 的页。
 const MAX_MESSAGE_PAGE_ROWS: usize = 1000;
 
+/// 取一页「页首对齐到真 user」的消息窗口（ADR-035 §8，2026-11 定稿语义）。
+///
+/// **分页接口（[`SessionService::get_messages_page`]）与订阅快照
+/// （`tasks::handlers::subscribe_events`）必须共用这一份实现。** 两处各自取窗的
+/// 实测后果：快照按固定行数取最近 N 行、页首落在压缩点之后的 assistant/tool 上 ——
+/// 打开会话看到的首屏既没有压缩点卡片、又把那一轮从中间切开；而同一时刻分页接口
+/// 从压缩点**之前**的真 user 起，两份窗口边界相差数条。前端以快照 replace 首屏、
+/// 再用快照的 `next_before_seq` 上滚 —— 拼接结果取决于两条不同的边界策略。
+///
+/// 语义（用户裁定）：`base` 只是**基准量** —— 不管窗口里有没有 user、有几个 user，
+/// 都要**继续向前**找到最近的一条「真 user」为止，页从它起。
+///
+/// 因此一页实际行数**一定 ≥ base**（除链头收束：向前找不到 user 时整段从链头起）。
+/// 为什么必须"继续向前"、而不是"窗口里有 user 就用它"：
+/// 1. 页首会随窗口滑动漂移 —— 同样是"最新一页"，两次请求可能从不同 user 起；
+/// 2. 窗口里的 user 可能全是**压缩点**（ADR-053：压缩点 user 锚定），压缩点之后
+///    还没有新消息时，旧实现整页塌成「只剩压缩点一条」，前面几十条历史全丢
+///    （用户实测：切回会话只剩一张摘要卡）。
+///
+/// `last_user_seq_before` 已排除压缩点；链头无 user → `lo = 0` → 整段从链头起。
+/// 两个 user 相隔超过 `max_rows`（超长工具段）时触顶退化 —— 宁可返回页首未对齐的
+/// 一页，也不返回一个几 MB 的页。调用方按用途给上限：分页 [`MAX_MESSAGE_PAGE_ROWS`]，
+/// 订阅快照取更紧的值（首屏不必一次给全，更早历史由上滚补齐）。
+pub(crate) async fn load_aligned_page(
+    manager: &Arc<dyn SessionManager>,
+    session_id: &str,
+    before_seq: i64,
+    base: usize,
+    max_rows: usize,
+) -> Result<Vec<(i64, tianyan::common::types::StructuredMessage)>, ApiError> {
+    // 基准窗口（`seq < before_seq` 里最近 base 行）
+    let window = manager.load_before(session_id, before_seq, base).await?;
+    match window.first().map(|(seq, _)| *seq) {
+        Some(head) => {
+            let lo = manager
+                .last_user_seq_before(session_id, head)
+                .await?
+                .unwrap_or(0);
+            let span = (before_seq - lo).max(1) as usize;
+            Ok(manager
+                .load_before(session_id, before_seq, span.min(max_rows))
+                .await?)
+        }
+        // 空窗口（无更早消息）
+        None => Ok(window),
+    }
+}
+
 /// 会话服务，管理对话会话
 pub struct SessionService {
     session_manager: Arc<dyn SessionManager>,
@@ -186,41 +234,14 @@ impl SessionService {
             .clamp(1, MAX_MESSAGE_BASE);
         let last_seq = self.session_manager.last_seq(session_id).await?;
         let before = before_seq.unwrap_or(last_seq + 1);
-        // 基准窗口（`seq < before` 里最近 base 条）
-        let window = self
-            .session_manager
-            .load_before(session_id, before, base)
-            .await?;
-        // 页首对齐（ADR-035 §8，2026-11 定稿语义）：**基准窗口只是起点** ——
-        // 不管窗口里有没有 user、有几个 user，都要**继续向前**找到最近的一条
-        // 「真 user」为止，页从它起。
-        //
-        // 因此一页实际条数**一定 ≥ base**（除链头收束：向前找不到 user 时从链头起，
-        // 那时页就是「链头..窗口尾」）。
-        //
-        // 为什么必须"继续向前"、而不是"窗口里有 user 就用它"：
-        // 1. 页首会随窗口滑动漂移 —— 同样是"最新一页"，两次请求可能从不同 user 起；
-        // 2. 窗口里的 user 可能全是**压缩点**（ADR-053：压缩点 user 锚定），压缩点
-        //    之后还没有新消息时，旧实现整页塌成「只剩压缩点一条」，前面几十条历史
-        //    全丢（用户实测：切回会话只剩一张摘要卡）。
-        //
-        // `last_user_seq_before` 已排除压缩点；链头无 user → `lo = 0` → 整段从链头起。
-        // 两个 user 相隔超过 `MAX_MESSAGE_PAGE_ROWS`（超长工具段）时触顶退化。
-        let rows = match window.first().map(|(seq, _)| *seq) {
-            Some(head) => {
-                let lo = self
-                    .session_manager
-                    .last_user_seq_before(session_id, head)
-                    .await?
-                    .unwrap_or(0);
-                let span = (before - lo).max(1) as usize;
-                self.session_manager
-                    .load_before(session_id, before, span.min(MAX_MESSAGE_PAGE_ROWS))
-                    .await?
-            }
-            // 空窗口（无更早消息）
-            None => window,
-        };
+        let rows = load_aligned_page(
+            &self.session_manager,
+            session_id,
+            before,
+            base,
+            MAX_MESSAGE_PAGE_ROWS,
+        )
+        .await?;
         // 上滚游标 = 本页最早一条的 seq（=0 表示已到链首，无更早）
         let next_before_seq = rows.first().map(|(seq, _)| *seq).filter(|seq| *seq > 0);
         Ok(SessionMessagesResponse {
@@ -806,6 +827,44 @@ mod tests {
     }
 
     /// 分段加载：不存在的会话 → 404（与全量路径一致）。
+    ///
+    /// ## （下方新增）快照与分页共用的取窗：对齐 + 触顶退化
+    #[tokio::test]
+    async fn test_aligned_page_aligns_to_user_and_respects_max_rows() {
+        use super::{load_aligned_page, MAX_MESSAGE_PAGE_ROWS};
+
+        // 链：u0, a1..a8, u9, a10, a11 —— 一个 user 后面挂了 8 条 assistant
+        // （模拟「超长工具段」：对齐跨度可能远大于 base）
+        let mut session = Session::new("s1");
+        session.push_message(StructuredMessage::user("s1", "u0"));
+        for i in 1..=8 {
+            session.push_message(StructuredMessage::assistant("s1", format!("a{i}")));
+        }
+        session.push_message(StructuredMessage::user("s1", "u9"));
+        session.push_message(StructuredMessage::assistant("s1", "a10"));
+        session.push_message(StructuredMessage::assistant("s1", "a11"));
+        let manager: Arc<dyn SessionManager> =
+            Arc::new(MockSessionManager::with_sessions(vec![session]));
+
+        // ① 分页视角（base=2，上限宽）：窗口 [a10,a11] → 继续向前对齐到 u9
+        //    → 页 [u9,a10,a11]，页首是真 user（不是窗口里最早的非 user 行）。
+        let page = load_aligned_page(&manager, "s1", 12, 2, MAX_MESSAGE_PAGE_ROWS)
+            .await
+            .expect("分页取窗");
+        let seqs: Vec<i64> = page.iter().map(|(s, _)| *s).collect();
+        assert_eq!(seqs, vec![9, 10, 11], "页首必须继续向前对齐到真 user");
+
+        // ② 快照视角（上限紧到 2 行）：同一 before 位置 → 触顶退化为「最近 2 行」，
+        //    页首不再对齐。快照宁可页首不对齐，也不返回一个几 MB 的页
+        //    （ADR-035 §8：体积优先，更早历史由上滚补齐）。
+        let snap = load_aligned_page(&manager, "s1", 12, 5, 2)
+            .await
+            .expect("快照取窗");
+        let snap_seqs: Vec<i64> = snap.iter().map(|(s, _)| *s).collect();
+        assert_eq!(snap_seqs, vec![10, 11], "触顶退化为最近 max_rows 行");
+        assert!(snap.len() <= 2, "max_rows 是硬上限");
+    }
+
     #[tokio::test]
     async fn test_get_messages_page_missing_session_not_found() {
         let service = SessionService::new(
