@@ -231,7 +231,7 @@ fn def_self_check(name: &'static str) -> ToolDefinition {
 fn def_context_status(name: &'static str) -> ToolDefinition {
     ToolDefinition::function(FunctionDefinition::from_schema::<ContextStatusParams>(
         name,
-        "读取**当前会话**的上下文预算：窗口多大、已用多少 token（占比）、自动压缩阈值、距阈值还剩多少、距上次压缩有多少条消息、现在是否具备压缩条件；顺带给出**当前时间**（你本身没有时钟，做时间相关判断时以它为准）。想知道「还有多少余量」时调它——凭感觉估通常偏差很大。注意：上下文紧张不代表要停手，把任务做完是第一位的；真需要腾空间时用 compress_context。",
+        "读取**当前会话**的上下文预算：窗口多大、已用多少 token（占比）、距**窗口上限**还剩多少、距上次压缩有多少条消息、现在是否具备压缩条件；顺带给出**当前时间**（你本身没有时钟，做时间相关判断时以它为准）。想知道「还有多少余量」时调它——凭感觉估通常偏差很大。注意：系统的自动压缩只在**本轮收尾**时兜底（轮内不会触发），所以一轮里连续跑很多步时，余量得你自己盯；上下文紧张不代表要停手，把任务做完是第一位的，真需要腾空间时用 compress_context。",
     ))
 }
 

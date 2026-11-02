@@ -41,6 +41,17 @@ impl ContextReport {
             .saturating_sub(self.budget.used_tokens)
     }
 
+    /// 距**窗口上限**还剩多少 token（已越过则为 0）。
+    ///
+    /// 与 [`Self::remaining_to_threshold`] 的区别：阈值是**系统自动兜底**的策略线
+    /// （且只在轮收尾时生效），窗口上限是**物理约束**（撞上去请求就发不出去）。
+    /// 模型在轮内（连续多步工具）能依靠的只有后者，所以两个数字都给、含义分开写。
+    pub fn remaining_window(&self) -> u64 {
+        self.budget
+            .context_window
+            .saturating_sub(self.budget.used_tokens)
+    }
+
     /// 占用百分比（四舍五入；窗口为 0 时按 0 处理）。
     pub fn used_pct(&self) -> u64 {
         if self.budget.context_window == 0 {
@@ -60,9 +71,9 @@ impl ContextReport {
         if !self.compressible() {
             "上下文还很新（距上次压缩的消息不足），现在压缩没有可压的内容"
         } else if self.budget.is_critical {
-            "已越过临界阈值：建议尽快压缩，否则下一次请求可能被上游拒绝"
+            "已越过临界阈值：建议尽快压缩（系统只在本轮收尾兜底，轮内不会触发）"
         } else if self.budget.should_compress {
-            "已越过自动压缩阈值：可以压缩后继续，也可以先做完当前步骤再压"
+            "已越过自动压缩阈值：系统会在本轮收尾时兜底压缩；你先做完当前步骤再压也可以"
         } else {
             "上下文充裕，继续工作即可"
         }
@@ -79,6 +90,7 @@ impl ContextReport {
             "context_window": self.budget.context_window,
             "used_tokens": self.budget.used_tokens,
             "used_pct": self.used_pct(),
+            "remaining_window": self.remaining_window(),
             "threshold_tokens": self.budget.threshold_tokens,
             "critical_tokens": self.budget.critical_tokens,
             "remaining_to_threshold": self.remaining_to_threshold(),
@@ -95,17 +107,20 @@ impl ContextReport {
 
 /// 「低余量」尾部提示的文案（`Agent::low_remaining_note` 用）。
 ///
-/// **百分比只有一个口径：窗口占比**——与 [`ContextReport::used_pct`]、与界面上下文环
-/// 完全同源。阈值一律用**绝对 token** 表达。
+/// ## 只给两个数：窗口占比 + 距窗口上限的绝对余量
 ///
-/// 为什么单独抽成函数、为什么口径必须统一：这段文案是**给模型读的**，而模型会把它
-/// 转述给用户。早先的写法是「已用到自动压缩阈值的 {pct}%」（分母 = 阈值，即窗口的
-/// 60%），模型转述时把「阈值」这个限定词丢掉、直接说「上下文已用到 89%」，而界面
-/// 环显示 54%（分母 = 窗口）—— 同一份占用被两种分母算成两个数（实测：used 536,891
-/// / 窗口 1,000,000 = 54%；/ 阈值 600,000 = 89%），用户直接质疑「才 54% 怎么就到
-/// 89%」。分母换成窗口之后，模型怎么转述都不会与环矛盾。
+/// **不再提「自动压缩阈值」**。它是**系统自动兜底**的策略参数，而且**只在轮收尾时
+/// 生效**——一轮里连续跑很多步（工具链）时它根本不会触发。把它报给模型有两个坏处：
 ///
-/// 紧迫感靠绝对余量（「还差 N 触发」）表达，不靠第二个百分比。
+/// 1. **口径打架**：早先的文案是「已用到自动压缩阈值的 {pct}%」（分母 = 阈值 = 窗口
+///    的 60%），模型转述时把「阈值」这个限定词丢掉、说成「上下文已用到 89%」，而界面
+///    上下文环显示 54%（分母 = 窗口）——同一份占用两个数（实测 used 536,891：
+///    54% vs 89%），用户直接质疑「才 54% 怎么就到 89%」。
+/// 2. **给出错误的依赖**：模型看到「距阈值还差 63K」会以为「还有系统兜底」，而在
+///    轮内（它真正会撞墙的时段）兜底并不存在。
+///
+/// 所以这里只报**物理事实**（窗口占用 + 余量），并明确告知兜底的时机；要不要提前
+/// 压缩由模型自己判断（ADR-053：判断权归模型，系统只兜底）。
 pub fn low_remaining_note_text(
     budget: &CompressionBudget,
     since_marker: usize,
@@ -113,20 +128,13 @@ pub fn low_remaining_note_text(
 ) -> String {
     let window = budget.context_window.max(1);
     let pct = (budget.used_tokens as f64 / window as f64 * 100.0).round() as u64;
-    let to_threshold = budget.threshold_tokens.saturating_sub(budget.used_tokens);
-    let threshold_note = if to_threshold == 0 {
-        format!("已越过自动压缩阈值 {} token", budget.threshold_tokens)
-    } else {
-        format!(
-            "自动压缩阈值 {} token（还差 {} 触发）",
-            budget.threshold_tokens, to_threshold
-        )
-    };
+    let remaining = budget.context_window.saturating_sub(budget.used_tokens);
     let mut note = format!(
-        "【上下文提示】上下文窗口已用 {pct}%（约 {} / {} token）；{threshold_note}。\
-         任务还长的话可以调 compress_context 压缩并继续（handoff 写清接下来要做什么）；\
-         系统也会在必要时兜底。不要为了省上下文而缩小工作范围。",
-        budget.used_tokens, budget.context_window
+        "【上下文提示】上下文窗口已用 {pct}%（约 {} / {} token），距窗口上限还剩 {}。\
+         系统的自动压缩**只在本轮收尾时**兜底（轮内不会触发）——这一轮如果还要跑很多步，\
+         余量得你自己盯。任务还长可以调 compress_context 压缩并继续（handoff 写清接下来\
+         要做什么）；不要为了省上下文而缩小工作范围。",
+        budget.used_tokens, budget.context_window, remaining
     );
     if since_marker < min_messages {
         note.push_str(&format!(
@@ -220,6 +228,10 @@ mod tests {
         let v = report(200_000, 1_000_000, 600_000, 800_000, 20).to_json();
         assert_eq!(v["used_pct"], 20);
         assert_eq!(v["remaining_to_threshold"], 400_000);
+        assert_eq!(
+            v["remaining_window"], 800_000,
+            "窗口余量是物理约束（1,000,000 − 200,000）——轮内唯一能依靠的数字"
+        );
         assert_eq!(v["compressible"], true);
         assert_eq!(v["now"], "2026-11-01 20:00:00 +08:00", "当前时间随快照带出");
         assert!(v["hint"].as_str().is_some());
@@ -230,7 +242,7 @@ mod tests {
     ///
     /// 事故数字：窗口 1,000,000 / 阈值 600,000 / 实测占用 536,891。
     /// 窗口占比 54%（界面环同源）、阈值占比 89%（旧文案的分母）—— 旧文案让模型
-    /// 说成「上下文已用到 89%」，与环矛盾。现在文案只给窗口口径。
+    /// 说成「上下文已用到 89%」，与环矛盾。现在文案只给窗口口径与窗口余量。
     #[test]
     fn low_remaining_note_uses_window_pct_only() {
         let b = CompressionBudget {
@@ -251,25 +263,36 @@ mod tests {
             "不能再出现「阈值的 89%」——模型转述时会丢掉限定词：{note}"
         );
         assert!(
-            note.contains("600000") && note.contains("还差 63109"),
-            "阈值与余量用绝对 token：{note}"
+            note.contains("还剩 463109"),
+            "余量按**窗口**算（1,000,000 − 536,891）：{note}"
+        );
+        assert!(
+            !note.contains("自动压缩阈值 600000"),
+            "阈值是系统兜底参数（且只在轮收尾生效），不该报给模型当依据：{note}"
+        );
+        assert!(
+            note.contains("只在本轮收尾时"),
+            "必须告知兜底时机——轮内不会触发，模型不能依赖它：{note}"
         );
     }
 
-    /// 越过阈值后文案切换为「已越过」，窗口占比照旧（不给第二个百分比）。
+    /// 余量吃紧时口径不变（仍是窗口占比 + 绝对余量），不给第二个百分比、也不给阈值。
     #[test]
-    fn low_remaining_note_marks_over_threshold() {
+    fn low_remaining_note_keeps_single_pct_when_tight() {
         let b = CompressionBudget {
             context_window: 1_000_000,
-            used_tokens: 700_000,
+            used_tokens: 960_000,
             threshold_tokens: 600_000,
             critical_tokens: 800_000,
             should_compress: true,
-            is_critical: false,
+            is_critical: true,
         };
         let note = low_remaining_note_text(&b, 20, 6);
-        assert!(note.contains("窗口已用 70%"), "{note}");
-        assert!(note.contains("已越过自动压缩阈值"), "{note}");
-        assert!(!note.contains("还差"), "已越阈不应再给「还差」：{note}");
+        assert!(note.contains("窗口已用 96%"), "{note}");
+        assert!(note.contains("还剩 40000"), "{note}");
+        assert!(
+            !note.contains("阈值 600000"),
+            "余量吃紧也不报阈值（口径仍是窗口）：{note}"
+        );
     }
 }
