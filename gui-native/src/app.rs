@@ -218,6 +218,7 @@ impl ClientApp {
             submit_for: None,
             subscribed_sessions: std::collections::HashSet::new(),
             events_connected: false,
+            stream_epoch: 0,
             draft_restore_path: String::new(),
             parked: Vec::new(),
             oldest_seq: None,
@@ -614,6 +615,10 @@ impl ClientApp {
     pub(crate) fn on_event_stream_connected(&mut self, cx: &mut Context<Self>) {
         let was_connected = self.events_connected;
         self.events_connected = true;
+        // 代际 +1：**每一次**连上都算新一代（首连也算，无所谓），因为「断过又连上」
+        // 与「一直连着」在代际值上必须区分得开 —— 断线期间丢了哪些增量无从得知，
+        // 所有旧快照一律作废（切回时走重新拉取，见 `RestoreOutcome::Stale`）。
+        self.stream_epoch = self.stream_epoch.wrapping_add(1);
         let subs: Vec<String> = self.subscribed_sessions.iter().cloned().collect();
         let n = subs.len();
         for sid in subs {
@@ -741,6 +746,10 @@ impl ClientApp {
             snap.message_total = snap.messages.len();
             snap.oldest_seq = next_before;
             snap.has_more_history = has_more;
+            // 内容刚被服务端权威窗口整表替换 → 这份快照对**当前这一代**事件流是完整的，
+            // 记上代际让切回直接命中投影（否则断线重连后每个后台会话都被判 `Stale`
+            // 白拉一次，而这批快照正是重连时 `on_event_stream_connected` 强制重放产生的）。
+            snap.epoch = self.stream_epoch;
             // 条数变了 → 那份列表状态作废（切回 restore 时重建，避免 item_count 越界）
             snap.msg_list_state = None;
             self.parked.insert(pos, (key, snap));

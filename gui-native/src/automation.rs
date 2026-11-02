@@ -380,6 +380,10 @@ impl ClientApp {
                 "events": {
                     "connected": self.events_connected,
                     "subscribed": self.subscribed_sessions.iter().cloned().collect::<Vec<_>>(),
+                    // 事件流代际（每连上一次 +1）：切回会话时投影是否可直接用的判据之一
+                    // （同代 + 在线 + 有消息 → 零请求）。断言「断线重连后确实重新拉了一页」
+                    // 只能靠它区分「一直连着」与「断过又接上」。
+                    "epoch": self.stream_epoch,
                 },
                 // 顶部会话 Tab（浏览器式）：断言「点 × 有没有真的关掉」只能看这里
                 // —— 实测的 bug 正是「close_tab 删掉、冒泡又把 id 加回来」。

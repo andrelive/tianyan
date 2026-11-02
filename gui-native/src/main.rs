@@ -321,6 +321,18 @@ struct ClientApp {
     pub(crate) subscribed_sessions: std::collections::HashSet<String>,
     /// 事件流当前是否已连接（`/state` 的 `events.connected`，断线横幅的数据源）。
     pub(crate) events_connected: bool,
+    /// 事件流的**代际号**：这条连接每建立一次（含断线重连）就 +1。
+    ///
+    /// 用途只有一个，但是决定性的：切回会话时判断「本地投影还能不能当权威内容用」
+    /// （见 `RestoreOutcome`）。同一代之内，切走期间的事件都由
+    /// [`Self::apply_event_offline`] 写回该会话自己的快照 —— 一条不少；跨代就有了
+    /// 缺口（断线期间服务端推的事件根本到不了客户端），快照会永久停在旧位置，
+    /// 只能重新拉一页。
+    ///
+    /// 为什么不能只靠 `events_connected`：它在「重新连上」之后立刻回到 `true`，
+    /// 而那一刻**断线期间的增量已经不可恢复**——代际号才能区分「一直活着」与
+    /// 「断过又接上了」。
+    pub(crate) stream_epoch: u64,
     /// 最近一次草稿恢复走的哪条路（诊断用，进 `/state` 的 `usage.draft_restore_path`）。
     ///
     /// `"window"` = 真实点击路径（`on_click` 把 `&mut Window` 直接传下来）；
@@ -611,8 +623,17 @@ pub(crate) const MAX_PARKED_SESSIONS: usize = 12;
 ///   不属于单个会话的视图状态）；
 /// - 输入框文本：仍在 `drafts`（按会话的 HashMap）；输入框**实体**（光标/选区/IME）
 ///   留到期 2 一起搬，因为要按会话管理多个 `Entity<TextareaState>`。
+///
+/// ## `epoch`：这份快照能不能当权威内容用
+///
+/// 快照里的 `messages` 是**切走那一刻的投影**，之后由 `apply_event_offline` 继续
+/// 增量维护 —— 前提是事件流没断。所以这里记下 park 时的事件流代际
+/// （`ClientApp::stream_epoch`）：代际一致 = 投影完整，切回时零请求直接用；
+/// 不一致 = 断线重连过，缺口不可恢复，必须重新拉一页（判据见 `projection_usable`）。
 #[derive(Default)]
 pub(crate) struct SessionSnapshot {
+    /// park 那一刻的事件流代际（`ClientApp::stream_epoch`）
+    pub(crate) epoch: u64,
     // ── 会话语义：消息主屏（期 1 的核心收益）──
     /// 消息列表
     pub(crate) messages: Rc<Vec<MsgRow>>,

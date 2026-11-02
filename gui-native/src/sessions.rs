@@ -11,6 +11,36 @@ use crate::types::*;
 use gpui_kit::assets::IconName;
 use gpui_kit::component::input::InputState;
 
+/// [`ClientApp::restore_view_state`] 的结果：调用方据此决定「要不要去服务端拉一页」。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum RestoreOutcome {
+    /// 没有快照（首次打开该会话 / 被 LRU 挤掉）—— 本地什么都没有，必须拉。
+    Miss,
+    /// 有快照，但**不能**当权威内容用（跨代：断线重连过，或此刻就是断开态）—— 必须拉。
+    Stale,
+    /// 快照就是当前内容（同代 + 在线 + 消息非空）—— 切回零请求，直接用投影。
+    Fresh,
+}
+
+/// 「切回会话能否直接用本地投影」的判据（纯函数，便于单测钉住三个条件）。
+///
+/// 三个条件缺一不可：
+/// - `snap_epoch == stream_epoch`：事件流**没换代** —— 切走期间的增量都由
+///   `apply_event_offline`（以及非当前会话的快照帧）写进了这份快照，一条不少；
+/// - `connected`：此刻在线 —— 断开态下「断线期间没丢事件」这个前提不成立；
+/// - `message_count > 0`：快照真有内容 —— 空投影渲染出来就是「进会话什么都没有」。
+///
+/// 为什么不能只判「有快照」：那正是 (63) 那条被实测推翻的旧口径
+/// （「切回只看到部分工具步骤」—— 快照因 LRU 或断线停在旧位置却一直显示）。
+pub(crate) fn projection_usable(
+    snap_epoch: u64,
+    stream_epoch: u64,
+    connected: bool,
+    message_count: usize,
+) -> bool {
+    connected && snap_epoch == stream_epoch && message_count > 0
+}
+
 impl ClientApp {
     pub(crate) fn load_sessions(&self, cx: &mut Context<Self>) {
         let port = self.port;
@@ -286,6 +316,9 @@ impl ClientApp {
         // ⚠️ 穷尽构造：新增 per-session 字段若不加进 `SessionSnapshot`，这里编译报错
         // ——这是「漏一个补一个」的机制性防线，**不要**改成 `..Default::default()`。
         let snap = SessionSnapshot {
+            // 记下 park 时的事件流代际：切回时据此判断这份投影还能不能当权威内容
+            // （见 `projection_usable`；跨代说明断线重连过，缺口不可恢复）。
+            epoch: self.stream_epoch,
             messages: std::mem::replace(&mut self.messages, Rc::new(Vec::new())),
             // `ListState` 内部是 `Rc<RefCell<..>>`：clone 会共享滚动位置，必须换走
             msg_list_state: Some(std::mem::replace(
@@ -389,16 +422,28 @@ impl ClientApp {
 
     /// 取回目标会话的快照并填入 `self`。
     ///
-    /// 返回是否**命中**：`false` = 首次进入该会话（调用方需要去拉消息）；
-    /// `true` = 状态已恢复（调用方**不应**再 `load_messages`，否则 `scroll_to_end`
-    /// 会把刚恢复的滚动位置冲掉）。
-    pub(crate) fn restore_view_state(&mut self) -> bool {
+    /// 返回值说明这份快照**能不能当权威内容用**（见 [`RestoreOutcome`]）：
+    /// `Fresh` = 状态已恢复且投影完整（调用方**不应**再 `load_messages`，否则
+    /// `scroll_to_end` 会把刚恢复的滚动位置冲掉，还要白等一次往返）；
+    /// `Miss` / `Stale` = 状态尽力恢复了，但调用方**必须**去服务端拉一页消息。
+    pub(crate) fn restore_view_state(&mut self) -> RestoreOutcome {
         let key = self.current_session.clone();
         let Some(i) = self.parked.iter().position(|(k, _)| k == &key) else {
             self.reset_view_state();
-            return false;
+            return RestoreOutcome::Miss;
         };
         let (_, snap) = self.parked.remove(i);
+        // 判据必须在把 `snap` 拆开搬进 `self` **之前**算（代际与条数都在 snap 上）
+        let outcome = if projection_usable(
+            snap.epoch,
+            self.stream_epoch,
+            self.events_connected,
+            snap.messages.len(),
+        ) {
+            RestoreOutcome::Fresh
+        } else {
+            RestoreOutcome::Stale
+        };
         // ⚠️ **不信任快照里的 `ListState`**（这是一个会让内容「凭空消失」的坑）：
         //
         // 它的 `item_count` 是 **park 那一刻**的条数，而切走期间
@@ -466,7 +511,7 @@ impl ClientApp {
         self.current_title = snap.current_title;
         self.new_session_workspace = snap.new_session_workspace;
         // `streaming` 不随快照走：它由全局 `running_sessions` 决定，调用方设置
-        true
+        outcome
     }
 
     /// 把当前输入框实体存进 `inputs`（`Entity` 是句柄，拷贝不复制状态）。
@@ -560,7 +605,9 @@ impl ClientApp {
         // 首次则清默认。这样「新建会话 → 输入 → 切走 → 再点新建」不会带着上一次
         // 新建会话的面板/折叠状态。
         let restored = self.restore_view_state();
-        if !restored || self.current_title.trim().is_empty() {
+        // `Miss` = 没有快照（首次点新建）→ 用默认标题；`Fresh` / `Stale` 都有标题
+        // （`Stale` 只是消息要重拉，标题仍是这个会话的）
+        if matches!(restored, RestoreOutcome::Miss) || self.current_title.trim().is_empty() {
             self.current_title = "新会话（发送首条消息后创建）".to_string();
         }
         self.streaming = false;
@@ -610,39 +657,56 @@ impl ClientApp {
         self.thinking_menu_open = false;
         // 会话级模型 / 思考强度的权威值在会话头里：拉回来覆盖快照里的旧值
         self.load_session_model(id.clone(), cx);
-        // 消息：**每次都从库里拉一页权威内容**，快照只提供 UI 态（折叠 / 面板 /
-        // 输入框 / 滚动锚点）。
+        // 消息：**投影可用就零请求**，否则拉一页权威内容。
         //
-        // 为什么不沿用「有快照就不重拉」（(63) 那条）：它的前提是「快照一定完整」，
-        // 而被实测打破 —— 切回会话只看到**部分**工具步骤，同一时刻库里一条不少
-        // （直接查 `/messages` 对照）。缺口来源是 `apply_event_offline`：切走期间的
-        // 事件只有在「该会话仍在 `parked` 里」时才写得回去，一旦快照被 LRU 挤掉或
-        // 某条事件丢了，快照就永久停在旧位置，而「不重拉」会让它一直显示下去。
+        // 判据在 [`RestoreOutcome`]：`Fresh` = 快照与当前事件流同一代 + 在线 + 有消息。
+        // 同一代之内，切走期间的增量由 `apply_event_offline` 写回这份快照（一条不少），
+        // 所以本地投影**就是**权威内容 —— 再拉一次不但白等一个往返，还会让消息区
+        // 先闪一下（旧列表被整页替换、`GpuiListState` 重建）。
+        //
+        // 必须拉的三类：
+        // - `Miss`：首开 / 被 LRU 挤掉（快照没了，本地什么都没有）；
+        // - `Stale`：断线重连过 —— 断线期间的增量根本到不了客户端，快照会永久停在
+        //   旧位置，不重拉就会一直显示下去（用户实测过「切回只看到部分工具步骤」）；
+        // - 断开态（`Stale` 的一种）：此刻连增量都在路上不成立。
         //
         // 页边界不靠前端兜：服务端 `get_messages_page` 会把页首对齐到 user 消息
         // （整轮不会被切开，见 [`MESSAGE_BASE`] 的注释），前端只要按
         // `next_before_seq` 游标走。
-        //
-        // `anchor_seq` = 恢复出来的窗口**顶部**那条消息的 seq：重拉后按它找回
-        // 阅读位置，否则每次切回都会被 `ListAlignment::Bottom` 钉到底部
-        // （vite 靠 store 里保留的 Virtuoso 实例天然保位，native 得显式给锚点）。
-        let anchor_seq = {
-            let ix = self.msg_list_state.logical_scroll_top().item_ix;
-            self.messages.get(ix).map(|m| m.seq).filter(|s| *s > 0)
-        };
+        let use_projection = matches!(restored, RestoreOutcome::Fresh);
         // 历史窗口是否为空：为空说明「有订阅但没有内容」——下面要**强制重订阅**，
         // 因为 resident 幂等会把正常重发挡掉，而这个会话可能从来没拿到过快照
         // （vite `useSessionHistory` 的 `needForce` 同口径）。
+        // 投影分支必为空？不 —— `Fresh` 要求消息非空，所以这里的 `history_empty`
+        // 只会出现在「要拉消息」的分支上。
         let history_empty = self.messages.is_empty();
-        let _ = restored;
-        self.load_messages_with(id, MESSAGE_BASE, anchor_seq, cx);
+        if use_projection {
+            println!(
+                "[消息] 切回会话使用本地投影（{} 条，零请求）",
+                self.messages.len()
+            );
+        } else {
+            // `anchor_seq` = 恢复出来的窗口**顶部**那条消息的 seq：重拉后按它找回
+            // 阅读位置，否则每次切回都会被 `ListAlignment::Bottom` 钉到底部
+            // （vite 靠 store 里保留的 Virtuoso 实例天然保位，native 得显式给锚点）。
+            let anchor_seq = {
+                let ix = self.msg_list_state.logical_scroll_top().item_ix;
+                self.messages.get(ix).map(|m| m.seq).filter(|s| *s > 0)
+            };
+            self.load_messages_with(id, MESSAGE_BASE, anchor_seq, cx);
+        }
         self.load_session_usage(cx);
         self.load_todos_goals(cx);
         self.load_approvals(cx);
         // 订阅该会话（ADR-029 resident）：服务端收到订阅后推一帧快照，前端 replace
         // 窗口 —— 幂等（已订阅直接返回），断线重连时由 `on_event_stream_connected`
         // 整集重放。**这行是"打开/切回就有权威内容"的触发点**，缺了它快照永远不会来。
-        self.subscribe_session(sid_for_subscribe, history_empty, cx);
+        //
+        // ⚠️ 投影分支必须传 `false`：`force` 会让服务端**再推一帧快照** replace 窗口
+        // —— 那会把已经分页加载的更早历史冲回最近一窗（内容凭空变少），滚动位置也
+        // 会被重建到底部。已在 `subscribed_sessions` 里的会话幂等直接返回；不在集合里
+        // （订阅曾失败）的会照常补发，那正是它需要的。
+        self.subscribe_session(sid_for_subscribe, !use_projection && history_empty, cx);
         // 选中态与「当前会话始终可见」都体现在左栏行上
         self.restore_input(window, cx);
         self.rebuild_session_rows(cx);
@@ -1232,5 +1296,62 @@ impl ClientApp {
         } else {
             cx.notify();
         }
+    }
+}
+
+#[cfg(test)]
+mod projection_tests {
+    //! 「切回会话直接用本地投影」判据的回归。
+    //!
+    //! 为什么单测纯函数而不是 UI 断言：判据只看四个标量（快照代际 / 当前代际 /
+    //! 连接态 / 条数），四种组合各有明确期望；而端到端要造「切走 → 断线 → 重连 →
+    //! 切回」的真实时序，成本高且不稳。判据钉住了，`open_session` 的分支就只剩
+    //! `matches!(restored, Fresh)` 一行。
+    // ⚠️ 不要写 `use super::*`（bin crate 根是 `main.rs`，glob 会把整棵模块树拉进
+    // 测试模块，`#[test]` 宏展开撞 `recursion_limit`）。只显式导入需要的项。
+    use crate::sessions::{projection_usable, RestoreOutcome};
+
+    /// 常态：同一代、在线、有内容 → 零请求直接用投影。
+    #[test]
+    fn same_epoch_online_nonempty_is_usable() {
+        assert!(projection_usable(3, 3, true, 42));
+    }
+
+    /// 断线重连过（代际变了）→ 断线期间的增量不可恢复，必须重拉。
+    ///
+    /// 这是本判据存在的**唯一理由**：只判「有快照」正是被实测推翻的旧口径
+    /// （切回只看到部分工具步骤，而库里一条不少）。
+    #[test]
+    fn epoch_mismatch_is_not_usable() {
+        assert!(
+            !projection_usable(2, 3, true, 42),
+            "跨代必须重拉：断线期间的增量到不了客户端"
+        );
+    }
+
+    /// 此刻断开（还没重连上）→ 连「增量都在路上」都不成立，必须重拉。
+    #[test]
+    fn disconnected_is_not_usable() {
+        assert!(
+            !projection_usable(3, 3, false, 42),
+            "断开态下不能把本地投影当权威内容"
+        );
+    }
+
+    /// 空投影不可用：渲染出来就是「进会话什么都没有」，必须重拉。
+    #[test]
+    fn empty_projection_is_not_usable() {
+        assert!(!projection_usable(3, 3, true, 0));
+    }
+
+    /// `restore_view_state` 的返回值三分：无快照 = Miss，有快照但投影不可用 = Stale。
+    ///
+    /// `Miss` 与 `Stale` 对调用方是同一件事（都要拉消息），但**原因不同** ——
+    /// 分开是为了日志与 `/state` 能区分「首开」与「重连后补拉」。
+    #[test]
+    fn outcome_kinds_are_distinct() {
+        assert_ne!(RestoreOutcome::Miss, RestoreOutcome::Stale);
+        assert_ne!(RestoreOutcome::Miss, RestoreOutcome::Fresh);
+        assert_ne!(RestoreOutcome::Stale, RestoreOutcome::Fresh);
     }
 }
