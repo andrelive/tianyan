@@ -149,7 +149,17 @@
 | `type` | string | 恒为 `"snapshot"` |
 | `session_id` | string | 会话 id——路由字段 |
 | `cursor` | number | 快照时最新持久化 seq（`SessionStore::last_seq`，`core/src/session/store.rs:402`） |
-| `messages` | ChatMessage[] | 完整历史（`ChatMessage::from_structured_light`） |
+| `messages` | ChatMessage[] | 一页历史（页首对齐到真 user，与 `GET /sessions/{id}/messages` 共用 `load_aligned_page`） |
+| `next_before_seq` | number \| null | 上滚游标（本页最早一条的 seq；`null` = 已到链首） |
+| `has_more` | bool | 更早历史是否可上滚 |
+| `turn` | object | 轮状态权威值 `{state:"running"\|"idle", auto:bool}`（ADR-045） |
+| `clarification` | object \| null | **挂起的追问**（`ask_user` 的问题原文；`null` = 没有在等回答） |
+
+**为什么快照要带 `clarification`**：追问此前只由流式 `tool_call` 事件带到前端——事件一旦
+错过（该会话从没打开过 / 断线重连 / 应用重启），界面就永远看不到问题，而服务端那一轮会
+一直挂着等回答（用户侧表现：任务凭空停住）。快照是「打开 / 切回 / 重连」时唯一的一次对齐
+机会，所以问答复原也走这里（`UserQuestionService::pending_questions`）。前端收到后**重置**
+所选答案 / 当前屏（这些是纯前端态，服务端不知道）。
 
 **DSH 模式 + replace 兜底**：前端收到快照即 `setSessionMessages(sid, messages)`（**replace** 窗口）；
 **流式进行中跳过 replace**（覆盖流式占位有害；增量由实时事件继续）（`use-unified-events.ts:153`）。

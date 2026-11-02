@@ -379,9 +379,14 @@ impl ToolRegistry {
         let service = self.user_questions.as_ref().ok_or_else(|| {
             TianyanError::Custom("tool: 执行失败：用户问题服务未装配".to_string())
         })?;
+        // 问题原文随等待一起登记：订阅快照帧据此还原追问卡片（事件错过也能看到）
+        let questions =
+            serde_json::from_str::<serde_json::Value>(arguments).unwrap_or(serde_json::Value::Null);
         // 挂起等待用户回答（无超时：多会话场景用户可能稍后回答；主循环停止时取消等待）
         let answers = service
-            .ask(session_id, || self.delegation_cancelled_sync(session_id))
+            .ask(session_id, questions, || {
+                self.delegation_cancelled_sync(session_id)
+            })
             .await?;
         // 审批降级：确认语义放行待确认指纹（模型重试工具时通过）
         let approved = crate::executor::approval::is_user_confirmation(&answers.to_string());

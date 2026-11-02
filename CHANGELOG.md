@@ -7,7 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Changed
+### Fixed
+
+- **错过事件就再也看不到追问卡片（任务凭空停住）**：`ask_user` 的追问此前**只由流式
+  `tool_call` 事件**带到前端。事件一旦错过就永远没有卡片，而服务端那一轮一直挂着等
+  回答——三条命中路径：① 该会话从没打开过（后台/定时任务里模型追问）；② 断线重连；
+  ③ 应用重启。实测复现：先用 API 发消息（界面还没选中该会话），模型调 `ask_user`，
+  再选中会话 → 卡片不出现、`/state` 的 `clarification` 为 null，那一轮永久挂起。
+  修法：**订阅快照帧带挂起追问**（`clarification` 字段）。快照是「打开 / 切回 / 重连」
+  唯一的一次对齐机会，问答复原走这条主通道：
+  - core：`UserQuestionService` 的挂起项从「只有回答通道」改成「通道 + **问题原文**」
+    （`PendingAsk`），新增 `pending_questions(session_id)`；
+  - server：`build_snapshot_payload` 增加 `clarification` 字段，`subscribe_events` 从
+    上面那个方法取值；
+  - gui-native：`apply_snapshot` 应用它——**不受「流式中不 replace」影响**（流式中打开
+    会话正是最需要卡片的场景）；当前会话直接显示、非当前会话写回它自己的 parked 快照；
+    `null` 表示服务端已不在等（提交过 / 已取消）→ 卡片清除。
+  已验证：同一路径（先发消息、后选中一个从未打开过的会话）现在会在快照到达时打出
+  `[事件] 快照带回挂起追问 <sid>：N 个问题` 并渲染出分步 tab 卡片。
 
 - **追问卡片（`ask_user`）改成 vite 版的分步 tab**：native 原先是「所有问题平铺在一张卡里」，
   问题一多就成一片，也没有自定义回答的入口。现在与 `ClarificationBubble` 同构：

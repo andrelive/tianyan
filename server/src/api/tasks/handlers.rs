@@ -61,12 +61,19 @@ const SNAPSHOT_MAX_ROWS: usize = 300;
 /// 上滚。`seq` 随消息下发（前端按位置对齐）。
 /// `turn` 为该会话的**轮状态权威值**（纯通知状态模型的快照校正来源）：
 /// `{{"state":"running"|"idle","auto":bool}}`。
+///
+/// `clarification` 为该会话**挂起的追问**（`ask_user` 的问题原文；`null` = 没有在等）。
+/// 为什么放进快照：追问此前只由流式 `tool_call` 事件带到前端，事件一旦错过（会话从没
+/// 打开过 / 断线重连 / 应用重启），界面就永远看不到问题，而那一轮会一直挂着等回答
+/// ——用户侧表现就是「任务凭空停住」。快照是「打开 / 切回 / 重连」时唯一的一次对齐
+/// 机会，所以问答复原也必须走这里。
 pub(crate) fn build_snapshot_payload(
     session_id: &str,
     messages: Vec<(i64, tianyan::common::types::StructuredMessage)>,
     cursor: i64,
     has_more: bool,
     turn: serde_json::Value,
+    clarification: serde_json::Value,
 ) -> serde_json::Value {
     let next_before_seq = messages.first().map(|(seq, _)| *seq).filter(|seq| *seq > 0);
     let messages = ChatMessage::messages_from_structured_with_seq(messages);
@@ -78,6 +85,7 @@ pub(crate) fn build_snapshot_payload(
         "next_before_seq": next_before_seq,
         "messages": messages,
         "turn": turn,
+        "clarification": clarification,
     })
 }
 
@@ -148,8 +156,20 @@ pub async fn subscribe_events(
     } else {
         serde_json::json!({ "state": "idle", "auto": false })
     };
-    let payload =
-        build_snapshot_payload(&request.session_id, page, last_seq.max(0), has_more, turn);
+    // 挂起追问：快照里带上「这个会话在等什么」，错过事件的客户端也能还原卡片
+    let clarification = state
+        .user_questions()
+        .pending_questions(&request.session_id)
+        .await
+        .unwrap_or(serde_json::Value::Null);
+    let payload = build_snapshot_payload(
+        &request.session_id,
+        page,
+        last_seq.max(0),
+        has_more,
+        turn,
+        clarification,
+    );
     if let Ok(json) = serde_json::to_string(&payload) {
         let _ = state.task_event_tx.send(json);
     }

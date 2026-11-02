@@ -12,11 +12,24 @@ use tokio::sync::{oneshot, Mutex};
 
 use crate::common::error::{Result, TianyanError};
 
+/// 一个挂起的追问：回答通道 + **问题原文**（`ask_user` 的 tool 参数 JSON）。
+///
+/// 为什么要存问题原文：追问此前只由流式 `tool_call` 事件带到前端——事件一旦错过
+/// （该会话从没打开过 / 断线重连 / 应用重启），界面就再也看不到问题，而这一轮会
+/// 一直挂着等回答（用户侧表现：任务凭空停住）。订阅快照要把「这个会话在等什么」
+/// 一并告诉前端，所以服务端必须自己记得问题，而不是指望前端当时在场。
+struct PendingAsk {
+    /// 回答通道（回答提交端点 → 工具执行恢复）。
+    answer_tx: oneshot::Sender<serde_json::Value>,
+    /// 问题原文（`{ "questions": [{question, options}] }`，前端用同一个解析器消费）。
+    questions: serde_json::Value,
+}
+
 /// 用户问题服务。
 #[derive(Clone, Default)]
 pub struct UserQuestionService {
-    /// 按会话索引的回答等待通道（回答提交端点 → 工具执行恢复）。
-    pending: Arc<Mutex<HashMap<String, oneshot::Sender<serde_json::Value>>>>,
+    /// 按会话索引的挂起追问。
+    pending: Arc<Mutex<HashMap<String, PendingAsk>>>,
 }
 
 impl UserQuestionService {
@@ -28,6 +41,7 @@ impl UserQuestionService {
     /// 挂起等待用户回答（ask_user 工具执行路径）。
     ///
     /// - `session_id` — 归属会话（回答提交端点按此索引）
+    /// - `questions` — 问题原文（`ask_user` 的 tool 参数 JSON；快照帧据此还原卡片）
     /// - `cancelled` — 同步取消检查（主循环停止时不再等待，返回取消错误）
     ///
     /// **无超时**：多会话场景用户可能稍后才看到提问——等待直到回答提交或
@@ -36,13 +50,20 @@ impl UserQuestionService {
     pub async fn ask(
         &self,
         session_id: &str,
+        questions: serde_json::Value,
         cancelled: impl Fn() -> bool,
     ) -> Result<serde_json::Value> {
         let (tx, rx) = oneshot::channel();
         {
             let mut pending = self.pending.lock().await;
             // 同一会话不应有并发等待（turn 锁保证）；残留通道覆盖（防御）
-            pending.insert(session_id.to_string(), tx);
+            pending.insert(
+                session_id.to_string(),
+                PendingAsk {
+                    answer_tx: tx,
+                    questions,
+                },
+            );
         }
         let mut rx = rx;
         let mut interval = tokio::time::interval(std::time::Duration::from_millis(200));
@@ -76,13 +97,25 @@ impl UserQuestionService {
     /// 返回是否找到等待中的追问（无等待时返回 false，不报错——
     /// 前端在无追问时提交是幂等空操作）。
     pub async fn submit(&self, session_id: &str, answers: serde_json::Value) -> bool {
-        let tx = self.pending.lock().await.remove(session_id);
-        match tx {
-            Some(tx) => {
-                let _ = tx.send(answers);
+        let pending = self.pending.lock().await.remove(session_id);
+        match pending {
+            Some(p) => {
+                let _ = p.answer_tx.send(answers);
                 true
             }
             None => false,
         }
+    }
+
+    /// 该会话此刻挂起的追问原文（`None` = 没有在等回答）。
+    ///
+    /// 供**订阅快照帧**使用：快照是「打开 / 切回 / 断线重连」时唯一的一次对齐机会，
+    /// 把挂起追问放进去，错过事件的客户端也能把卡片还原出来（否则那一轮会一直挂着）。
+    pub async fn pending_questions(&self, session_id: &str) -> Option<serde_json::Value> {
+        self.pending
+            .lock()
+            .await
+            .get(session_id)
+            .map(|p| p.questions.clone())
     }
 }

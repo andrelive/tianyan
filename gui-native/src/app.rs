@@ -684,6 +684,17 @@ impl ClientApp {
             .and_then(|v| v.as_str())
             == Some("running");
         let n = rows.len();
+        // 挂起追问（快照自带「这个会话在等什么」）：`null`/缺失 = 没有在等回答。
+        //
+        // 为什么必须在快照里做：追问此前只由流式 `tool_call` 事件带出，事件一旦错过
+        // （会话从没打开过 / 断线重连 / 应用重启），卡片就永远不出现，而服务端那一轮
+        // 会一直挂着等回答（用户侧表现：任务凭空停住）。快照是「打开 / 切回 / 重连」
+        // 唯一的一次对齐机会。
+        let pending_questions: Option<Vec<(String, Vec<String>)>> = ev
+            .get("clarification")
+            .filter(|v| !v.is_null())
+            .map(parse_ask_user)
+            .filter(|qs| !qs.is_empty());
 
         // 轮状态是**会话级全局**事实（与 `handle_event` 里 `turn_state` 的记账同口径）：
         // 快照帧带的是权威值，不管是不是当前会话都要落到 `running_sessions`。
@@ -709,6 +720,28 @@ impl ClientApp {
             // 就永远残留 → 快照永远不 replace → 界面停在 `open_session` 刚清空的
             // 空白状态（只有 `has_more_history` / 游标被更新，于是「加载更早」按钮
             // 还在）—— 用户实测「进会话完全是空的，点加载更早才出现」正是这条。
+            // 追问卡片：**不受 `protect_inflight` 影响** —— 流式中打开会话正是最需要它的
+            // 场景（那一轮挂着等回答，界面却没卡片就是这里漏的）。
+            match &pending_questions {
+                Some(qs) => {
+                    if self.clarification.as_ref() != Some(qs) {
+                        self.clarification = Some(qs.clone());
+                        self.clarify_answers = vec![String::new(); qs.len()];
+                        self.clarify_tab = 0;
+                        self.ensure_clarify_inputs(cx);
+                        println!("[事件] 快照带回挂起追问 {sid}：{} 个问题", qs.len());
+                    }
+                }
+                None => {
+                    if self.clarification.is_some() {
+                        // 服务端没有在等回答（已提交 / 已取消）→ 卡片不该留着
+                        self.clarification = None;
+                        self.clarify_answers.clear();
+                        self.clarify_tab = 0;
+                        self.clarify_inputs.clear();
+                    }
+                }
+            }
             let protect_inflight =
                 (self.busy() || self.running_sessions.contains(&sid)) && !self.messages.is_empty();
             if !protect_inflight {
@@ -752,6 +785,21 @@ impl ClientApp {
             // 记上代际让切回直接命中投影（否则断线重连后每个后台会话都被判 `Stale`
             // 白拉一次，而这批快照正是重连时 `on_event_stream_connected` 强制重放产生的）。
             snap.epoch = self.stream_epoch;
+            // 追问态跟着写回该会话自己的快照（切回时 restore 会把它连同编辑框一起恢复）
+            match &pending_questions {
+                Some(qs) => {
+                    if snap.clarification.as_ref() != Some(qs) {
+                        snap.clarification = Some(qs.clone());
+                        snap.clarify_answers = vec![String::new(); qs.len()];
+                        snap.clarify_tab = 0;
+                    }
+                }
+                None => {
+                    snap.clarification = None;
+                    snap.clarify_answers.clear();
+                    snap.clarify_tab = 0;
+                }
+            }
             // 条数变了 → 那份列表状态作废（切回 restore 时重建，避免 item_count 越界）
             snap.msg_list_state = None;
             self.parked.insert(pos, (key, snap));
