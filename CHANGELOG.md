@@ -9,6 +9,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`powershell.exe - Application Error 0xc0000142` 弹窗（跑测试/构建时偶发）**：这个框不是
+  天演弹的，是某个 `powershell.exe` 子进程在**初始化阶段**就崩掉、由 CSRSS 弹的 HardError。
+  WER 的 bucket 把签名钉死了：`System.ComponentModel.Win32Exception` @
+  `Microsoft.PowerShell.ConsoleControl+<>c.<.cctor>b__106_1` —— **Windows PowerShell 5.1
+  的 CLR / 控制台初始化失败**（本机 2026-11-02 有三条 `Critical_powershell.exe_…` 报告，
+  时刻与「跑 `core` 的 `executor::command` 测试就弹窗」完全重合）。
+  - 触发源：那条测试过去**显式调裸 `powershell`**（解析到 5.1）来造慢命令；更早是
+    `waitfor`、再早是 `ping` —— 三种子进程撞的是同一个框。
+  - 改法：`executor::command` 的慢命令统一走 `slow_command()`，**用 `pwsh`（7.x）**，
+    Unix 仍用 `sleep`。实测改后再跑该模块 21 项测试：**`powershell.exe` 进程数为 0**，
+    WER 无新增报告。
+  - 配套：子进程退出码属于「自己没起来」类时，工具结果新增 `startup_failure` 字段给人话
+    诊断（`executor::command::startup_failure_hint`，覆盖 `0xC0000142` / `0xC000013A` /
+    `0xC0000005`）——以前只有一个天文数字退出码，既不可诊断也没有行动建议。
+  - 排查手册：`docs/operations/troubleshooting.md` §6（含取 WER 报告 / 事件 bucket 的命令）。
+
 - **错过事件就再也看不到追问卡片（任务凭空停住）**：`ask_user` 的追问此前**只由流式
   `tool_call` 事件**带到前端。事件一旦错过就永远没有卡片，而服务端那一轮一直挂着等
   回答——三条命中路径：① 该会话从没打开过（后台/定时任务里模型追问）；② 断线重连；

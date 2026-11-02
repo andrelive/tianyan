@@ -826,6 +826,31 @@ pub fn hide_console_window(mut cmd: tokio::process::Command) -> tokio::process::
     cmd
 }
 
+/// 「进程没起来」类退出码 → 人话诊断（`None` = 正常退出码，不用解释）。
+///
+/// 这些码不是命令跑完后的业务失败，而是**子进程自己都没初始化成功**，光看数字既不可
+/// 诊断也没有行动建议。实测现场：`0xC0000142` 由 Windows PowerShell 5.1 在无窗口 /
+/// 资源紧张时触发（WER：`System.ComponentModel.Win32Exception` @
+/// `Microsoft.PowerShell.ConsoleControl+<>c.<.cctor>`），进程崩掉后由 CSRSS 弹出
+/// `powershell.exe - Application Error 0xc0000142`。
+pub fn startup_failure_hint(exit_code: i32) -> Option<&'static str> {
+    match exit_code as u32 {
+        0xC000_0142 => Some(
+            "子进程启动失败（0xC0000142 / STATUS_DLL_INIT_FAILED）：DLL 或运行时初始化没完成，\
+             命令本身没有执行。常见原因：系统资源紧张（同时启动大量进程 / 内存吃紧）、\
+             安全软件拦截、或子 shell 是 Windows PowerShell 5.1 且没有可用控制台——\
+             可改用 pwsh（PowerShell 7）或把命令拆小后重试",
+        ),
+        0xC000_013A => Some(
+            "子进程没能加载（0xC000013A / STATUS_CONTROL_C_EXIT）：启动阶段被 Ctrl+C / 控制台事件中止",
+        ),
+        0xC000_0005 => Some(
+            "子进程访问冲突（0xC0000005 / STATUS_ACCESS_VIOLATION）：多为该程序自身的崩溃，与命令内容无关",
+        ),
+        _ => None,
+    }
+}
+
 fn build_shell_command(command: &str) -> tokio::process::Command {
     // 执行底层由 `crate::executor::shell` 的全局 spec 决定（auto 探测 /
     // 用户配置——ADR-037）；输出编码注入（PS 系 UTF-8）与 Windows 黑窗抑制
@@ -1482,7 +1507,8 @@ pub async fn execute_command_action_cancellable(
             };
             let out_trunc = truncate::truncate_tail_noted(&stdout_text, &note);
             let err_trunc = truncate::truncate_tail_noted(&stderr_text, &note);
-            Ok(json!({
+            let exit_code = status.code().unwrap_or(-1);
+            let mut payload = json!({
                 "stdout": out_trunc.text,
                 "stderr": err_trunc.text,
                 "stdout_truncated": out_trunc.truncated,
@@ -1490,8 +1516,18 @@ pub async fn execute_command_action_cancellable(
                 "stdout_total_bytes": out_trunc.total_bytes,
                 "stderr_total_bytes": err_trunc.total_bytes,
                 "log_file": log_file,
-                "exit_code": status.code().unwrap_or(-1),
-            }))
+                "exit_code": exit_code,
+            });
+            // 「进程自己没起来」的退出码：只说数字（`3221225786`）对模型和用户都没有信息量，
+            // 补一句诊断 + 常见原因。0xC0000142 = STATUS_DLL_INIT_FAILED，实测出现在
+            // **子进程（尤其 Windows PowerShell 5.1）在资源紧张 / 无控制台时 CLR 初始化失败**
+            // （WER 签名：`PowerShell.ConsoleControl+<>c.<.cctor>` 抛 Win32Exception）。
+            if let Some(hint) = startup_failure_hint(exit_code) {
+                if let Some(obj) = payload.as_object_mut() {
+                    obj.insert("startup_failure".to_string(), json!(hint));
+                }
+            }
+            Ok(payload)
         }
         CommandWaitOutcome::Failed(e) => Err(TianyanError::Custom(format!(
             "executor: 命令执行失败：{}",
@@ -1852,23 +1888,39 @@ mod tests {
         assert!(log.contains("Hello"), "日志文件应含完整输出");
     }
 
+    /// 造一条「慢命令」（取消 / 并发许可测试用）。
+    ///
+    /// **用 `pwsh`，不要写裸 `powershell`**：裸名解析到 **Windows PowerShell 5.1**，
+    /// 而 5.1 在「无窗口 / 资源紧张」时会于 `Microsoft.PowerShell.ConsoleControl` 的
+    /// **静态构造**里抛 `Win32Exception`，进程随之崩掉、由 CSRSS 弹出
+    /// `powershell.exe - Application Error 0xc0000142`。
+    ///
+    /// WER 实证（本机 2026-11-02，三条 `Critical_powershell.exe_…` 报告，与「跑本模块
+    /// `cargo test` 就弹窗」的时刻完全重合）：
+    /// `P3 = System.ComponentModel.Win32Exception` /
+    /// `P5 = Microsoft.PowerShell.ConsoleControl+<>c.<.cctor>b__106_1`。
+    /// 更早的 `waitfor` / `ping` 撞的是同一个弹窗（一个等句柄、一个要加载网络栈），
+    /// 所以这里也不能退回它们。
+    ///
+    /// pwsh 7 的 console host 对「无窗口控制台」更健壮（本地与 CI 都有 pwsh / sleep）。
+    fn slow_command(seconds: u32) -> String {
+        if cfg!(target_os = "windows") {
+            format!("pwsh -NoProfile -NonInteractive -Command \"Start-Sleep -Seconds {seconds}\"")
+        } else {
+            format!("sleep {seconds}")
+        }
+    }
+
     #[tokio::test]
     async fn test_background_kill_marks_cancelled() {
         let _g = CHILD_REGISTRY_LOCK.lock().await; // 与 kill_all 类测试互斥（见常量注释）
         let manager = CommandManager::new(None);
-        // 慢命令**不能用 `ping`、也不要用 `waitfor`**：ping 要加载网络栈
-        // （ws2_32/iphlpapi），waitfor 在某些环境同样会触发 0xc0000142 由 CSRSS
-        // 弹 HardError 对话框（用户实测：跑本模块的 `cargo test` 时又见到那个
-        // 弹窗）；进程挂在框上不退出，既污染开发机也占住并发许可。
-        // 改用 PowerShell 的 `Start-Sleep`：纯托管等待、不碰网络栈、不起窗口，
-        // 代价只是多约 1 秒的解释器启动（`wait_terminal` 上限 15 秒，足够）。
-        let cmd = if cfg!(target_os = "windows") {
-            "powershell -NoProfile -Command \"Start-Sleep -Seconds 20\""
-        } else {
-            "sleep 30"
-        };
+        // 慢命令：见 `slow_command` 的注释（`ping` / `waitfor` / 裸 `powershell` 5.1
+        // 都会触发 0xc0000142 HardError 弹窗，后者由 WER 签名锁定到
+        // `PowerShell.ConsoleControl` 的静态构造）。
+        let cmd = slow_command(20);
         let task = manager
-            .spawn_background("sess-1", cmd, None, None, 0, None)
+            .spawn_background("sess-1", &cmd, None, None, 0, None)
             .await
             .unwrap();
         manager.kill(&task.id, CancelSource::User).await.unwrap();
@@ -1893,14 +1945,10 @@ mod tests {
     async fn test_max_concurrent_commands_gates_spawn() {
         let _g = CHILD_REGISTRY_LOCK.lock().await; // 与 kill_all 类测试互斥（见常量注释）
         let manager = CommandManager::new(None).with_max_concurrent(1);
-        // 同上：慢命令一律走 `Start-Sleep`（`ping` / `waitfor` 都会触发 0xc0000142 弹窗）
-        let long_cmd = if cfg!(target_os = "windows") {
-            "powershell -NoProfile -Command \"Start-Sleep -Seconds 5\""
-        } else {
-            "sleep 4"
-        };
+        // 同上：慢命令统一走 `slow_command`（不再裸调 powershell 5.1）
+        let long_cmd = slow_command(5);
         let first = manager
-            .spawn_background("sess-c", long_cmd, None, None, 0, None)
+            .spawn_background("sess-c", &long_cmd, None, None, 0, None)
             .await
             .unwrap();
 

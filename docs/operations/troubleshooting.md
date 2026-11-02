@@ -406,6 +406,61 @@ At line:1 char:1
 
 ---
 
+## 6. `powershell.exe - Application Error 0xc0000142` 弹窗
+
+**现象**：跑本地构建 / 测试，或天眼里执行过命令之后，弹出一个系统对话框：
+
+```
+powershell.exe - Application Error
+应用程序无法正常启动(0xc0000142)。请单击"确定"关闭应用程序。
+```
+
+**它不是天演弹的**，是 Windows 的 HardError 对话框（CSRSS 弹出）：某个 `powershell.exe`
+子进程在**初始化阶段**就崩了，进程没能起来。天演侧通常只看到一条失败的命令（甚至看不到
+—— 弹窗把进程挂住）。
+
+**取证**（决定性证据在 WER，不在天演日志）：
+
+```powershell
+# 最近的 powershell 崩溃报告（Critical = 进程初始化/未处理异常）
+Get-ChildItem 'C:\ProgramData\Microsoft\Windows\WER\ReportArchive' |
+  Where-Object { $_.Name -match 'powershell' } | Sort-Object LastWriteTime -Descending |
+  Select-Object -First 5 Name, LastWriteTime
+
+# 事件日志里的 bucket（P1..P10 是签名）
+Get-WinEvent -FilterHashtable @{LogName='Application'; Id=1001; StartTime=(Get-Date).AddDays(-1)} |
+  Where-Object { $_.Message -match 'PowerShell' } | Select-Object -First 2 | ForEach-Object { $_.Message }
+```
+
+本机 2026-11-02 实测的三条报告，签名一致：
+
+```
+P1: powershell.exe      P2: 10.0.26100.9818
+P3: System.ComponentModel.Win32Exception
+P4: System.Management.Automation.Host.Host
+P5: oft.PowerShell.ConsoleControl+<>c.<.cctor>b__106_1
+```
+
+→ **Windows PowerShell 5.1 的 `ConsoleControl` 静态构造抛 `Win32Exception`**：CLR / 控制台
+初始化失败。触发条件苛刻（并发或资源紧张、无可用控制台），所以「偶发」，但每次跑
+`core` 的 `executor::command` 测试都可能命中（那条测试过去显式调 `powershell`）。
+
+**已知的历史触发源（都别再用）**：
+- `waitfor /t N`（等句柄）；
+- `ping -n N`（要加载网络栈 ws2_32 / iphlpapi）；
+- **裸写 `powershell`**（解析到 5.1；测试里已改为 `pwsh`，见 `executor::command` 的
+  `slow_command`）。
+
+**天演侧的处理**：
+- 子进程退出码为「没起来」类时，工具结果里会带 `startup_failure` 字段给人话诊断
+  （`executor::command::startup_failure_hint`，覆盖 `0xC0000142` / `0xC000013A` / `0xC0000005`）；
+- 执行底层默认 `auto`（优先 pwsh 7）—— 5.1 只在你显式配 `[executor].shell = "powershell"`
+  或机器没有 pwsh 时才会用到。
+
+**处置**：看到这个弹窗，先按上面的命令取 WER 报告确认是不是 powershell；若确实是，检查
+是否有脚本/命令在调 5.1，改成 `pwsh`。弹窗本身无法由调用方拦下（HardError 由系统弹），
+只能从「不产生这种子进程」入手。
+
 ## 附：本手册核实来源
 
 - `gui-native/src/main.rs`（`init_logging` 调用点、`panic_hook::install`、`windows_subsystem`、`ensure_server`）
