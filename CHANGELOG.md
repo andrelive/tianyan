@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.2.2] - 2026-11-02
+
 ### Added
 
 - **设置页可以自己选命令执行 Shell，并看到「当前生效」到底是什么**：`[executor].shell` 一直
