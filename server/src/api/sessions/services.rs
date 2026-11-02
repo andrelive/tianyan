@@ -186,27 +186,27 @@ impl SessionService {
             .session_manager
             .load_before(session_id, before, page_limit)
             .await?;
-        let head_seq = window.first().map(|(seq, _)| *seq);
-        // 窗口内由远及近第一条**真** user（压缩点也是 user 锚定的，见 ADR-053，
-        // 但它不是「用户发言」）。
+        // 页首对齐（ADR-035 §8 修订，2026-11 重定语义）：**以窗口起点为界向前找
+        // 最近的一条「真 user」**，而不是「窗口内最早的那条 user」。
         //
-        // 为什么必须排除：页首对齐到 user 是为了「页从用户发言开始」；压缩点
-        // （`compression_marker`）是系统写的摘要，user 锚定只是为了让上游接受
-        // 全 system 请求。不排除的后果（用户实测「长时间不看再切回，页面只剩
-        // 压缩点」）：压缩点之后还没有新消息时，窗口里唯一的 user 就是压缩点 →
-        // 整页切成「只有压缩点一条」，前面几十条历史全被丢掉。
-        let user_pos = window
-            .iter()
-            .position(|(_, m)| m.role == MessageRole::User && !m.compression_marker);
-        let rows = match (user_pos, head_seq) {
-            // 窗口内找到 user：页从它起（截取尾部，页长 ≤ 窗口）
-            (Some(pos), _) => window
-                .into_iter()
-                .skip(pos)
-                .collect::<Vec<(i64, StructuredMessage)>>(),
-            // 窗口内无 user：直接向前找最近一条更早的 user（一次查询，不按批
-            // 扩展）；到链头仍无 → 整段（链头..窗口尾）兜底。
-            (None, Some(head)) => {
+        // 旧语义（窗口内最早 user）有两个毛病，都在实测里咬过人：
+        // 1. 页首取决于「窗口里恰好有什么」——窗口里若有 user，页会比 page_limit
+        //    短一截，且页起点随窗口滑动漂移；
+        // 2. **压缩点也是 user 锚定**（ADR-053：全 system 请求会被上游拒），压缩点
+        //    之后还没有新消息时，窗口里唯一的 user 就是压缩点 → 整页被切成「只剩
+        //    压缩点一条」，前面几十条历史全丢（用户实测：切回会话只剩一张摘要卡）。
+        //
+        // 新语义：窗口第一条本身就是真 user 时不动；否则**向前**找最近的真 user
+        // （`last_user_seq_before` 已排除压缩点），页从它起。页长因此可能超过
+        // page_limit，上限由 `MAX_MESSAGE_PAGE` 兜底（超长工具段时才可能触顶）。
+        let starts_with_real_user = window
+            .first()
+            .map(|(_, m)| m.role == MessageRole::User && !m.compression_marker)
+            .unwrap_or(false);
+        let rows = match window.first().map(|(seq, _)| *seq) {
+            Some(_) if starts_with_real_user => window,
+            // 向前找最近的真 user；到链头仍无 user → 整段（链头..窗口尾）兜底。
+            Some(head) => {
                 let lo = self
                     .session_manager
                     .last_user_seq_before(session_id, head)
@@ -214,11 +214,11 @@ impl SessionService {
                     .unwrap_or(0);
                 let span = (before - lo).max(1) as usize;
                 self.session_manager
-                    .load_before(session_id, before, span)
+                    .load_before(session_id, before, span.min(MAX_MESSAGE_PAGE))
                     .await?
             }
             // 空窗口（无更早消息）
-            (None, None) => window,
+            None => window,
         };
         // 上滚游标 = 本页最早一条的 seq（=0 表示已到链首，无更早）
         let next_before_seq = rows.first().map(|(seq, _)| *seq).filter(|seq| *seq > 0);
