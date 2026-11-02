@@ -331,6 +331,16 @@ impl ToolRegistry {
             }
         }
     }
+
+    /// 注入上下文工程端口（**子代理压缩用**：`delegate_to_agent` 构造子代理
+    /// `AgentLoop` 时挂上轮边界压缩器）。
+    ///
+    /// 必须在构造 `AgentLoop` **之前**调用（`AgentLoop` 持有 `ToolRegistry` 的
+    /// 一份克隆，之后再改不会传导过去）。
+    pub fn with_context_port(mut self, port: Arc<dyn crate::context::ContextPort>) -> Self {
+        self.ctx.context_port = Some(port);
+        self
+    }
 }
 
 impl ToolRegistry {

@@ -2275,3 +2275,100 @@ async fn test_wake_only_when_unconsumed() {
         "已消费后不得重复唤醒（取代 T1-23 的水位失效判定）"
     );
 }
+// ── 子代理轮边界压缩（ADR-053「未做 2」补齐）─────────────────────────────
+//
+// 为什么值得单测：子代理走 `run_stream` 直连，不经过 `Agent::run_agent_turn`
+// 的轮末压缩——长委托把工具结果一路堆到撞窗口时，上游是**直接 400**。这条路径
+// 只能靠 `maybe_compress_between_turns` 兜住，而它改的是循环手里的 `messages`，
+// 改错（比如切断工具对、丢尾部）会让下一轮请求直接 400。
+
+/// 桩压缩器：预算永远「该压」，摘要固定 `SUMMARY-TEXT`。
+struct StubCompressor;
+
+#[async_trait]
+impl ContextPort for StubCompressor {
+    async fn load_injectable(
+        &self,
+        _query: &str,
+        _wd: &crate::common::types::WorkingDirectory,
+    ) -> Result<crate::common::types::InjectableContext> {
+        Ok(crate::common::types::InjectableContext::new())
+    }
+
+    async fn compress_for_session(
+        &self,
+        _messages: &[Message],
+        _session_id: &str,
+        _recent_input_tokens: usize,
+        _force: bool,
+        _existing: Option<&str>,
+    ) -> Option<StructuredMessage> {
+        Some(StructuredMessage::system("s", "[对话摘要] SUMMARY-TEXT"))
+    }
+
+    fn extract_marker_summary(&self, _marker: &StructuredMessage) -> Option<String> {
+        Some("SUMMARY-TEXT".to_string())
+    }
+
+    async fn compression_budget(&self, used: usize) -> Option<crate::context::CompressionBudget> {
+        Some(crate::context::CompressionBudget {
+            context_window: 1000,
+            used_tokens: used as u64,
+            // 阈值压到极小 → 任何非空上下文都「该压」，测试只关心改写行为
+            threshold_tokens: 1,
+            critical_tokens: 900,
+            should_compress: true,
+            is_critical: false,
+        })
+    }
+}
+
+/// 超阈值 → 前缀换成一条摘要、尾部保留（条数 = 1 + KEEP_TAIL）。
+#[tokio::test]
+async fn test_subagent_boundary_compression_keeps_tail_and_prepends_summary() {
+    let agent_loop = make_loop(stream_mock(vec![]), 5).with_compressor(Arc::new(StubCompressor));
+    let mut messages: Vec<Message> = vec![Message::system("soul")];
+    for i in 0..10 {
+        messages.push(Message::user(format!("u{i}")));
+        messages.push(Message::user(format!("a{i}")));
+    }
+    let before = messages.len();
+    agent_loop
+        .maybe_compress_between_turns(&mut messages, "task-1")
+        .await;
+    assert!(
+        messages.len() < before,
+        "应发生压缩（{before} → {}）",
+        messages.len()
+    );
+    assert_eq!(messages.len(), 7, "1 条摘要 + 保留尾部 6 条");
+    assert_eq!(messages[0].role, MessageRole::System);
+    assert!(
+        messages[0].content.contains("SUMMARY-TEXT"),
+        "摘要文本必须进上下文（否则模型丢了前面的工作）"
+    );
+}
+
+/// 未装配压缩器（主 agent 现状）→ 一字不改。
+#[tokio::test]
+async fn test_subagent_boundary_compression_skips_when_not_configured() {
+    let agent_loop = make_loop(stream_mock(vec![]), 5);
+    let mut messages: Vec<Message> = (0..20).map(|i| Message::user(format!("m{i}"))).collect();
+    let before = messages.len();
+    agent_loop
+        .maybe_compress_between_turns(&mut messages, "task-1")
+        .await;
+    assert_eq!(messages.len(), before, "未装配压缩器时不得改动上下文");
+}
+
+/// 尾部本来就没几条 → 不动（避免把仅有的上下文压成一句摘要）。
+#[tokio::test]
+async fn test_subagent_boundary_compression_skips_short_context() {
+    let agent_loop = make_loop(stream_mock(vec![]), 5).with_compressor(Arc::new(StubCompressor));
+    let mut messages: Vec<Message> = (0..5).map(|i| Message::user(format!("m{i}"))).collect();
+    let before = messages.len();
+    agent_loop
+        .maybe_compress_between_turns(&mut messages, "task-1")
+        .await;
+    assert_eq!(messages.len(), before, "上下文太短时不压缩");
+}

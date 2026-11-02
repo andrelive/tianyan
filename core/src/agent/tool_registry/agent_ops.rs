@@ -612,7 +612,7 @@ impl ToolRegistry {
 
         // AgentLoop 实例（统一循环框架：委托策略——角色过滤工具执行、
         // 不索引 FTS（ADR-026）、max_turns 尽力而为）
-        let agent_loop = AgentLoop::new(
+        let mut agent_loop = AgentLoop::new(
             model_service,
             self.clone(),
             session_manager,
@@ -627,6 +627,12 @@ impl ToolRegistry {
             max_turns_graceful: true,
             tools: Some(delegate_tools),
         });
+        // 子代理轮边界压缩：长委托（大重构 / 长评审）把工具结果一路堆到撞窗口时，
+        // 上游是**直接 400**、任务失败。主 agent 的压缩挂在 `run_agent_turn` 轮末，
+        // 子代理不经过那条路，所以在这里单独挂压缩器。
+        if let Some(compressor) = self.ctx.context_port.clone() {
+            agent_loop = agent_loop.with_compressor(compressor);
+        }
 
         // 循环执行（含 timeout 兜底守卫）：超时置位**子代理本地**标志并返回
         // 超时错误（执行细节见 [`Self::run_delegate_loop`]）。

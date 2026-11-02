@@ -92,6 +92,12 @@ pub struct ToolContext {
     /// 与 `AgentLoop` / `Agent` 共享同一份 Arc：循环用它作**收尾判据**（本轮立刻
     /// 结束，别拿旧上下文继续生成），Agent 用它取出交接说明去压缩。
     pub compression_requests: Arc<crate::agent::compression_request::CompressionRequests>,
+    /// 上下文工程端口（**子代理压缩用**）。
+    ///
+    /// 为什么放在工具上下文里：`delegate_to_agent` 在工具层构造子代理的
+    /// `AgentLoop`，而子代理的轮边界压缩需要压缩器（主 agent 的压缩挂在
+    /// `Agent::run_agent_turn` 轮末，子代理不走那条路）。`None` = 不压缩。
+    pub context_port: Option<Arc<dyn crate::context::ContextPort>>,
 }
 
 impl ToolContext {
@@ -113,6 +119,7 @@ impl ToolContext {
             compression_requests: Arc::new(
                 crate::agent::compression_request::CompressionRequests::new(),
             ),
+            context_port: None,
         }
     }
 

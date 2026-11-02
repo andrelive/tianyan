@@ -540,6 +540,12 @@ impl AgentBuilder {
         // 进程 cwd——会话绑定目录失效时 `apply_patch` 就写进服务安装目录。
         tool_registry =
             tool_registry.with_default_working_directory(self.default_working_directory.clone());
+        // 上下文端口**提前**给注册表一份：子代理的轮边界压缩要用它，而 `AgentLoop`
+        // 持有的是注册表的一份克隆——构造之后再改不会传导过去（子代理跑长委托会
+        // 撞窗口直接 400，不是"变慢"）。`None` = 子代理不压缩，与主 agent 降级一致。
+        if let Some(port) = self.context_port.clone() {
+            tool_registry = tool_registry.with_context_port(port);
+        }
         // 审批门控只在装配了就注入（未装配 → `ToolContext.approval_gate` 保持 None，
         // `ensure_approved` 走「未装配直接放行」分支；见上方告警）
         if let Some(gate) = approval {

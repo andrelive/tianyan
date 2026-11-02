@@ -11,6 +11,7 @@ use crate::common::error::TianyanError;
 use crate::common::types::{FunctionCall, Message, MessageRole, StructuredMessage, TokenUsage};
 use crate::common::types::{ToolCall, ToolCallType};
 use crate::context::ContextAssembler;
+use crate::context::ContextPort;
 use crate::model::spec::ModelSpec;
 use crate::model::types::ChatCompletionRequest;
 use crate::model::ChatService;
@@ -209,6 +210,13 @@ pub struct AgentLoop {
     chat_clients: HashMap<String, SharedChatService>,
     /// 单轮演进策略（ADR-030：主 agent 默认；子代理委托策略）。
     turn_policy: TurnPolicy,
+    /// 轮边界压缩器（**子代理专用**；主 agent 的压缩在 `Agent::run_agent_turn` 的轮末）。
+    ///
+    /// 为什么子代理需要它：子代理走 `run_stream` 直连，不经过 `Agent::run_agent_turn`
+    /// /`process_wake`——那两个函数才是主 agent 压缩的挂载点。而子代理跑长委托时
+    /// 工具结果一路堆下去，撞到窗口时**上游直接 400**、任务失败（不是"变慢"）。
+    /// 轮边界是唯一能安全改写 `messages` 的时刻：工具对必须完整。
+    compressor: Option<Arc<dyn ContextPort>>,
 }
 
 impl AgentLoop {
@@ -231,7 +239,14 @@ impl AgentLoop {
             default_chat_provider: None,
             chat_clients: HashMap::new(),
             turn_policy: TurnPolicy::default(),
+            compressor: None,
         }
+    }
+
+    /// 装配轮边界压缩器（子代理路径使用；不装 = 不压缩，主 agent 保持现状）。
+    pub fn with_compressor(mut self, compressor: Arc<dyn ContextPort>) -> Self {
+        self.compressor = Some(compressor);
+        self
     }
 
     /// 设置单轮演进策略（ADR-030：主 agent 默认；子代理委托策略）。
@@ -1090,6 +1105,11 @@ impl AgentLoop {
 
             // G6：非终轮 span（工具执行后继续下一轮）
             self.record_turn_span(session_id, model, turn_start, &total_tokens);
+
+            // 子代理：轮边界压缩（装配了 `compressor` 才会动；主 agent 不装，
+            // 保持"轮末由 Agent 落库成压缩点"的现状）
+            self.maybe_compress_between_turns(messages, session_id)
+                .await;
         }
 
         // ADR-030：max_turns 行为按策略——主 agent 报错；子代理尽力而为
@@ -1296,6 +1316,60 @@ impl AgentLoop {
                 true,
             );
         }
+    }
+
+    /// 轮边界压缩（**子代理专用**）：占用越过阈值时把上下文压到窗口以下，原地改写
+    /// `messages`。
+    ///
+    /// 为什么在这里做：`messages` 是循环自己持有的可变切片，轮边界是唯一能安全替换
+    /// 它的时刻（工具调用/结果必须成对，这一刻天然完整）。主 agent 不走这条路径
+    /// ——它的压缩在 `Agent::run_agent_turn` 的轮末，且要落库成压缩点。
+    ///
+    /// 替换策略：**保留尾部若干条 + 前缀换成一条摘要**。保留尾部是必须的——模型要
+    /// 看到"最近在干什么"，只给摘要会让它丢掉手上的上下文。
+    async fn maybe_compress_between_turns(&self, messages: &mut Vec<Message>, session_id: &str) {
+        let Some(compressor) = self.compressor.as_ref() else {
+            return;
+        };
+        // 保留尾部条数：够看到最近几步的工具与结论，又不至于压不下去
+        const KEEP_TAIL: usize = 6;
+        if messages.len() <= KEEP_TAIL + 1 {
+            return;
+        }
+        let estimator = crate::common::token_estimator::TokenEstimator::new();
+        let used = estimator.estimate_messages(messages);
+        let Some(budget) = compressor.compression_budget(used).await else {
+            return;
+        };
+        if !budget.should_compress {
+            return;
+        }
+        let split = messages.len() - KEEP_TAIL;
+        let summary = compressor
+            .compress_for_session(&messages[..split], session_id, used, false, None)
+            .await;
+        let Some(marker) = summary else {
+            // 摘要为空（模型空响应）：保持原上下文，下一轮再试（不阻塞任务）
+            tracing::warn!(session = %session_id, "子代理轮边界压缩未产出摘要，保持原上下文");
+            return;
+        };
+        let Some(text) = compressor.extract_marker_summary(&marker) else {
+            tracing::warn!(session = %session_id, "子代理压缩摘要提取失败，保持原上下文");
+            return;
+        };
+        let mut next: Vec<Message> = Vec::with_capacity(KEEP_TAIL + 1);
+        next.push(Message::system(format!(
+            "[对话摘要] 以下是本次任务较早阶段被压缩的上下文（完整记录已落库）：\n{text}\n[摘要结束]"
+        )));
+        next.extend(messages[split..].iter().cloned());
+        tracing::info!(
+            session = %session_id,
+            before = messages.len(),
+            after = next.len(),
+            used_tokens = used,
+            "子代理轮边界压缩完成"
+        );
+        *messages = next;
     }
 
     /// 达到 max_turns 上限时的结果（ADR-030）：策略为尽力而为则返回最后输出
