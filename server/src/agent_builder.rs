@@ -91,6 +91,7 @@ impl AgentBuilderFactory {
         event_tx: tokio::sync::broadcast::Sender<String>,
         working_sets: Arc<tianyan::agent::working_set::WorkingSetRegistry>,
         todo_store: Arc<tianyan::todos::TodoStore>,
+        goal_store: Arc<tianyan::goals::GoalStore>,
         approval_gate: Option<Arc<dyn tianyan::executor::approval::ApprovalGate>>,
         context_port: Option<Arc<dyn crate::ContextPort>>,
         task_reviewer: Option<Arc<dyn tianyan::executor::review::TaskReviewer>>,
@@ -172,6 +173,7 @@ impl AgentBuilderFactory {
             // 会话待办存储（P0）：与 `todo` 工具 / REST API **同一实例**——工具
             // 写进去的待办要立刻出现在下一轮上下文里（传副本 = 刚写完就忘）。
             .with_todo_store(todo_store);
+        let agent = agent.with_goal_store(goal_store);
         let agent = match snapshot_manager {
             Some(sm) => agent.with_snapshot_manager(sm),
             None => agent,
@@ -283,6 +285,7 @@ impl AgentBuilderFactory {
         event_tx: tokio::sync::broadcast::Sender<String>,
         working_sets: Arc<tianyan::agent::working_set::WorkingSetRegistry>,
         todo_store: Arc<tianyan::todos::TodoStore>,
+        goal_store: Arc<tianyan::goals::GoalStore>,
         approval_gate: Option<Arc<dyn tianyan::executor::approval::ApprovalGate>>,
         context_port: Option<Arc<dyn crate::ContextPort>>,
         task_reviewer: Option<Arc<dyn tianyan::executor::review::TaskReviewer>>,
@@ -310,6 +313,7 @@ impl AgentBuilderFactory {
             event_tx,
             working_sets,
             todo_store,
+            goal_store,
             approval_gate,
             context_port,
             task_reviewer,

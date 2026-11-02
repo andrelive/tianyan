@@ -250,6 +250,17 @@ pub trait TaskNotifier: Send + Sync {
 pub trait TaskWaker: Send + Sync {
     /// 唤醒指定会话的主 agent（触发一轮系统消息处理）。
     async fn wake(&self, session_id: &str);
+
+    /// **续跑**唤醒：上下文压缩完成后继续原任务（不是"有新消息要处理"）。
+    ///
+    /// 与 [`Self::wake`] 的区别只有一处过滤条件：默认实现里 `wake` 会跳过
+    /// 「没有未消费新消息」的会话（避免空转），但压缩后**本来就没有新消息**
+    /// ——压缩点由系统自己写入、落库即标记已消费。所以续跑必须绕过那道过滤，
+    /// 否则压缩完永远叫不醒。默认实现退化成 `wake`（未覆盖的实现方不需要感知
+    /// 这个区别，行为与之前一致）。
+    async fn wake_for_continuation(&self, session_id: &str) {
+        self.wake(session_id).await;
+    }
 }
 
 /// 子代理暂存的结果（ADR-030：submit_result 工具写入；complete 时优先使用）。

@@ -109,6 +109,8 @@ pub struct AgentBuilder {
     /// 装配层必须传入与 `todo` 工具 / REST API **同一实例**的 store（工具写的
     /// 待办要立刻出现在下一轮上下文里）。
     todo_store: Option<Arc<crate::todos::TodoStore>>,
+    /// 会话目标存储（压缩后续跑判据；与 `goal` 工具同一实例）。
+    goal_store: Option<Arc<crate::goals::GoalStore>>,
 }
 
 impl AgentBuilder {
@@ -151,6 +153,7 @@ impl AgentBuilder {
             user_questions: None,
             task_event_sink: None,
             todo_store: None,
+            goal_store: None,
         }
     }
 
@@ -468,6 +471,15 @@ impl AgentBuilder {
         self
     }
 
+    /// 注入会话目标存储（与 `goal` 工具 / REST API **同一实例**）。
+    ///
+    /// 用途：模型主动压缩后判断「任务还在进行吗」——有 active goal 才自动续跑。
+    /// 传副本等于「刚建的 goal 压缩后看不见」，续跑判据会永远说不。
+    pub fn with_goal_store(mut self, store: Arc<crate::goals::GoalStore>) -> Self {
+        self.goal_store = Some(store);
+        self
+    }
+
     /// 构建 Agent 实例。
     pub fn build(self) -> Result<Agent> {
         let model_service = self
@@ -719,8 +731,13 @@ impl AgentBuilder {
             working_sets,
         );
         // 待办上下文注入的数据源（P0）：装配层传入与 `todo` 工具同一实例的 store
-        Ok(match self.todo_store {
+        let agent = match self.todo_store {
             Some(store) => agent.with_todo_store(store),
+            None => agent,
+        };
+        // 目标存储（压缩后续跑判据）：同样必须是与 `goal` 工具同一个实例
+        Ok(match self.goal_store {
+            Some(store) => agent.with_goal_store(store),
             None => agent,
         })
     }

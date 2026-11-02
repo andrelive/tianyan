@@ -133,6 +133,24 @@ pub struct Agent {
     /// 不报错。装配后**必须**与 `todo` 工具、REST API 是**同一实例**（工具写的
     /// 待办要立刻出现在下一轮上下文里）——各自 `TodoStore` 的内存快照互不感知。
     pub(crate) todo_store: Option<Arc<crate::todos::TodoStore>>,
+    /// 会话目标存储（`goal` 工具 / REST API **同一实例**）。
+    ///
+    /// 用途只有一个：模型主动压缩后判断「这个任务还在进行吗」——**有 active goal
+    /// 才自动唤醒继续**（用户口径：以完成目标为最终判据，不设次数预算）。
+    /// `None` = 未装配 → 压缩后照常结束、不续跑（core 内单测等非会话场景）。
+    pub(crate) goal_store: Option<Arc<crate::goals::GoalStore>>,
+    /// 续跑唤醒器（`register_task_waker` 时顺带存一份）。
+    ///
+    /// 为什么不复用 `background_tasks` 里那个：压缩后的续跑必须走
+    /// [`TaskWaker::wake_for_continuation`]（绕过「无未消费新消息就不唤醒」的过滤
+    /// ——压缩点由系统写入并立刻标记已消费，否则永远叫不醒）。
+    pub(crate) continuation_waker: Arc<TokioMutex<Option<Arc<dyn TaskWaker>>>>,
+    /// 自唤醒链状态（保险丝）：`session_id → (连续自唤醒次数, 链起点)`。
+    ///
+    /// 为什么需要：自旋判据是**模型自己维护的 goal 状态**，它忘了标完成就会一直
+    /// 转——每轮压缩都要重发完整 prompt（真实花钱）。保险丝 60 次 / 1 小时，
+    /// 正常任务碰不到。
+    pub(crate) self_wake_chains: Arc<TokioMutex<std::collections::HashMap<String, (u32, Instant)>>>,
 }
 
 impl Agent {
@@ -172,6 +190,9 @@ impl Agent {
             approval_gate,
             pending_approval_fingerprints,
             todo_store: None,
+            goal_store: None,
+            continuation_waker: Arc::new(TokioMutex::new(None)),
+            self_wake_chains: Arc::new(TokioMutex::new(std::collections::HashMap::new())),
         }
     }
 
@@ -181,6 +202,15 @@ impl Agent {
     /// 调用；未装配时 [`Agent::assemble_context`] 不注入待办段。
     pub(crate) fn with_todo_store(mut self, store: Arc<crate::todos::TodoStore>) -> Self {
         self.todo_store = Some(store);
+        self
+    }
+
+    /// 注入会话目标存储（`goal` 工具 / REST API **同一实例**）。
+    ///
+    /// 传副本等于「刚建的 goal 压缩后看不见」——压缩续跑的判据会永远说不。
+    /// 注入会话目标存储（供装配层直接调用；通常走 `AgentBuilder::with_goal_store`）。
+    pub fn with_goal_store(mut self, store: Arc<crate::goals::GoalStore>) -> Self {
+        self.goal_store = Some(store);
         self
     }
 
@@ -247,6 +277,8 @@ impl Agent {
     /// [`AgentWakeForwarder`]——Weak 打破循环引用）。
     pub async fn register_task_waker(&self, waker: Arc<dyn TaskWaker>) {
         self.background_tasks.set_waker(waker.clone()).await;
+        // 顺带留一份给「压缩后续跑」（走 `wake_for_continuation` 那条通道）
+        *self.continuation_waker.lock().await = Some(waker.clone());
         // 后台命令唤醒复用同一转发器（CommandWaker 适配）
         self.command_tasks
             .set_waker(Arc::new(CommandWakeAdapter(waker)))
@@ -382,8 +414,18 @@ impl Agent {
             // 推进（等子代理报告/后台通知），无检查会使上下文持续增长而
             // 压缩被无限推迟（实测：60.8%→81.7% 区间零压缩）。判定成本
             // 廉价（消息数/实测 token 读取），仅超阈值才真正压缩。
-            self.maybe_compress_and_persist(&state, session_id, false)
-                .await;
+            //
+            // 模型主动请求（`compress_context`）优先：唤醒轮里它同样可能请求压缩，
+            // 处理完若目标仍未完成就再续一轮（自唤醒链的常见形态）。
+            let mut continue_after_compression = false;
+            if self.has_compression_request(session_id) {
+                continue_after_compression = self
+                    .handle_compression_request(&state, session_id, &self.default_model)
+                    .await;
+            } else {
+                self.maybe_compress_and_persist(&state, session_id, false)
+                    .await;
+            }
             // 收尾：仅未取消时清理槽（与用户轮一致——已取消时保留标志，
             // 让转后台的委托子代理仍能看到并退出）
             if !wake_cancel.load(std::sync::atomic::Ordering::SeqCst) {
@@ -393,6 +435,11 @@ impl Agent {
                     .await;
             }
             sender.send_turn_state(false, true).await;
+            // 续跑放在 idle 之后发：前端先看到这一轮收尾，再看到下一轮开始
+            // （与用户轮同一顺序语义）
+            if continue_after_compression {
+                self.wake_after_compression(session_id).await;
+            }
             return;
         }
         tracing::warn!(
@@ -826,6 +873,115 @@ impl Agent {
     ///
     /// 返回压缩生成的摘要消息（`Some` = 发生了压缩；`None` = 无需压缩）。
     /// 自动压缩调用方忽略返回值（压缩检查只是副作用）；手动压缩透传给前端。
+    /// 本会话是否有待处理的主动压缩请求（`compress_context` 登记）。
+    fn has_compression_request(&self, session_id: &str) -> bool {
+        self.agent_loop
+            .tool_registry()
+            .context()
+            .compression_requests
+            .is_pending(session_id)
+    }
+
+    /// 处理模型主动请求的压缩，返回**是否应该自唤醒继续**。
+    ///
+    /// 三段硬顺序：
+    /// 1. 真正压缩（`force = true`：模型自己判断的，跳过窗口阈值；仍受「≥6 条消息」保护）；
+    /// 2. 压缩没发生（`None`：消息不足 / 摘要为空）→ **不续跑**——拿旧上下文继续只会白跑；
+    /// 3. goal 判据（有 active goal 才续跑）+ 保险丝（60 次 / 1 小时）。
+    async fn handle_compression_request(
+        &self,
+        state: &Arc<RwLock<SessionState>>,
+        session_id: &str,
+        model: &str,
+    ) -> bool {
+        let Some(request) = self
+            .agent_loop
+            .tool_registry()
+            .context()
+            .compression_requests
+            .take(session_id)
+        else {
+            return false;
+        };
+        // 交接说明目前只记日志：把它拼进摘要 prompt 需要扩 `ContextPort` 契约
+        // （`compress_for_session` 加参数），留作后续；摘要本身的增量合并已能保住主线。
+        if let Some(h) = request.handoff.as_deref() {
+            tracing::info!(session = %session_id, handoff = %h, "压缩请求带交接说明");
+        }
+        let compressed = self
+            .maybe_compress_and_persist(state, session_id, true)
+            .await
+            .is_some();
+        if !compressed {
+            tracing::warn!(
+                session = %session_id,
+                "主动压缩未发生（消息不足或摘要为空），不续跑"
+            );
+            return false;
+        }
+        // 压缩后立即刷新快照：模型下一轮读到的余量必须是压缩后的数字
+        self.refresh_context_report(state, session_id, model).await;
+        if !self.has_active_goal(session_id).await {
+            tracing::info!(session = %session_id, "压缩完成，但没有 active goal → 不自动续跑");
+            return false;
+        }
+        if !self.allow_self_wake(session_id).await {
+            tracing::warn!(
+                session = %session_id,
+                "自唤醒保险丝触发（60 次 / 1 小时），停止续跑"
+            );
+            return false;
+        }
+        true
+    }
+
+    /// 本会话是否有 active goal。
+    ///
+    /// 归属判定：`session_id` 相同，或 goal 未绑会话（全局目标）也算——前者是常态，
+    /// 后者避免"全局目标跑到一半被压缩后不续跑"。
+    async fn has_active_goal(&self, session_id: &str) -> bool {
+        let Some(store) = self.goal_store.as_ref() else {
+            return false;
+        };
+        store.list().await.iter().any(|g| {
+            g.status == crate::goals::GoalStatus::Active
+                && (g.session_id.is_none() || g.session_id.as_deref() == Some(session_id))
+        })
+    }
+
+    /// 保险丝：同一条自唤醒链连续 60 次或累计 1 小时 → 拒绝续跑。
+    async fn allow_self_wake(&self, session_id: &str) -> bool {
+        const MAX_ROUNDS: u32 = 60;
+        const MAX_SPAN: Duration = Duration::from_secs(3600);
+        let mut guard = self.self_wake_chains.lock().await;
+        let entry = guard
+            .entry(session_id.to_string())
+            .or_insert((0, Instant::now()));
+        if entry.0 >= MAX_ROUNDS || entry.1.elapsed() >= MAX_SPAN {
+            guard.remove(session_id);
+            return false;
+        }
+        entry.0 += 1;
+        true
+    }
+
+    /// 用户新消息到来 → 重置该会话的自唤醒链（新任务重新计数）。
+    async fn reset_self_wake_chain(&self, session_id: &str) {
+        self.self_wake_chains.lock().await.remove(session_id);
+    }
+
+    /// 触发续跑唤醒（压缩完成且任务仍未完成）。
+    async fn wake_after_compression(&self, session_id: &str) {
+        let waker = self.continuation_waker.lock().await.clone();
+        match waker {
+            Some(w) => w.wake_for_continuation(session_id).await,
+            None => tracing::warn!(
+                session = %session_id,
+                "压缩后无法续跑：未装配唤醒器（服务端未调用 register_task_waker）"
+            ),
+        }
+    }
+
     /// 刷新「上下文状态快照」（`context_status` 工具的数据源）。
     ///
     /// 调用点固定在**每轮组装完消息之后、跑循环之前**：占用取「最近一次请求的
@@ -1015,6 +1171,10 @@ impl Agent {
         user_message_id: Option<&str>,
         options: TurnOptions,
     ) -> Result<AgentResponse> {
+        // 用户新消息 = 新任务：重置该会话的自唤醒链（保险丝按「链」计数，
+        // 不复用上一条消息留下的计数，否则长会话里几次压缩就撞上限）
+        self.reset_self_wake_chain(session_id).await;
+
         // 1. Persist current user message
         // 流式路径：入库后立即发送确认事件（ADR-031：乐观渲染的 id 回显——
         // 携带前端 user_message_id 与落库后的真实 message_id，前端比对后
@@ -1152,16 +1312,28 @@ impl Agent {
         self.update_agent_metrics(session_id, loop_tokens.as_ref(), loop_tokens.is_some())
             .await;
 
-        // 6. Compression check and persist (optional per path semantics)
+        // 6. 轮末压缩：**模型主动请求优先**于自动阈值压缩
         //
-        // 压缩阶段可取消（结构性取消）：取消先到 → 跳过压缩（摘要下轮重算，
-        // 幂等）；轮结果（回答）已交付/已落库，不受影响。
-        if options.do_compress {
+        // 顺序：先看有没有 `compress_context` 请求（force 压缩 + 可能续跑），没有
+        // 再走原来的阈值检查。两条都跑只会让第二次徒劳（消息已不足 6 条）。
+        let mut continue_after_compression = false;
+        if self.has_compression_request(session_id) {
+            continue_after_compression = self
+                .handle_compression_request(state, session_id, model)
+                .await;
+        } else if options.do_compress {
+            // 压缩阶段可取消（结构性取消）：取消先到 → 跳过压缩（摘要下轮重算，
+            // 幂等）；轮结果（回答）已交付/已落库，不受影响。
             let _ = cancellable(
                 cancel,
                 self.maybe_compress_and_persist(state, session_id, false),
             )
             .await;
+        }
+        // 压缩成功、目标仍未完成 → 续跑（`wake_for_continuation` 绕过「无未消费
+        // 新消息就不唤醒」的过滤；幂等性由会话锁保证）
+        if continue_after_compression {
+            self.wake_after_compression(session_id).await;
         }
 
         Ok(response)
@@ -1517,6 +1689,35 @@ impl TaskWaker for AgentWakeForwarder {
                 spawn_stream_forwarder(session_id.clone(), mapper, deliver);
             // 轮结束（sender 全部释放）→ 消费任务收尾：等待句柄确保
             // 尾部事件已送达（唤醒轮输出不丢最后一块）。
+            agent.process_wake_locked(&session_id, sender).await;
+            let _ = forward_handle.await;
+        });
+    }
+
+    /// 续跑唤醒（上下文压缩后继续原任务）。
+    ///
+    /// 与 [`Self::wake`] 同一条路径，**只去掉「无未消费新消息就跳过」那道过滤**：
+    /// 压缩点由系统自己写入并立刻标记已消费（`reshape_after_compression`），
+    /// 用「有新消息」当判据会把它永远挡在门外。幂等性仍由 `turn_try_lock` 保证。
+    async fn wake_for_continuation(&self, session_id: &str) {
+        let Some(agent) = self.agent.upgrade() else {
+            tracing::debug!("续跑唤醒被丢弃：Agent 已销毁");
+            return;
+        };
+        let Some(guard) = agent.turn_try_lock(session_id).await else {
+            tracing::debug!(
+                session = %session_id,
+                "续跑唤醒跳过：该会话已有 loop 在跑（它的轮边界会续上）"
+            );
+            return;
+        };
+        let mapper = self.mapper.clone();
+        let deliver = self.deliver.clone();
+        let session_id = session_id.to_string();
+        tokio::spawn(async move {
+            let _guard = guard;
+            let (sender, forward_handle) =
+                spawn_stream_forwarder(session_id.clone(), mapper, deliver);
             agent.process_wake_locked(&session_id, sender).await;
             let _ = forward_handle.await;
         });

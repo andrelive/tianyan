@@ -570,6 +570,10 @@ impl AppState {
         // 会话待办存储（P0）：**在构建 Agent 之前**创建，因为 Agent 需要它把
         // 当前清单每轮注入上下文；且必须与 `todo` 工具 / REST API 是同一份实例。
         let todo_store = Arc::new(TodoStore::new(&config.storage.data_dir));
+        // 会话目标存储：同样**在构建 Agent 之前**创建——Agent 用它判断「压缩后
+        // 任务还在不在」（有 active goal 才自动续跑），必须与 `goal` 工具 /
+        // REST API 是同一份实例（传副本 = 刚建的 goal 压缩后看不见）。
+        let goal_store = Arc::new(GoalStore::new(&config.storage.data_dir));
         let agent = AgentBuilderFactory::build_agent_or_wizard(
             &config,
             model_services.clone(),
@@ -592,6 +596,7 @@ impl AppState {
             task_event_tx.clone(),
             working_sets.clone(),
             todo_store.clone(),
+            goal_store.clone(),
             approval_gate.clone(),
             context_port,
             task_reviewer,
@@ -599,7 +604,6 @@ impl AppState {
         )
         .await?;
 
-        let data_dir = config.storage.data_dir.clone();
         Ok(Self {
             agent: Arc::new(RwLock::new(agent)),
             config: Arc::new(RwLock::new(config)),
@@ -622,7 +626,7 @@ impl AppState {
             scheduled_agent_tasks: Arc::new(RwLock::new(None)),
             scheduled_task_tx: Arc::new(RwLock::new(None)),
             todo_store,
-            goal_store: Arc::new(GoalStore::new(&data_dir)),
+            goal_store,
             sqlite_db: database,
             event_bus: Arc::new(tianyan::events::EventBus::new()),
             shutdown_flag: Arc::new(std::sync::atomic::AtomicBool::new(false)),
@@ -857,6 +861,8 @@ impl AppState {
             // 待办存储跨热重载复用：新 Agent 的上下文注入必须看到同一个 store
             // （重建副本 = 工具写的待办在下一轮上下文里消失）
             self.todo_store.clone(),
+            // 目标存储同样跨热重载复用（压缩续跑判据读的就是这一份）
+            self.goal_store.clone(),
             approval_gate,
             context_port,
             task_reviewer,
