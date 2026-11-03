@@ -1204,18 +1204,18 @@ impl ClientApp {
             "scroll_messages" => {
                 match arg_str(cmd, "to")?.as_str() {
                     "top" => {
-                        // 先退出「贴底跟随」，否则 scroll_to 会被 follow 逻辑拉回底部
-                        self.msg_list_state
-                            .set_follow_mode(gpui_kit::FollowMode::Normal);
+                        // 与用户上滚等价：先把「上滚」标志置真。`scroll_to` 是**程序
+                        // 滚动**，不会触发列表的滚动监听——不显式置位就等于「没上滚过」，
+                        // 下一个流式增量会立刻把视图拉回底部（实测复现）。
+                        self.msg_scrolled_up.set(true);
                         self.msg_list_state.scroll_to(gpui_kit::ListOffset {
                             item_ix: 0,
                             offset_in_item: gpui_kit::px(0.),
                         });
                     }
                     "end" | "bottom" => {
-                        // 恢复跟随（用户回到对话尾部的正常行为）
-                        self.msg_list_state
-                            .set_follow_mode(gpui_kit::FollowMode::Tail);
+                        // 回到底部并恢复跟随（与用户滚到底部等价）
+                        self.msg_scrolled_up.set(false);
                         self.msg_list_state.scroll_to_end();
                     }
                     other => return Err(format!("to 只能是 top / bottom：{other}")),

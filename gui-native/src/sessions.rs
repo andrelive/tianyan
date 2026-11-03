@@ -323,7 +323,7 @@ impl ClientApp {
             // `ListState` 内部是 `Rc<RefCell<..>>`：clone 会共享滚动位置，必须换走
             msg_list_state: Some(std::mem::replace(
                 &mut self.msg_list_state,
-                GpuiListState::new(0, ListAlignment::Bottom, px(120.)),
+                crate::app::new_msg_list_state(0, self.msg_scrolled_up.clone()),
             )),
             // 同上：`ExpandRef` 也是 `Rc` 共享语义
             expand: Some(std::mem::replace(
@@ -380,7 +380,7 @@ impl ClientApp {
     /// 把视图状态清回默认（首次进入某会话 / park 完一个空会话）。
     pub(crate) fn reset_view_state(&mut self) {
         self.messages = Rc::new(Vec::new());
-        self.msg_list_state = GpuiListState::new(0, ListAlignment::Bottom, px(120.));
+        self.msg_list_state = crate::app::new_msg_list_state(0, self.msg_scrolled_up.clone());
         self.expand = Rc::new(std::cell::RefCell::new(crate::msg::ExpandState::default()));
         self.message_total = 0;
         self.oldest_seq = None;
@@ -465,13 +465,16 @@ impl ClientApp {
             .filter(|s| *s > 0);
         self.messages = snap.messages;
         self.msg_list_state =
-            GpuiListState::new(self.messages.len(), ListAlignment::Bottom, px(120.));
+            crate::app::new_msg_list_state(self.messages.len(), self.msg_scrolled_up.clone());
         if let Some(seq) = anchor_seq {
             if let Some(ix) = self.messages.iter().position(|m| m.seq == seq) {
                 self.msg_list_state.scroll_to(gpui_kit::ListOffset {
                     item_ix: ix,
                     offset_in_item: px(0.),
                 });
+                // 视线停在中间 = 用户不在尾部：后续新内容/流式增量不得把他拉回底部。
+                // （`scroll_to` 是程序滚动，不触发滚动监听，标志必须显式设。）
+                self.msg_scrolled_up.set(ix + 1 < self.messages.len());
             }
         }
         self.expand = snap.expand.unwrap_or_else(|| {
@@ -810,7 +813,7 @@ impl ClientApp {
                             this.turn_running = false;
                             this.messages = Rc::new(Vec::new());
                             this.msg_list_state =
-                                GpuiListState::new(0, ListAlignment::Bottom, px(120.));
+                                crate::app::new_msg_list_state(0, this.msg_scrolled_up.clone());
                             this.message_total = 0;
                             this.current_title = "选择左侧会话查看消息".to_string();
                             this.session_usage = None;

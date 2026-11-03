@@ -46,23 +46,29 @@ pub fn count_by_status(items: &[TodoItem]) -> (usize, usize, usize) {
 /// 输出形如：
 ///
 /// ```text
-/// ## 当前待办（3 项，进行中 1）
+/// ## 当前待办（系统注入 · 3 项，进行中 1）
 /// - [ ] 工作目录 L1+L2+L3 —— ToolContext 统一 fallback
 /// - [•] 内联 FileChipNode + 消息区 code 渲染器
 /// - [x] 真机验证 Lexical 中文 IME
-/// 完成一步就重发整表并把它标 completed——不要等最后一起标。
+/// 更新这份清单只能调 todo 工具（不要在回复正文里罗列待办）；完成一步就重发整表并把它标 completed。
 /// ```
 ///
 /// 全部 completed 时**仍然渲染**：模型需要看到「都做完了」，才会去清空清单
 /// （`todos: []`）而不是继续找活干。尾行是硬提醒——实测模型倾向攒到最后一起
 /// 标完成，中间过程对用户与自身都不可见。
+///
+/// **两处措辞不是装饰**（2026-11-02 用户实测）：模型跑长回合时开始在**回复正文**
+/// 里用 markdown 列表罗列待办——面板不更新，用户看到两份互不一致的清单。注入段
+/// 本身就是一份 `- [ ]` 列表，模型很容易把它当成「回答该长什么样」的模板。所以
+/// 标题标注「系统注入」（说明这是数据、不是你该复述的格式），尾行明确「更新只能
+/// 调工具」。
 pub fn render_todos_summary(items: &[TodoItem]) -> Option<String> {
     if items.is_empty() {
         return None;
     }
     let (_, in_progress, _) = count_by_status(items);
     let mut text = format!(
-        "## 当前待办（{} 项，进行中 {}）\n",
+        "## 当前待办（系统注入 · {} 项，进行中 {}）\n",
         items.len(),
         in_progress
     );
@@ -83,7 +89,10 @@ pub fn render_todos_summary(items: &[TodoItem]) -> Option<String> {
         }
         text.push('\n');
     }
-    text.push_str("完成一步就重发整表并把它标 completed——不要等最后一起标。\n");
+    text.push_str(
+        "更新这份清单只能调 todo 工具（不要在回复正文里罗列待办）；\
+         完成一步就重发整表并把它标 completed。\n",
+    );
     Some(text)
 }
 
@@ -151,7 +160,7 @@ mod tests {
         let text = render_todos_summary(&items).expect("非空清单必须渲染");
 
         assert!(
-            text.starts_with("## 当前待办（3 项，进行中 1）\n"),
+            text.starts_with("## 当前待办（系统注入 · 3 项，进行中 1）\n"),
             "{text}"
         );
         assert!(text.contains("- [ ] 待办项\n"), "{text}");
@@ -159,10 +168,16 @@ mod tests {
         assert!(text.contains("- [x] 完成项\n"), "{text}");
         // 不输出 id（整表替换不需要；省 token）
         assert!(!text.contains("1 "), "不得输出条目 id：{text}");
-        // 尾行硬提醒（模型攒到最后一起标完成的实测倾向）
+        // 尾行硬提醒（模型攒到最后一起标完成的实测倾向）+ **禁止正文罗列**
+        // （实测：模型把注入段的 `- [ ]` 当成回答格式模板，在正文里复述待办，
+        //   面板与正文两份清单互相打架）
+        assert!(
+            text.contains("更新这份清单只能调 todo 工具（不要在回复正文里罗列待办）"),
+            "缺「禁止正文罗列」约束：{text}"
+        );
         assert!(
             text.trim_end()
-                .ends_with("完成一步就重发整表并把它标 completed——不要等最后一起标。"),
+                .ends_with("完成一步就重发整表并把它标 completed。"),
             "缺尾行提醒：{text}"
         );
         // 纯函数：同入参同输出
@@ -183,7 +198,7 @@ mod tests {
             item("2", "乙", TodoStatus::Completed, None),
         ];
         let text = render_todos_summary(&items).unwrap();
-        assert!(text.contains("（2 项，进行中 0）"), "{text}");
+        assert!(text.contains("系统注入 · 2 项，进行中 0）"), "{text}");
         assert_eq!(text.matches("[x]").count(), 2, "{text}");
     }
 

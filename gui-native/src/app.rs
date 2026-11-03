@@ -39,6 +39,9 @@ impl ClientApp {
         let app_ref: AppRef = Arc::new(Mutex::new(None));
         let messages: Rc<Vec<MsgRow>> = Rc::new(Vec::new());
         let total: usize = 0;
+        // 「用户是否上滚看历史」：由消息列表的滚动监听维护，`follows_tail()` 只读它。
+        // 与 `msg_list_state` 共用同一个 `Rc`——列表每重建一次都会重新注册监听。
+        let scrolled_up: Rc<std::cell::Cell<bool>> = Rc::new(std::cell::Cell::new(false));
 
         // 输入框：自研 `ComposerState`（见 `composer_ui`）——`gpui-component` 的
         // `Textarea` 是纯文本控件，做不到「文件引用与正文排在同一行并渲染成 chip」
@@ -231,7 +234,8 @@ impl ClientApp {
             new_session_workspace: None,
             dialog_input: None,
             messages,
-            msg_list_state: GpuiListState::new(0, ListAlignment::Bottom, px(120.)),
+            msg_scrolled_up: scrolled_up.clone(),
+            msg_list_state: new_msg_list_state(0, scrolled_up.clone()),
             message_total: total,
             status: "正在连接后端…".to_string(),
             port,
@@ -749,7 +753,7 @@ impl ClientApp {
             if !protect_inflight {
                 self.messages = Rc::new(rows);
                 self.msg_list_state =
-                    GpuiListState::new(self.messages.len(), ListAlignment::Bottom, px(120.));
+                    new_msg_list_state(self.messages.len(), self.msg_scrolled_up.clone());
                 self.message_total = self.messages.len();
                 // 世代号 +1：让**在飞的** `load_messages` 结果作废（见 `messages_epoch`）
                 self.messages_epoch = self.messages_epoch.wrapping_add(1);
@@ -1384,7 +1388,7 @@ impl ClientApp {
     ///   一旦 `segs` 里已经有思考段（`thought` 增量建的），渲染就走 segs 分支，
     ///   正文根本不显示。
     ///
-    /// 流式更新时「跟随尾部」：**只有视图本来就在底部**才滚到底。
+    /// 流式更新时「跟随尾部」：**只有视图本来就在跟随**才滚到底。
     ///
     /// 为什么：早先每个流式增量都无条件 `scroll_to_end()` —— 用户往上看历史时，
     /// 下一个 delta 就把他拖回底部，输出过程中根本没法上滚（用户实测）。
@@ -1397,24 +1401,27 @@ impl ClientApp {
         }
     }
 
-    /// 视图此刻是否「跟着尾部」。
+    /// 视图此刻是否「跟着尾部」——**只读用户滚动动作维护的标志**。
     ///
-    /// ⚠️ **不能只用 `is_scrolled_to_end()`**（实测踩过）：它依赖
-    /// `last_layout_bounds` + `summary.has_unknown_height` —— 虚拟列表在
-    /// 滚到顶部/中部时，下方未渲染项的高度是未知的，于是它返回 `None`；
-    /// 隐藏窗口（无布局）同样返回 `None`。把它当「在底部」处理，结果就是
-    /// **永远跟随、上滚立刻被拖回**（正是用户报的现象）。
+    /// 历史（三代修法，别退回去）：
+    /// 1. `is_scrolled_to_end()`：依赖 `last_layout_bounds` + `summary.has_unknown_height`，
+    ///    虚拟列表在中部/顶部或隐藏窗口时返回 `None` —— 当成「在底部」，于是**永远
+    ///    跟随、上滚立刻被拖回**；
+    /// 2. `is_scrolled_to_end()` + `logical_scroll_top().item_ix` 兜底：`item_ix` 只
+    ///    反映「视口顶部是哪一项」，而**流式输出会把最后一条撑得很长** —— 用户在同一
+    ///    条内部向上滚，`item_ix` 仍是最后一条，`top + 1 >= len` 照旧成立 ⇒ 每个
+    ///    delta 又把他拉回底部（用户 2026-11-02 复报的现象）；
+    /// 3. `FollowMode::Tail` + `is_following_tail()`：状态机本身是对的（`scroll_by`
+    ///    向上即 `stop_following`），但它的**恢复**判据
+    ///    `scroll_offset + available_height >= total_height` 里的 `total_height` 来自
+    ///    `summary().height` —— 含未测量项时偏小 ⇒ 用户刚上滚就被判「已回到尾部」
+    ///    并 `start_following()`（实测：`scroll_to(0)` 后 `item_ix` 仍是末尾）。
     ///
-    /// 所以用两条判据：
-    /// 1. `is_scrolled_to_end() == Some(true)` → 明确在底部；
-    /// 2. 兜底：`logical_scroll_top().item_ix` 已经是最后一条（或更后）。
-    ///    `item_ix` 只反映滚动锚点、**不依赖测量**，任何状态下都有效。
+    /// 现在：`new_msg_list_state` 用一个滚动监听维护 `msg_scrolled_up` ——
+    /// **可见范围到没到最后一个项**是布局算出来的实值，不受未测量项影响；回到尾部
+    /// 时监听把标志清零，跟随自动恢复。追加内容只在标志为「未上滚」时才滚到底。
     pub(crate) fn follows_tail(&self) -> bool {
-        if self.msg_list_state.is_scrolled_to_end() == Some(true) {
-            return true;
-        }
-        let top = self.msg_list_state.logical_scroll_top().item_ix;
-        top + 1 >= self.messages.len()
+        !self.msg_scrolled_up.get()
     }
 
     pub(crate) fn append_delta(&mut self, delta: &str) {
@@ -1535,7 +1542,11 @@ impl ClientApp {
         self.messages = Rc::new(next);
         self.message_total = self.messages.len();
         if !self.offline {
-            self.msg_list_state.reset(self.messages.len());
+            reset_msg_list_state(
+                &self.msg_list_state,
+                self.messages.len(),
+                &self.msg_scrolled_up,
+            );
             self.scroll_to_end_if_following();
         }
     }
@@ -1723,7 +1734,11 @@ impl ClientApp {
         });
         self.trim_loaded_front(&mut next);
         self.messages = Rc::new(next);
-        self.msg_list_state.reset(self.messages.len());
+        reset_msg_list_state(
+            &self.msg_list_state,
+            self.messages.len(),
+            &self.msg_scrolled_up,
+        );
         self.msg_list_state.scroll_to_end();
         self.message_total = self.messages.len();
         self.streaming = true;
@@ -1874,10 +1889,9 @@ impl ClientApp {
                             }
                             this.messages = Rc::new(rows);
                             // 条数变了必须重建 list state（item_count 在构造时固定）
-                            this.msg_list_state = GpuiListState::new(
+                            this.msg_list_state = new_msg_list_state(
                                 this.messages.len(),
-                                ListAlignment::Bottom,
-                                px(120.),
+                                this.msg_scrolled_up.clone(),
                             );
                             // 整页替换后把滚动锚点找回来（只按服务端下发的 seq 查表）
                             if let Some(seq) = anchor_seq {
@@ -1998,13 +2012,23 @@ impl ClientApp {
                 this.messages = Rc::new(merged);
                 // 重建列表（item_count 构造时固定），并把视线留在**原来那条**上：
                 // 前插了 added 条，原来的第一条现在在索引 added
+                //
+                // 重建会丢掉「是否跟尾」的状态，而这条路径正是**用户上滚**触发的：
+                // 若重建后无条件贴底，「加载更早」就变成了「跳到底部」。所以先记住
+                // 重建前的跟随状态——跟随中就贴底，否则按 added 把视线放回原处。
+                let was_following = this.follows_tail();
                 this.msg_list_state =
-                    GpuiListState::new(this.messages.len(), ListAlignment::Bottom, px(120.));
-                if added > 0 {
+                    new_msg_list_state(this.messages.len(), this.msg_scrolled_up.clone());
+                if was_following {
+                    this.msg_list_state.scroll_to_end();
+                } else if added > 0 {
                     this.msg_list_state.scroll_to(gpui_kit::ListOffset {
                         item_ix: added,
                         offset_in_item: px(0.),
                     });
+                    // 构造新 state 时标志被复位成「跟随」，这里要恢复成「用户在看历史」：
+                    // 否则下一页 delta 一到，刚加载好的历史就又被拉到底部。
+                    this.msg_scrolled_up.set(true);
                 }
                 this.message_total = this.messages.len();
                 // 标题跟着走（「还有更早」随 has_more 出现/消失）
@@ -2340,6 +2364,39 @@ impl ClientApp {
 }
 
 /// 线性插值（统计行数字滚动用）：`e` 已含缓动，这里只负责取整。
+/// 构造消息列表状态（**唯一入口**）：同时注册「用户是否上滚」的滚动监听。
+///
+/// 判据**只来自用户滚动动作**（`visible_range` 覆盖到最后一项 = 回到尾部），
+/// 不做任何「是否在底部」的位置推算——虚拟列表的 `summary().height` 含未测量项，
+/// 基于它的判断在长消息上必然翻车（历史见 [`ClientApp::follows_tail`]）。
+///
+/// 有意**不用** `FollowMode::Tail`：它的「滚回底部自动恢复跟随」判据是
+/// `scroll_offset + available_height >= total_height`，`total_height` 同样受
+/// 未测量项影响，实测会把刚上滚的用户立刻拉回底部（2026-11-02）。
+pub(crate) fn new_msg_list_state(
+    item_count: usize,
+    scrolled_up: Rc<std::cell::Cell<bool>>,
+) -> GpuiListState {
+    let state = GpuiListState::new(item_count, ListAlignment::Bottom, px(120.));
+    // 新构造 / 重置后一律贴底（`scrolled_up = false`）
+    scrolled_up.set(false);
+    state.set_scroll_handler(move |event, _window, _cx| {
+        // 可见范围到达最后一项 = 用户回到了尾部（恢复跟随）；否则视为上滚看历史。
+        scrolled_up.set(event.visible_range.end < event.count);
+    });
+    state
+}
+
+/// 重置项数并复位「上滚」标志（`reset` 不碰 handler，监听继续有效）。
+pub(crate) fn reset_msg_list_state(
+    state: &GpuiListState,
+    item_count: usize,
+    scrolled_up: &Rc<std::cell::Cell<bool>>,
+) {
+    state.reset(item_count);
+    scrolled_up.set(false);
+}
+
 fn lerp_u64(from: u64, to: u64, e: f32) -> u64 {
     let f = from as f64;
     let t = to as f64;

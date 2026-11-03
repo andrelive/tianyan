@@ -7,6 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **流式输出把用户上滚的位置又拉回底部（「想翻历史却被拽回」）**：跟随判据三代都不可靠，
+  根因逐代记录（别再退回去）：
+  1. `is_scrolled_to_end()`：依赖 `last_layout_bounds` + `has_unknown_height`，虚拟列表在
+     中部/顶部或窗口隐藏（无布局）时返回 `None` —— 当成「在底部」，于是**永远跟随**；
+  2. `is_scrolled_to_end()` + `logical_scroll_top().item_ix` 兜底：`item_ix` 只表示「视口
+     顶部是哪一项」，而**流式输出会把最后一条撑得很长** —— 用户在同一条**内部**向上滚，
+     `item_ix` 仍是最后一条，`top + 1 >= len` 照旧成立 ⇒ 每个 delta 又把他拉回底部
+     （用户 2026-11-02 复报）；
+  3. `FollowMode::Tail` + `is_following_tail()`：状态机本身没问题（`scroll_by` 向上即
+     `stop_following`），但它的**恢复**判据 `scroll_offset + available_height >= total_height`
+     里的 `total_height` 来自 `summary().height`（含未测量项时偏小）⇒ 用户刚上滚就被判
+     「已回到尾部」并 `start_following()`（实测：`scroll_to(0)` 后 `item_ix` 立刻回到末尾）。
+  现在：消息列表构造时注册**滚动监听**（`ListState::set_scroll_handler`），用布局算出的
+  `visible_range.end < count` 维护一个显式标志 `msg_scrolled_up` —— 可见范围覆盖到最后一项
+  才算「在尾部」；追加内容与流式增量只在标志为「未上滚」时滚到底。切回会话恢复视线时
+  按锚点位置显式置位（程序滚动不触发监听）。
+  隔离实测：流式中上滚后 `item=0 / following=false` 保持不变，而末条从 0 行长到 299 行；
+  滚回底部后 `following=true`，再发消息自动贴底。
+
+- **模型在回复正文里罗列待办，面板却不更新（两份清单打架）**：长回合里模型开始在**回答
+  正文**用 markdown 列表复述待办，`todo` 工具一次都没调。根因是**注入格式被当成回答模板**：
+  每轮注入上下文的「当前待办」本身就是一份 `- [ ]` 列表（`render_todos_summary`），却没有
+  任何地方说「这是数据、更新要走工具」。三处补上：
+  - 注入段标题改为「## 当前待办（**系统注入** · N 项，进行中 M）」，尾行加「更新这份清单
+    只能调 todo 工具（**不要在回复正文里罗列待办**）」；
+  - `todo` 工具描述新增【禁止】条（同时压缩原有措辞，控制在 300 字内）；
+  - `default_soul.md`：计划只写进 `todo` 工具，正文罗列会让用户看到两份不一致的清单。
+
 ## [1.2.2] - 2026-11-02
 
 ### Added

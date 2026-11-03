@@ -29,8 +29,8 @@ use futures::StreamExt as _;
 use gpui_kit::component::input::{InputState, TextareaState};
 use gpui_kit::component::theme::{Theme, ThemeMode};
 use gpui_kit::component::Root;
+use gpui_kit::ListState as GpuiListState;
 use gpui_kit::*;
-use gpui_kit::{ListAlignment, ListState as GpuiListState};
 use std::rc::Rc;
 
 mod api;
@@ -376,6 +376,9 @@ struct ClientApp {
     pub(crate) messages: Rc<Vec<MsgRow>>,
     /// gpui 原生变高虚拟列表的状态（只有可见项会被 render）
     pub(crate) msg_list_state: GpuiListState,
+    /// 用户是否上滚看历史了（由消息列表的滚动监听维护，**不靠位置推算**）。
+    /// `true` = 别自动滚到底；`false` = 跟随尾部（新内容到达即贴底）。
+    pub(crate) msg_scrolled_up: Rc<std::cell::Cell<bool>>,
     /// 会话消息总数（messages 可能只保留最近 N 条用于渲染）
     pub(crate) message_total: usize,
     pub(crate) status: String,
