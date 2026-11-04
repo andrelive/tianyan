@@ -48,6 +48,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **图标四角黑边**（任务栏 / 开始菜单 / 托盘 / 安装向导可见）：`assets/icon.ico`、
+  `assets/app.ico`、`assets/tray-32.png` 三份资产的**圆角之外**是不透明的纯黑
+  `(0,0,0)`、`alpha` 全 255——源头是那张白底 PNG 本身就带着黑角，打包 ICO 时没有抠掉
+  alpha。修法不是阈值切割（会留一圈黑晕）：角落区是「白色边缘 ↔ 黑色」的线性混合，
+  亮度恰好等于白色覆盖率，故取 `alpha = luminance / 255`、`RGB = 底板白`；用 flood fill
+  从四角出发、以亮像素（白色底板）为墙，保证不侵入图标内部的深色内容。ICO 六帧全部
+  处理（256px 帧 1995 个角部像素，16px 帧 12 个）。
+
 - **向上滚动时消息列表跳动/发涩（四个叠加原因）**：
   1. `ListState` 的 **overdraw 只有 120px**（gpui 文档明说它用来防「滚动时闪烁/弹跳」），
      而消息项高度方差极大（一行 user 气泡 ↔ 上百行回复）→ 向上滚动不断触发「未测量项
