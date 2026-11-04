@@ -41,6 +41,27 @@
 
 ## 决策
 
+### 0. 术语：轮（turn）与步（step）
+
+**读本 ADR 的前提**：代码里 `turn` 一词被用在两个层级上，读错就会把「步数上限」
+当成「会话轮次上限」。
+
+| 概念 | 定义 | 入口 / 代码 | 特征 |
+|---|---|---|---|
+| **轮**（turn） | 一次完整执行：组装上下文 → 步循环 → 收尾 | `AgentCore::run_agent_turn`（用户输入 / 澄清回答）、`AgentCore::process_wake_locked`（唤醒轮：压缩续跑、后台任务通知、定时任务） | 全程持**会话排他锁**；前端 `turn_running` / `turn_state`；可「停止」 |
+| **步**（step，代码里误叫 `turn`） | 轮内第 N 次 LLM 请求 + 其工具执行 | `AgentLoop::run_turns` 的 `for turn in 0..max_turns` | 返回 `tool_calls` → 执行 → 下一步；**无 `tool_calls` 即收尾**（ADR-030 的「统一收尾」） |
+
+- 一次「用户输入」与一次「压缩后唤醒」**都是一轮**：两个入口，结构相同（各自独立
+  计数、独立持锁）。
+- `[agent].max_turns`（默认 200）是**每轮的步数上限**，不是会话轮次上限。字段名沿用
+  历史命名（改 `max_steps` 属破坏性配置变更），因此只在文案层纠正——设置页显示
+  「最大步数」，代码注释与本节标注 `turn` 的历史语义。
+- **待办清单的注入频次是每轮一次**：`assemble_context` 组装时插一条 system 消息
+  （`render_todos_summary` → `insert_todos_summary`，位置在最后一条 user 之前）。
+  轮内多步**不重新组装**，轮内对清单的修改靠 `todo` 工具的返回值（整表 + counts）
+  回显；每步只做两种**尾部追加**（不动前缀）：`inject_pending_if_any`（活动轮期间
+  落库的新消息）、`push_context_notice_if_crossed`（上下文 60%/80% 阈值提示）。
+
 ### 1. 统一循环框架：AgentLoop 核心抽配置点
 
 `run_turns` 的循环骨架（LLM 调用 → 工具执行 → 继续，直到收尾条件）保持不变，

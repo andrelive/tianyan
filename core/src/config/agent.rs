@@ -11,7 +11,12 @@ pub struct AgentConfig {
     /// 上下文管线注入的 learned rules 默认 Top-K。
     #[serde(default = "default_learned_rules_top_k")]
     pub learned_rules_top_k: usize,
-    /// Agent Loop 最大轮次。
+    /// 单轮内最多发几次模型请求（含工具调用往返）——**语义是「步」，不是「轮」**。
+    ///
+    /// 一次「轮」= 用户输入 / 唤醒触发的完整执行（`AgentCore::run_agent_turn` /
+    /// `process_wake_locked`）；本字段管的是轮**内**的步数上限。字段名沿用历史
+    /// 命名（改成 `max_steps` 属破坏性配置变更），只在文案层纠正。到顶即收尾：
+    /// 主 agent 报错，子 agent 返回最后输出（ADR-030）。
     #[serde(default = "default_max_turns")]
     pub max_turns: usize,
     /// 后台任务结果自审（G4，默认关闭 opt-in）：开启后后台任务完成

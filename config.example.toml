@@ -274,7 +274,7 @@ max_fetch_bytes = 2097152
 #   model         角色模型名（缺省回落主 Agent 模型）
 #   system_prompt 角色系统提示（缺省无）
 #   tools         工具白名单（缺省不限制；白名单外工具调用被拒绝并回喂模型）
-#   max_turns     子 Agent 最大循环轮数（缺省 200）
+#   max_turns     子 Agent 单轮内最大步数（缺省 200；一次 LLM 请求 = 一步）
 #   timeout_secs  委托整体超时（秒，缺省不限制）
 #
 # [agent_roles.researcher]

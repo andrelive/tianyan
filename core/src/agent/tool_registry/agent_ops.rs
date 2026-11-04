@@ -483,7 +483,7 @@ impl ToolRegistry {
     ///   [`execute_parallel`]（JoinSet）并行执行，多个子任务可同时推进。
     /// - **嵌套委托**：子 Agent 内可继续委托（树状编排），深度受
     ///   [`MAX_DELEGATION_DEPTH`] 限制，超限调用被拒绝（防失控派生）。
-    /// - **有界循环**：默认 200 轮，可用 `max_turns` 收紧；`timeout_secs`
+    /// - **有界循环**：默认 200 步（单轮内），可用 `max_turns` 收紧；`timeout_secs`
     ///   可整体限时，超时中断委托。
     /// - **后台委托**：`background = true` 时 fire-and-forget——立即返回
     ///   任务 ID，任务独立运行；完成时自动向父会话注入通知（含结果摘要

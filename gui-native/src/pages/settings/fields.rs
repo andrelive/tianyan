@@ -266,12 +266,15 @@ pub(crate) const FIELDS: &[FieldDef] = &[
         tab: SettingsTab::Agent,
         section: "回合与检索",
         path: "agent.max_turns",
-        label: "最大轮次",
-        hint: "单次任务 Agent 循环上限（工具调用轮数）。",
+        // 文案按**语义**说（步），字段名保留历史命名 `max_turns`
+        // （改名是破坏性配置变更；详见 `AgentLoopConfig::max_turns` 的注释）。
+        label: "最大步数",
+        hint: "单轮内最多发几次模型请求（一次请求 = 一步，含工具调用往返）。到顶即收尾——\
+               长任务该拆就拆，别指望一味加大这个数。",
         kind: FieldKind::Int {
             min: 1,
             max: 500,
-            unit: "轮",
+            unit: "步",
         },
         restart: false,
     },

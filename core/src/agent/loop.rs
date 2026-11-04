@@ -23,7 +23,12 @@ use crate::session::SessionManager;
 /// Agent 循环配置。
 #[derive(Debug, Clone)]
 pub struct AgentLoopConfig {
-    /// 最大轮数。
+    /// 单轮内的**步数**上限（一次 LLM 请求 = 一步）。
+    ///
+    /// ⚠️ 命名是历史包袱：字段与循环变量叫 `turn` / `max_turns`，语义却是「步」。
+    /// 真正的「轮」在外层——`AgentCore::run_agent_turn`（用户输入/澄清回答）与
+    /// `process_wake_locked`（压缩续跑、后台通知等唤醒轮）。改名属破坏性配置
+    /// 变更（`[agent].max_turns` 用户可见），故保留字段名，只在文案上纠正。
     pub max_turns: usize,
 }
 
@@ -981,6 +986,9 @@ impl AgentLoop {
         // 每跑一次 loop 就重置 —— 一轮内每档最多提示一次）
         let mut notified = [false; 2];
 
+        // 这里的 `turn` 是**步**（一次 LLM 请求 + 其工具执行）；真正的「轮」在外层
+        // `AgentCore::run_agent_turn` / `process_wake_locked`。命名沿用历史（见
+        // `AgentLoopConfig::max_turns` 的说明）。
         for turn in 0..self.config.max_turns {
             // 轮顶取消检查：工具执行结束后、进入下一轮 LLM 调用前响应取消
             if Self::is_cancelled(cancel) {
