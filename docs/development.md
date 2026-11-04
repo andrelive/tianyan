@@ -27,13 +27,17 @@ pwsh -File scripts/verify-gui-native.ps1  # 自动化验收：一条命令跑完
 - 出包（版本号落点 / 本地打 MSI / CI 发布链 / 已知坑 / 验收清单）→ [`operations/release-msi.md`](operations/release-msi.md)。
 - 验收脚本**必须用 PowerShell 7+（`pwsh`）**：5.1 的 `Invoke-RestMethod` 在响应头没有 `charset` 时按 ISO-8859-1 解码 JSON——读到的中文本身是乱码，再写回服务端就会写坏数据。
 
-### `gui-vite/` —— React 对照前端（**不随包发布**）
+### `gui-vite/` —— 已退役的 Web 前端（**不是产品前端，不随包发布**）
+
+2026-11 退役：native（`gui-native/`）是唯一产品前端，本目录不再进 CI、
+不再接新功能，仅作参考实现与手工调试保留（server 已不再托管其 `dist`，
+浏览器访问请用 vite dev server 的代理）。
 
 ```powershell
 npm run dev            # Vite dev server（端口 5100，/api 代理到 3000）
 npm run test           # vitest 单元测试
 npm run typecheck      # tsc --noEmit
-npm run test:e2e       # Playwright e2e
+npm run test:e2e       # Playwright e2e（后端须避开 3000，见 AGENTS.md）
 ```
 
 文档地图（我要做什么该读哪份）→ [docs/README.md](README.md)。
@@ -111,7 +115,6 @@ npm run test:e2e       # Playwright e2e
 
 ```powershell
 cargo run -p tianyan-server   # 后端 127.0.0.1:3000
-npm run dev                   # 前端 Dev（gui-vite/，5100）
 ```
 
 配置固定 `~/.tianyan/tianyan.toml`（ADR-023）；数据目录由配置 `storage.data_dir` 决定。

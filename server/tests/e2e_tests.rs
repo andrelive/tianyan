@@ -553,66 +553,10 @@ async fn test_e2e_messages_default_is_latest_page() {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// SPA 静态回退与 API 404（修复：前端子路由刷新 404 白屏 / API 未知路径被 SPA 吞掉）
+// API 未知路径兜底
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// SPA 子路由直接访问 / 刷新必须返回外壳 HTML（history 路由语义）。
-///
-/// 判别力：删掉 `static_service` 的 `not_found_service(ServeFile::new(index.html))`
-/// 后，本用例立刻变红（`ServeDir` 对 `/chat` 无对应文件 → 404）。
-#[tokio::test]
-async fn test_e2e_spa_subroute_serves_index_html() {
-    // 静态目录用绝对路径显式指定（测试进程 cwd 是 crate 目录，靠 get_static_dir 的
-    // 猜测列表虽然能命中 `../gui-vite/dist`，但那是隐式的；显式设定让本用例与 cwd 解耦）。
-    // 用 `parent()` 拼出**不含 `..` 的绝对路径**（不能用 canonicalize：Windows 上会变成
-    // `\\?\F:\…` UNC 前缀，`ServeFile` 的路径校验同样会拒）。
-    let dist = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .expect("CARGO_MANIFEST_DIR 应有父目录")
-        .join("gui-vite/dist");
-    assert!(
-        dist.join("index.html").exists(),
-        "本用例需要已构建的前端产物：{}/index.html 不存在（先执行 npm run build）",
-        dist.display()
-    );
-    std::env::set_var("TIANYAN_STATIC_DIR", &dist);
-
-    let dir = tempdir().expect("创建临时目录失败");
-    let config = test_tianyan_config_with_data_dir(dir.path().to_path_buf());
-    let (router, _state) = tianyan_server::create_app_with_assembly(config, test_assembly())
-        .await
-        .expect("create_app 失败");
-    let server = TestServer::start(router).await.expect("启动测试服务器失败");
-
-    for path in ["/chat", "/settings", "/chat/session-does-not-exist"] {
-        let resp = server.get(path).await;
-        assert_eq!(resp.status(), 200, "{path} 应回 SPA 外壳（不是 404）");
-        let body = resp.text().await.unwrap_or_default();
-        assert!(
-            body.contains("id=\"root\""),
-            "{path} 应返回含 #root 的外壳 HTML，实际：{}",
-            &body[..body.len().min(200)]
-        );
-    }
-
-    // 反向对照：真实存在的静态资源仍按 200 返回（fallback 不劫持正常路径）
-    //
-    // 文件名带**内容哈希**（vite / Rolldown 每次构建都变），因此从 dist 现取一个，
-    // 不硬编码——硬编码会让「前端依赖升级 / 重新构建产物」变成「Rust e2e 无故变红」
-    // （期 5-F2 升 vite 8 后本断言即因此失败：旧名 `index-CYF_pX8c.css` 已不存在）。
-    let css_name = std::fs::read_dir(dist.join("assets"))
-        .expect("读取 dist/assets 目录失败")
-        .filter_map(|entry| entry.ok())
-        .map(|entry| entry.file_name().to_string_lossy().into_owned())
-        .find(|name| name.ends_with(".css"))
-        .expect("dist/assets 里应有 css 产物（先执行 npm run build）");
-    let css = server.get(&format!("/assets/{css_name}")).await;
-    assert_eq!(css.status(), 200, "既有静态资源不应被 SPA fallback 影响");
-
-    server.shutdown();
-}
-
-/// 未知 `/api/v1/**` 必须 404 **JSON**，不能被 SPA fallback 变成 index.html。
+/// 未知 `/api/v1/**` 必须 404 **JSON**，不能被任何兜底变成 HTML。
 ///
 /// 判别力：删掉 `api_router` 的 `api_not_found` 兜底后，本用例会拿到 200 + HTML
 /// （前端 `resp.json()` 报 `Unexpected token <`，把「路径写错」伪装成解析错误）。

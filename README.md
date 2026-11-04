@@ -88,12 +88,12 @@ cargo run -p tianyan-server                          # 只跑后端（默认 127
 | `tools-ops/` | 运维工具（服务停止后直接修数据的终端脚本，**不被任何 crate 依赖**） |
 | **`gui-native/`** | **GPUI 原生客户端（主发布渠道）**：独立 workspace，复用 `desktop/` 做单实例发现与端口避让 |
 | `desktop/` | 桌面启动编排：发现「同一数据目录」的已有实例并复用，未命中才自起（ADR-051） |
-| `gui-vite/` | React + TypeScript 前端 —— **保留作对照**，不随包发布 |
+| `gui-vite/` | React + TypeScript 前端 —— **已退役**（2026-11），目录作参考实现保留，不随包发布 |
 | `mcp/` | MCP 协议客户端（stdio + streamable HTTP） |
 
 技术栈：**Rust（stable）· GPUI（原生 UI）· Axum 0.8 · Tokio · LanceDB 0.33（嵌入式向量）· SQLite（主存储）**。
 
-核心设计基于一系列架构决策记录（[ADR 索引](./docs/architecture/decisions/README.md)，共 52 份）：VFS 双层摘要索引（ADR-001）、StructuredMessage 单一真相源（ADR-002）、组件工具化（ADR-003）、前缀匹配上下文组装（ADR-004）、统一事件推送（ADR-028/029）、统一 Agent 循环（ADR-030）、微内核插件化（ADR-049）等。
+核心设计基于一系列架构决策记录（[ADR 索引](./docs/architecture/decisions/README.md)，共 54 份）：VFS 双层摘要索引（ADR-001）、StructuredMessage 单一真相源（ADR-002）、组件工具化（ADR-003）、前缀匹配上下文组装（ADR-004）、统一事件推送（ADR-028/029）、统一 Agent 循环（ADR-030）、微内核插件化（ADR-049）等。
 
 ## 支持的模型
 
@@ -120,7 +120,7 @@ cargo run -p tianyan-server                          # 只跑后端（默认 127
 
 **全部文档的入口 → [`docs/README.md`](./docs/README.md)**（按「我要做什么」索引：模块 / 决策 / 机制 / 运维 / 归档）。
 
-- 架构：[模块索引](./docs/architecture/module-map.md) · [设计原则与纪律](./AGENTS.md) · [ADR 索引（52 份）](./docs/architecture/decisions/README.md)
+- 架构：[模块索引](./docs/architecture/module-map.md) · [设计原则与纪律](./AGENTS.md) · [ADR 索引（54 份）](./docs/architecture/decisions/README.md)
 - 机制：[上下文管线](./docs/architecture/context-pipeline.md) · [事件协议](./docs/architecture/event-protocol.md) · [Provider 备注](./docs/architecture/model-provider-notes.md) · [任务运行时](./docs/architecture/task-runtime.md)
 - 开发与运维：[开发指南](./docs/development.md) · [运维手册](./docs/operations/) · [更新日志](./CHANGELOG.md)
 

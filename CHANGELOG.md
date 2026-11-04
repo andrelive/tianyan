@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Removed
+
+- **Web 端（`gui-vite`）退役——阶段 1：解除 Rust / CI 耦合**。native（GPUI）已是唯一
+  产品前端：MSI 只装 exe、release 链从不构建 `gui-vite`（`release.yml` 头注释原本就这么写）。
+  但 `gui-vite` 仍通过五处耦合牵制 Rust 测试与 CI，其中最硬的一处是
+  `server/tests/e2e_tests.rs` 用例硬断言 `gui-vite/dist/index.html` 存在（缺产物 panic，
+  不是 skip）——CI 因此必须在集成测试前 `npm ci && npm run build`，这正是 v1.0.0 / v1.0.1
+  「tag 推了不出包」事故的机制。本次一并解除：
+  - `server`：删除静态资源服务与 SPA 回退（`get_static_dir`、`/assets` 的 `ServeDir`、
+    `TIANYAN_STATIC_DIR`、`tower-http` 的 `fs` feature）。服务只提供 `/api/v1/**` 与
+    `/health`，未知路径由 axum 默认 404 处理。
+  - 删除 `test_e2e_spa_subroute_serves_index_html`；保留 `test_e2e_unknown_api_returns_404_json_not_html`
+    （API 未知路径仍须 404 JSON，不能被兜成 HTML）。
+  - CI（`quality.yml`）：移除 `setup-node` + npm 缓存 + 前端 build / lint / typecheck / vitest 五步。
+  - 本地门禁（`scripts/test.ps1`）：移除 `gui-build` / `gui-e2e` 两个层级，以及 lint / unit
+    里的前端步骤；层级只剩 `lint | unit | integration | e2e | bench | all`。
+  - `gui-vite/` 目录暂留作参考实现（`npm run dev` 手工仍可用，静态服务已删故后端不再托管
+    其 `dist`）；目录物理删除与文档全量清理留待阶段 2。
+
 ### Added
 
 - **定时任务支持「定点 + 错过策略」（ADR-024 之后的第二维）**：此前只有间隔制

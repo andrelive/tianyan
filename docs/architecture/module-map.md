@@ -33,9 +33,9 @@
 | `tools-ops/` | `tianyan-tools-ops` | **运维工具**（ADR-049 期 4d）：服务停止后直接修数据的终端脚本（`skill_import` / `rebuild_overviews`）；**终端消费者——不被任何 crate 依赖**，因此插件 crate 之间零 dev 边 | `tools-ops/src/` |
 | `app/` | `tianyan-app` (bin: `tianyan-server`) | 装配器（headless）：配置加载 + 日志 + 启动 + 搬迁重启；清单取自 `tianyan-assembly`（ADR-049 期 1 / 期 4） | `app/src/` |
 | `plugins/*` | `tianyan-{tools-fs,tools-code,tools-todo,tools-web,storage-vector,storage-sqlite,task-builtin,task-evolution,policy-approval,policy-context,policy-review,provider-client,provider-llm,provider-embed,tool-pipeline}` | 编译期插件（只依赖 `core`，彼此零互赖） | `plugins/*/src/` |
-| `gui-vite/` | - | React TS 前端 | `gui-vite/src/` |
+| `gui-vite/` | - | React TS 前端（**已退役 2026-11**：不是产品前端，目录仅作参考实现保留） | `gui-vite/src/` |
 | `desktop/` | `tianyan-desktop` | 桌面启动编排：**单 server 发现与复用**（`ensure_server` / `discover_existing`：扫 `3000..=3100` + 校验 `/health` 的 `service` 与 `data_dir`）+ `find_available_port` / `start_axum_server`；`tauri/` 与 `gui-native/` 共用（ADR-051） | `desktop/src/` |
-| `gui-native/` | `tianyan-gui-native` | **GPUI 原生客户端（第二个桌面壳）**：自带 `[workspace]`，**不进主 workspace**（零脚本/IDE/CI 污染，代价 = core+server 编两份）；与 `gui-vite` 并存、走同一套 HTTP/SSE 协议；启动编排同样走 `tianyan-desktop`（ADR-051） | `gui-native/src/` |
+| `gui-native/` | `tianyan-gui-native` | **GPUI 原生客户端（第二个桌面壳）**：自带 `[workspace]`，**不进主 workspace**（零脚本/IDE/CI 污染，代价 = core+server 编两份）；是**唯一产品前端**（`gui-vite` 已退役）、走同一套 HTTP/SSE 协议；启动编排同样走 `tianyan-desktop`（ADR-051） | `gui-native/src/` |
 | `mcp/` | `tianyan-mcp` | MCP 协议客户端 | `mcp/src/` |
 
 共享依赖统一在 workspace `[workspace.dependencies]` 中定义。
@@ -89,7 +89,7 @@
 
 ---
 
-## GUI 子模块
+## GUI 子模块（`gui-vite/`，**已退役 2026-11**——以下结构仅作历史参照，阶段 2 将随目录删除）
 
 | 子模块 | 位置 | 职责 |
 |--------|------|------|

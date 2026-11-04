@@ -206,7 +206,7 @@ curl.exe -sSL --compressed -H "Authorization: Bearer $tok" `
 
 ## 5. 本地验收入口（避免"本地绿 / CI 红"）
 
-推送前跑 **`.\scripts\test.ps1 lint`**（= fmt + `clippy --all-targets -D warnings` + 工具目录 freshness + 前端 lint/typecheck）。
+推送前跑 **`.\scripts\test.ps1 lint`**（= fmt + `clippy --all-targets -D warnings` + 工具目录 freshness + 版本一致性）。
 
 **不要**用单条手工命令替代：0.6.3 排查期间只跑了 `cargo check` 就推送，
 CI 的 clippy 立刻红（`doc_lazy_continuation`：doc 注释里列表项后紧跟无缩进段落）。

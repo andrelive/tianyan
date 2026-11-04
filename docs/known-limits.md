@@ -21,7 +21,7 @@
 
 ### 3. 没有 CLI 交互模式
 
-- **现象**：天演只有**桌面客户端**（`gui-native`，GPUI 原生；`gui-vite` 保留做对照）+ **HTTP API**。没有 `tianyan chat` 之类的命令行对话；命令行只用来传启动参数，不构成交互。
+- **现象**：天演只有**桌面客户端**（`gui-native`，GPUI 原生；`gui-vite` 已于 2026-11 退役）+ **HTTP API**。没有 `tianyan chat` 之类的命令行对话；命令行只用来传启动参数，不构成交互。
 - **限制**：脚本化只有 HTTP API 一条路（端点见 [`api-endpoints.md`](api-endpoints.md)），需要自己起服务/起客户端。
 - **处置**：要走自动化，用 HTTP API 或 GUI 自动化端口（ADR-052）。
 

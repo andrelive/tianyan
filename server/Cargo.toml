@@ -16,7 +16,7 @@ tianyan-service-config = { path = "../service/config" }
 
 # HTTP server
 axum = { version = "0.8", features = ["multipart"] }
-tower-http = { version = "0.6", features = ["cors", "trace", "fs"] }
+tower-http = { version = "0.6", features = ["cors", "trace"] }
 tower = { version = "0.5", features = ["util"] }
 
 # Core dependencies

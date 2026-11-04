@@ -10,7 +10,7 @@
 | 知道天演是什么、怎么装起来 | [`../README.md`](../README.md)（产品介绍 + 快速开始） |
 | 改代码前弄清纪律与禁区 | [`../AGENTS.md`](../AGENTS.md) — **必读**：硬块约束 / 构建命令 / 工作区结构 / 代码规范 / 设计原则 / 模块速览 / 常见陷阱 |
 | 找某个模块在哪、职责是什么 | [`architecture/module-map.md`](architecture/module-map.md) — **唯一的模块索引**（crate / core 子模块 / server / GUI） |
-| 查某个设计为什么这么定 | [`architecture/decisions/`](architecture/decisions/) — 52 份 ADR，全量索引见 [`architecture/decisions/README.md`](architecture/decisions/README.md)；被否的方向见 [`architecture/decisions/REJECTED.md`](architecture/decisions/REJECTED.md) |
+| 查某个设计为什么这么定 | [`architecture/decisions/`](architecture/decisions/) — 54 份 ADR，全量索引见 [`architecture/decisions/README.md`](architecture/decisions/README.md)；被否的方向见 [`architecture/decisions/REJECTED.md`](architecture/decisions/REJECTED.md) |
 | 理解一条链路的机制（不是决策） | 下面的「专题文档」 |
 | 改契约前先确认级别 | [`architecture/contracts.md`](architecture/contracts.md) — S / A / B 契约分级台账（分级已冻结） |
 | 排查故障 / 体检数据 / 出包 / CI / 依赖升级 | [`operations/`](operations/) — 五份运维手册 |

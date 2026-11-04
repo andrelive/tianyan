@@ -46,9 +46,9 @@ cargo fmt --all                             # 自动格式化
 cargo clippy --workspace                    # Clippy
 cargo test -p tianyan-core --lib            # 单元测试
 cargo test -p tianyan-core vfs::backend::local -- --nocapture  # 指定测试模块
-.\scripts\test.ps1 lint                     # fmt + clippy(--all-targets) + 工具目录 freshness + 前端 lint/typecheck
-.\scripts\test.ps1 unit                     # Rust 单测 + 前端 vitest
-.\scripts\test.ps1 all                      # lint + unit + integration + e2e + gui-build + gui-e2e + bench
+.\scripts\test.ps1 lint                     # fmt + clippy(--all-targets) + 工具目录 freshness + 版本一致性
+.\scripts\test.ps1 unit                     # Rust 单测
+.\scripts\test.ps1 all                      # lint + unit + integration + e2e + bench
 ```
 
 ## 工作区结构
@@ -60,7 +60,7 @@ cargo test -p tianyan-core vfs::backend::local -- --nocapture  # 指定测试模
 | `core/` | `tianyan-core` (lib: `tianyan`) | 纯库（内核：契约 + 实现 + 策略） |
 | `server/` | `tianyan-server` | Axum HTTP 服务（**不认识任何具体插件 crate**） |
 | `app/` | `tianyan-app` (bin: `tianyan-server`) | **装配器**：唯一 `use` 插件类型之处，装配清单住这里 |
-| `gui-vite/` | - | React TypeScript 前端（非 crate） |
+| `gui-vite/` | - | **已退役（2026-11，冻结中）**：React TypeScript 前端（非 crate）。它不是产品前端——MSI 只装 exe、release 链从不构建它；Rust/CI 耦合已摘除（server 静态资源服务 + SPA 回退删除、CI 前端门禁移除、test.ps1 前端层级移除），目录暂留作参考实现（`npm run dev` 手工仍可用） |
 | `mcp/` | `tianyan-mcp` | MCP 协议客户端 |
 | `service/config/` | `tianyan-service-config` | **服务层**：配置加载 / 持久化（段保全）/ 数据目录迁移 / 校验编排 / 向导 DTO（ADR-049 期 3-T4，753 生产行从 core 搬出）；**不含配置结构**（`TianyanConfig` 留 core——内核与插件的共同构造参数） |
 | `assembly/` | `tianyan-assembly` | **装配清单**：11 个插件工厂 + 两份清单（`full()` = 生产 11 插槽 / `policies()` = 集成测试的 9 插槽前缀）+ 跨插件顺序断言的**单一实现**（ADR-049 期 4）；全仓唯一 `use` 全部插件 crate 之处（改造前同一份清单在 `app` / `gui-native` / `server/tests` / `app/tests` / `app/examples` 共 5 处副本） |
@@ -81,7 +81,7 @@ cargo test -p tianyan-core vfs::backend::local -- --nocapture  # 指定测试模
 | `plugins/provider-llm/` | `tianyan-provider-llm` | 插件：**聊天 + 视觉 provider**（`chat` / `vision` / `discovery` / 日志装饰，约 2,450 行 + 39 个迁移测试）+ 连通性探针（配置页「测试连接」）；`async-openai` 随之离开 core（ADR-049 期 2 序 6） |
 | `plugins/provider-embed/` | `tianyan-provider-embed` | 插件：**文本嵌入 provider**（宽容 usage 解析 / 用量上报 / 查询缓存 FIFO 256，约 700 行 + 10 个迁移测试）；用量上报**契约** `EmbeddingUsageSink` 留 core（实现方在通道层）（期 2 序 6） |
 | `plugins/tool-pipeline/` | `tianyan-tool-pipeline` | 插件：**工具管线出口侧**——观测监听器（统计 / Trace / GEPA 执行记录 / 失败规则学习，213 生产行）+ 超预算输出落盘（ADR-047，181 生产行）+ 工具目录渲染（96 生产行），394 生产行搬出 core + 14 个迁移测试 + 2 个新增；契约 `ToolPostExecuteListener` / `ToolPipelineWiring` / `ToolPipelineFactory` 留 core（`agent::tool_registry::pipeline`，期 3-T5） |
-| `gui-native/` | `tianyan-gui-native` | **GPUI 原生客户端（第二个桌面壳，独立 workspace）**：自带 `[workspace]`，**不进主 workspace**（零脚本改动、零 IDE 索引污染、零 CI 风险；代价 = `core`/`server` 编两份）。与 `gui-vite` 并存（`tauri/` **已于 2026-10 删除**），连同一个内嵌 server、走同一套 HTTP/SSE 协议。验证结论与实测数据见 `gui-native/README.md`（含 GPUI 内存对比、IME/Markdown/虚拟列表实测）；打包四节（静默安装 / 同版本升级 / 验收 / 自动更新编排）见 [`docs/operations/release-msi.md`](docs/operations/release-msi.md) |
+| `gui-native/` | `tianyan-gui-native` | **GPUI 原生客户端（第二个桌面壳，独立 workspace）**：自带 `[workspace]`，**不进主 workspace**（零脚本改动、零 IDE 索引污染、零 CI 风险；代价 = `core`/`server` 编两份）。是**唯一的产品前端**（`tauri/` **已于 2026-10 删除**、`gui-vite/` **已于 2026-11 退役**），连同一个内嵌 server、走同一套 HTTP/SSE 协议。验证结论与实测数据见 `gui-native/README.md`（含 GPUI 内存对比、IME/Markdown/虚拟列表实测）；打包四节（静默安装 / 同版本升级 / 验收 / 自动更新编排）见 [`docs/operations/release-msi.md`](docs/operations/release-msi.md) |
 
 **依赖铁律**（破一条拆包收益全部回吐）：插件只依赖 `core`（kernel-api）；插件之间零互赖；
 `core`/`server` 不认识任何插件 crate。**认识具体插件 crate 的只有三处**：`assembly/`
@@ -179,7 +179,7 @@ agent 没有 system 前缀、上下文只增不减，服务起得来但行为已
 
 **完整文档地图 → [`docs/README.md`](docs/README.md)**（按「我要做什么」索引）。这里只留最常查的。
 
-核心架构决策 → [`docs/architecture/decisions/`](docs/architecture/decisions/)（52 份，全量索引见该目录 `README.md`）。最常查的九份：
+核心架构决策 → [`docs/architecture/decisions/`](docs/architecture/decisions/)（54 份，全量索引见该目录 `README.md`）。最常查的九份：
 
 - [ADR-001: VFS 双层摘要索引](docs/architecture/decisions/001-vfs-dual-layer-index.md) — 项目基础机制（**检索两铁律**见「模块速览」下方注）
 - [ADR-018: 会话权威存储迁至 SQLite](docs/architecture/decisions/018-session-authoritative-sqlite.md) — 会话不经 VFS 的唯一例外
@@ -261,7 +261,7 @@ Harness 工程（外部资料整理，非天演机制）→ [`docs/reference/har
 - 工具不做自主多轮决策，决策权在 LLM
 - 已有链路不叠加抽象（不额外封装 Manager/Coordinator）
 - `server/main.rs` 不解析 `--host/--port` 命令行参数——独立启动默认监听 `127.0.0.1:3000`（`TIANYAN_PORT` 可覆盖，走 `ServerConfig::from_env`），QA 时直接测 3000
-- **GUI e2e 后端刻意不用 3000**：`gui-vite/playwright.config.ts` 的 `E2E_PORT`（默认 3099，`TIANYAN_E2E_PORT` 可覆盖），vite 经 `TIANYAN_API_TARGET` 代理到该端口——本地 3000 常被运行中的桌面应用（`tianyan-gui-native`）占用，若共用则「跑 e2e」与「用应用」互斥（后端条目 `reuseExistingServer: false` 会因端口冲突响亮失败）
+- **手工跑 Web 端 playwright 时后端仍须避开 3000**（gui-vite 已退役、e2e 不再进 CI，此条仅手工需要）：`gui-vite/playwright.config.ts` 的 `E2E_PORT`（默认 3099，`TIANYAN_E2E_PORT` 可覆盖），vite 经 `TIANYAN_API_TARGET` 代理到该端口——本地 3000 常被运行中的桌面应用（`tianyan-gui-native`）占用，若共用则「跑 e2e」与「用应用」互斥（后端条目 `reuseExistingServer: false` 会因端口冲突响亮失败）
 - 配置热更新 API（`PUT /api/v1/config`）会持久化写入 `tianyan.toml`——QA/测试改动配置后必须恢复，别留污染
 - **PowerShell + cargo 陷阱（会伪造"编译失败"）**：PowerShell 5.1 下 `cargo ... 2>&1 | Select-String` / `Out-String` 会把 cargo 写到 **stderr** 的内容（warning 列表、`Blocking waiting for file lock`）当作错误抛出（`NativeCommandError`，exit 1）——即使编译实际成功。判据是输出里是否出现 `Finished` / `test result:`。脚本内用 `$ErrorActionPreference="Continue"`，交互排查可用 `cmd /c "cargo ..."`
 - 事件总线为**有界通道**（4096）：订阅者（事件处理器/SSE）积压时丢弃事件并计数（`EventBus::dropped_events()`）——实时通知尽力而为，权威数据在 SQLite/日志文件；不要把"事件必达"当作完整性契约

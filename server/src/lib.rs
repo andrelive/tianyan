@@ -3,19 +3,13 @@
 // 测试代码中 unwrap 是有意的（失败即 panic 即测试失败），豁免以保持测试可读性。
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
-use axum::http::{HeaderValue, StatusCode};
-use axum::{
-    extract::DefaultBodyLimit,
-    response::{IntoResponse, Json},
-    routing::get,
-    Router,
-};
+use axum::http::HeaderValue;
+use axum::{extract::DefaultBodyLimit, response::Json, routing::get, Router};
 use serde::Serialize;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::sync::watch;
 use tower_http::cors::{Any, CorsLayer};
-use tower_http::services::ServeDir;
 use tower_http::trace::TraceLayer;
 use tracing::{error, info, warn};
 
@@ -159,45 +153,6 @@ async fn health_check() -> Json<HealthResponse> {
         data_dir,
         pid: std::process::id(),
     })
-}
-
-/// Get the static files directory path
-///
-/// This function tries to find the gui-vite/dist directory from various possible locations
-fn get_static_dir() -> std::path::PathBuf {
-    // 显式覆盖（测试 / 自定义部署）：优先于所有猜测路径。
-    // 测试进程的 cwd 是 crate 目录（`server/`），下面第 3 条能命中；但 CI 或嵌
-    // 入式部署未必，故留一条确定性入口。
-    if let Ok(dir) = std::env::var("TIANYAN_STATIC_DIR") {
-        if !dir.is_empty() {
-            return std::path::PathBuf::from(dir);
-        }
-    }
-    // 基准目录：当前工作目录（支持从项目根或 target/{debug,release} 启动）
-    let current_dir = std::env::current_dir().unwrap_or_default();
-
-    // Check if we're running from target/release or target/debug
-    let possible_paths = [
-        // From target/release or target/debug - go up 3 levels to project root
-        current_dir.join("../../..").join("gui-vite/dist"),
-        // Direct from project root
-        current_dir.join("gui-vite/dist"),
-        // From tauri directory
-        current_dir.join("../gui-vite/dist"),
-        // Legacy gui/dist layouts (kept for backward compatibility)
-        current_dir.join("../../..").join("gui/dist"),
-        current_dir.join("gui/dist"),
-        current_dir.join("../gui/dist"),
-    ];
-
-    for path in &possible_paths {
-        if path.exists() && path.join("index.html").exists() {
-            return path.clone();
-        }
-    }
-
-    // Default fallback - use the first option and let it fail gracefully if not found
-    possible_paths[0].clone()
 }
 
 /// 应用级 VFS 初始化
@@ -554,69 +509,12 @@ async fn create_app_inner(
     // Create API router
     let api_router = create_api_router(state.clone());
 
-    // Serve static files (gui-vite/dist preferred, legacy gui/dist fallback)
-    let static_dir = get_static_dir();
-    info!("Serving static files from: {}", static_dir.display());
-
-    // SPA 回退（修复：`/chat` 等前端子路由直接访问/刷新返回 404 白屏）。
-    //
-    // 前端是 history 路由（`/chat`、`/chat/{session_id}`、`/settings`…），磁盘上没有
-    // 对应文件，用户按 F5 时浏览器请求的就是 `/chat` —— 必须回 `index.html` 交给前端路由。
-    //
-    // 实现选择（**纠错记录**）：最初用「教科书写法」
-    // `ServeDir::not_found_service(ServeFile::new(index))`，实测仍返回 404，一度误判为
-    // axum 0.8 + tower-http 0.6 的版本缺陷。查 tower-http 源码后确认是**用法错误**：
-    //
-    //     pub fn not_found_service<F2>(self, f: F2) -> ServeDir<SetStatus<F2>> {
-    //         self.fallback(SetStatus::new(f, StatusCode::NOT_FOUND))   // 强制 404
-    //     }
-    //
-    // 它的语义是「404 + 自定义 body」，**不是** SPA fallback（那要求 200 + index.html），
-    // 所以 404 是正确行为。SPA 要用 `.fallback(ServeFile::new(index))`（不带 SetStatus）。
-    // 这里最终选用显式 handler，是因为它能区分两类未命中（见下），比 ServeDir::fallback
-    // 更精确：
-    // - `/assets/*` 交给 `ServeDir`（保留正确 MIME 与缓存头）；
-    // - 无扩展名的路径（前端路由）→ `index.html`；
-    // - 带扩展名的（`/missing.js`）→ 404，**不**伪装成 HTML（否则浏览器把 HTML 当 JS
-    //   解析，报出与真实原因无关的语法错误）；
-    // - `/api/v1/**` 的未知路径由 api_router 的 `api_not_found` 先兜住（404 JSON），
-    //   不会落到这里变成 HTML。
-    let spa_index = static_dir.join("index.html");
-    let spa_fallback = move |uri: axum::http::Uri| {
-        let index = spa_index.clone();
-        async move {
-            let path = uri.path();
-            let last_segment = path.rsplit('/').next().unwrap_or("");
-            // 带扩展名 → 静态资源缺失，如实 404（不吞成 HTML）
-            if last_segment.contains('.') {
-                return (StatusCode::NOT_FOUND, "静态资源不存在").into_response();
-            }
-            match tokio::fs::read(&index).await {
-                Ok(bytes) => (
-                    [(axum::http::header::CONTENT_TYPE, "text/html; charset=utf-8")],
-                    bytes,
-                )
-                    .into_response(),
-                Err(e) => {
-                    // 前端产物缺失（未 npm run build / 部署不完整）：如实报错，不静默白屏
-                    error!("SPA 外壳读取失败（{}）：{}", index.display(), e);
-                    (
-                        StatusCode::NOT_FOUND,
-                        format!("前端产物缺失：{}", index.display()),
-                    )
-                        .into_response()
-                }
-            }
-        }
-    };
-    let assets_service = ServeDir::new(static_dir.join("assets"));
-
+    // 静态资源服务已随 gui-vite 退役（SPA 外壳 / /assets / TIANYAN_STATIC_DIR 一并移除）：
+    // 本服务只提供 `/api/v1/**` 与 `/health`，未知路径由 axum 默认 404 处理。
     Ok((
         Router::new()
             .route("/health", get(health_check))
             .merge(api_router)
-            .nest_service("/assets", assets_service)
-            .fallback(spa_fallback)
             .layer(cors)
             .layer(TraceLayer::new_for_http())
             .layer(DefaultBodyLimit::max(50 * 1024 * 1024)), // 50MB 请求体限制
