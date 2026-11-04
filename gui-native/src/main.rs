@@ -379,6 +379,11 @@ struct ClientApp {
     /// 用户是否上滚看历史了（由消息列表的滚动监听维护，**不靠位置推算**）。
     /// `true` = 别自动滚到底；`false` = 跟随尾部（新内容到达即贴底）。
     pub(crate) msg_scrolled_up: Rc<std::cell::Cell<bool>>,
+    /// 消息列顶部此刻是否正显示「↑ 加载更早」浮层（渲染时写入，滚动监听读）。
+    ///
+    /// 用途：滚轮事件不再无条件重渲染整列，只有「按钮该出现/该消失」翻转时才
+    /// `cx.notify()`——每次滚轮都重渲染（含 overdraw 内的项）会让滚动发涩。
+    pub(crate) older_btn_shown: std::cell::Cell<bool>,
     /// 会话消息总数（messages 可能只保留最近 N 条用于渲染）
     pub(crate) message_total: usize,
     pub(crate) status: String,

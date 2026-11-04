@@ -236,6 +236,7 @@ impl ClientApp {
             messages,
             msg_scrolled_up: scrolled_up.clone(),
             msg_list_state: new_msg_list_state(0, scrolled_up.clone()),
+            older_btn_shown: std::cell::Cell::new(false),
             message_total: total,
             status: "正在连接后端…".to_string(),
             port,
@@ -2010,25 +2011,17 @@ impl ClientApp {
                     .and_then(|v| v.as_bool())
                     .unwrap_or(false);
                 this.messages = Rc::new(merged);
-                // 重建列表（item_count 构造时固定），并把视线留在**原来那条**上：
-                // 前插了 added 条，原来的第一条现在在索引 added
-                //
-                // 重建会丢掉「是否跟尾」的状态，而这条路径正是**用户上滚**触发的：
-                // 若重建后无条件贴底，「加载更早」就变成了「跳到底部」。所以先记住
-                // 重建前的跟随状态——跟随中就贴底，否则按 added 把视线放回原处。
-                let was_following = this.follows_tail();
-                this.msg_list_state =
-                    new_msg_list_state(this.messages.len(), this.msg_scrolled_up.clone());
-                if was_following {
-                    this.msg_list_state.scroll_to_end();
-                } else if added > 0 {
-                    this.msg_list_state.scroll_to(gpui_kit::ListOffset {
-                        item_ix: added,
-                        offset_in_item: px(0.),
-                    });
-                    // 构造新 state 时标志被复位成「跟随」，这里要恢复成「用户在看历史」：
-                    // 否则下一页 delta 一到，刚加载好的历史就又被拉到底部。
-                    this.msg_scrolled_up.set(true);
+                // 用 `splice` **前插**，而不是重建 `ListState`：
+                // 1. 重建会丢掉**所有已测量高度** → 整列表按估算值重排 → 视口跳
+                //    （用户实测「加载更早之后画面会跳一下」的根因之一）；
+                // 2. `splice(0..0, added)` 由 gpui 保持滚动锚点
+                //    （同 `MessageScrollerState::prepend` 的语义），不需要手动
+                //    `scroll_to`——手写那版还把 `offset_in_item` 丢成 0，用户若正停在
+                //    某条中间，会被对齐到条目顶部（几十~几百像素的跳变）。
+                // 3. 程序 splice 不触发滚动监听，`msg_scrolled_up` 原值保持（上滚中仍是
+                //    true），后续 delta 不会把视图拽回底部。
+                if added > 0 {
+                    this.msg_list_state.splice(0..0, added);
                 }
                 this.message_total = this.messages.len();
                 // 标题跟着走（「还有更早」随 has_more 出现/消失）
@@ -2377,7 +2370,16 @@ pub(crate) fn new_msg_list_state(
     item_count: usize,
     scrolled_up: Rc<std::cell::Cell<bool>>,
 ) -> GpuiListState {
-    let state = GpuiListState::new(item_count, ListAlignment::Bottom, px(120.));
+    // overdraw = 视口上下各**预测量**多少像素。gpui 文档原话：它就是为了
+    // 「滚动时不让列表闪烁/弹跳」（elements within this area will be measured
+    // even though they are not visible）——原来只给 120px（约一条短消息），而消息项
+    // 高度方差极大（一行 user 气泡 ↔ 上百行 assistant 回复）：向上滚动时视口上方
+    // 不断有未测量项被测量，`ListItemSummary` 的估算高度被真实值修正，靠估算反查
+    // 出来的 `logical_scroll_top` 随即失效 → 重排后内容整体位移（用户实测「滚过
+    // 两轮对话的位置会跳、不平滑」）。
+    // 600px ≈ 2–3 屏预测量（gpui-component 的 `MessageScroller` 用 400；我们的项
+    // 更重且高度方差更大，取大一档）。代价是每次布局多测量几项，可接受。
+    let state = GpuiListState::new(item_count, ListAlignment::Bottom, px(600.));
     // 新构造 / 重置后一律贴底（`scrolled_up = false`）
     scrolled_up.set(false);
     state.set_scroll_handler(move |event, _window, _cx| {

@@ -555,7 +555,7 @@ impl ClientApp {
     /// 父级用 `flex_col + items_center` 让限宽块水平居中；限宽块自身
     /// `w_full + max_w` 才会在宽窗口下取 896。
     pub(crate) fn render_message_column(&self, cx: &mut Context<Self>) -> AnyElement {
-        let mut col = div()
+        let col = div()
             .flex_1()
             .min_h_0()
             .w_full()
@@ -574,12 +574,84 @@ impl ClientApp {
         // 缺的那半环是**滚动后重新渲染**——在列表容器上挂 `on_scroll_wheel`
         // （见下），滚轮到达时 `cx.notify()`。它不消费事件，列表自身照常滚动。
         let at_top = self.msg_list_state.logical_scroll_top().item_ix == 0;
-        if self.has_more_history && at_top {
-            col = col.child(
+        // 入口**只在滚到顶部时出现**（早先常驻时用户抱怨「一直出现，不符合预期」）。
+        // 但它必须做成**浮层**（见下方 `list_area` 的绝对定位）：按 `at_top` 出现/消失
+        // 的东西一旦参与纵向布局，就会在滚到顶的那一刻改变列表的可用高度 → 内容整体
+        // 位移（用户实测「向上滚到最前面那两轮对话时会跳一下、不平滑」）。
+        let show_older = self.has_more_history && at_top;
+        // 记录本次渲染的按钮可见性：滚动监听据此判断「要不要重渲染」（见
+        // `on_scroll_wheel`）。
+        self.older_btn_shown.set(show_older);
+        let mut list_area = div()
+            .flex_1()
+            .min_h_0()
+            .w_full()
+            .max_w(px(colors::CHAT_MAX_W))
+            // 浮层定位基准（「加载更早」按钮挂在上方，不占布局）
+            .relative()
+            // 滚轮到达：**只在「加载更早」浮层该出现/该消失时**才重渲染。
+            //
+            // 早先这里无条件 `cx.notify()` —— 每收到一个滚轮事件就把整列重渲染一遍
+            // （含 overdraw 区内已测量的项，每项都是 markdown 文本），滚动因此发涩；
+            // 而它唯一的目的只是让那颗浮层按钮按位置出现/消失，判据本身极便宜。
+            // 不 stop_propagation：列表自己还要滚。
+            .on_scroll_wheel(
+                cx.listener(|this, _ev: &gpui_kit::ScrollWheelEvent, _window, cx| {
+                    let at_top = this.msg_list_state.logical_scroll_top().item_ix == 0;
+                    let want = this.has_more_history && at_top;
+                    if want != this.older_btn_shown.get() {
+                        cx.notify();
+                    }
+                }),
+            )
+            .child({
+                let items = self.messages.clone();
+                let expand = self.expand.clone();
+                let app = self.app_ref.clone();
+                // 回退需要会话 id（消息操作按钮用）
+                let sid = self.current_session.clone().unwrap_or_default();
+                // 「思考中」指示器的两个输入：本轮是否在跑、哪条是末尾。
+                // 判定本身在 `msg::stream_pending` 一处（气泡内与输入卡片控件行
+                // 共用），这里只负责把「是不是末尾」喂进去。
+                let streaming = self.busy();
+                let tail_ix = self.messages.len().saturating_sub(1);
+                // 时间戳落点预计算：本轮最后一条**有正文**的 assistant；整轮没有正文
+                // （纯工具调用就结束）则兜底到最后一条 assistant。语义判据见
+                // `msg::ts_anchor_flags` —— 不再用「下一条是不是 assistant」这句几何
+                // 判据（`tool` 的 role 也不是 assistant，会把中间步误判成轮末）。
+                let ts_flags = std::rc::Rc::new(ts_anchor_flags(&items));
+                gpui_list(self.msg_list_state.clone(), move |ix, _window, _cx| {
+                    let Some(m) = items.get(ix) else {
+                        return div().into_any_element();
+                    };
+                    // 这条是否属于**同一轮**的后续步骤（一轮多步 → 每步一条
+                    // assistant 消息），用于弱化渲染与压紧留白。判据（含压缩点
+                    // 例外）收敛在 `msg::same_turn_continuation` 一处。
+                    let is_continuation = same_turn_continuation(&items, ix);
+                    // 本条是不是这一轮的时间锚点（预计算，见上方 `ts_flags`）。
+                    let show_ts = ts_flags.get(ix).copied().unwrap_or(false);
+                    // 段渲染口径见 `render_msg_body`（思考块 / 工具卡可折叠，
+                    // 结果按 `tool_calls` 的 id 关联）
+                    render_msg_body(
+                        m,
+                        ix,
+                        &expand,
+                        &app,
+                        &sid,
+                        is_continuation,
+                        show_ts,
+                        stream_pending(m, streaming && ix == tail_ix),
+                    )
+                })
+                .size_full()
+            });
+        if show_older {
+            list_area = list_area.child(
                 div()
-                    .w_full()
-                    .max_w(px(colors::CHAT_MAX_W))
-                    .pt_2()
+                    .absolute()
+                    .top_2()
+                    .left_0()
+                    .right_0()
                     .flex()
                     .flex_row()
                     .justify_center()
@@ -606,62 +678,7 @@ impl ClientApp {
                     ),
             );
         }
-        col.child(
-            div()
-                .flex_1()
-                .min_h_0()
-                .w_full()
-                .max_w(px(colors::CHAT_MAX_W))
-                // 滚轮到达 → 重渲染，让上面那颗「加载更早」按钮按滚动位置出现/消失。
-                // 不 stop_propagation：列表自己还要滚。
-                .on_scroll_wheel(cx.listener(
-                    |_this, _ev: &gpui_kit::ScrollWheelEvent, _window, cx| {
-                        cx.notify();
-                    },
-                ))
-                .child({
-                    let items = self.messages.clone();
-                    let expand = self.expand.clone();
-                    let app = self.app_ref.clone();
-                    // 回退需要会话 id（消息操作按钮用）
-                    let sid = self.current_session.clone().unwrap_or_default();
-                    // 「思考中」指示器的两个输入：本轮是否在跑、哪条是末尾。
-                    // 判定本身在 `msg::stream_pending` 一处（气泡内与输入卡片控件行
-                    // 共用），这里只负责把「是不是末尾」喂进去。
-                    let streaming = self.busy();
-                    let tail_ix = self.messages.len().saturating_sub(1);
-                    // 时间戳落点预计算：本轮最后一条**有正文**的 assistant；整轮没有正文
-                    // （纯工具调用就结束）则兜底到最后一条 assistant。语义判据见
-                    // `msg::ts_anchor_flags` —— 不再用「下一条是不是 assistant」这句几何
-                    // 判据（`tool` 的 role 也不是 assistant，会把中间步误判成轮末）。
-                    let ts_flags = std::rc::Rc::new(ts_anchor_flags(&items));
-                    gpui_list(self.msg_list_state.clone(), move |ix, _window, _cx| {
-                        let Some(m) = items.get(ix) else {
-                            return div().into_any_element();
-                        };
-                        // 这条是否属于**同一轮**的后续步骤（一轮多步 → 每步一条
-                        // assistant 消息），用于弱化渲染与压紧留白。判据（含压缩点
-                        // 例外）收敛在 `msg::same_turn_continuation` 一处。
-                        let is_continuation = same_turn_continuation(&items, ix);
-                        // 本条是不是这一轮的时间锚点（预计算，见上方 `ts_flags`）。
-                        let show_ts = ts_flags.get(ix).copied().unwrap_or(false);
-                        // 段渲染口径见 `render_msg_body`（思考块 / 工具卡可折叠，
-                        // 结果按 `tool_calls` 的 id 关联）
-                        render_msg_body(
-                            m,
-                            ix,
-                            &expand,
-                            &app,
-                            &sid,
-                            is_continuation,
-                            show_ts,
-                            stream_pending(m, streaming && ix == tail_ix),
-                        )
-                    })
-                    .size_full()
-                }),
-        )
-        .into_any_element()
+        col.child(list_area).into_any_element()
     }
 
     /// 事件流断线横幅：只在 `events_connected == false` 时出现。
