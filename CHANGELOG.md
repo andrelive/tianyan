@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.2.2] - 2026-11-04
+
+### Added
+
+- **设置页可以自己选命令执行 Shell，并看到「当前生效」到底是什么**：`[executor].shell` 一直
+  只能改 `tianyan.toml`，而 `auto` 探测到的结果只写在启动日志里。实测踩过一次：本机装了
+  PowerShell 7，报错里却出现 5.1 的行为，翻日志才排除「auto 选错」（真因是别处裸写了
+  `powershell`，与 auto 无关）——但用户没有任何界面证据可用。
+  - **Agent 栏目新增「命令执行」分组**（排在栏目最前）：`[executor].shell`
+    （自动 / PowerShell 7+ / PS 5.1 / cmd / bash / sh / 自定义）+ `[executor].shell_program`
+    （pwsh 没进 PATH 时填绝对路径）。
+  - **栏目顶部新增「命令执行环境（当前生效）」卡片**：Shell 身份、可执行绝对路径、参数模板，
+    每行可复制、可刷新。数据源是新接口 `GET /api/v1/config/executor`，它返回的是**服务进程里
+    已安装的 spec**（`shell::current()`），不是前端按配置值二次推算——配置写 `auto` 时两者本就
+    不同，而用户要的正是「实际在跑什么」。
+  - 保存后卡片立刻刷新（服务端 resolve + install 是热生效，不需要重启应用）。
+  - 自动化：`/state` 增加 `executor_shell`（configured / kind / executable / args），
+    「切换真的生效了」不再只能靠截图判断；设置页「切栏目 + 懒加载」抽成
+    `enter_settings_tab`，界面点击与 `/act settings_tab` 走同一条路径（此前两处各写一份 match）。
+
 ### Fixed
 
 - **流式输出把用户上滚的位置又拉回底部（「想翻历史却被拽回」）**：跟随判据三代都不可靠，
@@ -36,28 +56,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     只能调 todo 工具（**不要在回复正文里罗列待办**）」；
   - `todo` 工具描述新增【禁止】条（同时压缩原有措辞，控制在 300 字内）；
   - `default_soul.md`：计划只写进 `todo` 工具，正文罗列会让用户看到两份不一致的清单。
-
-## [1.2.2] - 2026-11-02
-
-### Added
-
-- **设置页可以自己选命令执行 Shell，并看到「当前生效」到底是什么**：`[executor].shell` 一直
-  只能改 `tianyan.toml`，而 `auto` 探测到的结果只写在启动日志里。实测踩过一次：本机装了
-  PowerShell 7，报错里却出现 5.1 的行为，翻日志才排除「auto 选错」（真因是别处裸写了
-  `powershell`，与 auto 无关）——但用户没有任何界面证据可用。
-  - **Agent 栏目新增「命令执行」分组**（排在栏目最前）：`[executor].shell`
-    （自动 / PowerShell 7+ / PS 5.1 / cmd / bash / sh / 自定义）+ `[executor].shell_program`
-    （pwsh 没进 PATH 时填绝对路径）。
-  - **栏目顶部新增「命令执行环境（当前生效）」卡片**：Shell 身份、可执行绝对路径、参数模板，
-    每行可复制、可刷新。数据源是新接口 `GET /api/v1/config/executor`，它返回的是**服务进程里
-    已安装的 spec**（`shell::current()`），不是前端按配置值二次推算——配置写 `auto` 时两者本就
-    不同，而用户要的正是「实际在跑什么」。
-  - 保存后卡片立刻刷新（服务端 resolve + install 是热生效，不需要重启应用）。
-  - 自动化：`/state` 增加 `executor_shell`（configured / kind / executable / args），
-    「切换真的生效了」不再只能靠截图判断；设置页「切栏目 + 懒加载」抽成
-    `enter_settings_tab`，界面点击与 `/act settings_tab` 走同一条路径（此前两处各写一份 match）。
-
-### Fixed
 
 - **切 shell 后「模型看到的平台事实」滞后一次重建**：`persist_and_reload` 里
   `shell::install(spec)` 原本排在 `update_config`（重建 Agent）**之后**。Agent 重建时
