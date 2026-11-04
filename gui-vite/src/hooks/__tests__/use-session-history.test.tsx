@@ -111,7 +111,10 @@ describe('useSessionHistory', () => {
     expect(useAppStore.getState().sessionMessages['session-1']).toHaveLength(2);
   });
 
-  it('loadSessionHistory fetches only the latest page (limit=50) and records paging meta', async () => {
+  // `base` 是**基准量**（1.2.1 定稿语义，原参数名 `limit`）：页首无条件向前对齐到
+  // 最近的「真 user」，一页实际条数 ≥ base。断言仍写 `limit=50` 会让「实现已改、
+  // 测试没跟」的红挂在 CI 上（v1.2.1 那轮 Quality 就因此没能出包）。
+  it('loadSessionHistory fetches only the latest page (base=50) and records paging meta', async () => {
     let capturedUrl = '';
     server.use(
       http.get(`${API_BASE}/sessions/session-1/messages`, ({ request }) => {
@@ -129,7 +132,7 @@ describe('useSessionHistory', () => {
     const ok = await loadSessionHistory('session-1');
 
     expect(ok).toBe(true);
-    expect(capturedUrl).toContain('limit=50');
+    expect(capturedUrl).toContain('base=50');
     expect(capturedUrl).not.toContain('before_seq');
     const st = useAppStore.getState();
     expect(st.sessionMessages['session-1']).toHaveLength(2);
@@ -260,7 +263,7 @@ describe('useSessionHistory', () => {
     });
 
     expect(capturedUrl).toContain('before_seq=12');
-    expect(capturedUrl).toContain('limit=50');
+    expect(capturedUrl).toContain('base=50');
     const msgs = useAppStore.getState().sessionMessages['session-1'] ?? [];
     expect(msgs).toHaveLength(3);
     expect(msgs[0]?.id).toBe('msg-0');
