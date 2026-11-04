@@ -115,6 +115,11 @@ impl ClientApp {
         let sched_prompt = cx.new(|cx| {
             TextareaState::new(window, cx).placeholder("给智能体的指令（每次触发让它做的事）")
         });
+        // 定点任务的时刻输入（默认 15:30——收盘场景就是它）
+        let sched_at = cx.new(|cx| InputState::new(window, cx).placeholder("15:30（本地时间）"));
+        // 错过补跑窗口（小时；仅「窗口内补」用）
+        let sched_grace =
+            cx.new(|cx| InputState::new(window, cx).placeholder("补跑窗口（小时，如 8）"));
         // 设置页的两个编辑框：endpoint 与 api_key（打开编辑时从 `GET /config` 回填）
         let endpoint_input =
             cx.new(|cx| TextareaState::new(window, cx).placeholder("API 端点（http(s)://…）"));
@@ -157,6 +162,12 @@ impl ClientApp {
             sched_custom_secs,
             sched_workspace,
             sched_prompt,
+            sched_mode: SchedMode::Interval,
+            sched_at,
+            // 默认工作日（周一至周五）——最常用的定点组合
+            sched_days: vec![1, 2, 3, 4, 5],
+            sched_missed: SchedMissed::Skip,
+            sched_grace,
             sched_status: String::new(),
             memories: Vec::new(),
             memories_status: "正在加载记忆…".to_string(),

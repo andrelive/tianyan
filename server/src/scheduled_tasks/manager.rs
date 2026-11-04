@@ -133,7 +133,10 @@ impl TaskRegistrar for SchedulerRegistrar {
             task.name.clone(),
             task.interval_secs,
             handler,
-        );
+        )
+        // 调度规格以任务自己的为准（`schedule` 显式设置优先，否则 = 间隔制），
+        // 错过策略同理（缺省沿用旧的「开机就补跑」）
+        .with_schedule(task.effective_schedule(), task.effective_missed());
         sched
             // 传任务自身持久化的上次运行时间：调度器启动时该任务尚未注册
             // （load_state 覆盖不到），不传会被判"从未执行"→ 每次重启立即补跑
@@ -415,7 +418,12 @@ impl ScheduledAgentTaskManager {
             req.workspace.clone(),
             req.prompt.clone(),
         );
-        task.next_run_at = Some(chrono::Utc::now().timestamp() + task.interval_secs as i64);
+        // 新接口：显式调度规格 / 错过策略（旧客户端只给 interval_secs → 走间隔制）
+        task.schedule = req.schedule.clone();
+        task.missed = req.missed;
+        // 落盘双写：`schedule` → `interval_secs`（旧版本读新文件仍能跑）
+        task.sync_legacy_interval();
+        task.next_run_at = task.estimated_next_run(chrono::Utc::now().timestamp());
         self.tasks
             .write()
             .await
@@ -426,7 +434,8 @@ impl ScheduledAgentTaskManager {
         }
         tracing::info!(
             name = %task.name,
-            interval_secs = task.interval_secs,
+            schedule = %task.effective_schedule().describe(),
+            missed = %task.effective_missed().describe(),
             workspace = %task.workspace,
             "已创建定时智能体任务",
         );
@@ -459,7 +468,16 @@ impl ScheduledAgentTaskManager {
             if let Some(t) = tasks.get_mut(id) {
                 t.last_run_at = Some(now);
                 t.last_result = Some(result.to_string());
-                t.next_run_at = Some(now + t.interval_secs as i64);
+                // 下次时间按**调度规格**算：日历类任务不是「现在 + 间隔」
+                t.next_run_at = t.estimated_next_run(now);
+                // 一次性任务：跑完即停用（不再注册、不再补跑）
+                if matches!(
+                    t.effective_schedule(),
+                    tianyan::scheduler::Schedule::Once { .. }
+                ) {
+                    t.enabled = false;
+                    t.next_run_at = None;
+                }
             }
         }
         self.save().await;

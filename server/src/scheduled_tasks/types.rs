@@ -36,6 +36,19 @@ pub struct ScheduledAgentTask {
     pub next_run_at: Option<i64>,
     /// 最近一次执行结果摘要。
     pub last_result: Option<String>,
+    /// **何时该跑**（间隔 / 每天 / 每周 / 一次性）。
+    ///
+    /// `None` = 旧数据（或旧客户端创建）：按 `interval_secs` 推成
+    /// [`tianyan::scheduler::Schedule::Every`]，即 ADR-024 的间隔语义。
+    /// 落盘与 `interval_secs` **双写**（见 [`Self::sync_legacy_interval`]），
+    /// 旧版本读新文件仍能跑（可回退）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schedule: Option<tianyan::scheduler::Schedule>,
+    /// **错过了怎么办**（立即补跑 / 跳过 / 窗口内补跑）。
+    ///
+    /// `None` = 旧行为（[`tianyan::scheduler::MissedPolicy::RunOnce`]：开机即补）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub missed: Option<tianyan::scheduler::MissedPolicy>,
 }
 
 impl ScheduledAgentTask {
@@ -53,6 +66,46 @@ impl ScheduledAgentTask {
             last_run_at: None,
             next_run_at: None,
             last_result: None,
+            schedule: None,
+            missed: None,
+        }
+    }
+
+    /// 生效的调度规格：显式 `schedule` 优先，否则由 `interval_secs` 推成间隔制。
+    ///
+    /// 这是**唯一**的语义出口——判定、注册、`next_run` 计算都读它，避免
+    /// 「一处看 `schedule`、另一处看 `interval_secs`」的分叉。
+    pub fn effective_schedule(&self) -> tianyan::scheduler::Schedule {
+        self.schedule
+            .clone()
+            .unwrap_or(tianyan::scheduler::Schedule::Every {
+                secs: self.interval_secs.max(1),
+            })
+    }
+
+    /// 生效的错过策略（缺省沿用旧行为：错过就立即补跑一次）。
+    pub fn effective_missed(&self) -> tianyan::scheduler::MissedPolicy {
+        self.missed.unwrap_or_default()
+    }
+
+    /// 把 `schedule` 的等价间隔同步进 `interval_secs`（**落盘双写**）。
+    ///
+    /// 旧版本只认 `interval_secs`：不双写的话，新版本创建的任务在旧版本里读成
+    /// `interval_secs = 0`（`load` 会拿它去换算 cron → 回退每日一次），升级/回退
+    /// 行为会漂。双写后旧版本「大致正确」，新版本按 `schedule` 精确执行。
+    pub fn sync_legacy_interval(&mut self) {
+        self.interval_secs = self.effective_schedule().equivalent_interval_secs();
+    }
+
+    /// 估算「下次触发」的 epoch 秒（展示用；真实触发以调度器判据为准）。
+    ///
+    /// - 间隔制：`now + 间隔`（与旧实现一致）；
+    /// - 日历类：按**时刻点**算（`next_occurrence_after`）——用 `last_run + 间隔`
+    ///   算日历任务会给出错误时间（这正是「收盘任务被显示成次日盘中」的来源）。
+    pub fn estimated_next_run(&self, now: i64) -> Option<i64> {
+        match self.effective_schedule() {
+            tianyan::scheduler::Schedule::Every { secs } => Some(now + secs as i64),
+            schedule => schedule.next_occurrence_after(now),
         }
     }
 }
@@ -84,6 +137,10 @@ pub struct ScheduledTaskResponse {
     pub next_run_at: Option<DateTime<Utc>>,
     /// 最近一次执行结果摘要。
     pub last_result: Option<String>,
+    /// 调度规格的可读描述（如「每天 15:30」）。
+    pub schedule_desc: String,
+    /// 错过策略的可读描述。
+    pub missed_desc: String,
 }
 
 impl From<&ScheduledAgentTask> for ScheduledTaskResponse {
@@ -101,6 +158,8 @@ impl From<&ScheduledAgentTask> for ScheduledTaskResponse {
             last_run_at: task.last_run_at.map(to_dt),
             next_run_at: task.next_run_at.map(to_dt),
             last_result: task.last_result.clone(),
+            schedule_desc: task.effective_schedule().describe(),
+            missed_desc: task.effective_missed().describe(),
         }
     }
 }
@@ -110,8 +169,20 @@ impl From<&ScheduledAgentTask> for ScheduledTaskResponse {
 pub struct CreateScheduledTaskRequest {
     /// 任务显示名称。
     pub name: String,
-    /// 执行间隔（秒），如 1800 = 每 30 分钟、86400 = 每天（距上次执行 ≥24h 即触发）。
+    /// 执行间隔（秒）——仅当没给 `schedule` 时使用（旧客户端兼容）。
+    ///
+    /// 如 1800 = 每 30 分钟、86400 = 每天（距上次执行 ≥24h 即触发）。
+    #[serde(default)]
     pub interval_secs: u64,
+    /// 调度规格（推荐）：`{"kind":"daily","at":"15:30"}` /
+    /// `{"kind":"weekly","weekdays":[1,3,5],"at":"09:00"}` /
+    /// `{"kind":"once","at":"2026-11-05T15:30"}` / `{"kind":"every","secs":1800}`。
+    #[serde(default)]
+    pub schedule: Option<tianyan::scheduler::Schedule>,
+    /// 错过策略：`{"kind":"skip"}` / `{"kind":"run_once"}` /
+    /// `{"kind":"within","grace_secs":28800}`。缺省 = 旧的「立即补跑一次」。
+    #[serde(default)]
+    pub missed: Option<tianyan::scheduler::MissedPolicy>,
     /// 工作目录（agent 执行命令/读写文件的根）。
     pub workspace: String,
     /// 给智能体的指令。
@@ -135,7 +206,78 @@ mod tests {
             last_run_at: Some(1_700_000_100),
             next_run_at: None,
             last_result: None,
+            schedule: None,
+            missed: None,
         }
+    }
+
+    /// 新字段的**语义出口**：`schedule` 优先，缺省回落到旧的间隔制。
+    #[test]
+    fn effective_schedule_defaults_to_legacy_interval() {
+        let mut task = sample();
+        task.schedule = None;
+        task.interval_secs = 1800;
+        assert_eq!(
+            task.effective_schedule(),
+            tianyan::scheduler::Schedule::Every { secs: 1800 }
+        );
+        assert_eq!(
+            task.effective_missed(),
+            tianyan::scheduler::MissedPolicy::RunOnce,
+            "旧数据缺省沿用「错过就补跑一次」"
+        );
+
+        task.schedule = Some(tianyan::scheduler::Schedule::Daily { at: "15:30".into() });
+        task.missed = Some(tianyan::scheduler::MissedPolicy::Skip);
+        assert_eq!(
+            task.effective_schedule(),
+            tianyan::scheduler::Schedule::Daily { at: "15:30".into() }
+        );
+        assert_eq!(
+            task.effective_missed(),
+            tianyan::scheduler::MissedPolicy::Skip
+        );
+    }
+
+    /// 落盘**双写**：日历类任务要把等价间隔同步进 `interval_secs`，旧版本才能读。
+    #[test]
+    fn calendar_schedule_dual_writes_interval_secs() {
+        let mut task = sample();
+        task.schedule = Some(tianyan::scheduler::Schedule::Daily { at: "15:30".into() });
+        task.sync_legacy_interval();
+        assert_eq!(task.interval_secs, 24 * 3600, "日历类的等价间隔 = 一天");
+
+        let disk = serde_json::to_string(&task).expect("序列化");
+        assert!(
+            disk.contains("\"interval_secs\":86400"),
+            "必须双写等价间隔（可回退）：{disk}"
+        );
+        assert!(
+            disk.contains("\"kind\":\"daily\""),
+            "新字段也要落盘：{disk}"
+        );
+    }
+
+    /// `next_run` 必须按调度规格算：日历类不是「现在 + 间隔」。
+    #[test]
+    fn estimated_next_run_uses_calendar_semantics() {
+        use chrono::TimeZone as _;
+        let at = |h, m| {
+            chrono::Local
+                .with_ymd_and_hms(2026, 11, 4, h, m, 0)
+                .single()
+                .expect("时刻应可构造")
+                .timestamp()
+        };
+        let mut task = sample();
+        task.schedule = Some(tianyan::scheduler::Schedule::Daily { at: "15:30".into() });
+        // 10:00 时：下一次是今天 15:30，而不是「now + 24h」
+        assert_eq!(task.estimated_next_run(at(10, 0)), Some(at(15, 30)));
+
+        // 旧语义（间隔制）保持 now + 间隔
+        task.schedule = None;
+        task.interval_secs = 600;
+        assert_eq!(task.estimated_next_run(at(10, 0)), Some(at(10, 0) + 600));
     }
 
     /// 落盘保持 epoch 秒（旧版本能读 → 可回退），对外输出 RFC3339（统一口径）。

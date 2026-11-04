@@ -165,6 +165,16 @@ struct ClientApp {
     pub(crate) sched_custom_secs: Entity<InputState>,
     pub(crate) sched_workspace: Entity<InputState>,
     pub(crate) sched_prompt: Entity<TextareaState>,
+    /// 定时任务页：重复方式（间隔 / 每天 / 每周 / 一次性）
+    pub(crate) sched_mode: SchedMode,
+    /// 定时任务页：时刻输入（`HH:MM` 或 `YYYY-MM-DDTHH:MM`，随 `sched_mode`）
+    pub(crate) sched_at: Entity<InputState>,
+    /// 定时任务页：每周模式选中的星期（ISO 1..7）
+    pub(crate) sched_days: Vec<u8>,
+    /// 定时任务页：错过策略（**定点任务选「错过跳过」**，否则重启会在错误时刻补跑）
+    pub(crate) sched_missed: SchedMissed,
+    /// 定时任务页：窗口内补跑的小时数（`SchedMissed::Within` 用）
+    pub(crate) sched_grace: Entity<InputState>,
     /// 定时任务页状态行（创建/删除结果）
     pub(crate) sched_status: String,
     /// 记忆页：全部记忆条目（`GET /memory`，已聚合 memory/ + user/ + agent/patterns）

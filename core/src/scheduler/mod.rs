@@ -32,11 +32,13 @@
 //! 间隔扫描与补跑、执行契约、注册机制、能力集合——改任务策略／新增任务不重编 core。
 
 mod evolution_executor;
+mod schedule;
 mod task_assembly;
 mod task_scheduler;
 mod task_state;
 
 pub use evolution_executor::EvolutionReviewExecutor;
+pub use schedule::{decide_fire, FireDecision, MissedPolicy, Schedule};
 pub use task_assembly::{TaskRegistration, TaskServices};
 pub use task_scheduler::{
     interval_from_cron, next_due_at, TaskContext, TaskDefinition, TaskHandler, TaskPriority,

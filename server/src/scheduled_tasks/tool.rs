@@ -26,10 +26,25 @@ use crate::scheduled_tasks::types::{CreateScheduledTaskRequest, ScheduledAgentTa
 pub struct ScheduleTaskArgs {
     /// 任务显示名称。
     pub name: String,
-    /// 执行间隔（秒）：距上次执行 ≥ 此间隔即在下个扫描周期执行；
-    /// 服务未运行期间超期的任务在重启后自动补跑一次。如 1800 = 每 30 分钟、
-    /// 86400 = 每天、604800 = 每周。
+    /// 执行间隔（秒）——**旧参数**，仅在没给 `schedule` 时生效。
+    /// 如 1800 = 每 30 分钟、86400 = 每天、604800 = 每周（最小 60）。
+    #[serde(default)]
     pub interval_secs: u64,
+    /// 调度规格（**推荐**，优先于 `interval_secs`）。
+    ///
+    /// - 定点：`{"kind":"daily","at":"15:30"}`（本地时间）、
+    ///   `{"kind":"weekly","weekdays":[1,3,5],"at":"09:00"}`、
+    ///   `{"kind":"once","at":"2026-11-05T15:30"}`
+    /// - 间隔：`{"kind":"every","secs":1800}`
+    #[serde(default)]
+    pub schedule: Option<tianyan::scheduler::Schedule>,
+    /// 错过策略（时刻点已过、但服务没在跑时怎么办）。
+    ///
+    /// - `{"kind":"skip"}`：只在准点跑，错过就等下一个时刻（**收盘后/定点类任务必须用它**）；
+    /// - `{"kind":"within","grace_secs":28800}`：时刻点后 8 小时内可补，超出跳过；
+    /// - `{"kind":"run_once"}`：错过就立即补跑一次（缺省；维护类任务用）。
+    #[serde(default)]
+    pub missed: Option<tianyan::scheduler::MissedPolicy>,
     /// 工作目录（agent 将在此目录完成工作）。
     pub workspace: String,
     /// 给智能体的指令（到点后让它做的事）。
@@ -69,7 +84,12 @@ impl DynamicToolExecutor for ScheduleTaskTool {
         // schema 由 struct 派生（from_schema）——单一事实源
         ToolDefinition::function(FunctionDefinition::from_schema::<ScheduleTaskArgs>(
             "schedule_task",
-            "创建一个后台定时任务：按执行间隔周期调用智能体在指定工作目录完成给定指令。用于用户要求定时/周期执行某项工作（如每 30 分钟检查一次、每天总结一次）。间隔制（ADR-024）：距上次执行达到间隔即触发，服务未运行期间超期的任务会在重启后自动补跑一次。",
+            "创建一个后台定时任务：到点在指定工作目录调用智能体完成给定指令。\
+             【两种调度】① 定点（推荐给「每天/每周某时刻」）——`schedule={\"kind\":\"daily\",\"at\":\"15:30\"}`（本地时间），也支持 weekly / once；\
+             ② 间隔——`schedule={\"kind\":\"every\",\"secs\":1800}` 或旧参数 `interval_secs`（距上次执行达到间隔即触发，最小 60 秒）。\
+             【错过策略】`missed` 决定「时刻点已过但服务没在跑」时怎么办：`{\"kind\":\"skip\"}` 只在准点跑、错过等下一个（**收盘后/盘中不能跑的定点任务必须用它**）；\
+             `{\"kind\":\"within\",\"grace_secs\":28800}` 时刻点后 8 小时内可补、超出跳过；`{\"kind\":\"run_once\"}` 错过立即补跑一次（缺省，维护类任务用）。\
+             注意 `run_once` + 间隔制的旧组合会在服务重启后立刻补跑——定点任务请显式指定 schedule 与 missed=skip/within。",
         ))
     }
 
@@ -81,14 +101,33 @@ impl DynamicToolExecutor for ScheduleTaskTool {
                 "tool: schedule_task 需要 name 与 prompt".to_string(),
             ));
         }
-        if args.interval_secs < 60 {
-            return Err(TianyanError::Custom(
-                "tool: schedule_task interval_secs 最小 60（个人 PC 无需更高频）".to_string(),
-            ));
+        // 间隔下限只对「间隔制」有意义（日历类任务没有这个概念）
+        match &args.schedule {
+            Some(tianyan::scheduler::Schedule::Every { secs }) if *secs < 60 => {
+                return Err(TianyanError::Custom(
+                    "tool: schedule_task 间隔最小 60 秒（个人 PC 无需更高频）".to_string(),
+                ));
+            }
+            Some(_) => {}
+            None if args.interval_secs < 60 => {
+                return Err(TianyanError::Custom(
+                    "tool: schedule_task interval_secs 最小 60（个人 PC 无需更高频）；\
+                     定点任务请改用 schedule={\"kind\":\"daily\",\"at\":\"HH:MM\"}"
+                        .to_string(),
+                ));
+            }
+            None => {}
         }
         let req = CreateScheduledTaskRequest {
             name: args.name,
-            interval_secs: args.interval_secs,
+            interval_secs: match &args.schedule {
+                Some(tianyan::scheduler::Schedule::Every { secs }) => *secs,
+                // 日历类：落盘前由 manager 用 `schedule` 回填等价间隔（双写）
+                Some(_) => 0,
+                None => args.interval_secs,
+            },
+            schedule: args.schedule,
+            missed: args.missed,
             workspace: args.workspace,
             prompt: args.prompt,
         };

@@ -20,6 +20,7 @@ use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
 
+use super::schedule::{decide_fire, FireDecision, MissedPolicy, Schedule};
 use crate::common::error::TianyanError;
 use crate::config::TianyanConfig;
 use crate::scheduler::TaskStateStore;
@@ -85,6 +86,12 @@ pub struct TaskResult {
     pub processed_count: usize,
     /// 错误信息（如果有）。
     pub error: Option<TianyanError>,
+    /// 业务级「跳过」原因（如「今天不是交易日」）。
+    ///
+    /// 与**调度级**跳过（`MissedPolicy` 判定错过窗口、任务根本没执行）不是一回事：
+    /// 这里是任务跑了、但自己判断「现在不该做事」。单独成字段是为了不把正常早退
+    /// 记成失败（否则洞察页失败率一片红，而用户其实没做错任何事）。
+    pub skipped: Option<String>,
 }
 
 impl TaskResult {
@@ -94,6 +101,7 @@ impl TaskResult {
             success: true,
             processed_count,
             error: None,
+            skipped: None,
         }
     }
 
@@ -103,6 +111,19 @@ impl TaskResult {
             success: false,
             processed_count: 0,
             error: Some(error.into()),
+            skipped: None,
+        }
+    }
+
+    /// 创建「业务级跳过」结果：任务正常结束，只是判断现在不该做事。
+    ///
+    /// `success = true` —— 跳过不是失败（调度器统计、洞察页失败率都不该被它污染）。
+    pub fn skipped(reason: impl Into<String>) -> Self {
+        Self {
+            success: true,
+            processed_count: 0,
+            error: None,
+            skipped: Some(reason.into()),
         }
     }
 }
@@ -127,14 +148,23 @@ pub struct TaskDefinition {
     pub name: String,
     /// 任务优先级。
     pub priority: TaskPriority,
-    /// 执行间隔（秒）：距上次执行完成 ≥ 此值即到期，下个扫描周期立即执行。
+    /// **何时该跑**（间隔 / 每天 / 每周 / 一次性）。
+    pub schedule: Schedule,
+    /// **错过了怎么办**（立即补跑 / 跳过 / 窗口内补跑）。
+    pub missed: MissedPolicy,
+    /// 等价的间隔秒数（`schedule` 的镜像；落盘与旧接口/前端兼容用）。
+    ///
+    /// 由 [`TaskDefinition::with_schedule`] / [`TaskDefinition::new`] 保持同步，
+    /// 不要在构造后单独改它——判定一律读 `schedule`。
     pub interval_secs: u64,
     /// 任务处理器。
     pub handler: Arc<dyn TaskHandler>,
 }
 
 impl TaskDefinition {
-    /// 创建新的任务定义。
+    /// 创建**间隔制**任务定义（旧语义：`Every { secs }` + 错过就补跑）。
+    ///
+    /// 保留这个签名是为了让既有调用点（内置 5 任务 / 演化任务）零改动迁移。
     pub fn new(
         id: impl Into<String>,
         name: impl Into<String>,
@@ -145,9 +175,24 @@ impl TaskDefinition {
             id: id.into(),
             name: name.into(),
             priority: TaskPriority::Normal,
+            schedule: Schedule::Every {
+                secs: interval_secs.max(1),
+            },
+            missed: MissedPolicy::RunOnce,
             interval_secs,
             handler,
         }
+    }
+
+    /// 换成其它调度规格（`Daily { at: "15:30" }` / `Weekly` / `Once`）。
+    ///
+    /// 同时把 `interval_secs` 更新为等价间隔——旧接口与 `scheduler_state.json`
+    /// 的展示字段仍读它。
+    pub fn with_schedule(mut self, schedule: Schedule, missed: MissedPolicy) -> Self {
+        self.interval_secs = schedule.equivalent_interval_secs();
+        self.schedule = schedule;
+        self.missed = missed;
+        self
     }
 }
 
@@ -156,10 +201,18 @@ struct RegisteredTask {
     definition: TaskDefinition,
     /// 上次执行完成时刻（epoch 秒；None = 从未执行，首个扫描周期即执行）。
     last_run: Option<i64>,
+    /// **调度游标**：最近处理过的调度时刻点（跑过或判定跳过都推进）。
+    ///
+    /// 与 `last_run` 严格分开——`last_run` 是「上次真的执行完的时间」，这里是
+    /// 「哪个时刻点已经结算过了」。混用会导致：服务每晚关机、白天开机时，反复重判
+    /// 同一个已跳过的时刻点（补跑风暴）；或反过来永远不补。
+    last_fire: Option<i64>,
     /// 执行次数。
     run_count: u64,
     /// 最近一次执行的失败信息（None = 成功或从未执行）。
     last_error: Option<String>,
+    /// 最近一次「跳过」的原因（调度级错过窗口 / 业务级主动跳过）。
+    last_skipped: Option<String>,
 }
 
 /// 任务运行状态快照（供状态查询接口使用）。
@@ -171,27 +224,58 @@ pub struct TaskStatus {
     pub name: String,
     /// 任务优先级。
     pub priority: TaskPriority,
-    /// 执行间隔（秒）。
+    /// 等价间隔（秒；日历类任务取其近似值，供旧调用方展示）。
     pub interval_secs: u64,
+    /// 调度规格描述（如「每天 15:30」「每 1800 秒」）。
+    pub schedule: String,
+    /// 错过策略描述。
+    pub missed: String,
     /// 执行次数。
     pub run_count: u64,
     /// 距上次执行已过秒数（从未执行时为 None）。
     pub last_run_ago_secs: Option<u64>,
     /// 距下次到期秒数（已到期 = 0；从未执行 = 0，首个扫描周期即执行）。
+    ///
+    /// 日历类任务按**时刻点**算（`next_occurrence_after`），不是 `last_run + 间隔`
+    /// —— 后者正是旧模型「重启就补跑」的展示侧同款错误。
     pub next_due_in_secs: u64,
+    /// 距上次「结算时刻点」已过秒数（None = 从未结算）。
+    pub last_fire_ago_secs: Option<u64>,
     /// 最近一次执行的失败信息（None = 成功或从未执行）。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_error: Option<String>,
+    /// 最近一次跳过原因（调度级错过窗口 / 业务级主动跳过）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_skipped: Option<String>,
+}
+
+/// 一次扫描里判定为「需要处理」的任务（**含判定为跳过的**——跳过也要结算游标，
+/// 否则同一个错过的时刻点会被反复重判）。
+struct DueTask {
+    /// 任务 ID。
+    id: String,
+    /// 时刻点（epoch 秒）。
+    anchor: i64,
+    /// 该跑还是跳过。
+    decision: FireDecision,
+    /// 是否为**绝对**时刻点（`Every` 是相对语义，游标由 `last_run` 承担）。
+    absolute: bool,
 }
 
 /// 持久化状态文件的单任务条目。
 #[derive(Debug, Serialize, Deserialize)]
 struct PersistedTaskState {
     last_run: i64,
+    /// 调度游标（旧状态文件无此字段 → 缺省 None，按「从未结算」处理）。
+    #[serde(default)]
+    last_fire: Option<i64>,
     run_count: u64,
     /// 最近一次失败信息（旧状态文件无此字段，缺省 None）。
     #[serde(default)]
     last_error: Option<String>,
+    /// 最近一次跳过原因（旧状态文件无此字段）。
+    #[serde(default)]
+    last_skipped: Option<String>,
 }
 
 /// 扫描间隔默认值（秒）。
@@ -225,6 +309,41 @@ pub struct TaskScheduler {
 pub fn next_due_at(last_run: Option<i64>, interval_secs: u64, now: i64) -> i64 {
     let due = last_run.map(|t| t + interval_secs as i64).unwrap_or(now);
     due.max(now)
+}
+
+/// 判定一个任务此刻该不该处理（**纯函数**：时间可注入，便于单测）。
+///
+/// 两条语义：
+/// - [`Schedule::Every`]：相对语义（锚点 = `last_run + secs`），`missed` 不参与
+///   ——「间隔到了就跑」本来就是它的定义；
+/// - 日历类：锚点 = 最近一个 `≤ now` 的时刻点，先被调度游标 `last_fire` 去重，
+///   再按 [`MissedPolicy`] 判「补跑 / 跳过」。
+///
+/// 返回 [`FireDecision::NotDue`] 表示「没有待处理的时刻点」（未到 / 已结算）。
+pub fn plan_one(
+    schedule: &Schedule,
+    missed: MissedPolicy,
+    last_run: Option<i64>,
+    last_fire: Option<i64>,
+    now: i64,
+    tick_secs: u64,
+) -> FireDecision {
+    match schedule {
+        Schedule::Every { secs } => match last_run.map(|lr| lr + *secs as i64) {
+            Some(due) if due > now => FireDecision::NotDue,
+            _ => FireDecision::Fire { delay: 0 },
+        },
+        calendar => {
+            let Some(anchor) = calendar.most_recent_occurrence(now) else {
+                return FireDecision::NotDue;
+            };
+            if last_fire.is_some_and(|lf| anchor <= lf) {
+                return FireDecision::NotDue; // 该时刻点已结算
+            }
+            let delay = (now - anchor).max(0) as u64;
+            decide_fire(missed, delay, tick_secs)
+        }
+    }
 }
 
 /// 旧 cron 表达式 → 间隔秒数（一次性迁移辅助；仅覆盖本项目文档化的模式）。
@@ -322,8 +441,10 @@ impl TaskScheduler {
         for t in tasks.iter_mut() {
             if let Some(s) = map.get(&t.definition.id) {
                 t.last_run = Some(s.last_run);
+                t.last_fire = s.last_fire;
                 t.run_count = s.run_count;
                 t.last_error = s.last_error.clone();
+                t.last_skipped = s.last_skipped.clone();
             }
         }
         tracing::info!(count = map.len(), "已加载调度器持久化状态");
@@ -339,16 +460,19 @@ impl TaskScheduler {
             tasks
                 .iter()
                 .filter_map(|t| {
-                    t.last_run.map(|lr| {
-                        (
-                            t.definition.id.clone(),
-                            PersistedTaskState {
-                                last_run: lr,
-                                run_count: t.run_count,
-                                last_error: t.last_error.clone(),
-                            },
-                        )
-                    })
+                    // 只要「执行过」或「结算过时刻点」就落盘（跳过也要记，否则重启后
+                    // 会重判同一个已跳过的时刻点）
+                    let lr = t.last_run.or(t.last_fire)?;
+                    Some((
+                        t.definition.id.clone(),
+                        PersistedTaskState {
+                            last_run: lr,
+                            last_fire: t.last_fire,
+                            run_count: t.run_count,
+                            last_error: t.last_error.clone(),
+                            last_skipped: t.last_skipped.clone(),
+                        },
+                    ))
                 })
                 .collect()
         };
@@ -377,8 +501,22 @@ impl TaskScheduler {
                         t.definition.id.clone(),
                         PersistedTaskState {
                             last_run: lr,
+                            last_fire: t.last_fire,
                             run_count: t.run_count,
                             last_error: t.last_error.clone(),
+                            last_skipped: t.last_skipped.clone(),
+                        },
+                    );
+                } else if let Some(lf) = t.last_fire {
+                    // 只有游标、还没执行过（例如全是跳过）：也要落盘
+                    map.insert(
+                        t.definition.id.clone(),
+                        PersistedTaskState {
+                            last_run: lf,
+                            last_fire: Some(lf),
+                            run_count: t.run_count,
+                            last_error: t.last_error.clone(),
+                            last_skipped: t.last_skipped.clone(),
                         },
                     );
                 }
@@ -410,38 +548,113 @@ impl TaskScheduler {
         }
     }
 
-    /// 当前到期的任务 ID（按注册顺序；顺序扫描 = 串行执行）。
-    async fn due_task_ids(&self) -> Vec<String> {
+    /// 本轮扫描要处理的任务（按注册顺序；顺序扫描 = 串行执行）。
+    ///
+    /// 判定分两条路：
+    /// - [`Schedule::Every`]：**相对**语义，锚点 = `last_run + secs`（与旧模型等价，
+    ///   从未执行 = 立即）；
+    /// - 日历类（`Daily` / `Weekly` / `Once`）：**绝对**时刻点，锚点 = 最近一个
+    ///   `≤ now` 的时刻点，再用调度游标 `last_fire` 去重，最后由 [`decide_fire`]
+    ///   按 `MissedPolicy` 判「补跑 / 跳过」。
+    ///
+    /// 跳过的任务也会出现在结果里（`Skip`）——调用方必须结算游标，否则同一个错过的
+    /// 时刻点会被反复重判。
+    async fn plan_due(&self) -> Vec<DueTask> {
         let now = Utc::now().timestamp();
-        self.tasks
-            .read()
-            .await
+        let tick = self.tick_secs;
+        let tasks = self.tasks.read().await;
+        tasks
             .iter()
-            .filter(|t| {
-                t.last_run
-                    .map(|lr| now - lr >= t.definition.interval_secs as i64)
-                    .unwrap_or(true) // 从未执行 = 到期（首跑/补跑）
+            .filter_map(|t| {
+                // 判定单点：`plan_one`（纯函数，单测覆盖收盘场景）
+                let decision = plan_one(
+                    &t.definition.schedule,
+                    t.definition.missed,
+                    t.last_run,
+                    t.last_fire,
+                    now,
+                    tick,
+                );
+                if decision == FireDecision::NotDue {
+                    return None;
+                }
+                let (anchor, absolute) = match &t.definition.schedule {
+                    Schedule::Every { secs } => {
+                        (t.last_run.map(|lr| lr + *secs as i64).unwrap_or(now), false)
+                    }
+                    calendar => (calendar.most_recent_occurrence(now).unwrap_or(now), true),
+                };
+                Some(DueTask {
+                    id: t.definition.id.clone(),
+                    anchor,
+                    decision,
+                    absolute,
+                })
             })
-            .map(|t| t.definition.id.clone())
             .collect()
     }
 
-    /// 单一扫描循环：顺序检查 → 到期即执行 → 持久化 → 睡到下个 tick。
+    /// 结算调度游标（绝对时刻点专用）：把「该时刻点已处理」落下来。
+    ///
+    /// **必须在执行之前调用**：任务执行期间进程被重启时，下次启动不该重跑同一个
+    /// 时刻点（这正是旧模型「重启就立刻补跑」的另一面）。
+    async fn settle_fire(&self, task_id: &str, anchor: i64) {
+        let mut tasks = self.tasks.write().await;
+        if let Some(t) = tasks.iter_mut().find(|t| t.definition.id == task_id) {
+            t.last_fire = Some(anchor);
+        }
+    }
+
+    /// 记录一次**调度级**跳过（任务未执行；原因写进状态，用户看得见）。
+    async fn record_skip(&self, task_id: &str, reason: String) {
+        let mut tasks = self.tasks.write().await;
+        if let Some(t) = tasks.iter_mut().find(|t| t.definition.id == task_id) {
+            t.last_skipped = Some(truncate_error(&reason));
+        }
+    }
+
+    /// 单一扫描循环：顺序检查 → 到期即执行 / 判跳过 → 持久化 → 睡到下个 tick。
     async fn run_scanner(scheduler: Arc<TaskScheduler>, ctx: Arc<TaskContext>) {
         loop {
             if !scheduler.is_running() {
                 break;
             }
-            let due = scheduler.due_task_ids().await;
-            for id in due {
+            for due in scheduler.plan_due().await {
                 if !scheduler.is_running() {
                     break;
                 }
-                // 串行执行：一个任务跑完才检查下一个（避免资源争抢）
-                scheduler.execute_task(&id, &ctx).await;
-                // 执行后**立即**持久化：任务本体可能长时间运行（用户任务是
-                // 分钟级管线），若只在 tick 末尾写，进程在运行中被重启会丢失
-                // 本次 last_run → 下次启动重复补跑。
+                // **先结算游标、后执行**（绝对时刻点）：任务跑起来就算「处理过」，
+                // 执行期间进程被重启也不会重跑同一个时刻点。
+                if due.absolute {
+                    scheduler.settle_fire(&due.id, due.anchor).await;
+                }
+                match due.decision {
+                    FireDecision::Fire { delay } => {
+                        if due.absolute && delay > scheduler.tick_secs {
+                            tracing::info!(
+                                task = %due.id,
+                                delay,
+                                "定时任务补跑（已偏离时刻点，按错过策略允许）"
+                            );
+                        }
+                        // 串行执行：一个任务跑完才检查下一个（避免资源争抢）
+                        scheduler.execute_task(&due.id, &ctx).await;
+                    }
+                    FireDecision::Skip { delay } => {
+                        tracing::info!(
+                            task = %due.id,
+                            delay,
+                            "定时任务错过窗口，跳过本次（游标已推进，不再重判）"
+                        );
+                        scheduler
+                            .record_skip(&due.id, format!("错过窗口（延迟 {delay} 秒）"))
+                            .await;
+                    }
+                    FireDecision::NotDue => {}
+                }
+                // 处理完**立即**持久化：任务本体可能长时间运行（用户任务是分钟级
+                // 管线），若只在 tick 末尾写，进程在运行中被重启会丢失本次记录，
+                // 下次启动重复补跑。
                 scheduler.persist_state().await;
             }
             scheduler.persist_state().await;
@@ -525,17 +738,20 @@ impl TaskScheduler {
         }
 
         tracing::info!(
-            "注册任务：{} ({})，间隔：{}s",
+            "注册任务：{} ({})，调度：{}，错过策略：{}",
             definition.name,
             definition.id,
-            definition.interval_secs
+            definition.schedule.describe(),
+            definition.missed.describe()
         );
 
         tasks.push(RegisteredTask {
             definition,
             last_run: initial_last_run,
+            last_fire: None,
             run_count: 0,
             last_error: None,
+            last_skipped: None,
         });
         drop(tasks);
         // 立即落盘（merge）：让动态注册的任务进入 scheduler_state.json
@@ -625,22 +841,33 @@ impl TaskScheduler {
             .iter()
             .map(|t| {
                 let last_run_ago_secs = t.last_run.map(|lr| (now - lr).max(0) as u64);
-                let next_due_in_secs = match t.last_run {
-                    Some(lr) => {
-                        let due = lr + t.definition.interval_secs as i64;
-                        (due - now).max(0) as u64
-                    }
-                    None => 0, // 从未执行 = 立即到期
+                let last_fire_ago_secs = t.last_fire.map(|lf| (now - lf).max(0) as u64);
+                let next_due_in_secs = match &t.definition.schedule {
+                    // 相对语义：last_run + 间隔
+                    Schedule::Every { secs } => match t.last_run {
+                        Some(lr) => (lr + *secs as i64 - now).max(0) as u64,
+                        None => 0, // 从未执行 = 立即到期
+                    },
+                    // 绝对时刻点：按日历算「下一个」，不是 last_run + 间隔
+                    schedule => match schedule.next_occurrence_after(now) {
+                        Some(ts) => (ts - now).max(0) as u64,
+                        // 一次性已过 / 每周无选中日：没有「下次」
+                        None => 0,
+                    },
                 };
                 TaskStatus {
                     id: t.definition.id.clone(),
                     name: t.definition.name.clone(),
                     priority: t.definition.priority,
                     interval_secs: t.definition.interval_secs,
+                    schedule: t.definition.schedule.describe(),
+                    missed: t.definition.missed.describe(),
                     run_count: t.run_count,
                     last_run_ago_secs,
                     next_due_in_secs,
+                    last_fire_ago_secs,
                     last_error: t.last_error.clone(),
+                    last_skipped: t.last_skipped.clone(),
                 }
             })
             .collect();
@@ -706,15 +933,24 @@ impl TaskScheduler {
                     .error
                     .as_ref()
                     .map(|e| truncate_error(&e.to_string()));
+                // 业务级跳过：成功时覆盖（跳过写原因、正常执行清空），失败时保留旧值
+                // （避免状态里留着过期信息，也不让失败把跳过原因抹掉）
+                let skipped_now = result.skipped.as_deref().map(truncate_error);
+                if result.success {
+                    task.last_skipped = skipped_now;
+                }
             }
         }
 
         if result.success {
-            tracing::info!(
-                "任务执行成功：{}，处理了 {} 个条目",
-                task_id,
-                result.processed_count
-            );
+            match result.skipped.as_deref() {
+                Some(reason) => tracing::info!("任务已跳过：{} - {}", task_id, reason),
+                None => tracing::info!(
+                    "任务执行成功：{}，处理了 {} 个条目",
+                    task_id,
+                    result.processed_count
+                ),
+            }
         } else if let Some(ref error) = result.error {
             tracing::error!("任务执行失败：{} - {}", task_id, error);
         }
@@ -761,6 +997,21 @@ mod tests {
         let summary_engine = Arc::new(SummaryEngine::new(chat.clone(), "test-model"));
         let config = Arc::new(TianyanConfig::default());
         TaskContext::new(vfs, summary_engine, None, config)
+    }
+
+    /// 本轮扫描判定为「要处理」的任务 ID（含判定为跳过的）。
+    async fn due_ids(s: &TaskScheduler) -> Vec<String> {
+        s.plan_due().await.into_iter().map(|d| d.id).collect()
+    }
+
+    /// 构造本地时刻的 epoch 秒（`plan_one` 的纯函数测试用）。
+    fn ts_of(y: i32, mo: u32, d: u32, h: u32, mi: u32) -> i64 {
+        use chrono::TimeZone as _;
+        chrono::Local
+            .with_ymd_and_hms(y, mo, d, h, mi, 0)
+            .single()
+            .expect("时刻应可构造")
+            .timestamp()
     }
 
     struct TestTask {
@@ -828,11 +1079,11 @@ mod tests {
             .await
             .unwrap();
         // 从未执行 → 到期
-        assert_eq!(scheduler.due_task_ids().await, vec!["a".to_string()]);
+        assert_eq!(due_ids(&scheduler).await, vec!["a".to_string()]);
         // 执行后 3600s 内不再到期
         let ctx = Arc::new(make_context());
         scheduler.execute_task("a", &ctx).await;
-        assert!(scheduler.due_task_ids().await.is_empty());
+        assert!(due_ids(&scheduler).await.is_empty());
     }
 
     /// **注册晚于调度器启动**的任务必须用自身的 last_run_at 初始化——否则
@@ -856,7 +1107,7 @@ mod tests {
 
         // 刚跑过（间隔 1 天）→ 不到期（修复前会是 [late]）
         assert!(
-            scheduler.due_task_ids().await.is_empty(),
+            due_ids(&scheduler).await.is_empty(),
             "带 last_run 注册的任务不应被判定立即到期"
         );
 
@@ -866,6 +1117,89 @@ mod tests {
             raw.contains("late"),
             "注册后应立即写入 scheduler_state.json，实际：{raw}"
         );
+    }
+
+    /// **收盘场景回归**（本次改动的起因）：每天 15:30 跑，且只允许收盘后窗口内补跑。
+    ///
+    /// 判别力：旧模型（间隔 24h + 立即补跑）会在「次日盘中重启」时立刻执行——业务上
+    /// 必须避免。这里锁住三条：
+    /// 1. 准点（15:30）跑；
+    /// 2. 昨天 15:30 的时刻点在次日 10:00（盘中）已超出 8h 窗口 → **跳过**；
+    /// 3. 昨天那个时刻点已结算（`last_fire`）→ 次日 10:00 压根不再判定。
+    #[test]
+    fn calendar_task_never_fires_during_trading_hours() {
+        let close = Schedule::Daily {
+            at: "15:30".to_string(),
+        };
+        let within = MissedPolicy::Within {
+            grace_secs: 8 * 3600,
+        };
+        let tick = 60;
+        let at_close = ts_of(2026, 11, 4, 15, 30);
+        let next_morning = ts_of(2026, 11, 5, 10, 0);
+
+        // 1) 准点 → 跑
+        assert!(
+            matches!(
+                plan_one(&close, within, None, None, at_close, tick),
+                FireDecision::Fire { .. }
+            ),
+            "准点应触发"
+        );
+        // 2) 盘中（昨天 15:30 已过 18.5h > 8h 窗口）→ 跳过，而不是补跑
+        assert_eq!(
+            plan_one(&close, within, None, None, next_morning, tick),
+            FireDecision::Skip { delay: 66600 },
+            "盘中重启不得补跑收盘任务"
+        );
+        // 3) 昨天时刻点已结算 → 不再判定（防重复补跑）
+        assert_eq!(
+            plan_one(&close, within, None, Some(at_close), next_morning, tick),
+            FireDecision::NotDue
+        );
+        // 对照：旧策略 RunOnce 会补跑（维护类任务要的正是这个行为）
+        assert!(
+            matches!(
+                plan_one(
+                    &close,
+                    MissedPolicy::RunOnce,
+                    None,
+                    None,
+                    next_morning,
+                    tick
+                ),
+                FireDecision::Fire { .. }
+            ),
+            "RunOnce 应保留旧的「开机补跑」语义"
+        );
+        // 对照：Skip 策略只容忍一个 tick 的准点容差
+        assert_eq!(
+            plan_one(&close, MissedPolicy::Skip, None, None, at_close + 120, tick),
+            FireDecision::Skip { delay: 120 }
+        );
+    }
+
+    /// 间隔制不受 `missed` 影响：到点就跑、没到就不跑（维护类任务的既有语义）。
+    #[test]
+    fn interval_task_ignores_missed_policy() {
+        let every = Schedule::Every { secs: 600 };
+        let now = ts_of(2026, 11, 4, 15, 30);
+        for m in [
+            MissedPolicy::RunOnce,
+            MissedPolicy::Skip,
+            MissedPolicy::Within { grace_secs: 0 },
+        ] {
+            assert_eq!(
+                plan_one(&every, m, Some(now - 601), None, now, 60),
+                FireDecision::Fire { delay: 0 },
+                "间隔制应到点即跑（missed={m:?}）"
+            );
+            assert_eq!(
+                plan_one(&every, m, Some(now - 100), None, now, 60),
+                FireDecision::NotDue,
+                "未到间隔不应到期（missed={m:?}）"
+            );
+        }
     }
 
     /// 对照：不传 last_run（既有行为）→ 从未执行 → 立即到期（补跑语义）。
@@ -881,7 +1215,7 @@ mod tests {
             ))
             .await
             .unwrap();
-        assert_eq!(scheduler.due_task_ids().await, vec!["fresh".to_string()]);
+        assert_eq!(due_ids(&scheduler).await, vec!["fresh".to_string()]);
     }
 
     #[tokio::test]

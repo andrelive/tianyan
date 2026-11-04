@@ -256,6 +256,82 @@ pub(crate) const SCHED_PRESETS: [(u64, &str); 7] = [
     (0, "自定义…"),
 ];
 
+/// 定时任务的「重复方式」（与后端 `Schedule` 的 `kind` 一一对应）。
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum SchedMode {
+    /// 间隔制（每 N 分钟 / 小时）。
+    Interval,
+    /// 每天某时刻（本地时间）。
+    Daily,
+    /// 每周某几天的某时刻。
+    Weekly,
+    /// 一次性定点。
+    Once,
+}
+
+impl SchedMode {
+    /// 全部模式（渲染顺序）。
+    pub(crate) const ALL: [SchedMode; 4] = [Self::Interval, Self::Daily, Self::Weekly, Self::Once];
+
+    /// 分段按钮文案。
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::Interval => "间隔",
+            Self::Daily => "每天",
+            Self::Weekly => "每周",
+            Self::Once => "一次性",
+        }
+    }
+
+    /// 时刻输入框的占位文案（不同模式语义不同）。
+    pub(crate) fn at_placeholder(self) -> &'static str {
+        match self {
+            Self::Interval => "",
+            Self::Daily | Self::Weekly => "15:30（本地时间）",
+            Self::Once => "2026-11-05T15:30（本地时间）",
+        }
+    }
+}
+
+/// 错过策略（三态；`Within` 另读小时输入框）。
+///
+/// 与后端 `MissedPolicy` 对应——**这是本次修复的关键开关**：定点任务若用
+/// 「立即补跑」，服务一重启就会在错误的时刻执行（例如收盘任务在盘中跑）。
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum SchedMissed {
+    /// 错过就跳过，等下一个时刻。
+    Skip,
+    /// 错过就立即补跑一次（旧行为，维护类任务用）。
+    RunOnce,
+    /// 只在窗口内补跑。
+    Within,
+}
+
+impl SchedMissed {
+    /// 全部策略（渲染顺序：跳过在最前——定点任务最常用）。
+    pub(crate) const ALL: [SchedMissed; 3] = [Self::Skip, Self::RunOnce, Self::Within];
+
+    /// 分段按钮文案。
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::Skip => "错过跳过",
+            Self::RunOnce => "立即补跑",
+            Self::Within => "窗口内补",
+        }
+    }
+}
+
+/// 星期标签（ISO 编号 1 = 周一 … 7 = 周日）。
+pub(crate) const WEEKDAY_LABELS: [(u8, &str); 7] = [
+    (1, "一"),
+    (2, "二"),
+    (3, "三"),
+    (4, "四"),
+    (5, "五"),
+    (6, "六"),
+    (7, "日"),
+];
+
 // ===== 会话列表 =====
 
 /// 会话（`GET /api/v1/sessions` 的子集，够左栏分组渲染）。
@@ -514,6 +590,11 @@ pub(crate) struct SchedTaskRow {
     pub(crate) id: String,
     pub(crate) name: String,
     pub(crate) interval_secs: u64,
+    /// 调度规格的可读描述（后端 `effective_schedule().describe()`，如「每天 15:30」）。
+    /// 旧服务器不返回该字段 → 回退成间隔描述。
+    pub(crate) schedule_desc: String,
+    /// 错过策略的可读描述（如「错过就跳过，等下一个时刻」）。
+    pub(crate) missed_desc: String,
     pub(crate) workspace: String,
     pub(crate) prompt: String,
     pub(crate) enabled: bool,
