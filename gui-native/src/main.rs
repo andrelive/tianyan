@@ -718,9 +718,18 @@ pub(crate) struct SessionSnapshot {
     pub(crate) ws_diff_files: Vec<WsDiffFile>,
     pub(crate) ws_diff: Option<(String, String)>,
     pub(crate) ws_diff_status: String,
-    // ── 头部与「未落库会话」的待绑定目录 ──
+    // ── 头部 ──
     pub(crate) current_title: String,
-    pub(crate) new_session_workspace: Option<String>,
+    // 注：`new_session_workspace`（新建会话待绑定的目录）**刻意不进快照**。
+    //
+    // 它是「下一次新建会话」的设置，与任何会话的视图状态无关。此前误放进快照，
+    // 造成两个 bug：
+    //   1. `confirm_workspace_picker` 先设值、再调 `start_new_session`，而后者的
+    //      `park_view_state()` 会把它 take 走存进**旧会话**快照，紧接着
+    //      `restore_view_state()`（键 = None）把它覆盖回 `None` —— 用户选的目录
+    //      当场丢失，新会话落到默认工作区。
+    //   2. 切回某个旧会话时，会把该会话快照里残留的目录「复活」成待绑定目录，
+    //      之后点「新建会话」直接发消息就会莫名绑上它。
 }
 
 impl ClientApp {

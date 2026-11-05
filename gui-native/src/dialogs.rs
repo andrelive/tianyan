@@ -1023,8 +1023,15 @@ impl ClientApp {
                 cx.notify();
             }
             PickerTarget::NewSession => {
-                self.new_session_workspace = Some(path.clone());
+                // **顺序是语义**：先 `start_new_session`（它会把待绑定目录重置为
+                // 默认工作区），再设本次选中的目录——谁后写谁生效。
+                //
+                // 修复前是反的（先设值再 start），而当时 `new_session_workspace`
+                // 还在视图快照里，start 内部的 park 把它搬进旧会话快照、restore
+                // 又覆盖成 None（无快照时走 `reset_view_state` 同样清空）——
+                // 用户选的目录当场丢失，新会话落到默认工作区。
                 self.start_new_session(window, cx);
+                self.new_session_workspace = Some(path.clone());
                 self.set_status(format!("新会话将绑定目录：{path}"));
                 cx.notify();
             }

@@ -364,7 +364,6 @@ impl ClientApp {
             ws_diff: self.ws_diff.take(),
             ws_diff_status: std::mem::take(&mut self.ws_diff_status),
             current_title: std::mem::take(&mut self.current_title),
-            new_session_workspace: self.new_session_workspace.take(),
         };
         // LRU：同键先丢弃旧快照，最近使用的排到末尾
         self.parked
@@ -418,7 +417,6 @@ impl ClientApp {
         self.ws_diff = None;
         self.ws_diff_status.clear();
         self.current_title = "选择左侧会话查看消息".to_string();
-        self.new_session_workspace = None;
         self.streaming = false;
         self.turn_running = false;
     }
@@ -519,7 +517,6 @@ impl ClientApp {
         self.ws_diff = snap.ws_diff;
         self.ws_diff_status = snap.ws_diff_status;
         self.current_title = snap.current_title;
-        self.new_session_workspace = snap.new_session_workspace;
         // `streaming` 不随快照走：它由全局 `running_sessions` 决定，调用方设置
         outcome
     }
@@ -629,6 +626,12 @@ impl ClientApp {
         // ——不会把上一会话的附件误发到新会话，也不会丢掉自己写了一半的内容
         self.composer_images.clear();
         self.restore_input(window, cx);
+        // 「新建会话」= 回到默认工作区：这里重置待绑定目录。
+        //
+        // 位置很关键：必须放在 `park_view_state` / `restore_view_state` **之后**——
+        // 选目录新建的路径是 `start_new_session()` → 再设 `new_session_workspace`，
+        // 谁后写谁生效（见 `confirm_workspace_picker` 的注释）。
+        self.new_session_workspace = None;
         self.rebuild_session_rows(cx);
     }
 
