@@ -1070,6 +1070,9 @@ async fn drain_output<R>(
                 carry.extend_from_slice(chunk);
                 let (text, rest) = decode_utf8_keep_tail(&carry);
                 carry = rest;
+                // 同前台路径：剥 ANSI 控制序列——后台命令的 tail 与增量事件最终都会
+                // 回传给模型/前端，转义码在那里同样是纯噪声。
+                let text = crate::common::ansi::strip_ansi(&text).into_owned();
                 if !text.is_empty() {
                     {
                         let mut t = tail.lock().await;
@@ -1096,7 +1099,7 @@ async fn drain_output<R>(
     }
     // 收尾 1：流以不完整序列结束（真截断/非法字节）→ lossy 兜底一次
     if !carry.is_empty() {
-        let text = String::from_utf8_lossy(&carry).into_owned();
+        let text = crate::common::ansi::strip_ansi(&String::from_utf8_lossy(&carry)).into_owned();
         if !text.is_empty() {
             let mut t = tail.lock().await;
             t.push_str(&text);
@@ -1493,8 +1496,17 @@ pub async fn execute_command_action_cancellable(
 
             // 输出体量治理：命令输出原样可达数十万字符——尾部截断（错误/摘要
             // 通常在尾部；50KB / 2000 行双上限），防单条结果压垮上下文。
-            let stdout_text = String::from_utf8_lossy(&stdout_bytes).to_string();
-            let stderr_text = String::from_utf8_lossy(&stderr_bytes).to_string();
+            //
+            // 先剥 ANSI 控制序列：PowerShell 的 `Select-String` 会给匹配文本加反向
+            // 高亮（`ESC[7m…ESC[0m`），这些字节原样回传会让结果里尽是 `\u001b[7m`
+            // （既占 token，又让人误以为输出里有乱码）。落盘、截断、返回三处都基于
+            // 剥离后的文本，口径一致。
+            let stdout_text =
+                crate::common::ansi::strip_ansi(&String::from_utf8_lossy(&stdout_bytes))
+                    .into_owned();
+            let stderr_text =
+                crate::common::ansi::strip_ansi(&String::from_utf8_lossy(&stderr_bytes))
+                    .into_owned();
             // 截断前先把完整输出落盘（best effort）——截断标记附路径指引，
             // 模型可按需回读完整内容（read_file 分页），截掉的部分不再"永久丢失"。
             let log_file =

@@ -2,6 +2,7 @@
 //!
 //! 包含整个系统共享的通用组件和类型。
 
+pub mod ansi;
 pub mod binary;
 pub mod error;
 pub mod hash;
