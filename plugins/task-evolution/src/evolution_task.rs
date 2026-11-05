@@ -93,6 +93,9 @@ struct RulePlan {
     #[serde(rename = "abstract", default)]
     abstract_text: String,
     content: String,
+    /// 语义 slug（可选；可用则构成 `rule-evo-{slug}`，否则回退时间戳命名）。
+    #[serde(default)]
+    id: Option<String>,
 }
 
 /// 角色 diff 计划项。
@@ -407,15 +410,20 @@ impl EvolutionTask {
 【输出格式】只输出以下 JSON（不要输出其他内容）。
 不要使用任何工具（如 clipboard_write）输出综述结果——最终回复文本必须直接就是 JSON：
 {{
-  "memories": [{{"action": "add", "category": "preference|decision|fact|entity|pattern|successful_case|failed_case", "content": "...", "importance": 0.8, "id": "可选"}}{merge_example}],
+  "memories": [{{"action": "add", "category": "preference|decision|fact|entity|pattern|successful_case|failed_case", "id": "英文 kebab-case 语义短名（必填）", "content": "...", "importance": 0.8}}{merge_example}],
   "skills": [{{"action": "add|update", "id": "kebab-case", "name": "...", "description": "...", "content": "使用说明（Markdown）", "applicable_scenarios": ["..."]}}],
-  "rules": [{{"action": "add", "abstract": "规则摘要", "content": "规则详情"}}],
+  "rules": [{{"action": "add", "id": "英文 kebab-case 语义短名（必填）", "abstract": "规则摘要", "content": "规则详情"}}],
   "roles": [{{"action": "create|retire", "id": "role-name", "system_prompt": "...", "tools": ["..."]}}],
   "deletions": [{{"kind": "memory|skill|rule", "id": "...", "reason": "删除证据"}}],
   "summary": "一句话总结本期变更"
 }}
 
 【写前原则】
+- **`id` 是 URI 文件名，必须是英文 kebab-case 语义短名**（3-48 字符，只含 `a-z` `0-9` `-`）；
+  它决定这条记忆/规则在 `tianyan://…` 下的名字，也是检索与人工浏览时唯一的可读标识。
+  正例：`user-prefers-table-output`、`gnss-ztd-height-datum`、`apply-patch-context-anchoring`；
+  反例：`evo-1793150261`、`note-1`、中文、整句。名字要能让人只看文件名就知道是什么，
+  但不要写成一整句话；
 - 只把稳定、跨会话可复用的偏好 / 事实 / 教训 / 决策写入记忆与画像；临时性、一次性内容
   与过程记录（版本发布、功能完成、例行里程碑）不写记忆——它们在演化报告与项目文档中留痕；
 - 写新技能前先查现有技能（语义重复则完善而非新建）；
@@ -496,11 +504,27 @@ impl EvolutionTask {
     /// 实证 3 条同 id），以序号消歧。
     async fn apply_memory(&self, ctx: &TaskContext, m: &MemoryPlan, seq: usize) -> Result<()> {
         let category = parse_category(&m.category)?;
-        let id =
+        // id 语义化：模型给出的**可用 slug** 优先（构成可读的 URI 文件名），不可用才回退
+        // 时间戳。回退必定 `warn!`——否则「模型又开始不给 id」会静默退化成
+        // `evo-{时间戳}-{序号}` 这类既不可读、检索时模型也认不出是什么的机器名
+        // （实测 `user/preferences` 40 条活跃记忆里 34 条是这种名字）。
+        let raw_id =
             m.id.as_deref()
                 .map(normalize_entry_id)
-                .filter(|s| !s.is_empty())
-                .unwrap_or_else(|| format!("evo-{}-{}", chrono::Utc::now().timestamp(), seq));
+                .filter(|s| !s.is_empty());
+        let id = match raw_id.as_deref().and_then(sanitize_slug) {
+            Some(slug) => unique_memory_id(ctx, category, &slug).await?,
+            None => {
+                if let Some(raw) = raw_id.as_deref() {
+                    tracing::warn!(
+                        raw_id = raw,
+                        category = %m.category,
+                        "记忆 id 不是可用 slug（需 [a-z0-9-]，长度 3..=48），回退时间戳命名"
+                    );
+                }
+                format!("evo-{}-{}", chrono::Utc::now().timestamp(), seq)
+            }
+        };
         let mut entry = MemoryEntry::new(&id, &m.content, category);
         entry.importance = m.importance.clamp(0.0, 1.0);
         entry.source_session = Some("evolution".to_string());
@@ -634,9 +658,23 @@ impl EvolutionTask {
     /// 应用规则新增（agent/learned/{id}）。
     async fn apply_rule(&self, ctx: &TaskContext, r: &RulePlan) -> Result<()> {
         let ts = chrono::Utc::now().format("%Y%m%d-%H%M%S");
-        let rule_id = format!("rule-evo-{}", ts);
+        // 与记忆同理：可用 slug 优先（`rule-evo-{slug}`），否则回退时间戳。
+        let slug = r.id.as_deref().and_then(sanitize_slug);
+        if r.id.is_some() && slug.is_none() {
+            tracing::warn!(
+                raw_id = ?r.id,
+                "规则 id 不是可用 slug（需 [a-z0-9-]，长度 3..=48），回退时间戳命名"
+            );
+        }
+        let rule_id = match slug {
+            Some(slug) => format!("rule-evo-{slug}"),
+            None => format!("rule-evo-{ts}"),
+        };
         let uri = AgentPath::Learned.uri().append(&rule_id);
-        if !ctx.vfs.exists(&uri).await? {
+        // 同名即同主题：已有条目原地覆盖（演化规则是「最新结论」，旧版本在演化报告留痕）。
+        // 与 `RuleRecorder` 的「同主题聚合计数」互补——前者管结论演进，后者管失败频次。
+        let replaced = ctx.vfs.exists(&uri).await?;
+        if !replaced {
             ctx.vfs.create_file(&uri).await?;
         }
         let abstract_content = format!("[演化] {} (来源: evolution)", r.abstract_text);
@@ -647,7 +685,7 @@ impl EvolutionTask {
             chrono::Utc::now().to_rfc3339()
         );
         ctx.vfs.write_content(&uri, &detail).await?;
-        tracing::info!(rule_uri = %uri, "规则已写入");
+        tracing::info!(rule_uri = %uri, replaced, "规则已写入");
         Ok(())
     }
 
@@ -1054,6 +1092,61 @@ fn normalize_entry_id(raw: &str) -> String {
         .unwrap_or_default()
         .trim()
         .to_string()
+}
+
+/// 语义 slug 的最大长度（进 URI 文件名，太长会撑爆界面与日志）。
+const MAX_SLUG_LEN: usize = 48;
+/// `add` 撞已有 id 时最多尝试的序号后缀个数。
+const MAX_ID_SUFFIX: u32 = 9;
+
+/// 把模型给出的 id 规整为可用作 URI 文件名的**语义 slug**。
+///
+/// 返回 `None` 表示不可用，调用方回退到时间戳命名（并 `warn!`）。判据刻意从严——
+/// 命名的可读性正是这次改动的目的，宽松接受只是把不可读从 `evo-{时间戳}` 换成
+/// 另一种不可读：
+///
+/// - 只保留 `[a-z0-9]` 与作为分隔的 `-`（其余字符折成 `-`，连续 `-` 合并，
+///   首尾 `-` 去掉）。**中文因此会被丢弃**：URI 里中文要被百分号编码，文件名既不
+///   可读、也和现有全英文 slug（`doc-audience-layering` 等）不一致；
+/// - 规整后长度须在 `3..=MAX_SLUG_LEN`。
+///
+/// 例：`Apply_Patch 定位失败` → `apply-patch`；`用户偏好表格` → `None`（回退）。
+fn sanitize_slug(raw: &str) -> Option<String> {
+    let mut out = String::with_capacity(raw.len());
+    let mut last_is_dash = true; // 置真 → 开头的 `-` 被吞掉
+    for ch in raw.chars() {
+        let lower = ch.to_ascii_lowercase();
+        if lower.is_ascii_alphanumeric() {
+            out.push(lower);
+            last_is_dash = false;
+        } else if !last_is_dash {
+            out.push('-');
+            last_is_dash = true;
+        }
+    }
+    let slug = out.trim_matches('-');
+    if slug.len() < 3 || slug.len() > MAX_SLUG_LEN {
+        return None;
+    }
+    Some(slug.to_string())
+}
+
+/// 为 `add` 动作选一个不冲突的记忆 id：撞已有条目时加序号后缀。
+///
+/// 为什么不覆盖：`add` 的语义是「新增一条」，模型给的 id 相撞多半是命名凑巧，
+/// 覆盖会静默丢掉既有内容。真正的「更新同一条」应走 `merge` 动作。
+async fn unique_memory_id(ctx: &TaskContext, category: MemoryCategory, id: &str) -> Result<String> {
+    if !ctx.vfs.exists(&category.default_uri(id)).await? {
+        return Ok(id.to_string());
+    }
+    for n in 2..=MAX_ID_SUFFIX {
+        let candidate = format!("{id}-{n}");
+        if !ctx.vfs.exists(&category.default_uri(&candidate)).await? {
+            return Ok(candidate);
+        }
+    }
+    // 序号用尽：回退时间戳，保证一定能写（不让一个命名冲突丢掉整条记忆）
+    Ok(format!("evo-{}-0", chrono::Utc::now().timestamp()))
 }
 
 /// 解析记忆类别。
@@ -2250,6 +2343,154 @@ mod tests {
         assert!(
             input.contains("不要凭感觉删技能"),
             "删除纪律须显式否定「凭感觉」: {input}"
+        );
+    }
+
+    // ── 命名语义化：id 是 URI 文件名，必须可读 ──────────────────────
+
+    #[test]
+    fn test_sanitize_slug_normalises_to_kebab_case() {
+        // 下划线 / 空格 / 大写 → kebab-case，中文被丢弃
+        assert_eq!(
+            sanitize_slug("Apply_Patch 定位失败"),
+            Some("apply-patch".to_string())
+        );
+        // 连续分隔符合并、首尾分隔符去掉
+        assert_eq!(
+            sanitize_slug("--user  prefers  tables--"),
+            Some("user-prefers-tables".to_string())
+        );
+        // 纯中文：没有可保留字符 → 回退
+        assert_eq!(sanitize_slug("用户偏好表格"), None);
+        // 过短 / 过长 → 回退
+        assert_eq!(sanitize_slug("ab"), None);
+        assert_eq!(sanitize_slug(&"a".repeat(MAX_SLUG_LEN + 1)), None);
+        // 下界可用
+        assert_eq!(sanitize_slug("ev0"), Some("ev0".to_string()));
+    }
+
+    fn memory_plan(id: Option<&str>, content: &str) -> MemoryPlan {
+        MemoryPlan {
+            action: "add".to_string(),
+            category: "preference".to_string(),
+            content: content.to_string(),
+            importance: 0.8,
+            id: id.map(str::to_string),
+            merge_from: Vec::new(),
+        }
+    }
+
+    fn rule_plan(id: Option<&str>, content: &str) -> RulePlan {
+        RulePlan {
+            action: "add".to_string(),
+            abstract_text: "摘要".to_string(),
+            content: content.to_string(),
+            id: id.map(str::to_string),
+        }
+    }
+
+    fn new_task() -> EvolutionTask {
+        EvolutionTask::new(
+            Arc::new(FakeExecutor {
+                response: "{}".to_string(),
+            }),
+            10,
+        )
+    }
+
+    /// 记忆 add：可用 slug 直接成为 URI 文件名（不再是 `evo-{时间戳}`）。
+    #[tokio::test]
+    async fn test_apply_memory_uses_semantic_slug() {
+        let vfs = Arc::new(MockVfs::new());
+        let ctx = make_context(vfs.clone());
+        let task = new_task();
+
+        task.apply_memory(&ctx, &memory_plan(Some("user-prefers-tables"), "内容"), 0)
+            .await
+            .unwrap();
+
+        let expect = MemoryCategory::Preference.default_uri("user-prefers-tables");
+        assert!(
+            ctx.vfs.exists(&expect).await.unwrap(),
+            "有可用 slug 时 URI 必须用该 slug：{expect}"
+        );
+    }
+
+    /// 记忆 add：纯中文 id 不可用 → 回退时间戳，且**不得**把中文当文件名。
+    #[tokio::test]
+    async fn test_apply_memory_falls_back_when_id_unusable() {
+        let vfs = Arc::new(MockVfs::new());
+        let ctx = make_context(vfs.clone());
+        let task = new_task();
+
+        task.apply_memory(&ctx, &memory_plan(Some("用户偏好表格"), "内容"), 0)
+            .await
+            .unwrap();
+
+        let bad = MemoryCategory::Preference.default_uri("用户偏好表格");
+        assert!(
+            !ctx.vfs.exists(&bad).await.unwrap(),
+            "不可用 id 不得原样成为 URI（中文需百分号编码，文件名不可读）"
+        );
+    }
+
+    /// 记忆 add 撞已有 id：加序号后缀，**不覆盖**既有内容（add 的语义是新增）。
+    #[tokio::test]
+    async fn test_apply_memory_suffixes_on_conflict() {
+        let vfs = Arc::new(MockVfs::new());
+        let ctx = make_context(vfs.clone());
+        let task = new_task();
+
+        let existing = MemoryCategory::Preference.default_uri("dup-name");
+        ctx.vfs.write_content(&existing, "旧内容").await.unwrap();
+
+        task.apply_memory(&ctx, &memory_plan(Some("dup-name"), "新内容"), 0)
+            .await
+            .unwrap();
+
+        let suffixed = MemoryCategory::Preference.default_uri("dup-name-2");
+        assert!(
+            ctx.vfs.exists(&suffixed).await.unwrap(),
+            "撞 id 应加序号后缀：{suffixed}"
+        );
+        let kept = ctx
+            .vfs
+            .read_content(&existing, ContentLevel::Detail)
+            .await
+            .unwrap();
+        assert_eq!(kept, "旧内容", "既有条目不得被 add 覆盖");
+    }
+
+    /// 规则 add：可用 slug → `rule-evo-{slug}`；不可用 → 回退时间戳。
+    #[tokio::test]
+    async fn test_apply_rule_uses_semantic_slug_or_falls_back() {
+        let vfs = Arc::new(MockVfs::new());
+        let ctx = make_context(vfs.clone());
+        let task = new_task();
+        let learned = AgentPath::Learned.uri();
+
+        task.apply_rule(
+            &ctx,
+            &rule_plan(Some("patch-anchoring"), "改补丁前先核对上下文"),
+        )
+        .await
+        .unwrap();
+        let expect = learned.append("rule-evo-patch-anchoring");
+        assert!(
+            ctx.vfs.exists(&expect).await.unwrap(),
+            "可用 slug 时规则名应为 rule-evo-<slug>：{expect}"
+        );
+
+        // 过短 id（<3）不可用 → 回退时间戳，不得留下 rule-evo-ab
+        task.apply_rule(&ctx, &rule_plan(Some("ab"), "另一条"))
+            .await
+            .unwrap();
+        assert!(
+            !ctx.vfs
+                .exists(&learned.append("rule-evo-ab"))
+                .await
+                .unwrap(),
+            "不可用 id 不得原样成为规则名"
         );
     }
 }
