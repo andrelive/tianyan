@@ -7294,6 +7294,7 @@ dependencies = [
 name = "tianyan-tools-ops"
 version = "1.2.3"
 dependencies = [
+ "chrono",
  "tianyan-core",
  "tianyan-provider-embed",
  "tianyan-provider-llm",

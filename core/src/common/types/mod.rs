@@ -14,6 +14,7 @@ mod metadata;
 mod namespace;
 
 mod search;
+mod slug;
 mod structured_message;
 mod token;
 pub(crate) mod tool;
@@ -31,6 +32,7 @@ pub use message::{Message, MessageRole};
 pub use metadata::EntryMetadata;
 pub use namespace::ContextNamespace;
 pub use search::SearchResult;
+pub use slug::{sanitize_slug, MAX_SLUG_LEN, MIN_SLUG_LEN};
 pub use structured_message::{
     CacheUsage, DetailedTokenUsage, MessageTime, Part, PartTime, StructuredMessage,
 };

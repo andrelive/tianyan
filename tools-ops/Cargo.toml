@@ -18,6 +18,7 @@ tianyan-provider-embed = { path = "../plugins/provider-embed" }
 tianyan-provider-llm = { path = "../plugins/provider-llm" }
 tianyan-service-config = { path = "../service/config" }
 tokio.workspace = true
+chrono.workspace = true
 
 [lints]
 workspace = true
