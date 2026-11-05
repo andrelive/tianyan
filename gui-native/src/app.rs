@@ -766,6 +766,8 @@ impl ClientApp {
                 self.messages = Rc::new(rows);
                 self.msg_list_state =
                     new_msg_list_state(self.messages.len(), self.msg_scrolled_up.clone());
+                // 整表替换后回到最新一条（`Top` 对齐不自动贴底，见 `new_msg_list_state`）
+                self.msg_list_state.scroll_to_end();
                 self.message_total = self.messages.len();
                 // 世代号 +1：让**在飞的** `load_messages` 结果作废（见 `messages_epoch`）
                 self.messages_epoch = self.messages_epoch.wrapping_add(1);
@@ -1836,13 +1838,17 @@ impl ClientApp {
     }
 
     pub(crate) fn load_messages(&mut self, session_id: String, cx: &mut Context<Self>) {
-        self.load_messages_with(session_id, MESSAGE_BASE, None, cx);
+        self.load_messages_with(session_id, MESSAGE_BASE, None, px(0.), cx);
     }
 
     /// [`Self::load_messages`] 的完整版：自带分页条数与滚动锚点。
     ///
     /// `anchor_seq`：整页替换必须重建 `GpuiListState`（条数变了不重建，虚拟列表会
     /// 越界），滚动位置随之丢失 —— 这里用「切走时顶部那条消息的 `seq`」把它找回来。
+    ///
+    /// `anchor_offset`：**那条消息内部的滚动偏移**。只给 `seq` 不够 ——
+    /// `scroll_to(ix, 0)` 会把视口钉在那条消息的**顶部**，用户若正看长回复的中段，
+    /// 切回来就整体上移（实测「在底部切走、切回来比底部高一点」「位置越高偏得越多」）。
     ///
     /// ⚠️ `seq` 在这里只作**服务端下发值的查询键**（服务端返回的 JSON 里就有它），
     /// **不由前端推断**。前端一旦要维护「本地这条对应库里哪一条」，就必然出现
@@ -1852,8 +1858,16 @@ impl ClientApp {
         session_id: String,
         base: usize,
         anchor_seq: Option<i64>,
+        anchor_offset: gpui_kit::Pixels,
         cx: &mut Context<Self>,
     ) {
+        // 与 `restore_view_state` 同口径钳制（见 `RECENT_ANCHOR_MAX_OFFSET`）：
+        // 重拉一页后那条消息的渲染高度可能变了，旧偏移不能无条件信。
+        let anchor_offset = anchor_offset.clamp(px(0.), px(RECENT_ANCHOR_MAX_OFFSET));
+        println!(
+            "[消息] 重拉定位: seq={anchor_seq:?} offset={:?} base={base}",
+            anchor_offset
+        );
         let port = self.port;
         println!("[消息] 加载会话 {session_id}（base={base}）");
         // 发起时的世代号：落地前必须没变过（期间若快照 replace 过，这一页就是旧的）
@@ -1910,9 +1924,16 @@ impl ClientApp {
                                 if let Some(ix) = this.messages.iter().position(|m| m.seq == seq) {
                                     this.msg_list_state.scroll_to(gpui_kit::ListOffset {
                                         item_ix: ix,
-                                        offset_in_item: px(0.),
+                                        offset_in_item: anchor_offset,
                                     });
+                                } else {
+                                    this.msg_list_state.scroll_to_end();
                                 }
+                            } else {
+                                // 首屏（无锚点）：进会话就该停在最新一条。
+                                // `Top` 对齐不会自动贴底（那是 `Bottom` 对齐用 `None` 表达的
+                                // 语义），漏了这句会话会停在顶部/中间。
+                                this.msg_list_state.scroll_to_end();
                             }
                             this.message_total = total;
                             this.oldest_seq = cursor;
@@ -2032,7 +2053,19 @@ impl ClientApp {
                 // 3. 程序 splice 不触发滚动监听，`msg_scrolled_up` 原值保持（上滚中仍是
                 //    true），后续 delta 不会把视图拽回底部。
                 if added > 0 {
-                    this.msg_list_state.splice(0..0, added);
+                    // 前插后**必须**给新项补高度 hint：`splice` 内部把新项设成
+                    // `size_hint: None`（gpui 视作 0px），而这一页动辄 50 条——
+                    // 用户接着上滚时按累计高度反查会连续跨项（「中间的 user 被跳过」）。
+                    // gpui 没有「给 splice 项设 hint」的公开 API，只能重建 +
+                    // 统一 hint + 把锚点显式搬回原处（`reset` 会清空
+                    // `logical_scroll_top`，所以下面这次 `scroll_to` 不能用省）。
+                    let anchor = this.msg_list_state.logical_scroll_top();
+                    this.msg_list_state
+                        .reset_with_uniform_height(this.messages.len(), px(MSG_ROW_HEIGHT_HINT));
+                    this.msg_list_state.scroll_to(gpui_kit::ListOffset {
+                        item_ix: anchor.item_ix + added,
+                        offset_in_item: anchor.offset_in_item,
+                    });
                 }
                 this.message_total = this.messages.len();
                 // 标题跟着走（「还有更早」随 has_more 出现/消失）
@@ -2377,6 +2410,32 @@ impl ClientApp {
 /// 有意**不用** `FollowMode::Tail`：它的「滚回底部自动恢复跟随」判据是
 /// `scroll_offset + available_height >= total_height`，`total_height` 同样受
 /// 未测量项影响，实测会把刚上滚的用户立刻拉回底部（2026-11-02）。
+/// 未测量项的统一高度估算（px）。
+///
+/// **这个值决定「滚动会不会跨项」**：gpui 的 `ListState::new` / `reset` 内部都走
+/// `splice`，而 `splice` 给每个新项 `size_hint: None`，`ListItemSummary` 里直接取
+/// `height = px(0.)`（gpui-pre 0.3.6 `elements/list.rs` 的 `impl sum_tree::Item`）。
+/// 于是所有未测量项的总高度是 0：滚一格（约 60–120px）按累计高度反查位置时，
+/// 会一次跨过好几项——实测「上滚时中间的 user 消息直接被跳过」，上下都是长回复
+/// （几千 px）时最明显。
+///
+/// gpui 为此提供了 `with_uniform_item_height` / `reset_with_uniform_height`：
+/// 给未测量项一个高度 hint，测量后自动被真实值替换（已测量项保持真实高度）。
+/// 只要 hint ≥ 一次滚动步长，反查就不会跨项。
+///
+/// 取值 280：接近消息项高度的中位数（短 user 气泡 60–120，长回复上千）。
+/// 太大 → 测量后收缩、视口内容下移；太小 → 仍会跨项。
+pub(crate) const MSG_ROW_HEIGHT_HINT: f32 = 280.;
+
+/// 恢复滚动位置时允许的最大「消息内偏移」（px）。
+///
+/// `offset_in_item` 的语义是「视口顶部在那条消息内部多深」，前提是那条消息的高度
+/// 没变。切走期间它可能变矮（重拉后渲染宽度变化、被压缩点替代、流式收尾重排），
+/// 旧偏移超过自身高度时 `layout_items` 会把该项顶到负 y 之外，视口落到**后面某一项**
+/// —— 表现是「这个会话不管怎么切都定在中间那个位置」（实测：长回复密集的会话如此，
+/// 短消息会话正常）。钳到一屏多：最坏是「偏高一条消息」，不会整条错位。
+pub(crate) const RECENT_ANCHOR_MAX_OFFSET: f32 = 1200.;
+
 pub(crate) fn new_msg_list_state(
     item_count: usize,
     scrolled_up: Rc<std::cell::Cell<bool>>,
@@ -2390,7 +2449,34 @@ pub(crate) fn new_msg_list_state(
     // 两轮对话的位置会跳、不平滑」）。
     // 600px ≈ 2–3 屏预测量（gpui-component 的 `MessageScroller` 用 400；我们的项
     // 更重且高度方差更大，取大一档）。代价是每次布局多测量几项，可接受。
-    let state = GpuiListState::new(item_count, ListAlignment::Bottom, px(600.));
+    // 600 → 1200：一屏约 800px，1200 ≈ 1.5 屏预测量，覆盖长消息的两端。
+    //
+    // `.measure_all()` 是**关键**：`scroll_top()` 的定义是
+    // `items.find(Count(item_ix)).height + offset_in_item`——从列表顶部累计的像素，
+    // 只要还有一个 Unmeasured 项（`size_hint: None` → `height = px(0.)`），
+    // 这个累计值就是错的，滚轮按它反查位置就会偏移（滚一格跨过整条消息）。
+    // 只补 uniform hint 只是把误差从「0 vs 3000」缩小到「280 vs 3000」，仍是错的。
+    // `measure_all()` 在**首帧**跑一遍 `layout_all_items`（逐项 render + layout，
+    // 用真实宽度），之后全部是 `ListItem::Measured`，累计高度精确。
+    // 代价：切会话/加载更早时多一次全量布局（一页 MESSAGE_BASE=50 条 markdown）；
+    // `reset()` 会把 `measuring_behavior` 复位，所以每次重置后都会重测一轮。
+    // **`ListAlignment::Top`，不是 Bottom。**
+    //
+    // Bottom 对齐下 `logical_scroll_top = None` 表示「贴底」，而 `StateInner::scroll()`
+    // 里有一句：`if alignment == Bottom && new_scroll_top == scroll_max { logical_scroll_top = None }`
+    // —— 贴底附近滚动一格会被这一句吞掉（位置重置为末尾），下一格才真正生效且已经
+    // 越过了视口底部那一项。实测表现就是「向上滚动时不总是跳，但在刚离开底部时
+    // 特别容易整条跳过」（用户：「刚看到用户输入的边，一下就跳到上面的输出上」）。
+    //
+    // Top 对齐下 `logical_scroll_top` 始终是明确的 `(item_ix, offset_in_item)`，
+    // 而且**渲染只依赖 item_ix**（`layout_items` 从 `scroll_top.item_ix` 开始往下排，
+    // 第一个项用 `-offset_in_item` 偏移），不依赖前面各项的累计高度——所以
+    // `splice(0..0, n)` 前插时只要 item_ix 后移 n 指回同一项，画面就纹丝不动。
+    // 代价：Top 对齐不会自动贴底（Bottom 才用 None 表示末尾），由调用方在数据
+    // 就绪后显式 `scroll_to_end()`（见 `load_messages` / `reset_msg_list_state`）。
+    let state = GpuiListState::new(item_count, ListAlignment::Top, px(1200.))
+        .with_uniform_item_height(px(MSG_ROW_HEIGHT_HINT))
+        .measure_all();
     // 新构造 / 重置后一律贴底（`scrolled_up = false`）
     scrolled_up.set(false);
     state.set_scroll_handler(move |event, _window, _cx| {
@@ -2406,7 +2492,9 @@ pub(crate) fn reset_msg_list_state(
     item_count: usize,
     scrolled_up: &Rc<std::cell::Cell<bool>>,
 ) {
-    state.reset(item_count);
+    state.reset_with_uniform_height(item_count, px(MSG_ROW_HEIGHT_HINT));
+    // Top 对齐不自动贴底，重置后显式回到底部（新会话/切会话的期望位置）
+    state.scroll_to_end();
     scrolled_up.set(false);
 }
 

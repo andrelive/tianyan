@@ -455,12 +455,33 @@ impl ClientApp {
         //
         // 因此这里一律按当前条数**重建**（重建不丢阅读位置：下面用 park 时视线
         // 所在那条的 `seq` 找回来）。
-        let anchor_seq = snap
+        // 锚点 = (**消息 seq**, **该消息内的滚动偏移**)。
+        //
+        // 两个都要：只带 seq 时 `scroll_to(ix, 0)` 会把视口钉在那条消息的**顶部**——
+        // 用户切走时若正看一条长回复的中段，切回来就整体上移（实测「切走时在底部、
+        // 切回来比底部高一点」「位置越高偏得越多」）。`Top` 对齐下渲染只依赖
+        // `(item_ix, offset_in_item)`，两者齐全才是像素级还原。
+        let anchor = snap
             .msg_list_state
             .as_ref()
-            .and_then(|ls| snap.messages.get(ls.logical_scroll_top().item_ix))
+            .map(|ls| ls.logical_scroll_top());
+        let anchor_seq = anchor
+            .and_then(|off| snap.messages.get(off.item_ix))
             .map(|m| m.seq)
             .filter(|s| *s > 0);
+        let anchor_offset = anchor.map_or(px(0.), |off| off.offset_in_item);
+        // 偏移必须钳制：`offset_in_item` 是「视口顶部在那条消息内多深」，前提是
+        // 那条消息的高度没有变。切走期间它可能变矮（重拉后宽度/渲染不同、被压缩点
+        // 替代、流式收尾重排），此时旧偏移会超过自身高度——`layout_items` 把该项
+        // 顶到负 y 之外，视口实际落在它**后面的某一项**上，表现就是「这个会话不管
+        // 怎么切都定在中间那个位置」（实测：只有长回复密集的会话如此，短消息会话正常）。
+        // 钳到一屏高度以内：最坏是「偏高一条消息」，不会整条错位。
+        let anchor_offset = anchor_offset.clamp(px(0.), px(crate::app::RECENT_ANCHOR_MAX_OFFSET));
+        println!(
+            "[消息] 切回定位: seq={anchor_seq:?} offset={:?} 条数={}",
+            anchor_offset,
+            self.messages.len()
+        );
         self.messages = snap.messages;
         self.msg_list_state =
             crate::app::new_msg_list_state(self.messages.len(), self.msg_scrolled_up.clone());
@@ -468,12 +489,22 @@ impl ClientApp {
             if let Some(ix) = self.messages.iter().position(|m| m.seq == seq) {
                 self.msg_list_state.scroll_to(gpui_kit::ListOffset {
                     item_ix: ix,
-                    offset_in_item: px(0.),
+                    offset_in_item: anchor_offset,
                 });
                 // 视线停在中间 = 用户不在尾部：后续新内容/流式增量不得把他拉回底部。
                 // （`scroll_to` 是程序滚动，不触发滚动监听，标志必须显式设。）
                 self.msg_scrolled_up.set(ix + 1 < self.messages.len());
+            } else {
+                // 锚点那条已被压缩点替代/删掉：退回底部（`Top` 对齐不自动贴底）
+                self.msg_list_state.scroll_to_end();
+                self.msg_scrolled_up.set(false);
             }
+        } else {
+            // 无锚点 = 切走时停在底部（`logical_scroll_top` 指向末尾之后，取不到消息）：
+            // 显式到底。**不能省**：`Top` 对齐下未指定位置等于「停在顶部」，
+            // 这正是「切回会话停在中间/顶部」那个回归的来源。
+            self.msg_list_state.scroll_to_end();
+            self.msg_scrolled_up.set(false);
         }
         self.expand = snap.expand.unwrap_or_else(|| {
             Rc::new(std::cell::RefCell::new(crate::msg::ExpandState::default()))
@@ -702,11 +733,15 @@ impl ClientApp {
             // `anchor_seq` = 恢复出来的窗口**顶部**那条消息的 seq：重拉后按它找回
             // 阅读位置，否则每次切回都会被 `ListAlignment::Bottom` 钉到底部
             // （vite 靠 store 里保留的 Virtuoso 实例天然保位，native 得显式给锚点）。
-            let anchor_seq = {
-                let ix = self.msg_list_state.logical_scroll_top().item_ix;
-                self.messages.get(ix).map(|m| m.seq).filter(|s| *s > 0)
-            };
-            self.load_messages_with(id, MESSAGE_BASE, anchor_seq, cx);
+            // 锚点必须带**消息内偏移**（`offset_in_item`），只给 seq 会落到那条消息
+            // 的顶部（见 `load_messages_with` 的文档）。
+            let anchor = self.msg_list_state.logical_scroll_top();
+            let anchor_seq = self
+                .messages
+                .get(anchor.item_ix)
+                .map(|m| m.seq)
+                .filter(|s| *s > 0);
+            self.load_messages_with(id, MESSAGE_BASE, anchor_seq, anchor.offset_in_item, cx);
         }
         self.load_session_usage(cx);
         self.load_todos_goals(cx);
