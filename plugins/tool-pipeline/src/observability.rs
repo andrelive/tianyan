@@ -18,6 +18,7 @@ use tianyan::agent::{CallSkillParams, ToolPostExecuteListener};
 use tianyan::common::error::TianyanError;
 use tianyan::model::types::ToolCall;
 use tianyan::observability::execution_log::ExecutionLog;
+use tianyan::observability::rule_recorder::{FailureClass, FailureKind, RuleTopic};
 use tianyan::observability::trace::TraceCollector;
 use tianyan::observability::usage_stats::UsageStats;
 use tianyan::observability::{ExecutionHistory, RuleRecorder};
@@ -182,11 +183,13 @@ impl ToolPostExecuteListener for ToolObservabilityListener {
         if !success {
             if let Some(ref recorder) = rule_recorder {
                 let tool_name = &call.function.name;
-                let err_msg = result
-                    .as_ref()
-                    .err()
-                    .map(|e| e.to_string())
-                    .unwrap_or_default();
+                let err = result.as_ref().err();
+                // 聚合主题 = (工具, 失败类别)。类别由 `TianyanError` 的语义谓词派生
+                // （分类契约只在 `common::error`，此处不做字符串匹配），
+                // 同工具同类失败因此合并进同一条规则（`RuleRecorder` 侧按文件名前缀聚合）。
+                let class = err.map(FailureClass::of).unwrap_or(FailureClass::Other);
+                let topic = RuleTopic::new(tool_name, class);
+                let err_msg = err.map(|e| e.to_string()).unwrap_or_default();
                 let abstract_text = format!("{} 工具执行失败", tool_name);
                 let detail_text = format!(
                     "工具: {}\n参数: {}\n错误: {}\n",
@@ -196,10 +199,11 @@ impl ToolPostExecuteListener for ToolObservabilityListener {
                 // by RuleSuggester across all sessions.
                 if let Err(e) = recorder
                     .record_with_kind(
+                        &topic,
                         &abstract_text,
                         &detail_text,
                         "tool-execution",
-                        tianyan::observability::rule_recorder::FailureKind::Logic,
+                        FailureKind::Logic,
                     )
                     .await
                 {

@@ -1,12 +1,26 @@
 //! 规则记录器。
 //!
-//! Harness Engineering 核心：每次智能体失败时，追加一条规则到 agent/learned/，
-//! 确保同一失败永不发生第二次。
+//! Harness Engineering 核心：每次智能体失败时，**按主题聚合**写入一条规则到
+//! `agent/learned/`，确保同一失败永不发生第二次。
+//!
+//! **聚合口径**（2026-11 修）：规则按 `(工具, 失败类别)` 聚合成**一条**。同一主题
+//! 反复失败时只累加计数并追加「最近失败」记录，不再每失败一次写一条新条目。
+//!
+//! **主题键编码在 URI 文件名里**（`rule-{tool}-{class}-{ts}`），刻意不放在 `abstract`：
+//! `abstract` 会被 `SummaryTask` 用 LLM 重写（实测库里 84 条由本记录器写入的规则
+//! **100% 被改写**成叙述长文），所以任何「以 abstract 文本相似度判重」的做法都只在
+//! 下次摘要任务跑之前有效——跨天的同类失败永远判不出重复，规则库于是按失败次数
+//! 线性膨胀（实测 84 条碎片按工具只有 18 类，`write_file` 10 条里 9 条同因）。
+//! URI 文件名不会被任何摘要/改写流程触碰，判据因此稳定，且只是 O(条目数) 的
+//! 纯字符串前缀比较——不需要读取任何条目内容。
+//!
+//! **累计计数的权威位置是 `detail`（`累计次数:` 行）**，不是 abstract——后者随时会被
+//! 摘要任务改写，只有 detail 是可靠的。
 
 use std::sync::Arc;
 
-use crate::common::error::Result;
-use crate::common::types::{AgentPath, ContentLevel};
+use crate::common::error::{Result, TianyanError};
+use crate::common::types::{AgentPath, ContentLevel, TianyanUri};
 use crate::vfs::VirtualFileSystem;
 
 /// 失败类型分类。
@@ -42,6 +56,133 @@ impl FailureKind {
             FailureKind::Input => "输入",
             FailureKind::System => "系统",
         }
+    }
+}
+
+/// 失败类别——规则的聚合维度之二（之一是工具名）。
+///
+/// **分类口径只有一处**：[`TianyanError`] 的语义谓词（ADR-014）。构造时传入错误对象，
+/// 这里只做映射，**不在这里也不在调用方做 `contains` / `starts_with` 判定**——
+/// 错误分类契约只住在 `common::error`。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FailureClass {
+    /// 权限拒绝 / 安全策略阻止。
+    Permission,
+    /// 目标不存在（条目 / 目录 / 文件）。
+    NotFound,
+    /// 冲突（语义编辑锚点不匹配、目标状态过期）。
+    Conflict,
+    /// 无效输入（参数缺失 / 格式错误）。
+    InvalidInput,
+    /// 操作超时。
+    Timeout,
+    /// 操作已取消。
+    Cancelled,
+    /// 配置错误。
+    Config,
+    /// 其它（外层包装未携带语义前缀，无法归类）。
+    Other,
+}
+
+impl FailureClass {
+    /// 从错误对象派生类别（顺序无影响：语义前缀互斥）。
+    pub fn of(err: &TianyanError) -> Self {
+        if err.is_permission() {
+            Self::Permission
+        } else if err.is_not_found() {
+            Self::NotFound
+        } else if err.is_conflict() {
+            Self::Conflict
+        } else if err.is_invalid_input() {
+            Self::InvalidInput
+        } else if err.is_timeout() {
+            Self::Timeout
+        } else if err.is_cancelled() {
+            Self::Cancelled
+        } else if err.is_config() {
+            Self::Config
+        } else {
+            Self::Other
+        }
+    }
+
+    /// 进 URI 文件名的短标识（只含小写字母与连字符，无分隔符歧义）。
+    pub fn slug(self) -> &'static str {
+        match self {
+            Self::Permission => "permission",
+            Self::NotFound => "not-found",
+            Self::Conflict => "conflict",
+            Self::InvalidInput => "invalid-input",
+            Self::Timeout => "timeout",
+            Self::Cancelled => "cancelled",
+            Self::Config => "config",
+            Self::Other => "other",
+        }
+    }
+
+    /// 写进 `abstract` 与 `detail` 的中文标签。
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Permission => "权限拒绝",
+            Self::NotFound => "目标不存在",
+            Self::Conflict => "定位冲突",
+            Self::InvalidInput => "参数无效",
+            Self::Timeout => "执行超时",
+            Self::Cancelled => "操作已取消",
+            Self::Config => "配置错误",
+            Self::Other => "执行失败",
+        }
+    }
+}
+
+/// 规则的聚合主题：`(工具, 失败类别)`。
+///
+/// 同主题的失败合并成一条规则；主题键的**唯一载体是 URI 文件名**，因为 `abstract`
+/// 会被 `SummaryTask` 用 LLM 改写（见模块文档），拿它做判重会在摘要任务跑过之后失效。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuleTopic {
+    tool: String,
+    class: FailureClass,
+}
+
+impl RuleTopic {
+    /// 构造主题。工具名会被规整为 URI 安全片段（小写、非 `[a-z0-9_]` 换 `_`）。
+    pub fn new(tool: &str, class: FailureClass) -> Self {
+        let mut sanitized = String::with_capacity(tool.len());
+        for ch in tool.chars() {
+            if ch.is_ascii_alphanumeric() {
+                sanitized.push(ch.to_ascii_lowercase());
+            } else {
+                sanitized.push('_');
+            }
+        }
+        if sanitized.is_empty() {
+            sanitized.push_str("unknown");
+        }
+        Self {
+            tool: sanitized,
+            class,
+        }
+    }
+
+    /// 工具名（已规整）。
+    pub fn tool(&self) -> &str {
+        &self.tool
+    }
+
+    /// 失败类别。
+    pub fn class(&self) -> FailureClass {
+        self.class
+    }
+
+    /// 规则文件名前缀（含开头 `rule-` 与结尾 `-`，用于同主题前缀匹配）。
+    pub fn file_prefix(&self) -> String {
+        format!("rule-{}-{}-", self.tool, self.class.slug())
+    }
+
+    /// 规则文件名（带写入时间戳，字典序即时间序）。
+    fn file_name(&self, ts: &str) -> String {
+        format!("rule-{}-{}-{}", self.tool, self.class.slug(), ts)
     }
 }
 
@@ -82,12 +223,18 @@ impl RuleRecorder {
         self
     }
 
-    /// 带失败类型分类的记录。
+    /// 带失败类型分类的记录（**按主题聚合**）。
     ///
-    /// Transient 失败不记录。Logic/System 失败记录为 learned rule。
-    /// 写入前检查语义重复，避免相同规则多次写入。
+    /// `Transient` / `Input` 失败不记录；`Logic` / `System` 失败按 `topic` 落地：
+    ///
+    /// - 同主题已有条目 → 累加 `累计次数` 并追加一条「最近失败」记录（不新建文件）；
+    /// - 无同主题条目 → 新建一条（命名 `rule-{tool}-{class}-{ts}`）。
+    ///
+    /// 判据是**文件名前缀**，不读任何条目内容，也不依赖 `abstract`（后者会被
+    /// `SummaryTask` 改写，见模块文档）。
     pub async fn record_with_kind(
         &self,
+        topic: &RuleTopic,
         abstract_text: &str,
         detail_text: &str,
         source_session: &str,
@@ -98,101 +245,237 @@ impl RuleRecorder {
             return Ok(());
         }
 
-        // 去重检查：避免语义重复的规则重复写入
-        if self.has_similar_rule(abstract_text).await? {
-            tracing::info!(
-                abstract_text = abstract_text,
-                failure_kind = kind.label(),
-                "跳过记录（已存在相似规则）"
-            );
-            return Ok(());
+        let now = chrono::Utc::now();
+        let now_rfc = now.to_rfc3339();
+        let ts = now.format("%Y%m%d-%H%M%S").to_string();
+
+        match self.find_topic_entry(topic).await? {
+            Some(uri) => {
+                self.append_occurrence(&uri, topic, detail_text, source_session, &now_rfc)
+                    .await?;
+                tracing::info!(
+                    rule_id = %uri.to_string(),
+                    session_id = %source_session,
+                    failure_kind = kind.label(),
+                    topic = %format!("{}/{}", topic.tool(), topic.class().slug()),
+                    "已聚合到同主题规则（累加计数，未新建条目）"
+                );
+            }
+            None => {
+                self.create_rule(
+                    topic,
+                    abstract_text,
+                    detail_text,
+                    source_session,
+                    &ts,
+                    &now_rfc,
+                    kind,
+                )
+                .await?;
+                tracing::info!(
+                    session_id = %source_session,
+                    failure_kind = kind.label(),
+                    topic = %format!("{}/{}", topic.tool(), topic.class().slug()),
+                    "已新建主题规则（同主题首条）"
+                );
+            }
         }
-
-        let ts = chrono::Utc::now().format("%Y%m%d-%H%M%S");
-        let rule_id = format!("rule-{}", ts);
-
-        let uri = AgentPath::Learned.uri().append(&rule_id);
-
-        self.vfs.create_file(&uri).await?;
-
-        let abstract_content = format!(
-            "[{}] {} (来源会话: {})",
-            kind.label(),
-            abstract_text,
-            source_session
-        );
-        self.vfs.write_abstract(&uri, &abstract_content).await?;
-
-        let full_detail = format!(
-            "失败类型: {}\n来源会话: {}\n\n详情:\n{}\n\n---\n## 规则元数据\n- 生成模型: {}\n- Pipeline 版本: {}\n- 生成时间: {}\n",
-            kind.label(),
-            source_session,
-            detail_text,
-            self.model_version,
-            self.pipeline_version,
-            chrono::Utc::now().to_rfc3339()
-        );
-        self.vfs.write_content(&uri, &full_detail).await?;
-
-        tracing::info!(
-            rule_id = %uri.to_string(),
-            session_id = %source_session,
-            failure_kind = kind.label(),
-            "已追加学习规则"
-        );
 
         Ok(())
     }
 
-    /// 检查 VFS 中是否已存在与 `abstract_text` 语义相似的规则。
+    /// 找同主题下**最新**的规则条目（纯文件名前缀匹配，不读条目内容）。
     ///
-    /// 通过比较已有规则的 Abstract 摘要与候选摘要的文本重叠度来判断。
-    async fn has_similar_rule(&self, candidate_abstract: &str) -> Result<bool> {
-        let learned_uri = AgentPath::Learned.uri();
-        let entries = match self.vfs.list(&learned_uri).await {
-            Ok(e) => e,
-            Err(_) => return Ok(false),
+    /// 文件名末尾是 `%Y%m%d-%H%M%S`，字典序即时间序，故取前缀命中里最大的那个。
+    async fn find_topic_entry(&self, topic: &RuleTopic) -> Result<Option<TianyanUri>> {
+        let dir = AgentPath::Learned.uri();
+        let entries = match self.vfs.list(&dir).await {
+            Ok(entries) => entries,
+            // 目录尚未建立（首次写入）→ 视作「无同主题条目」
+            Err(_) => return Ok(None),
         };
 
-        let candidate_lower = candidate_abstract.to_lowercase();
-
+        let prefix = topic.file_prefix();
+        let mut newest: Option<(String, TianyanUri)> = None;
         for entry in &entries {
-            if let Ok(existing) = self
-                .vfs
-                .read_content(entry.uri(), ContentLevel::Abstract)
-                .await
-            {
-                // 去掉类型标签前缀 "[逻辑]" / "[系统]"
-                let existing_clean = existing
-                    .trim_start_matches("[逻辑] ")
-                    .trim_start_matches("[系统] ")
-                    .trim_start_matches("[输入] ")
-                    .to_lowercase();
-
-                // 简单相似性检查：任一方向的包含关系或高重叠度
-                if existing_clean.contains(&candidate_lower)
-                    || candidate_lower.contains(&existing_clean)
-                {
-                    return Ok(true);
-                }
-
-                // 字符级 Jaccard 相似度近似
-                let overlap = candidate_lower
-                    .chars()
-                    .filter(|c| existing_clean.contains(*c))
-                    .count();
-                let total = candidate_lower
-                    .chars()
-                    .count()
-                    .max(existing_clean.chars().count());
-                if total > 0 && (overlap as f32 / total as f32) > 0.85 {
-                    return Ok(true);
-                }
+            let uri = entry.uri();
+            let Some(name) = uri.path().last().cloned() else {
+                continue;
+            };
+            if !name.starts_with(&prefix) {
+                continue;
+            }
+            if newest.as_ref().is_none_or(|(best, _)| name > *best) {
+                newest = Some((name, uri.clone()));
             }
         }
 
-        Ok(false)
+        Ok(newest.map(|(_, uri)| uri))
     }
+
+    /// 新建一条主题规则。
+    #[allow(clippy::too_many_arguments)]
+    async fn create_rule(
+        &self,
+        topic: &RuleTopic,
+        abstract_text: &str,
+        detail_text: &str,
+        source_session: &str,
+        ts: &str,
+        now: &str,
+        kind: FailureKind,
+    ) -> Result<()> {
+        let uri = AgentPath::Learned.uri().append(&topic.file_name(ts));
+        self.vfs.create_file(&uri).await?;
+
+        // abstract 给人看，会被 SummaryTask 改写；累计计数的权威在 detail。
+        self.vfs
+            .write_abstract(
+                &uri,
+                &format!(
+                    "[{}] {}（{}）(来源会话: {})",
+                    kind.label(),
+                    abstract_text,
+                    topic.class().label(),
+                    source_session
+                ),
+            )
+            .await?;
+
+        let full_detail = format!(
+            "失败类型: {}\n工具: {}\n主题: {} / {}\n累计次数: 1\n最近发生: {}\n\n\
+             ## 最近失败\n{}\n\n\
+             ## 首次失败详情\n{}\n\n\
+             ---\n## 规则元数据\n- 生成模型: {}\n- Pipeline 版本: {}\n- 生成时间: {}\n",
+            kind.label(),
+            topic.tool(),
+            topic.tool(),
+            topic.class().label(),
+            now,
+            record_line(now, source_session, detail_text),
+            detail_text.trim_end(),
+            self.model_version,
+            self.pipeline_version,
+            now
+        );
+        self.vfs.write_content(&uri, &full_detail).await?;
+
+        Ok(())
+    }
+
+    /// 把一次新失败并入已有主题条目：计数 +1、最近失败前插、保留最近 N 条。
+    async fn append_occurrence(
+        &self,
+        uri: &TianyanUri,
+        topic: &RuleTopic,
+        detail_text: &str,
+        source_session: &str,
+        now: &str,
+    ) -> Result<()> {
+        let old = self
+            .vfs
+            .read_content(uri, ContentLevel::Detail)
+            .await
+            .unwrap_or_default();
+
+        let occurrences = parse_occurrences(&old) + 1;
+        let mut recent = parse_recent(&old);
+        recent.insert(0, record_line(now, source_session, detail_text));
+        recent.truncate(MAX_RECENT_OCCURRENCES);
+
+        // 首次失败详情：新格式取「## 首次失败详情」之后的段；老格式（本改动前写入的
+        // `rule-{ts}` 条目）把整份 detail 当作首次详情，保证信息不丢。
+        let first = match old.split("## 首次失败详情").nth(1) {
+            Some(rest) => rest.trim_start_matches('\n').trim_end().to_string(),
+            None => old.trim_end().to_string(),
+        };
+
+        let merged = format!(
+            "工具: {}\n主题: {} / {}\n累计次数: {}\n最近发生: {}\n\n\
+             ## 最近失败\n{}\n\n\
+             ## 首次失败详情\n{}\n\n\
+             ---\n## 规则元数据\n- 合并模型: {}\n- Pipeline 版本: {}\n- 最近合并: {}\n",
+            topic.tool(),
+            topic.tool(),
+            topic.class().label(),
+            occurrences,
+            now,
+            recent.join("\n"),
+            first,
+            self.model_version,
+            self.pipeline_version,
+            now
+        );
+        self.vfs.write_content(uri, &merged).await?;
+
+        self.vfs
+            .write_abstract(
+                uri,
+                &format!(
+                    "[规则] {} {}（累计 {} 次，最近 {}）",
+                    topic.tool(),
+                    topic.class().label(),
+                    occurrences,
+                    now
+                ),
+            )
+            .await?;
+
+        Ok(())
+    }
+}
+
+/// 单条规则最多保留的「最近失败」记录行数。
+///
+/// 更早的发生只留在 `累计次数` 里——detail 不能随失败次数线性增长，否则这条规则
+/// 迟早撑爆上下文（一次 `apply_patch` 的 detail 里带着完整补丁）。
+const MAX_RECENT_OCCURRENCES: usize = 20;
+
+/// 从既有 detail 里取累计次数（老格式或缺这一行按 1 次算）。
+fn parse_occurrences(detail: &str) -> u32 {
+    detail
+        .lines()
+        .find_map(|line| line.strip_prefix("累计次数: "))
+        .and_then(|s| s.trim().parse::<u32>().ok())
+        .unwrap_or(1)
+}
+
+/// 从既有 detail 里取「## 最近失败」段的记录行（新的在前）。
+fn parse_recent(detail: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut inside = false;
+    for line in detail.lines() {
+        if line.starts_with("## 最近失败") {
+            inside = true;
+            continue;
+        }
+        if inside {
+            if line.starts_with("## ") {
+                break;
+            }
+            if line.starts_with("- ") {
+                out.push(line.to_string());
+            }
+        }
+    }
+    out
+}
+
+/// 生成一条压缩后的发生记录（参数与错误各截断，防止 detail 无限膨胀）。
+fn record_line(ts: &str, session: &str, detail_text: &str) -> String {
+    let param = detail_text
+        .lines()
+        .find_map(|line| line.strip_prefix("参数: "))
+        .unwrap_or("");
+    let err = detail_text
+        .lines()
+        .find_map(|line| line.strip_prefix("错误: "))
+        .unwrap_or("");
+    format!(
+        "- {ts} [{session}] 参数={} 错误={}",
+        crate::common::truncate::truncate_utf8_boundary(param, 240),
+        crate::common::truncate::truncate_utf8_boundary(err, 360)
+    )
 }
 
 #[cfg(test)]
@@ -236,6 +519,48 @@ mod tests {
                 .lock()
                 .unwrap()
                 .insert((uri.to_string(), level), text.to_string());
+        }
+
+        /// 第一个被创建的条目的 detail（测试断言用）。
+        fn detail_of_first(&self) -> String {
+            let Some(uri) = self.created_files.lock().unwrap().first().cloned() else {
+                return String::new();
+            };
+            self.content
+                .lock()
+                .unwrap()
+                .get(&(uri, ContentLevel::Detail))
+                .cloned()
+                .unwrap_or_default()
+        }
+
+        /// 第一个被创建的条目的 abstract。
+        fn abstract_of_first(&self) -> String {
+            let Some(uri) = self.created_files.lock().unwrap().first().cloned() else {
+                return String::new();
+            };
+            self.content
+                .lock()
+                .unwrap()
+                .get(&(uri, ContentLevel::Abstract))
+                .cloned()
+                .unwrap_or_default()
+        }
+
+        /// 模拟 `SummaryTask` 用 LLM 重写 L0 摘要（改写后原文措辞不复存在）。
+        fn overwrite_abstract(&self, text: &str) {
+            let Some(uri) = self.created_files.lock().unwrap().first().cloned() else {
+                return;
+            };
+            self.content
+                .lock()
+                .unwrap()
+                .insert((uri, ContentLevel::Abstract), text.to_string());
+        }
+
+        /// 测试用便捷主题（`execute_command` / `Other`）。
+        fn topic() -> RuleTopic {
+            RuleTopic::new("execute_command", FailureClass::Other)
         }
     }
 
@@ -309,7 +634,7 @@ mod tests {
                 .unwrap()
                 .get(&(uri.to_string(), level))
                 .cloned()
-                .ok_or_else(|| crate::common::error::TianyanError::not_found(uri))
+                .ok_or_else(|| TianyanError::not_found(uri))
         }
         async fn append(&self, _uri: &TianyanUri, _content: &str) -> Result<()> {
             Ok(())
@@ -349,7 +674,13 @@ mod tests {
         let recorder = RuleRecorder::new(vfs.clone());
 
         recorder
-            .record_with_kind("summary", "detail", "s1", FailureKind::Transient)
+            .record_with_kind(
+                &SpyVfs::topic(),
+                "summary",
+                "detail",
+                "s1",
+                FailureKind::Transient,
+            )
             .await
             .unwrap();
 
@@ -363,7 +694,13 @@ mod tests {
         let recorder = RuleRecorder::new(vfs.clone());
 
         recorder
-            .record_with_kind("summary", "detail", "s1", FailureKind::Input)
+            .record_with_kind(
+                &SpyVfs::topic(),
+                "summary",
+                "detail",
+                "s1",
+                FailureKind::Input,
+            )
             .await
             .unwrap();
 
@@ -380,6 +717,7 @@ mod tests {
 
         recorder
             .record_with_kind(
+                &SpyVfs::topic(),
                 "Always check file existence first.",
                 "detail text",
                 "s1",
@@ -398,110 +736,208 @@ mod tests {
         );
     }
 
-    // ── Dedup: exact abstraction should not duplicate ───────────────
+    // ── 分类：FailureClass 只映射语义谓词（不在调用方做字符串匹配）────
+
+    #[test]
+    fn test_failure_class_from_semantic_predicates() {
+        assert_eq!(
+            FailureClass::of(&TianyanError::permission("x")),
+            FailureClass::Permission
+        );
+        assert_eq!(
+            FailureClass::of(&TianyanError::not_found("x")),
+            FailureClass::NotFound
+        );
+        assert_eq!(
+            FailureClass::of(&TianyanError::conflict("x")),
+            FailureClass::Conflict
+        );
+        assert_eq!(
+            FailureClass::of(&TianyanError::invalid_input("x")),
+            FailureClass::InvalidInput
+        );
+        assert_eq!(
+            FailureClass::of(&TianyanError::timeout("x")),
+            FailureClass::Timeout
+        );
+        assert_eq!(
+            FailureClass::of(&TianyanError::cancelled("x")),
+            FailureClass::Cancelled
+        );
+        assert_eq!(
+            FailureClass::of(&TianyanError::config("x")),
+            FailureClass::Config
+        );
+        // 外层包装未携带语义前缀（executor 的通用包装）→ Other
+        assert_eq!(
+            FailureClass::of(&TianyanError::Custom(
+                "tool: 执行失败：executor: 命令执行失败：目录名称无效。 (os error 267)".into()
+            )),
+            FailureClass::Other
+        );
+    }
+
+    #[test]
+    fn test_topic_prefix_is_uri_safe() {
+        let topic = RuleTopic::new("Apply_Patch-2", FailureClass::Conflict);
+        assert_eq!(topic.tool(), "apply_patch_2");
+        assert_eq!(topic.file_prefix(), "rule-apply_patch_2-conflict-");
+    }
+
+    // ── 聚合：同主题只保留一条，计数累加 ─────────────────────────────
 
     #[tokio::test]
-    async fn test_duplicate_rule_not_recorded() {
+    async fn test_same_topic_merges_into_one_entry() {
         let vfs = Arc::new(SpyVfs::new());
         let recorder = RuleRecorder::new(vfs.clone());
 
-        // Record first
         recorder
             .record_with_kind(
-                "Check auth before accessing data.",
-                "detail",
+                &SpyVfs::topic(),
+                "write_file 工具执行失败",
+                "工具: write_file\n参数: first-args\n错误: 拒绝访问（os error 5）\n",
                 "s1",
                 FailureKind::Logic,
             )
             .await
             .unwrap();
-        let count_after_first = vfs.created_count();
+        assert_eq!(vfs.created_count(), 1);
 
-        // Try recording the same rule again
         recorder
             .record_with_kind(
-                "Check auth before accessing data.",
-                "detail2",
+                &SpyVfs::topic(),
+                "write_file 工具执行失败",
+                "工具: write_file\n参数: second-args\n错误: 拒绝访问（os error 5）\n",
                 "s2",
                 FailureKind::Logic,
             )
             .await
             .unwrap();
 
-        // No additional files created (dedup should catch it via list + read)
-        // The first record created a file which appears in entries listing
-        assert_eq!(
-            vfs.created_count(),
-            count_after_first,
-            "Duplicate rule should not create a new file"
-        );
-    }
-
-    // ── Dedup: substring containment ────────────────────────────────
-
-    #[tokio::test]
-    async fn test_similar_by_containment_not_recorded() {
-        let vfs = Arc::new(SpyVfs::new());
-        let recorder = RuleRecorder::new(vfs.clone());
-
-        // Record a long rule
-        recorder
-            .record_with_kind(
-                "Validate user input before processing any request.",
-                "detail",
-                "s1",
-                FailureKind::Logic,
-            )
-            .await
-            .unwrap();
-        let count = vfs.created_count();
-
-        // Try recording a shorter rule that is a substring of the first
-        recorder
-            .record_with_kind("Validate user input", "detail2", "s2", FailureKind::Logic)
-            .await
-            .unwrap();
-
-        // The shorter text is contained in the existing rule, so it should be dedupped
-        assert_eq!(
-            vfs.created_count(),
-            count,
-            "Substring-contained rule should not duplicate"
-        );
-    }
-
-    // ── Dedup: no match should create a new file ────────────────────
-
-    #[tokio::test]
-    async fn test_different_rule_recorded() {
-        let vfs = Arc::new(SpyVfs::new());
-        let recorder = RuleRecorder::new(vfs.clone());
-
-        recorder
-            .record_with_kind(
-                "Close file handles after use.",
-                "detail",
-                "s1",
-                FailureKind::Logic,
-            )
-            .await
-            .unwrap();
-
-        // Different rule
-        recorder
-            .record_with_kind(
-                "Always validate network input.",
-                "detail2",
-                "s2",
-                FailureKind::Logic,
-            )
-            .await
-            .unwrap();
-
-        // Both should be recorded (different topics)
+        assert_eq!(vfs.created_count(), 1, "同主题不应新建条目");
+        let detail = vfs.detail_of_first();
+        assert!(detail.contains("累计次数: 2"), "计数应累加：{detail}");
+        assert!(detail.contains("[s2]"), "应追加最近一次来源会话：{detail}");
         assert!(
-            vfs.created_count() >= 2,
-            "Different rules should each create a file"
+            detail.contains("first-args"),
+            "首次失败详情必须保留（否则合并会丢信息）：{detail}"
         );
+        assert!(
+            vfs.abstract_of_first().contains("累计 2 次"),
+            "abstract 应反映累计次数（供人阅读；计数权威在 detail）"
+        );
+    }
+
+    /// **判别力测试**：`abstract` 被 `SummaryTask` 改写后，同主题仍必须聚合。
+    ///
+    /// 旧实现以 abstract 文本相似度判重——摘要任务改写后（实测库里 100% 被改写）
+    /// 判据失配，同一失败会再次新建条目。本用例在旧实现下必红，是本修复的判别依据。
+    #[tokio::test]
+    async fn test_merge_survives_abstract_rewrite() {
+        let vfs = Arc::new(SpyVfs::new());
+        let recorder = RuleRecorder::new(vfs.clone());
+
+        recorder
+            .record_with_kind(
+                &SpyVfs::topic(),
+                "write_file 工具执行失败",
+                "工具: write_file\n参数: a\n错误: 拒绝访问（os error 5）\n",
+                "s1",
+                FailureKind::Logic,
+            )
+            .await
+            .unwrap();
+
+        // 模拟 SummaryTask：L0 被 LLM 重写成叙述长文，原文措辞不复存在
+        vfs.overwrite_abstract(
+            "write_file 向临时目录写入脚本时连续报「拒绝访问 os error 5」，属逻辑类错误。",
+        );
+
+        recorder
+            .record_with_kind(
+                &SpyVfs::topic(),
+                "write_file 工具执行失败",
+                "工具: write_file\n参数: b\n错误: 拒绝访问（os error 5）\n",
+                "s2",
+                FailureKind::Logic,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            vfs.created_count(),
+            1,
+            "abstract 被改写后仍应按主题聚合（旧实现此处会新建第 2 条）"
+        );
+        assert!(
+            vfs.detail_of_first().contains("累计次数: 2"),
+            "改写不影响计数（计数权威在 detail）"
+        );
+    }
+
+    // ── 不同主题各自独立 ─────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_same_tool_different_class_creates_separate_entry() {
+        let vfs = Arc::new(SpyVfs::new());
+        let recorder = RuleRecorder::new(vfs.clone());
+
+        recorder
+            .record_with_kind(
+                &RuleTopic::new("execute_command", FailureClass::Timeout),
+                "executor 命令执行失败",
+                "工具: execute_command\n参数: a\n错误: 操作超时：executor: 执行超时\n",
+                "s1",
+                FailureKind::Logic,
+            )
+            .await
+            .unwrap();
+
+        recorder
+            .record_with_kind(
+                &RuleTopic::new("execute_command", FailureClass::Conflict),
+                "executor 命令执行失败",
+                "工具: execute_command\n参数: b\n错误: 冲突：executor: …\n",
+                "s2",
+                FailureKind::Logic,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            vfs.created_count(),
+            2,
+            "同工具不同失败类别是不同主题，应各成一条"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_different_tool_creates_separate_entry() {
+        let vfs = Arc::new(SpyVfs::new());
+        let recorder = RuleRecorder::new(vfs.clone());
+
+        recorder
+            .record_with_kind(
+                &RuleTopic::new("write_file", FailureClass::Other),
+                "write_file 工具执行失败",
+                "工具: write_file\n参数: a\n错误: 拒绝访问\n",
+                "s1",
+                FailureKind::Logic,
+            )
+            .await
+            .unwrap();
+
+        recorder
+            .record_with_kind(
+                &RuleTopic::new("read_file", FailureClass::Other),
+                "read_file 工具执行失败",
+                "工具: read_file\n参数: b\n错误: 拒绝访问\n",
+                "s2",
+                FailureKind::Logic,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(vfs.created_count(), 2, "不同工具是不同的主题，应各成一条");
     }
 }
