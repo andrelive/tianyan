@@ -140,7 +140,12 @@ impl ContextPipeline {
         // Load learned rules and memories —— **一次合并检索**，两池在同一分数口径下
         // 排序后按命名空间分派回各自的段（旧路径两池各检一次：同一 query 查两遍、
         // 每池必然凑满 top_k 条、`daily_search_queries` 同秒记两条）。
-        let (rules, memories) = self.load_rules_and_memories(query).await;
+        //
+        // 工作目录一并传入：检索结果要按「项目作用域」重排（跨项目条目降权），
+        // 见 `project_scope` 模块文档。
+        let (rules, memories) = self
+            .load_rules_and_memories(query, working_directory.path())
+            .await;
         injectable.rules_and_experiences = rules;
         injectable.memories = memories;
 
@@ -356,23 +361,51 @@ impl ContextPipeline {
     /// 统一排序、丢弃低于 [`MIN_SEMANTIC_SCORE`] 的候选——**不凑数**。
     ///
     /// [`MIN_SEMANTIC_SCORE`]: crate::context::retrieval::MIN_SEMANTIC_SCORE
-    async fn load_rules_and_memories(&self, query: &str) -> (Vec<String>, Vec<String>) {
-        // 一次取两段上限之和；分派后各自仍受自己的 top_k 约束
-        let fetch_k = self.learned_rules_top_k + self.default_top_k;
+    async fn load_rules_and_memories(
+        &self,
+        query: &str,
+        working_directory: Option<&std::path::Path>,
+    ) -> (Vec<String>, Vec<String>) {
+        let min_score = crate::context::retrieval::min_combined_score();
+        // 候选拉宽一倍：作用域降权发生在 truncate 之前，不能先按原始分数截断
+        let fetch_k = (self.learned_rules_top_k + self.default_top_k) * 2;
+        let project_root = crate::context::project_scope::project_root(working_directory);
+
         match self
             .retriever
             .retrieve_merged(
                 query,
                 &[ContextNamespace::Agent, ContextNamespace::Memory],
                 fetch_k,
-                crate::context::retrieval::min_combined_score(),
+                min_score,
             )
             .await
         {
             Ok(results) => {
+                // 项目作用域重排：明确写着**其它项目**路径的条目降权（跨项目记忆污染，
+                // 见 `project_scope` 模块文档）；降权后低于门槛的直接丢弃，与
+                // `retrieve_merged` 同一口径。无路径的条目是中性（多为通用经验）。
+                let mut scored: Vec<(f32, crate::context::retrieval::RetrievalResult)> = results
+                    .into_iter()
+                    .filter_map(|r| {
+                        let scope = match (project_root.as_deref(), r.content.as_deref()) {
+                            (Some(root), Some(content)) => {
+                                crate::context::project_scope::classify_scope(content, root)
+                            }
+                            _ => crate::context::project_scope::ScopeMatch::Unknown,
+                        };
+                        let adjusted = r.score * crate::context::project_scope::scope_factor(scope);
+                        if adjusted < min_score {
+                            return None;
+                        }
+                        Some((adjusted, r))
+                    })
+                    .collect();
+                scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+
                 let mut rules = Vec::new();
                 let mut memories = Vec::new();
-                for r in results {
+                for (_, r) in scored {
                     let Some(content) = r.content else { continue };
                     if content.trim().is_empty() {
                         continue;
@@ -796,6 +829,52 @@ mod tests {
         let (ctx, _) = pipeline.run("test", &mut conversation, 0).await.unwrap();
 
         assert_eq!(ctx.rules_and_experiences, vec!["Always be concise."]);
+    }
+
+    /// 跨项目污染抑制：内容写着**其它项目**绝对路径的条目，降权后低于门槛 → 不入注入。
+    ///
+    /// 判别力：无作用域重排时两条都会注入——实测「做天演时注入 DevScaffold 端口记忆」
+    /// 就是这个形状。有了重排：异项目条目 0.68×0.55 = 0.374 < 门槛 0.48 被丢弃。
+    #[tokio::test]
+    async fn test_run_drops_other_project_entries() {
+        let soul_uri = AgentPath::Soul.uri();
+        let mine_uri = make_uri(ContextNamespace::Memory, &["facts", "mine"]);
+        let other_uri = make_uri(ContextNamespace::Memory, &["facts", "other"]);
+        let cwd = std::env::temp_dir();
+        let mine_text = format!("临时脚本写在 {} 下的会话目录", cwd.display());
+        let other_text =
+            "DevScaffold 端口：docs-site 5180（F:\\work\\git\\framework\\DevScaffold）";
+
+        let vfs = Arc::new(
+            MockVfs::builder()
+                .with_content(&soul_uri, ContentLevel::Detail, "soul")
+                .with_content(&mine_uri, ContentLevel::Overview, &mine_text)
+                .with_content(&mine_uri, ContentLevel::Detail, &mine_text)
+                .with_content(&other_uri, ContentLevel::Overview, other_text)
+                .with_content(&other_uri, ContentLevel::Detail, other_text)
+                .with_search_results(vec![
+                    make_search_result(&other_uri, 0.6),
+                    make_search_result(&mine_uri, 0.6),
+                ])
+                .build(),
+        );
+        let (pipeline, _) = make_pipeline(vfs);
+
+        let ctx = pipeline
+            .load_injectable("test", &WorkingDirectory::Bound(cwd))
+            .await
+            .unwrap();
+
+        assert!(
+            ctx.memories.iter().any(|m| m.contains("临时脚本")),
+            "本项目条目必须保留：{:?}",
+            ctx.memories
+        );
+        assert!(
+            !ctx.memories.iter().any(|m| m.contains("5180")),
+            "其它项目条目应被降权丢弃（跨项目污染）：{:?}",
+            ctx.memories
+        );
     }
 
     #[tokio::test]

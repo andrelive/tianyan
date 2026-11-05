@@ -20,6 +20,7 @@
 
 pub mod compression;
 pub mod pipeline;
+pub mod project_scope;
 pub mod retrieval;
 
 pub use pipeline::ContextPipeline;

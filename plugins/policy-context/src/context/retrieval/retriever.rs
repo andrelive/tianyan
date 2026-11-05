@@ -321,9 +321,11 @@ impl DualLayerRetriever {
                 .partial_cmp(&a.score)
                 .unwrap_or(std::cmp::Ordering::Equal)
         });
-        // 同一 uri 可能被多个池子返回（底层实现若未真正下推 namespace 过滤就会这样）——
-        // 降序排序后相邻去重，保留分数最高那份，避免同一内容占两个名额。
-        merged.dedup_by(|a, b| a.uri.as_str() == b.uri.as_str());
+        // 同一 uri 可能被多个池子返回（底层实现若未真正下推 namespace 过滤就会这样）。
+        // 用集合去重而不是 `dedup_by`：后者只删**相邻**重复，而并列分数下排序会把
+        // 同一 uri 的两份隔开（实测 mock 场景：other/mine/other/mine），去重失效。
+        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+        merged.retain(|r| seen.insert(r.uri.as_str().to_string()));
         merged.retain(|r| r.score >= min_score);
         merged.truncate(top_k);
 

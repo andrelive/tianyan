@@ -71,6 +71,13 @@ pub mod compression;
 #[path = "../../../plugins/policy-context/src/context/retrieval/mod.rs"]
 pub mod retrieval;
 
+// 项目作用域判定（跨项目记忆污染抑制）：纯 `std` 逻辑，无 `crate::` 依赖，
+// 两边同源包含零成本。`pipeline.rs` 用 `crate::context::project_scope::…` 引用它，
+// 所以这里必须声明，否则 core 测试构建解析不到该路径。
+#[cfg(test)]
+#[path = "../../../plugins/policy-context/src/context/project_scope.rs"]
+pub mod project_scope;
+
 // 测试期便利导出：core 的单测按**原路径**（`crate::context::ContextPipeline`）构造真实
 // 管线，与迁移前的写法逐字一致（迁移只改了「代码住哪儿」，不改测试怎么读它）。
 #[cfg(test)]
