@@ -256,58 +256,6 @@ impl DualLayerRetriever {
         super::loader::compose_overview_parts(&abstract_text, l1)
     }
 
-    /// 按**显式** namespace 检索内容（不受意图推断影响）。
-    ///
-    /// 与 [`Self::retrieve`] 的区别：namespace 直接**下推**到 VFS 搜索——
-    /// 显式指定检索范围时不得先经过意图分析再在结果上过滤（T1-4：意图可能
-    /// 把搜索范围限制到其它 namespace，随后过滤 → rules/memories 静默为空）。
-    ///
-    /// - `query` - 查询内容
-    /// - `top_k` - 返回数量限制
-    /// - `namespace` - 目标命名空间（下推 VFS category 过滤）
-    ///
-    /// 与 [`Self::retrieve_merged`] 的分工：本方法是**单池显式检索**（精确控制一个
-    /// 命名空间，回归测试与需要单池结果的调用方用）；注入管线走 `retrieve_merged`
-    /// （跨池统一排序 + 门槛）。
-    pub async fn retrieve_by_namespace(
-        &self,
-        query: &str,
-        top_k: usize,
-        namespace: tianyan::common::types::ContextNamespace,
-    ) -> Result<Vec<RetrievalResult>> {
-        let started = Instant::now();
-        // 直接按 namespace 搜索（不经意图分析）
-        let results = self
-            .fused_search_in_namespace(query, top_k, Some(namespace))
-            .await?;
-        // 使用统计（与 retrieve 路径同口径：doc 命中 / 查询 / 内容加载）
-        if let Some(ref stats) = self.usage_stats {
-            for result in &results {
-                stats.record_doc_hit(result.uri.as_str(), result.score);
-            }
-            let ns = results.first().map(|r| r.uri.namespace().to_string());
-            stats
-                .record_search_query(query, results.len(), ns.as_deref())
-                .await;
-        }
-        let results = self.load_content_for_results(results).await?;
-        if let Some(ref stats) = self.usage_stats {
-            for result in &results {
-                if result.has_content() {
-                    stats.record_doc_load(result.uri.as_str());
-                }
-            }
-        }
-        info!(
-            query = %query,
-            namespace = %namespace,
-            elapsed_ms = started.elapsed().as_millis() as u64,
-            result_count = results.len(),
-            "Namespace retrieval completed"
-        );
-        Ok(results)
-    }
-
     /// 跨多个命名空间检索，**合并后统一排序与截断**。
     ///
     /// 与 [`Self::retrieve_by_namespace`] 的两点区别：

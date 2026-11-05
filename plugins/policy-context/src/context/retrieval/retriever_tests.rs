@@ -442,8 +442,11 @@ async fn test_retrieve_loads_overview_or_detail_for_high_scores() {
 /// 判别力：旧实现先走 `retrieve()`（"search for documents" 的意图推断 →
 /// Knowledge 范围）再在结果上过滤 Memory——只搜了 Knowledge，过滤后必空；
 /// 修复后 namespace 直接下推 VFS 搜索，命中 Memory 条目。
+///
+/// （合并检索落地后本用例改测 `retrieve_merged`：它同样绕开意图分析，
+/// 直接按给定命名空间下推。）
 #[tokio::test]
-async fn test_retrieve_by_namespace_bypasses_intent_scope() {
+async fn test_retrieve_merged_bypasses_intent_scope() {
     let (retriever, storage) = create_test_retriever_with_data().await;
     // 追加一条 Memory 条目（知识库数据之外）
     let uri = TianyanUri::new(
@@ -464,7 +467,7 @@ async fn test_retrieve_by_namespace_bypasses_intent_scope() {
     storage.upsert_point(&point).await.unwrap();
 
     let results = retriever
-        .retrieve_by_namespace("search for documents", 5, ContextNamespace::Memory)
+        .retrieve_merged("search for documents", &[ContextNamespace::Memory], 5, 0.0)
         .await
         .unwrap();
     assert!(
@@ -513,7 +516,7 @@ async fn test_retrieve_filters_system_paths() {
     }
 
     let results = retriever
-        .retrieve_by_namespace("rule", 20, ContextNamespace::Agent)
+        .retrieve_merged("rule", &[ContextNamespace::Agent], 20, 0.0)
         .await
         .unwrap();
     let uris: Vec<&str> = results.iter().map(|r| r.uri.as_str()).collect();
