@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.2.3] - 2026-11-05
+
 ### Removed
 
 - **Web 端（`gui-vite`）退役——阶段 1：解除 Rust / CI 耦合**。native（GPUI）已是唯一
