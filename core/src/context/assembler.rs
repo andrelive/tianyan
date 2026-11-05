@@ -111,6 +111,30 @@ impl ContextAssembler {
             messages.push(Message::system(context_parts.concat()));
         }
 
+        // 可用技能清单（L0：id + 摘要）——渐进式披露的「发现」环节。
+        //
+        // 独立成段而不是并入 rules/memories：技能是**可选方法论**，与「必须
+        // 遵守的偏好」分层；也让这段将来能单独开关而不动其它注入段。
+        // L2 正文（平均 2.5 KB/个）不进前缀，由 `call_skill` 按需取。
+        if !injectable.skills.is_empty() {
+            let mut parts: Vec<String> = Vec::with_capacity(injectable.skills.len() + 2);
+            parts.push("## 可用技能\n".to_string());
+            parts.push(
+                "以下是可用的方法论文档。判断这件事有方法论可循时，用 `call_skill` 按 id 取完整内容——\n\
+                 它只返回文档，不执行任何操作；具体执行仍由你按文档用基础工具完成。\n"
+                    .to_string(),
+            );
+            for skill in &injectable.skills {
+                let desc = skill.description.trim();
+                if desc.is_empty() {
+                    parts.push(format!("- {}\n", skill.id));
+                } else {
+                    parts.push(format!("- {}：{}\n", skill.id, desc));
+                }
+            }
+            messages.push(Message::system(parts.concat()));
+        }
+
         // 历史对话（含当前用户输入）：从最后一个压缩点（compression_marker）
         // 开始组装——压缩点之前的原始消息已被摘要替代，不再发给 LLM；
         // 无压缩点时从头组装。压缩点本身（摘要消息）包含在组装范围内。
@@ -472,10 +496,10 @@ fn synthetic_interrupted_result(sm: &StructuredMessage, call_id: &str) -> Struct
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::common::types::InjectableContext;
     use crate::common::types::{
         DetailedTokenUsage, MessageRole, MessageTime, Part, PartTime, StructuredMessage,
     };
+    use crate::common::types::{InjectableContext, InjectableSkill};
 
     fn make_text_msg(
         id: &str,
@@ -527,6 +551,48 @@ mod tests {
         assert_eq!(messages[0].role, MessageRole::User);
         assert_eq!(messages[0].content, "Hi");
         assert_eq!(messages[1].content, "Hello again");
+    }
+
+    /// 技能段：列出 `id：摘要`；摘要为空时只列 id（不留「id：」空值）。
+    ///
+    /// 判别力：删掉 assembler 里的技能段后本用例变红——而技能清单是「渐进式
+    /// 披露」的发现环节，缺了它模型无从知道有哪些方法论可调。
+    #[test]
+    fn test_assemble_injects_skills_section() {
+        let injectable = InjectableContext {
+            skills: vec![
+                InjectableSkill {
+                    id: "planning".to_string(),
+                    description: "把需求拆成可执行步骤".to_string(),
+                },
+                InjectableSkill {
+                    id: "no-desc".to_string(),
+                    description: "   ".to_string(),
+                },
+            ],
+            ..Default::default()
+        };
+        let messages = ContextAssembler::assemble(&[], &injectable);
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].role, MessageRole::System);
+        let body = &messages[0].content;
+        assert!(body.contains("## 可用技能"), "应有技能段标题: {body}");
+        assert!(
+            body.contains("- planning：把需求拆成可执行步骤"),
+            "应列出 id + 摘要: {body}"
+        );
+        assert!(
+            body.contains("- no-desc\n"),
+            "摘要为空时只列 id，不留冒号空值: {body}"
+        );
+    }
+
+    /// 没有技能时不得注入空段（空段会白占前缀、还会让模型以为「技能清单是空的」）。
+    #[test]
+    fn test_assemble_omits_skills_section_when_empty() {
+        let injectable = InjectableContext::default();
+        let messages = ContextAssembler::assemble(&[], &injectable);
+        assert!(messages.is_empty(), "无技能且无其它注入时不应产生消息");
     }
 
     #[test]

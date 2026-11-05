@@ -414,6 +414,8 @@ pub(crate) enum Dialog {
     ResetRole { name: String },
     /// 退役删除角色（`DELETE /roles/{name}`）
     DeleteRole { name: String },
+    /// 归档技能（`DELETE /skills/{id}`：软删除到 `skill/_archive/`，可恢复）
+    DeleteSkill { id: String },
     /// 文件选择弹窗（**GPUI 自绘**，不是 OS 对话框 —— 所以自动化点得到）
     FilePicker,
     /// 回退到某条用户输入之前（`POST /sessions/{id}/messages/delete`，ADR-040 事务）
@@ -454,6 +456,7 @@ impl Dialog {
             Dialog::WorkspacePicker { .. } => "workspace_picker",
             Dialog::ResetRole { .. } => "reset_role",
             Dialog::DeleteRole { .. } => "delete_role",
+            Dialog::DeleteSkill { .. } => "delete_skill",
             Dialog::FilePicker => "kb_file_picker",
             Dialog::RollbackMessage { .. } => "rollback_message",
             Dialog::EditApproval { .. } => "edit_approval",

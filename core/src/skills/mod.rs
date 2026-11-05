@@ -29,3 +29,11 @@ pub use manager::{SkillManager, SkillSummary};
 /// （`tianyan://skill/_reviews/<id>.jsonl`），`SkillManager` 必须继续把它排除在技能列表外
 /// ——否则存量数据会在某天被当成一个叫 `_reviews` 的技能列出来。
 pub const REVIEWS_PREFIX: &str = "_reviews";
+
+/// 归档目录名（技能软删除）。
+///
+/// 归档 = 把 `skill/{id}` 移到 `skill/_archive/{id}`：内容与向量点随
+/// `move_entry` 一起迁移（可恢复），但归档子路径被
+/// `system_paths::is_system_path` 排除，因此归档后不再出现在技能列表、
+/// 检索结果与上下文前缀中。
+pub const ARCHIVE_PREFIX: &str = "_archive";

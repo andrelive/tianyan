@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use axum::{
     extract::{Path, State},
+    http::StatusCode,
     Json,
 };
 use tracing::info;
@@ -97,4 +98,31 @@ pub async fn execute_skill(
         .await
         .inspect_err(|e| tracing::error!("执行技能失败: {}", e))
         .map(Json)
+}
+
+/// 归档技能（软删除）：`DELETE /api/v1/skills/{id}`。
+///
+/// 归档 = 移到 `skill/_archive/{id}`：内容与向量点一起迁移，可恢复，归档后
+/// 不再出现在列表 / 检索 / 上下文前缀中（`system_paths` 统一排除）。
+/// 返回 204 = 已归档；技能不存在或已归档返回 404。
+pub async fn delete_skill(
+    State(state): State<Arc<AppState>>,
+    Path(skill_id): Path<String>,
+) -> Result<StatusCode, ApiError> {
+    if skill_id.trim().is_empty() {
+        return Err(ApiError::BadRequest("技能ID不能为空".to_string()));
+    }
+
+    info!("归档技能: {}", skill_id);
+
+    let service = SkillService::new(state.skill_manager(), state.vfs());
+
+    match service.archive_skill(&skill_id).await {
+        Ok(true) => Ok(StatusCode::NO_CONTENT),
+        Ok(false) => Err(ApiError::NotFound(format!("技能未找到: {}", skill_id))),
+        Err(e) => {
+            tracing::error!("归档技能失败: {}", e);
+            Err(e)
+        }
+    }
 }

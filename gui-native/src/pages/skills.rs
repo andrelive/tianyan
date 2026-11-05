@@ -204,6 +204,7 @@ impl ClientApp {
                 .into_any_element(),
             Some(skill) => {
                 let content = self.skill_content.clone().unwrap_or_default();
+                let archive_id = skill.id.clone();
                 let mut chips = div()
                     .flex()
                     .flex_row()
@@ -245,9 +246,38 @@ impl ClientApp {
                             .gap_1()
                             .child(
                                 div()
-                                    .text_size(px(15.))
-                                    .text_color(rgb(colors::TEXT_PRIMARY()))
-                                    .child(skill.name.clone()),
+                                    .flex()
+                                    .flex_row()
+                                    .items_center()
+                                    .justify_between()
+                                    .gap_2()
+                                    .child(
+                                        div()
+                                            .text_size(px(15.))
+                                            .text_color(rgb(colors::TEXT_PRIMARY()))
+                                            .child(skill.name.clone()),
+                                    )
+                                    .child(
+                                        // 「归档」= 软删除（移到 skill/_archive/，可恢复）；
+                                        // 二次确认走通用 Dialog 骨架，与删除会话/角色同一套。
+                                        div()
+                                            .id("skill-archive-btn")
+                                            .px_2()
+                                            .py_1()
+                                            .rounded_md()
+                                            .border_1()
+                                            .border_color(rgb(colors::BORDER()))
+                                            .text_size(px(11.))
+                                            .text_color(rgb(colors::ERROR()))
+                                            .cursor_pointer()
+                                            .child("归档")
+                                            .on_click(cx.listener(move |this, _, _, cx| {
+                                                this.dialog = Some(Dialog::DeleteSkill {
+                                                    id: archive_id.clone(),
+                                                });
+                                                cx.notify();
+                                            })),
+                                    ),
                             )
                             .child(
                                 div()

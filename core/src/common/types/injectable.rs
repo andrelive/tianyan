@@ -10,6 +10,18 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+/// 可用技能的 L0 条目（前缀注入用）。
+///
+/// 只带 id 与一句摘要：模型据此判断「该不该为这件事调 `call_skill`」；
+/// 技能正文（L2，平均 2.5 KB）不进前缀，按需加载——渐进式披露的前半段。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct InjectableSkill {
+    /// 技能 ID（`call_skill` 的入参）。
+    pub id: String,
+    /// L0 摘要（一句话说清「这技能解决什么问题」）。
+    pub description: String,
+}
+
 /// 可注入的上下文内容，由 ContextPipeline 填充，由 ContextAssembler 组装使用。
 ///
 /// `PartialEq` 用于「前缀是否实际变化」判定（工作集写收口 ③：无关字段更新
@@ -46,6 +58,13 @@ pub struct InjectableContext {
     pub rules_and_experiences: Vec<String>,
     /// 用户画像与环境事实。
     pub memories: Vec<String>,
+    /// 可用技能清单（L0：id + 摘要）。
+    ///
+    /// 技能是**准静态内容**（增删以周计，正文更新不改 id），进前缀不会造成
+    /// prompt 缓存抖动；会话级固化（`AgentCore::ensure_injectable`）保证同一
+    /// 会话内逐字不变，压缩点才刷新。旧快照缺该字段 → 空（不注入技能段）。
+    #[serde(default)]
+    pub skills: Vec<InjectableSkill>,
     /// 最后更新时间。
     pub last_updated: DateTime<Utc>,
 }
@@ -113,6 +132,26 @@ mod tests {
             Some("⚠️ 绑定目录已失效"),
             "警示文案同样落盘（快照复用，重启后模型仍能看到事实）"
         );
+        assert_eq!(back, ctx);
+    }
+
+    /// 技能清单往返：id + 摘要随快照落盘（否则重启后技能段整段消失）。
+    ///
+    /// 旧快照缺 `skills` 字段的兼容性由上一个用例覆盖（同一份 legacy JSON
+    /// 没有 `skills` 键，`#[serde(default)]` 缺失即反序列化失败）。
+    #[test]
+    fn test_roundtrip_with_skills() {
+        let ctx = InjectableContext {
+            skills: vec![InjectableSkill {
+                id: "planning".to_string(),
+                description: "把需求拆成可执行步骤".to_string(),
+            }],
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&ctx).unwrap();
+        let back: InjectableContext = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.skills.len(), 1, "技能清单必须随快照往返");
+        assert_eq!(back.skills[0].id, "planning");
         assert_eq!(back, ctx);
     }
 }

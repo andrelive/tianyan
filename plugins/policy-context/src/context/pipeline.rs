@@ -11,11 +11,12 @@ use tokio::sync::Mutex as TokioMutex;
 use crate::context::compression::ContextCompressor;
 use crate::context::retrieval::DualLayerRetriever;
 use tianyan::common::error::Result;
-use tianyan::common::types::InjectableContext;
 use tianyan::common::types::{
     AgentPath, CacheUsage, ContentLevel, ContextNamespace, DetailedTokenUsage, Message,
     MessageRole, MessageTime, Part, PartTime, StructuredMessage, TokenUsage, WorkingDirectory,
 };
+use tianyan::common::types::{InjectableContext, InjectableSkill};
+use tianyan::skills::SkillManager;
 use tianyan::vfs::VirtualFileSystem;
 
 /// 上下文工程管线。
@@ -143,6 +144,10 @@ impl ContextPipeline {
         // Load memories
         let memories = self.load_memories(query).await;
         injectable.memories = memories;
+
+        // Load skills（L0：id + 摘要）——渐进式披露的「发现」环节：清单进前缀，
+        // L2 正文仍由 `call_skill` 按需加载。
+        injectable.skills = self.load_skills().await;
 
         Ok(injectable)
     }
@@ -400,6 +405,30 @@ impl ContextPipeline {
                 .collect(),
             Err(e) => {
                 tracing::warn!(error = %e, "记忆检索失败");
+                Vec::new()
+            }
+        }
+    }
+
+    /// 加载可用技能清单（L0：id + 摘要）。
+    ///
+    /// 技能是准静态内容，全量列出即可（现网 44 个 ≈ 5K tokens），不做语义筛选
+    /// ——筛选会把「模型不知道自己有这个技能」的问题原样搬回来。
+    ///
+    /// 失败不阻塞：清单只是「发现」辅助，取不到就退化成没清单（模型仍可
+    /// `search_vfs` 或凭 id 试 `call_skill`），不该让整轮组装失败。
+    async fn load_skills(&self) -> Vec<InjectableSkill> {
+        let manager = SkillManager::new(self.vfs.clone());
+        match manager.list_available_skills().await {
+            Ok(list) => list
+                .into_iter()
+                .map(|s| InjectableSkill {
+                    id: s.id,
+                    description: s.description,
+                })
+                .collect(),
+            Err(e) => {
+                tracing::warn!(error = %e, "技能清单加载失败，本次不注入技能段");
                 Vec::new()
             }
         }

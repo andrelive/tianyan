@@ -28,6 +28,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **技能可归档（软删除）+ 技能清单接入上下文前缀**：
+  - `DELETE /api/v1/skills/{id}`：把 `skill/{id}` 移到 `skill/_archive/{id}`
+    （内容与向量点随 `move_entry` 一起迁移，可恢复）。归档路径由
+    `system_paths` 排除，故归档后不再出现在列表 / 检索 / 前缀。GUI 技能页详情
+    头部新增「归档」按钮，走通用确认框（与删除会话/角色同一套骨架）。
+  - **技能 L0 清单进 system 前缀**（`## 可用技能`：id + 一句摘要）。此前技能只有
+    `call_skill` 一个入口，而模型在看不到任何清单的情况下无从知道存在哪些技能——
+    实测 `call_skill` 零调用。清单是准静态内容（增删以周计、正文更新不改 id），
+    会话级固化（`ensure_injectable`）保证同会话内逐字不变，压缩点才刷新，因此
+    不会造成 prompt 缓存抖动；L2 正文（平均 2.5 KB/个）仍按需加载。
+  - `call_skill` 工具描述同步：把「清单在 system 前缀的可用技能段、直接按 id 调用」
+    写进描述，并移除已过时的「planning 为预置技能」表述。
+
 - **定时任务支持「定点 + 错过策略」（ADR-024 之后的第二维）**：此前只有间隔制
   （`now - last_run >= interval`）+ 宕机后立即补跑，导致「收盘后 15:30 复盘」这类任务在
   服务重启时于**盘中**补执行——业务上无效、甚至有害。拆成两个正交维度：
@@ -47,6 +60,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     `schedule_task` 工具新增 `schedule` / `missed` 参数。
 
 ### Fixed
+
+- **技能清单只显示 1/4 的技能**：`SkillManager::list_available_skills` 只认
+  `is_directory()` 的条目，而现网 57 个技能里 **44 个是文件形态**（`skill/{id}` 直接
+  是文档，演化任务后期写的主流形态）——技能面板、演化任务的注册表清单、上下文注入
+  全都看不到它们。改为文件/目录两种形态都列，归档与评审记录统一交给
+  `system_paths::is_system_path` 排除（顺带修掉 `_archive` 被当成一个技能列出的问题）。
+  实测：可见技能 **13 → 57**。
 
 - **图标四角黑边**（任务栏 / 开始菜单 / 托盘 / 安装向导可见）：`assets/icon.ico`、
   `assets/app.ico`、`assets/tray-32.png` 三份资产的**圆角之外**是不透明的纯黑

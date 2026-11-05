@@ -143,6 +143,17 @@ impl SkillService {
             error: None,
         })
     }
+
+    /// 归档技能（软删除）：移到 `skill/_archive/{id}`。
+    ///
+    /// 返回 `true` = 本次归档成功；`false` = 技能不存在或已归档（幂等语义，
+    /// 由 handler 决定是否映射成 404）。
+    pub async fn archive_skill(&self, skill_id: &str) -> Result<bool, ApiError> {
+        self.manager
+            .archive_skill(skill_id)
+            .await
+            .map_err(|e| ApiError::Internal(e.to_string()))
+    }
 }
 
 #[cfg(test)]

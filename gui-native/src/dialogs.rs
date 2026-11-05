@@ -92,6 +92,14 @@ impl ClientApp {
                 "删除".to_string(),
                 true,
             ),
+            Dialog::DeleteSkill { id } => (
+                "归档技能".to_string(),
+                Some(format!(
+                    "将技能 {id} 归档到 skill/_archive/（不再参与检索与上下文注入，内容保留可恢复）？"
+                )),
+                "归档".to_string(),
+                true,
+            ),
             Dialog::RollbackMessage { preview, .. } => (
                 "回退到此处".to_string(),
                 Some(format!(
@@ -223,6 +231,9 @@ impl ClientApp {
                                 }
                                 Some(Dialog::DeleteRole { name }) => {
                                     this.confirm_delete_role(name, cx)
+                                }
+                                Some(Dialog::DeleteSkill { id }) => {
+                                    this.confirm_delete_skill(id, cx)
                                 }
                                 Some(Dialog::RollbackMessage {
                                     session_id,
@@ -1226,6 +1237,39 @@ impl ClientApp {
                 Err(e) => {
                     let _ = this.update(cx, |this, cx| {
                         this.roles_action_msg = Some(format!("操作失败：{e}"));
+                        cx.notify();
+                    });
+                }
+            }
+        })
+        .detach();
+    }
+
+    /// 归档技能（`DELETE /skills/{id}`：软删除到 `skill/_archive/`，内容保留可恢复）。
+    ///
+    /// 归档后后端 `system_paths` 会把它排除在列表/检索/上下文前缀之外，所以这里
+    /// 除了刷新列表，还要清掉选中项与已加载正文——否则详情区会继续显示一个
+    /// 已经不在列表里的技能。
+    pub(crate) fn confirm_delete_skill(&mut self, id: String, cx: &mut Context<Self>) {
+        self.dialog = None;
+        let port = self.port;
+        cx.spawn(async move |this, cx| {
+            let url = format!("http://{SERVER_HOST}:{port}/api/v1/skills/{id}");
+            match delete_json(url).await {
+                Ok(()) => {
+                    let _ = this.update(cx, |this, cx| {
+                        this.skills_status = "技能已归档（skill/_archive/ 下可恢复）".to_string();
+                        if this.skills_selected.as_deref() == Some(id.as_str()) {
+                            this.skills_selected = None;
+                            this.skill_content = None;
+                        }
+                        this.load_skills(cx);
+                        cx.notify();
+                    });
+                }
+                Err(e) => {
+                    let _ = this.update(cx, |this, cx| {
+                        this.skills_status = format!("归档失败：{e}");
                         cx.notify();
                     });
                 }
