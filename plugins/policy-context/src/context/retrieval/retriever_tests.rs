@@ -527,6 +527,97 @@ async fn test_retrieve_filters_system_paths() {
     );
 }
 
+/// 构造一个向量点（`category` 必须等于该命名空间的 `dir_name()`，否则下推过滤会漏）。
+fn make_point(uri: &TianyanUri, category: &str, vector: Vec<f32>) -> VectorPoint {
+    let payload =
+        tianyan::common::types::EntryMetadata::new(uri.clone(), "unknown").with_category(category);
+    VectorPoint {
+        schema_version: tianyan::vfs::CURRENT_SCHEMA_VERSION,
+        id: uri.to_point_id(),
+        abstract_vector: Some(vector.clone()),
+        overview_vector: Some(vector),
+        visual_vector: None,
+        payload,
+    }
+}
+
+/// 合并检索：**跨池按分数择优**，不是「每池各凑 top_k 条」。
+///
+/// 判别力：旧路径两池各调 `retrieve_by_namespace`、各取 5 条——agent 池即便全是
+/// 负相关（cosine −1）也会塞满 10 条注入；合并后按全局分数只取前 4，低分池自然
+/// 被高分池挤掉。
+#[tokio::test]
+async fn test_retrieve_merged_prefers_higher_scores_across_pools() {
+    let (retriever, storage) = create_test_retriever_with_data().await;
+
+    // agent 池：与 query 反向（低分）
+    for i in 0..5 {
+        let uri = TianyanUri::new(
+            ContextNamespace::Agent,
+            vec!["learned".to_string(), format!("weak-{i}")],
+        );
+        storage
+            .upsert_point(&make_point(&uri, "agent", vec![-0.1; 768]))
+            .await
+            .unwrap();
+    }
+    // memory 池：与 query 同向（高分）
+    for i in 0..5 {
+        let uri = TianyanUri::new(
+            ContextNamespace::Memory,
+            vec!["facts".to_string(), format!("strong-{i}")],
+        );
+        storage
+            .upsert_point(&make_point(&uri, "memory", vec![0.1; 768]))
+            .await
+            .unwrap();
+    }
+
+    let merged = retriever
+        .retrieve_merged(
+            "q",
+            &[ContextNamespace::Agent, ContextNamespace::Memory],
+            4,
+            0.0,
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(merged.len(), 4, "应按总 top_k 截断，而不是每池各取 5 条");
+    assert!(
+        merged
+            .iter()
+            .all(|r| r.uri.namespace().to_string() == "memory"),
+        "结果应全部来自高分的 memory 池（跨池按分数择优）: {:?}",
+        merged.iter().map(|r| r.uri.as_str()).collect::<Vec<_>>()
+    );
+}
+
+/// 门槛：低于 `min_score` 的候选**不注入**（旧行为没有任何门槛，凑满即用）。
+#[tokio::test]
+async fn test_retrieve_merged_drops_below_min_score() {
+    let (retriever, storage) = create_test_retriever_with_data().await;
+    let uri = TianyanUri::new(
+        ContextNamespace::Memory,
+        vec!["facts".to_string(), "weak".to_string()],
+    );
+    storage
+        .upsert_point(&make_point(&uri, "memory", vec![-0.1; 768]))
+        .await
+        .unwrap();
+
+    let merged = retriever
+        .retrieve_merged("q", &[ContextNamespace::Memory], 5, min_combined_score())
+        .await
+        .unwrap();
+
+    assert!(
+        merged.is_empty(),
+        "低于门槛的候选不得注入: {:?}",
+        merged.iter().map(|r| r.score).collect::<Vec<_>>()
+    );
+}
+
 // ==================== Builder Removed ====================
 // DualLayerRetrieverBuilder removed — used only in these tests, never in production.
 // DualLayerRetriever::new() + with_*() methods provide the same functionality directly.

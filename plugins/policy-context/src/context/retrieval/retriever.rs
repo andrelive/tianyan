@@ -12,7 +12,7 @@ use tianyan::observability::usage_stats::UsageStats;
 
 use super::types::RetrievalResult;
 use crate::context::compression::estimate_tokens;
-use tianyan::common::error::Result;
+use tianyan::common::error::{Result, TianyanError};
 use tianyan::common::types::{system_paths, ContentLevel, TianyanUri};
 use tianyan::vfs::VirtualFileSystem;
 
@@ -25,6 +25,22 @@ const DEFAULT_FRESHNESS_WEIGHT: f32 = 0.2;
 
 fn compute_combined_score(semantic_score: f32) -> f32 {
     semantic_score * (1.0 - DEFAULT_FRESHNESS_WEIGHT) + DEFAULT_FRESHNESS_WEIGHT
+}
+
+/// 语义相似度下限：低于此值的候选**不注入**。
+///
+/// 依据（2026-11 实测 `doc_access` 的 207 批注入记录）：注入批次固定是「每池满
+/// 5 条」，与相关性无关——73% 的批次最低分 < 0.40，其中 4 批的**最高分**也只有
+/// 0.10~0.27（纯噪音照样进前缀，既占 token 也污染前缀缓存）。0.35 是「弱相关」
+/// 的经验分界：近期正常批次的最低分折算后是 0.45+，历史噪音批次是 0.04~0.09。
+pub const MIN_SEMANTIC_SCORE: f32 = 0.35;
+
+/// 语义下限换算成**组合分**（与 [`compute_combined_score`] 同口径）。
+///
+/// 门槛必须作用在组合分上：`doc_access` 记录的、排序与 `ContentLoadStrategy`
+/// 判级用的都是组合分，混用两套口径会让门槛值不可解释。
+pub fn min_combined_score() -> f32 {
+    compute_combined_score(MIN_SEMANTIC_SCORE)
 }
 
 /// 用于基于向量的内容检索的融合检索器。
@@ -249,6 +265,10 @@ impl DualLayerRetriever {
     /// - `query` - 查询内容
     /// - `top_k` - 返回数量限制
     /// - `namespace` - 目标命名空间（下推 VFS category 过滤）
+    ///
+    /// 与 [`Self::retrieve_merged`] 的分工：本方法是**单池显式检索**（精确控制一个
+    /// 命名空间，回归测试与需要单池结果的调用方用）；注入管线走 `retrieve_merged`
+    /// （跨池统一排序 + 门槛）。
     pub async fn retrieve_by_namespace(
         &self,
         query: &str,
@@ -286,6 +306,107 @@ impl DualLayerRetriever {
             "Namespace retrieval completed"
         );
         Ok(results)
+    }
+
+    /// 跨多个命名空间检索，**合并后统一排序与截断**。
+    ///
+    /// 与 [`Self::retrieve_by_namespace`] 的两点区别：
+    ///
+    /// 1. **两个池子的分数从此可比**：`memory_bias` 与组合分在合并后统一施加，
+    ///    排序只看分数——不再是「每池各取 top_k，谁也看不见谁」（旧路径每池必然
+    ///    满 `top_k` 条，无论那个池最高分是 0.7 还是 0.1）；
+    /// 2. **不凑数**：低于 `min_score` 的候选直接丢弃（依据见 [`MIN_SEMANTIC_SCORE`]）。
+    ///
+    /// 每个命名空间仍然**下推**到 VFS 检索（ADR-001 铁律②：取回全局 top-k 再在
+    /// 内存里按命名空间筛，会让目标命名空间被别的池子挤空）。
+    ///
+    /// 使用统计只记**一条** query：旧路径每池各记一条，`daily_search_queries` 里
+    /// 同一句话同秒出现两条（实测一次输入对应 `id=574/575` 两条记录）。
+    pub async fn retrieve_merged(
+        &self,
+        query: &str,
+        namespaces: &[tianyan::common::types::ContextNamespace],
+        top_k: usize,
+        min_score: f32,
+    ) -> Result<Vec<RetrievalResult>> {
+        let started = Instant::now();
+
+        // 逐命名空间下推检索，候选汇总到一个池子里（单个池失败只跳过该池）
+        let mut merged: Vec<RetrievalResult> = Vec::new();
+        let mut succeeded = 0usize;
+        let mut last_error: Option<TianyanError> = None;
+        for ns in namespaces {
+            match self.vfs.search(query, top_k, Some(*ns)).await {
+                Ok(hits) => {
+                    succeeded += 1;
+                    for sr in hits {
+                        if system_paths::is_system_path(&sr.uri) {
+                            continue;
+                        }
+                        let mut result = RetrievalResult::new(sr.uri, sr.score);
+                        // Memory 偏置与组合分在**合并后**统一施加，保证两池同口径
+                        if result.uri.namespace().to_string() == "memory" {
+                            result.score *= self.memory_bias;
+                        }
+                        result.score = compute_combined_score(result.score);
+                        merged.push(result);
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, namespace = %ns, "命名空间检索失败（跳过该池）");
+                    last_error = Some(e);
+                }
+            }
+        }
+
+        // 全部命名空间都失败 -> 上抛，让调用方走既有回退路径（全量规则列表）。
+        // 只要有一个池成功就继续——部分池失败不该让整段上下文缺失。
+        if succeeded == 0 && !namespaces.is_empty() {
+            return Err(last_error.unwrap_or_else(|| {
+                TianyanError::Custom("retrieval: 所有命名空间检索均失败".to_string())
+            }));
+        }
+
+        let candidates = merged.len();
+        merged.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        // 同一 uri 可能被多个池子返回（底层实现若未真正下推 namespace 过滤就会这样）——
+        // 降序排序后相邻去重，保留分数最高那份，避免同一内容占两个名额。
+        merged.dedup_by(|a, b| a.uri.as_str() == b.uri.as_str());
+        merged.retain(|r| r.score >= min_score);
+        merged.truncate(top_k);
+
+        if let Some(ref stats) = self.usage_stats {
+            for result in &merged {
+                stats.record_doc_hit(result.uri.as_str(), result.score);
+            }
+            let ns = merged.first().map(|r| r.uri.namespace().to_string());
+            stats
+                .record_search_query(query, merged.len(), ns.as_deref())
+                .await;
+        }
+
+        let merged = self.load_content_for_results(merged).await?;
+        if let Some(ref stats) = self.usage_stats {
+            for result in &merged {
+                if result.has_content() {
+                    stats.record_doc_load(result.uri.as_str());
+                }
+            }
+        }
+
+        info!(
+            query = %query,
+            candidates,
+            kept = merged.len(),
+            min_score,
+            elapsed_ms = started.elapsed().as_millis() as u64,
+            "Merged retrieval completed"
+        );
+        Ok(merged)
     }
 }
 

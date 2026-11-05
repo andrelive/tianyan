@@ -137,12 +137,11 @@ impl ContextPipeline {
         }
         injectable.working_directory_warning = working_directory.warning();
 
-        // Load learned rules and experiences
-        let rules = self.load_relevant_rules(query).await;
+        // Load learned rules and memories —— **一次合并检索**，两池在同一分数口径下
+        // 排序后按命名空间分派回各自的段（旧路径两池各检一次：同一 query 查两遍、
+        // 每池必然凑满 top_k 条、`daily_search_queries` 同秒记两条）。
+        let (rules, memories) = self.load_rules_and_memories(query).await;
         injectable.rules_and_experiences = rules;
-
-        // Load memories
-        let memories = self.load_memories(query).await;
         injectable.memories = memories;
 
         // Load skills（L0：id + 摘要）——渐进式披露的「发现」环节：清单进前缀，
@@ -343,21 +342,60 @@ impl ContextPipeline {
         }
     }
 
-    /// 使用 retriever 渐进式检索与当前 query 最相关的 learned rules。
-    async fn load_relevant_rules(&self, query: &str) -> Vec<String> {
+    /// 一次检索同时取 learned rules 与记忆，再按命名空间分派回两段。
+    ///
+    /// 为什么要合并（而不是「各池各检一次、各自截断」）：
+    ///
+    /// - 同一 query 要查两遍向量库（embedding 有查询缓存，查询本身省不掉）；
+    /// - **每池必然凑满 `top_k` 条**，与该池最高分是 0.7 还是 0.1 无关——实测 207 批
+    ///   注入记录全是「memory 5 + agent 5」，其中 4 批的最高分只有 0.10~0.27，
+    ///   等于把纯噪音塞进前缀；
+    /// - 使用统计里同一句话同秒记两条（`daily_search_queries` 实测 id 574/575）。
+    ///
+    /// 合并后由 [`DualLayerRetriever::retrieve_merged`] 统一施加 memory 偏置与组合分、
+    /// 统一排序、丢弃低于 [`MIN_SEMANTIC_SCORE`] 的候选——**不凑数**。
+    ///
+    /// [`MIN_SEMANTIC_SCORE`]: crate::context::retrieval::MIN_SEMANTIC_SCORE
+    async fn load_rules_and_memories(&self, query: &str) -> (Vec<String>, Vec<String>) {
+        // 一次取两段上限之和；分派后各自仍受自己的 top_k 约束
+        let fetch_k = self.learned_rules_top_k + self.default_top_k;
         match self
             .retriever
-            .retrieve_by_namespace(query, self.learned_rules_top_k, ContextNamespace::Agent)
+            .retrieve_merged(
+                query,
+                &[ContextNamespace::Agent, ContextNamespace::Memory],
+                fetch_k,
+                crate::context::retrieval::min_combined_score(),
+            )
             .await
         {
-            Ok(results) => results
-                .into_iter()
-                .filter_map(|r| r.content)
-                .filter(|c| !c.trim().is_empty())
-                .collect(),
+            Ok(results) => {
+                let mut rules = Vec::new();
+                let mut memories = Vec::new();
+                for r in results {
+                    let Some(content) = r.content else { continue };
+                    if content.trim().is_empty() {
+                        continue;
+                    }
+                    match r.uri.namespace() {
+                        ContextNamespace::Agent if rules.len() < self.learned_rules_top_k => {
+                            rules.push(content);
+                        }
+                        ContextNamespace::Memory if memories.len() < self.default_top_k => {
+                            memories.push(content);
+                        }
+                        _ => {}
+                    }
+                }
+                (rules, memories)
+            }
             Err(e) => {
-                tracing::warn!(error = %e, query = %query, "learned rules 检索失败，回退到全量列表");
-                self.fallback_load_rules().await
+                tracing::warn!(
+                    error = %e,
+                    query = %query,
+                    "合并检索失败：规则回退全量列表，记忆置空"
+                );
+                (self.fallback_load_rules().await, Vec::new())
             }
         }
     }
@@ -389,25 +427,6 @@ impl ContextPipeline {
         }
 
         rules
-    }
-
-    /// 检索相关记忆。
-    async fn load_memories(&self, query: &str) -> Vec<String> {
-        match self
-            .retriever
-            .retrieve_by_namespace(query, self.default_top_k, ContextNamespace::Memory)
-            .await
-        {
-            Ok(results) => results
-                .into_iter()
-                .filter_map(|r| r.content)
-                .filter(|c| !c.trim().is_empty())
-                .collect(),
-            Err(e) => {
-                tracing::warn!(error = %e, "记忆检索失败");
-                Vec::new()
-            }
-        }
     }
 
     /// 加载可用技能清单（L0：id + 摘要）。

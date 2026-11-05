@@ -11,7 +11,7 @@ mod retriever;
 mod types;
 
 pub use intent::{Intent, IntentAnalyzer};
-pub use retriever::DualLayerRetriever;
+pub use retriever::{min_combined_score, DualLayerRetriever, MIN_SEMANTIC_SCORE};
 pub use types::RetrievalResult;
 
 #[cfg(test)]
