@@ -210,6 +210,24 @@ impl SqliteDb {
                 )?;
             }
         }
+        // 迁移：vfs_entries 补 `importance` 列。早期这个值只活在记忆条目 detail 的
+        // markdown 里（「- **重要性**: 0.76」），而 `read_entry` 重建元数据时取默认
+        // 0.5 —— 界面显示、按重要性排序、以及任何加权计算拿到的都是假值。
+        if has_vfs_entries {
+            let cols: Vec<String> = {
+                let mut stmt = conn.prepare("PRAGMA table_info(vfs_entries)")?;
+                let collected = stmt
+                    .query_map([], |r| r.get::<_, String>(1))?
+                    .collect::<Result<Vec<_>, _>>()?;
+                collected
+            };
+            if !cols.iter().any(|c| c == "importance") {
+                conn.execute(
+                    "ALTER TABLE vfs_entries ADD COLUMN importance REAL NOT NULL DEFAULT 0.5",
+                    [],
+                )?;
+            }
+        }
         conn.execute_batch(SCHEMA_SQL)?;
         Ok(())
     }
@@ -254,8 +272,12 @@ const SCHEMA_SQL: &str = "
         abstract_content TEXT,
         overview_content TEXT,
         detail_content   TEXT,
+        -- 条目重要性（0.0–1.0）。**必须结构化落库**：早期只有记忆条目的 detail
+        -- markdown 里写着「重要性: 0.76」，而 `read_entry` 重建元数据时取默认 0.5
+        -- ——界面/排序/加权拿到的全是假值（实测记忆页 131 条清一色 0.50）。
         created_at       TEXT DEFAULT (datetime('now')),
-        updated_at       TEXT DEFAULT (datetime('now'))
+        updated_at       TEXT DEFAULT (datetime('now')),
+        importance       REAL NOT NULL DEFAULT 0.5
     );
 
     -- 后台任务状态（ADR-013：任务实体化——状态脱离调用栈持久化，

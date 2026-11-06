@@ -54,7 +54,8 @@ impl SqliteBackend {
                 overview_content TEXT,
                 detail_content   TEXT,
                 created_at       TEXT DEFAULT (datetime('now')),
-                updated_at       TEXT DEFAULT (datetime('now'))
+                updated_at       TEXT DEFAULT (datetime('now')),
+                importance       REAL NOT NULL DEFAULT 0.5
             );",
         )
         .map_err(|e| TianyanError::Custom(format!("存储后端错误：创建 vfs_entries 表失败: {e}")))?;
@@ -92,7 +93,7 @@ impl StorageBackend for SqliteBackend {
 
         conn.query_row(
             "SELECT is_directory, abstract_content, overview_content, detail_content,
-                    created_at, updated_at
+                    created_at, updated_at, importance
              FROM vfs_entries WHERE uri = ?1",
             rusqlite::params![&uri_str],
             |row| {
@@ -101,6 +102,9 @@ impl StorageBackend for SqliteBackend {
                 let updated_at: Option<String> = row.get(5)?;
                 let mut metadata = EntryMetadata::new(uri.clone(), "unknown");
                 metadata.is_directory = is_dir;
+                // 重要性从结构化列读。早期它只活在记忆 detail 的 markdown 里，
+                // 这里重建元数据时取默认 0.5 —— 界面 131 条清一色 0.50 就是这个原因。
+                metadata.importance = row.get::<_, f64>("importance").unwrap_or(0.5) as f32;
                 if let Some(ref ts) = created_at {
                     if let Some(t) = parse_stored_timestamp(ts) {
                         metadata.created_at = t;
@@ -134,20 +138,23 @@ impl StorageBackend for SqliteBackend {
 
         conn.execute(
             "INSERT INTO vfs_entries
-             (uri, is_directory, abstract_content, overview_content, detail_content, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, datetime('now'))
+             (uri, is_directory, abstract_content, overview_content, detail_content,
+              updated_at, importance)
+             VALUES (?1, ?2, ?3, ?4, ?5, datetime('now'), ?6)
              ON CONFLICT(uri) DO UPDATE SET
                 is_directory = excluded.is_directory,
                 abstract_content = excluded.abstract_content,
                 overview_content = excluded.overview_content,
                 detail_content = excluded.detail_content,
-                updated_at = excluded.updated_at",
+                updated_at = excluded.updated_at,
+                importance = excluded.importance",
             rusqlite::params![
                 uri,
                 is_dir,
                 entry.abstract_content,
                 entry.overview_content,
                 entry.detail_content,
+                entry.metadata.importance as f64,
             ],
         )
         .map_err(|e| TianyanError::Custom(format!("存储后端错误：写入条目失败: {e}")))?;
