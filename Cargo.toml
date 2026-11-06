@@ -37,7 +37,7 @@ resolver = "2"
 #   `gui-native/Cargo.toml`  —— 独立 workspace，无法 `version.workspace = true`
 # MSI 的 `ProductVersion`（4 段，如 1.1.0.0）由 `gui-native/installer/build-msi.ps1`
 # 从 `gui-native/Cargo.toml` 读出后补 `.0` 注入，不手工写。
-version = "1.2.3"
+version = "1.2.4"
 edition = "2021"
 authors = ["Tianyan Team"]
 license = "MIT"
