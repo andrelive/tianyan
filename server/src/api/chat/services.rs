@@ -10,7 +10,7 @@ use tianyan::agent::stream_forward::{
 use tianyan::agent::working_set::WorkingSetRegistry;
 use tianyan::agent::AgentCoordinator;
 use tianyan::common::types::StructuredMessage;
-use tianyan::session::SessionManager;
+use tianyan::session::{SessionHeader, SessionManager};
 use tianyan::Message as CoreMessage;
 use tianyan::MessageRole as CoreMessageRole;
 
@@ -382,21 +382,28 @@ async fn resolve_or_create_session(
         .map(|s| s.to_string())
         .unwrap_or_else(|| format!("session-{}", short_uuid()));
     let msg = CoreMessage::new(CoreMessageRole::User, initial_message);
-    // ? 传播：保留 core 错误语义（不吞成 Internal）
-    session_manager.create_session(&new_id, msg).await?;
-
-    // ADR-039：会话头部与消息写入**唯一入口** = 工作集（缓存与库同步推进）。
-    // 工作目录/标题经收口 ③（局部字段写，不覆盖并发写入的字段）；清空经收口 ②。
-    let ws = working_sets.ensure(&new_id).await?;
-    // 新会话绑定工作目录（工作区归属）：目录必须存在，坏值仅告警不阻断对话
+    // 新会话绑定工作目录（工作区归属）：目录必须存在，坏值仅告警不阻断对话。
+    //
+    // **必须与消息一次写入**（`create_session_with_header`），不能先建再
+    // `update_header`：两步之间会话已存在但目录为空，而左栏按 `working_directory`
+    // 分组（空串 = 「默认」组）——恰好落在这个窗口的刷新会把新会话归到「默认」
+    // 工作区下面，过一会儿才回到用户选的目录（用户实测到的就是这个）。
+    let mut header = SessionHeader::default();
     if let Some(wd) = working_directory.map(str::trim).filter(|w| !w.is_empty()) {
         if std::path::Path::new(wd).is_dir() {
-            ws.update_header(|h| h.working_directory = Some(wd.to_string()))
-                .await?;
+            header.working_directory = Some(wd.to_string());
         } else {
             tracing::warn!(working_directory = %wd, "新会话工作目录不存在，忽略绑定");
         }
     }
+    // ? 传播：保留 core 错误语义（不吞成 Internal）
+    session_manager
+        .create_session_with_header(&new_id, msg, header)
+        .await?;
+
+    // ADR-039：会话头部与消息写入**唯一入口** = 工作集（缓存与库同步推进）。
+    // 工作目录/标题经收口 ③（局部字段写，不覆盖并发写入的字段）；清空经收口 ②。
+    let ws = working_sets.ensure(&new_id).await?;
 
     // 用第一条用户消息生成标题（取第一行或前 30 个字符）
     let title = generate_session_title(initial_message);

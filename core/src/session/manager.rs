@@ -27,6 +27,27 @@ pub trait SessionManager: Send + Sync {
     /// 创建后的会话
     async fn create_session(&self, id: &str, message: Message) -> Result<Session>;
 
+    /// 带初始 header 创建会话：`working_directory` 等字段**与消息一次写入**。
+    ///
+    /// 为什么需要它（而不是 `create_session` + 事后 `update_header`）：两步写法会让
+    /// 会话存在一个「已建但 header 还没补上」的中间态。会话列表按
+    /// `working_directory` 分组（空串 = 「默认」组），任何恰好落在这个窗口里的刷新
+    /// 都会把新会话归到「默认」工作区下面，过一会儿再刷新才回到用户选的目录——
+    /// 用户实测就是这个现象（「新建后先出现在默认下面，不知道什么时候又回到
+    /// tianyan」）。一次写入把窗口彻底消掉，与刷新时机无关。
+    ///
+    /// 默认实现退化为「先建再补」以兼容测试替身（它们不关心目录）；生产实现
+    /// [`PersistentSessionManager`] 覆写为一次写入。
+    async fn create_session_with_header(
+        &self,
+        id: &str,
+        message: Message,
+        header: SessionHeader,
+    ) -> Result<Session> {
+        let _ = header;
+        self.create_session(id, message).await
+    }
+
     /// 通过 ID 获取会话。
     async fn get_session(&self, id: &str) -> Result<Option<Session>>;
 
@@ -146,6 +167,16 @@ impl PersistentSessionManager {
 #[async_trait]
 impl SessionManager for PersistentSessionManager {
     async fn create_session(&self, id: &str, message: Message) -> Result<Session> {
+        self.create_session_with_header(id, message, SessionHeader::default())
+            .await
+    }
+
+    async fn create_session_with_header(
+        &self,
+        id: &str,
+        message: Message,
+        mut header: SessionHeader,
+    ) -> Result<Session> {
         // 全保真转换（StructuredMessage::from_message：图片等非文本内容不丢失）
         let sm = StructuredMessage::from_message(&message, id, None, None);
         let mut session = Session::new(id);
@@ -159,11 +190,9 @@ impl SessionManager for PersistentSessionManager {
             )));
         }
 
-        // 会话级状态（created_at 固化；title/ended_at 初始为空）
-        let header = SessionHeader {
-            created_at: Some(session.created_at),
-            ..SessionHeader::default()
-        };
+        // 会话级状态（created_at 固化；调用方传入的字段原样保留——`working_directory`
+        // 就是这样与消息一次写入的，见 trait 上的 `create_session_with_header` 文档）
+        header.created_at = header.created_at.or(Some(session.created_at));
         self.store.create(id, &header).await?;
         self.store.append_message(id, &sm).await?;
 
@@ -324,6 +353,49 @@ mod tests {
         let loaded = mgr.get_session("test-1").await.unwrap().unwrap();
         assert_eq!(loaded.session_id, "test-1");
         assert_eq!(loaded.messages.len(), 1);
+    }
+
+    /// 判别性：`create_session_with_header` 必须**一次写入**——建完立刻读，
+    /// `working_directory` 就已经在，不需要任何事后 `update_header`。
+    ///
+    /// 为什么这条重要：会话列表按 `working_directory` 分组（空串 = 「默认」组）。
+    /// 旧的两步写法（先 `create_session` 再 `update_header`）会让会话存在一个
+    /// 「已建但目录为空」的窗口，落在窗口里的刷新会把新会话挂到「默认」工作区
+    /// 下面，过一会儿才回到所选目录——用户实测到的就是它。
+    ///
+    /// 反向验证：把 `create_session_with_header` 的实现退回「忽略 header」，
+    /// 下面两条断言都会失败（第一条即 `None != Some(...)`）。
+    #[tokio::test]
+    async fn test_create_session_with_header_binds_working_dir_in_one_write() {
+        let mgr = make_manager().await;
+        let dir = r"F:\work\git\tianyan";
+        let header = SessionHeader {
+            working_directory: Some(dir.to_string()),
+            ..SessionHeader::default()
+        };
+        mgr.create_session_with_header("sess-wd", Message::user("你好"), header)
+            .await
+            .unwrap();
+
+        // ① 立刻单条读：目录已在（没有任何 update_header 参与）
+        let loaded = mgr.get_session("sess-wd").await.unwrap().unwrap();
+        assert_eq!(
+            loaded.header.working_directory.as_deref(),
+            Some(dir),
+            "建会话时就该带上工作目录"
+        );
+
+        // ② 立刻列表读：左栏分组直接用它，空值会被归到「默认」组
+        let list = mgr.list_sessions().await.unwrap();
+        let row = list
+            .iter()
+            .find(|s| s.session_id == "sess-wd")
+            .expect("列表里应有刚建的会话");
+        assert_eq!(
+            row.header.working_directory.as_deref(),
+            Some(dir),
+            "列表里也必须立刻有目录，否则左栏会把新会话归到「默认」分组"
+        );
     }
 
     #[tokio::test]

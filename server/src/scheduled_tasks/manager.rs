@@ -19,7 +19,7 @@ use std::sync::Arc;
 use tianyan::agent::AgentCoordinator;
 use tianyan::common::types::Message;
 use tianyan::scheduler::{TaskContext, TaskDefinition, TaskHandler, TaskResult, TaskScheduler};
-use tianyan::session::SessionManager;
+use tianyan::session::{SessionHeader, SessionManager};
 use tianyan::TianyanError;
 use tokio::sync::RwLock;
 
@@ -234,20 +234,29 @@ impl ScheduledAgentTaskHandler {
         {
             return sid;
         }
+        // 工作目录**与消息一次写入**（`create_session_with_header`），不留
+        // 「会话已建但目录为空」的中间态——左栏按 `working_directory` 分组，
+        // 空串归「默认」组，落在这个窗口里的刷新会把任务会话挂到「默认」下面。
+        // 路径检查失败必须告警：早先是 `let _ =` 静默跳过，目录永远绑不上也查不到线索。
+        let mut header = SessionHeader::default();
+        if Path::new(&self.workspace).is_dir() {
+            header.working_directory = Some(self.workspace.clone());
+        } else {
+            tracing::warn!(
+                workspace = %self.workspace,
+                session_id = %sid,
+                "定时任务的工作目录不存在，任务会话不绑定目录"
+            );
+        }
         if self
             .session_manager
-            .create_session(&sid, Message::user(&self.prompt))
+            .create_session_with_header(&sid, Message::user(&self.prompt), header)
             .await
             .is_ok()
         {
-            // ADR-039 收口 ③②：工作目录绑定与清空预写消息均经工作集（唯一写入口；
+            // ADR-039 收口 ②：清空预写消息经工作集（唯一写入口；
             // 缓存同步推进 → 不再需要手动 remove 兜缓存分叉）
             if let Ok(ws) = self.working_sets.ensure(&sid).await {
-                if Path::new(&self.workspace).is_dir() {
-                    let _ = ws
-                        .update_header(|h| h.working_directory = Some(self.workspace.clone()))
-                        .await;
-                }
                 let _ = ws.rewrite(&[]).await;
             }
         }
