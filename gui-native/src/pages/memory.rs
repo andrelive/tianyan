@@ -15,19 +15,29 @@ use gpui_kit::component::text::TextView;
 
 impl ClientApp {
     pub(crate) fn render_memory(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        // 按目录分组（relative_path 的父段；根级归到「(根)」）
-        let mut groups: Vec<(String, Vec<&MemoryRow>)> = Vec::new();
+        // 按**完整目录路径**建分组，并按路径字典序输出。
+        //
+        // 旧实现按 `relative_path` 的父段分组、保持后端返回顺序（= 按更新时间），
+        // 于是 `entities` 与 `preferences` 并列、`cases/failed_tasks` 与
+        // `events/decisions` 各占一段——用户看不出它们同属哪些上层目录（记忆页因此
+        // 「完全平铺」）。字典序保证同一父目录的子目录**相邻**；同时把路径的每个
+        // 前缀也建成（可能为空的）分组，父目录才不会因为「没有直属条目」而消失。
+        let mut by_dir: std::collections::BTreeMap<String, Vec<&MemoryRow>> =
+            std::collections::BTreeMap::new();
         for m in &self.memories {
             let key = m
                 .relative_path
                 .rsplit_once('/')
                 .map(|(d, _)| d.to_string())
                 .unwrap_or_else(|| "(根)".to_string());
-            match groups.iter_mut().find(|(k, _)| *k == key) {
-                Some((_, v)) => v.push(m),
-                None => groups.push((key, vec![m])),
+            let mut prefix = key.as_str();
+            while let Some((parent, _)) = prefix.rsplit_once('/') {
+                by_dir.entry(parent.to_string()).or_default();
+                prefix = parent;
             }
+            by_dir.entry(key).or_default().push(m);
         }
+        let groups: Vec<(String, Vec<&MemoryRow>)> = by_dir.into_iter().collect();
         let selected = self
             .memories
             .iter()
@@ -59,19 +69,34 @@ impl ClientApp {
             );
         }
         for (gi, (dir, items)) in groups.iter().enumerate() {
+            // 层级标题：按 `/` 深度缩进、只显示末段目录名。**没有直属条目的父目录**
+            // （items 为空）用更弱的颜色 + 结尾 `/` 标出「这只是导航层」，与真正的
+            // 条目容器区分开——否则 `cases` 与 `cases/failed_tasks` 看起来一样。
+            let depth = dir.matches('/').count();
+            let leaf = dir.rsplit('/').next().unwrap_or(dir.as_str());
+            let indent = 8.0 + depth as f32 * 12.0;
+            let parent_only = items.is_empty();
+            let label_color = if parent_only {
+                colors::TEXT_TERTIARY()
+            } else {
+                colors::TEXT_SECONDARY()
+            };
             let mut section = div().flex().flex_col().gap_1().child(
                 div()
-                    .px_2()
+                    .pl(px(indent))
+                    .pr_2()
+                    .py_1()
                     .flex()
                     .flex_row()
                     .items_center()
                     .gap_2()
-                    .child(
-                        div()
-                            .text_size(px(10.))
-                            .text_color(rgb(colors::TEXT_TERTIARY()))
-                            .child(dir.clone()),
-                    )
+                    .child(div().text_size(px(10.)).text_color(rgb(label_color)).child(
+                        if parent_only {
+                            format!("{leaf}/")
+                        } else {
+                            leaf.to_string()
+                        },
+                    ))
                     .child(
                         div()
                             .text_size(px(10.))
