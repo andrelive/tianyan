@@ -15,6 +15,24 @@ use crate::types::*;
 use gpui_kit::assets::IconName;
 use gpui_kit::component::input::Input;
 
+/// 模态遮罩的**唯一构造入口**：整窗半透明底 + 内容居中（内容由调用方 `.child()` 挂上）。
+///
+/// `.occlude()` 是滚轮不穿透的唯一保证（机制见 `render_dialog` 的文档）。收敛成
+/// 一个构造函数而不是在每处弹窗里重复那串 `absolute/size_full/bg`，是为了让
+/// 「新增弹窗忘了 occlude」在结构上不可能发生。
+fn modal_overlay() -> Div {
+    div()
+        .absolute()
+        .top(px(0.))
+        .left(px(0.))
+        .size_full()
+        .flex()
+        .items_center()
+        .justify_center()
+        .bg(rgba(0x000000a0))
+        .occlude()
+}
+
 impl ClientApp {
     /// 打开「编辑后批准」弹窗（回填原命令）。
     ///
@@ -49,6 +67,17 @@ impl ClientApp {
     ///
     /// 自绘而不接组件库 `Dialog`：只有两种形态，自绘更可控（遮罩色、按钮危险色
     /// 都能直接对齐深色主题），也避免为弹窗引入一套焦点/Popover 语义。
+    ///
+    /// **遮罩层必须 `.occlude()`**（文件选择、目录选择两处同样）：gpui 的滚轮分发
+    /// 不是 DOM 那种「冒泡 + stopPropagation」，而是**命中链全员响应**——
+    /// `Window::hit_test` 把所有几何上包含鼠标的 hitbox 都收进 `HitboxTest.ids`，
+    /// 仅在遇到 `HitboxBehavior::BlockMouse` 时截断；而滚动容器（`List` 与
+    /// `overflow_y_scroll` 的 div）的判据一律是 `hitbox.should_handle_scroll()`，
+    /// 其实现就是 `ids.contains(&self)`（**整个 ids**，不是 hover 前缀）。
+    /// 遮罩层只有 `bg` 时根本不产生 hitbox（行为 `Normal`），于是弹窗里的列表滚一下，
+    /// 背后页面的列表也在 ids 里各自滚一遍（实测：工作目录选择器滚动时，
+    /// 背后会话消息跟着滚）。`block_mouse_except_scroll()` 不能替代——它恰好
+    /// **保留**滚动穿透，正是本 bug 的等价物。
     pub(crate) fn render_dialog(&self, cx: &mut Context<Self>) -> AnyElement {
         let Some(dialog) = self.dialog.clone() else {
             return div().into_any_element();
@@ -255,17 +284,7 @@ impl ClientApp {
                         ),
                 ),
         );
-        div()
-            .absolute()
-            .top(px(0.))
-            .left(px(0.))
-            .size_full()
-            .flex()
-            .items_center()
-            .justify_center()
-            .bg(rgba(0x000000a0))
-            .child(card)
-            .into_any_element()
+        modal_overlay().child(card).into_any_element()
     }
 
     /// 角色操作栏：回退内置种子 / 退役删除（都走确认弹窗）。
@@ -682,17 +701,7 @@ impl ClientApp {
                         ),
                 );
 
-        div()
-            .absolute()
-            .top(px(0.))
-            .left(px(0.))
-            .size_full()
-            .flex()
-            .items_center()
-            .justify_center()
-            .bg(rgba(0x000000a0))
-            .child(card)
-            .into_any_element()
+        modal_overlay().child(card).into_any_element()
     }
 
     pub(crate) fn render_workspace_picker_dialog(
@@ -796,15 +805,7 @@ impl ClientApp {
             _ => ("选择工作目录", None),
         };
 
-        div()
-            .absolute()
-            .top(px(0.))
-            .left(px(0.))
-            .size_full()
-            .flex()
-            .items_center()
-            .justify_center()
-            .bg(rgba(0x000000a0))
+        modal_overlay()
             .child(
                 div()
                     .w(px(560.))
