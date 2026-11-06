@@ -183,8 +183,9 @@ struct ClientApp {
     pub(crate) memories_status: String,
     /// 记忆页：选中的记忆 uri
     pub(crate) memory_selected: Option<String>,
-    /// 记忆页：被折叠的目录分组（绝对路径键；父目录折叠时其子分组一并隐藏）
-    pub(crate) memory_collapsed: std::collections::HashSet<String>,
+    /// 记忆页：左栏选中的类目键（`命名空间/目录`，如 `memory/cases/failed_tasks`）。
+    /// `None` = 未选过，渲染时落到第一个类目。
+    pub(crate) memory_selected_cat: Option<String>,
     /// 记忆页：L2 全文是否展开（默认收起——L0/L1 才是浏览主视图）
     pub(crate) memory_detail_open: bool,
     /// 洞察页：总览统计（`GET /stats`：技能/工具/文档/搜索四个追踪面）

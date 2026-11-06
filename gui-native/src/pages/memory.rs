@@ -13,57 +13,214 @@ use crate::widgets::*;
 use gpui_kit::assets::IconName;
 use gpui_kit::component::text::TextView;
 
-/// 目录 `dir` 是否有**祖先**被折叠（父目录收起时子分组一并隐藏）。
+/// 把一条记忆归到 `(命名空间, 目录)`。
 ///
-/// 折叠键是**绝对目录路径**（`cases/failed_tasks`），所以判祖先只需逐级截断路径前缀。
-fn has_collapsed_ancestor(collapsed: &std::collections::HashSet<String>, dir: &str) -> bool {
-    let mut prefix = dir;
-    while let Some((parent, _)) = prefix.rsplit_once('/') {
-        if collapsed.contains(parent) {
-            return true;
-        }
-        prefix = parent;
+/// 命名空间取自 URI 第一段（`relative_path` 不含它），目录取自 `relative_path`
+/// 去掉最后一段（`cases/failed_tasks/foo` → `cases/failed_tasks`；根级条目归「(根)」）。
+fn memory_category(m: &MemoryRow) -> (String, String) {
+    let ns = m
+        .uri
+        .trim_start_matches("tianyan://")
+        .split('/')
+        .next()
+        .unwrap_or("")
+        .to_string();
+    let dir = m
+        .relative_path
+        .rsplit_once('/')
+        .map(|(d, _)| d.to_string())
+        .unwrap_or_else(|| "(根)".to_string());
+    (ns, dir)
+}
+
+/// 左栏分组顺序：记忆 → 画像 → 规则 → 其它（未知命名空间排最后，不隐藏）。
+fn memory_ns_rank(ns: &str) -> u8 {
+    match ns {
+        "memory" => 0,
+        "user" => 1,
+        "agent" => 2,
+        _ => 3,
     }
-    false
+}
+
+/// 命名空间显示名。
+fn memory_ns_label(ns: &str) -> &str {
+    match ns {
+        "memory" => "记忆",
+        "user" => "画像",
+        "agent" => "规则",
+        other => other,
+    }
+}
+
+/// 目录显示名。**未知目录回落原路径**——宁可显示 `made/up` 也不要隐藏条目。
+///
+/// 返回 `String` 而不是 `&str`：未知目录要回借用入参（来自 `cats` 局部变量），
+/// 而调用点把它塞进渲染树（活到函数结束之后），借不出去。
+fn memory_dir_label(dir: &str) -> String {
+    match dir {
+        "facts" => "事实".to_string(),
+        "events/decisions" => "决策".to_string(),
+        "events/evolution_reports" => "演化报告".to_string(),
+        "events/task_states" => "任务状态".to_string(),
+        "cases/failed_tasks" => "案例 / 失败".to_string(),
+        "cases/successful_tasks" => "案例 / 成功".to_string(),
+        "preferences" => "偏好".to_string(),
+        "entities" => "实体".to_string(),
+        "patterns" => "模式".to_string(),
+        other => other.to_string(),
+    }
 }
 
 impl ClientApp {
     pub(crate) fn render_memory(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        // 目录树折叠：祖先折叠时子分组整段跳过（见下方 `has_collapsed_ancestor`）。
-        // 折叠状态只影响渲染，不改变数据源——展开后条目原样回来。
-        // 按**完整目录路径**建分组，并按路径字典序输出。
+        // ── 方案 B：分类独占左栏 ──────────────────────────────────────
         //
-        // 旧实现按 `relative_path` 的父段分组、保持后端返回顺序（= 按更新时间），
-        // 于是 `entities` 与 `preferences` 并列、`cases/failed_tasks` 与
-        // `events/decisions` 各占一段——用户看不出它们同属哪些上层目录（记忆页因此
-        // 「完全平铺」）。字典序保证同一父目录的子目录**相邻**；同时把路径的每个
-        // 前缀也建成（可能为空的）分组，父目录才不会因为「没有直属条目」而消失。
-        let mut by_dir: std::collections::BTreeMap<String, Vec<&MemoryRow>> =
+        // 键 = `命名空间/目录`（如 `memory/cases/failed_tasks`）。此前把分类混在
+        // 条目列表里、靠缩进表达层级，用户实测「分类看不清」——这里把分类彻底抽出来
+        // 做成独立导航栏，条目列表只显示当前类目。
+        let mut by_cat: std::collections::BTreeMap<String, (String, String, usize, f32)> =
             std::collections::BTreeMap::new();
         for m in &self.memories {
-            let key = m
-                .relative_path
-                .rsplit_once('/')
-                .map(|(d, _)| d.to_string())
-                .unwrap_or_else(|| "(根)".to_string());
-            let mut prefix = key.as_str();
-            while let Some((parent, _)) = prefix.rsplit_once('/') {
-                by_dir.entry(parent.to_string()).or_default();
-                prefix = parent;
-            }
-            by_dir.entry(key).or_default().push(m);
+            let (ns, dir) = memory_category(m);
+            let e = by_cat
+                .entry(format!("{ns}/{dir}"))
+                .or_insert((ns, dir, 0, 0.0));
+            e.2 += 1;
+            e.3 += m.importance;
         }
-        let groups: Vec<(String, Vec<&MemoryRow>)> = by_dir.into_iter().collect();
+        let mut cats: Vec<(String, String, String, usize, f32)> = by_cat
+            .into_iter()
+            .map(|(key, (ns, dir, n, sum))| (key, ns, dir, n, sum / n as f32))
+            .collect();
+        // 命名空间固定顺序（记忆 → 画像 → 规则），同命名空间内按目录名字典序
+        cats.sort_by(|a, b| {
+            memory_ns_rank(&a.1)
+                .cmp(&memory_ns_rank(&b.1))
+                .then_with(|| a.2.cmp(&b.2))
+        });
+
+        // 当前类目：记住的选择若仍在（刷新后目录可能消失）就沿用，否则取第一个
+        let current = self
+            .memory_selected_cat
+            .clone()
+            .filter(|k| cats.iter().any(|(key, ..)| key == k))
+            .or_else(|| cats.first().map(|(k, ..)| k.clone()));
+
         let selected = self
             .memories
             .iter()
             .find(|m| self.memory_selected.as_deref() == Some(m.uri.as_str()))
             .cloned();
 
-        // 左：分组列表
-        let mut list = div().flex_1().min_h_0().p_2().flex().flex_col().gap_2();
+        // 左栏：分类导航（命名空间分组 + 每类条数 + 平均重要性小条）
+        let mut nav = div()
+            .w(px(190.))
+            .h_full()
+            .flex()
+            .flex_col()
+            .border_r_1()
+            .border_color(rgb(colors::BORDER()))
+            .bg(rgb(colors::BG_TERTIARY()))
+            .py_2()
+            .overflow_y_scrollbar();
+        let mut last_ns = String::new();
+        for (cat_ix, (key, ns, dir, n, avg)) in cats.iter().enumerate() {
+            if *ns != last_ns {
+                nav = nav.child(
+                    div()
+                        .px_3()
+                        .pt_2()
+                        .pb_1()
+                        .text_size(px(10.))
+                        .text_color(rgb(colors::TEXT_TERTIARY()))
+                        .child(format!("{} · {}", memory_ns_label(ns), ns)),
+                );
+                last_ns = ns.clone();
+            }
+            let is_cur = current.as_deref() == Some(key.as_str());
+            let label_color = if is_cur {
+                colors::ACCENT()
+            } else {
+                colors::TEXT_SECONDARY()
+            };
+            let imp_color = if *avg >= 0.8 {
+                colors::SUCCESS()
+            } else if *avg >= 0.6 {
+                colors::TEXT_SECONDARY()
+            } else {
+                colors::TEXT_TERTIARY()
+            };
+            let bar_w = avg.clamp(0.0, 1.0) * 26.0;
+            let key_c = key.clone();
+            nav = nav.child(
+                div()
+                    .id(("mem-cat", cat_ix))
+                    .mx_1()
+                    .px_2()
+                    .py_1()
+                    .rounded_md()
+                    .cursor_pointer()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_2()
+                    .bg(rgb(if is_cur {
+                        colors::BG_SECONDARY()
+                    } else {
+                        colors::BG_TERTIARY()
+                    }))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .text_size(px(12.5))
+                            .text_color(rgb(label_color))
+                            .whitespace_nowrap()
+                            .text_ellipsis()
+                            .overflow_hidden()
+                            .child(memory_dir_label(dir)),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(10.))
+                            .text_color(rgb(colors::TEXT_TERTIARY()))
+                            .child(format!("{n}")),
+                    )
+                    .child(
+                        div()
+                            .w(px(26.))
+                            .h(px(3.))
+                            .rounded_full()
+                            .bg(rgb(colors::BORDER()))
+                            .child(
+                                div()
+                                    .w(px(bar_w))
+                                    .h(px(3.))
+                                    .rounded_full()
+                                    .bg(rgb(imp_color)),
+                            ),
+                    )
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.memory_selected_cat = Some(key_c.clone());
+                        cx.notify();
+                    })),
+            );
+        }
+
+        // 中栏：当前类目的条目（后端已按更新时间倒排，这里只过滤）
+        let mut mid = div()
+            .w(px(330.))
+            .h_full()
+            .flex()
+            .flex_col()
+            .border_r_1()
+            .border_color(rgb(colors::BORDER()))
+            .bg(rgb(colors::BG_SECONDARY()))
+            .py_2()
+            .overflow_y_scrollbar();
         if self.memories.is_empty() {
-            list = list.child(
+            mid = mid.child(
                 div()
                     .py_8()
                     .flex()
@@ -73,119 +230,67 @@ impl ClientApp {
                     .child(
                         svg()
                             .path(IconName::Brain.path())
-                            .size(px(32.))
+                            .size(px(28.))
                             .text_color(rgb(colors::TEXT_TERTIARY())),
                     )
                     .child(
                         div()
-                            .text_size(px(13.))
+                            .px_3()
+                            .text_size(px(12.))
                             .text_color(rgb(colors::TEXT_TERTIARY()))
                             .child("暂无记忆——自演化综述任务会在会话结束后写入"),
                     ),
             );
         }
-        for (gi, (dir, items)) in groups.iter().enumerate() {
-            // 祖先折叠 → 整段跳过：父目录收起时，子分组自然跟着藏起来
-            if has_collapsed_ancestor(&self.memory_collapsed, dir) {
-                continue;
-            }
-            let collapsed = self.memory_collapsed.contains(dir);
-            // 层级标题：按 `/` 深度缩进、只显示末段目录名。**没有直属条目的父目录**
-            // （items 为空）用更弱的颜色 + 结尾 `/` 标出「这只是导航层」，与真正的
-            // 条目容器区分开——否则 `cases` 与 `cases/failed_tasks` 看起来一样。
-            // 标题可点击折叠/展开（▸ 收起 / ▾ 展开）。
-            let depth = dir.matches('/').count();
-            let leaf = dir.rsplit('/').next().unwrap_or(dir.as_str());
-            let indent = 8.0 + depth as f32 * 12.0;
-            let parent_only = items.is_empty();
-            let label_color = if parent_only {
-                colors::TEXT_TERTIARY()
-            } else {
-                colors::TEXT_SECONDARY()
-            };
-            let toggle_key = dir.clone();
-            let mut section = div().flex().flex_col().gap_1().child(
-                div()
-                    .id(("mem-dir", gi))
-                    .pl(px(indent))
-                    .pr_2()
-                    .py_1()
-                    .rounded_sm()
-                    .cursor_pointer()
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap_2()
-                    .hover(|s| s.bg(rgb(colors::BG_TERTIARY())))
-                    .child(
-                        div()
-                            .text_size(px(9.))
-                            .text_color(rgb(colors::TEXT_TERTIARY()))
-                            .child(if collapsed { "▸" } else { "▾" }),
-                    )
-                    .child(div().text_size(px(10.)).text_color(rgb(label_color)).child(
-                        if parent_only {
-                            format!("{leaf}/")
-                        } else {
-                            leaf.to_string()
-                        },
-                    ))
-                    .child(
-                        div()
-                            .text_size(px(10.))
-                            .text_color(rgb(colors::TEXT_TERTIARY()))
-                            .child(format!("· {}", items.len())),
-                    )
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        // 点标题切换折叠；条目在下方子元素上，各自处理自己的点击
-                        if !this.memory_collapsed.remove(&toggle_key) {
-                            this.memory_collapsed.insert(toggle_key.clone());
-                        }
-                        cx.notify();
-                    })),
-            );
-            if collapsed {
-                list = list.child(section);
-                continue;
-            }
+        if let Some(cur) = &current {
+            let items: Vec<&MemoryRow> = self
+                .memories
+                .iter()
+                .filter(|m| {
+                    let (ns, dir) = memory_category(m);
+                    format!("{ns}/{dir}") == *cur
+                })
+                .collect();
             for (ix, m) in items.iter().enumerate() {
                 let is_sel = self.memory_selected.as_deref() == Some(m.uri.as_str());
                 let uri = m.uri.clone();
-                // 重要度三档配色：≥0.7 绿（稳固）/ ≥0.4 次级 / 其余红（待巩固）
-                let imp_color = if m.importance >= 0.7 {
+                let imp_color = if m.importance >= 0.8 {
                     colors::SUCCESS()
-                } else if m.importance >= 0.4 {
+                } else if m.importance >= 0.6 {
                     colors::TEXT_SECONDARY()
                 } else {
-                    colors::ERROR()
+                    colors::TEXT_TERTIARY()
                 };
-                section = section.child(
+                mid = mid.child(
                     div()
-                        .id(("mem", gi * 1000 + ix))
-                        .w_full()
+                        .id(("mem", ix))
+                        .mx_1()
                         .px_2()
-                        .py_2()
-                        .rounded_lg()
+                        .py_1()
+                        .rounded_md()
+                        .cursor_pointer()
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap_2()
                         .bg(rgb(if is_sel {
                             colors::BG_TERTIARY()
                         } else {
                             colors::BG_SECONDARY()
                         }))
-                        .cursor_pointer()
-                        .flex()
-                        .flex_col()
-                        .gap_1()
+                        .child(
+                            // 重要性色条：不占文字宽度（原实现是右侧一个恒为 0.50 的数字）
+                            div().w(px(3.)).h(px(26.)).rounded_full().bg(rgb(imp_color)),
+                        )
                         .child(
                             div()
+                                .flex_1()
+                                .min_w_0()
                                 .flex()
-                                .flex_row()
-                                .items_center()
-                                .gap_2()
+                                .flex_col()
                                 .child(
                                     div()
-                                        .flex_1()
-                                        .min_w_0()
-                                        .text_size(px(12.))
+                                        .text_size(px(12.5))
                                         .text_color(rgb(if is_sel {
                                             colors::ACCENT()
                                         } else {
@@ -198,23 +303,17 @@ impl ClientApp {
                                 )
                                 .child(
                                     div()
-                                        .text_size(px(10.))
-                                        .text_color(rgb(imp_color))
-                                        .child(format!("{:.2}", m.importance)),
-                                ),
-                        )
-                        .child(
-                            div()
-                                .text_size(px(10.))
-                                .text_color(rgb(colors::TEXT_TERTIARY()))
-                                .whitespace_nowrap()
-                                .text_ellipsis()
-                                .overflow_hidden()
-                                .child(
-                                    m.abstract_text
-                                        .as_ref()
-                                        .map(|t| ellipsis(t, 56))
-                                        .unwrap_or_else(|| "（无摘要）".to_string()),
+                                        .text_size(px(10.5))
+                                        .text_color(rgb(colors::TEXT_TERTIARY()))
+                                        .whitespace_nowrap()
+                                        .text_ellipsis()
+                                        .overflow_hidden()
+                                        .child(
+                                            m.abstract_text
+                                                .as_ref()
+                                                .map(|t| ellipsis(t, 40))
+                                                .unwrap_or_else(|| "（无摘要）".to_string()),
+                                        ),
                                 ),
                         )
                         .on_click(cx.listener(move |this, _, _, cx| {
@@ -222,7 +321,6 @@ impl ClientApp {
                         })),
                 );
             }
-            list = list.child(section);
         }
 
         // 右：详情（L0 → L1 → L2，L2 折叠）
@@ -408,17 +506,8 @@ impl ClientApp {
                     .min_h_0()
                     .flex()
                     .flex_row()
-                    .child(
-                        div()
-                            .w(px(320.))
-                            .h_full()
-                            .flex()
-                            .flex_col()
-                            .border_r_1()
-                            .border_color(rgb(colors::BORDER()))
-                            .bg(rgb(colors::BG_SECONDARY()))
-                            .child(list.overflow_y_scrollbar()),
-                    )
+                    .child(nav)
+                    .child(mid)
                     .child(div().flex_1().min_w_0().h_full().child(detail)),
             )
     }
@@ -516,32 +605,49 @@ impl ClientApp {
 
 #[cfg(test)]
 mod tests {
-    use super::has_collapsed_ancestor;
-    use std::collections::HashSet;
+    use super::{memory_category, memory_dir_label, memory_ns_rank};
+    use crate::types::MemoryRow;
 
-    #[test]
-    fn collapsed_ancestor_hides_children() {
-        let mut collapsed = HashSet::new();
-        collapsed.insert("cases".to_string());
-        assert!(
-            has_collapsed_ancestor(&collapsed, "cases/failed_tasks"),
-            "父目录折叠时子分组必须隐藏"
-        );
-        assert!(!has_collapsed_ancestor(&collapsed, "events/decisions"));
-        assert!(
-            !has_collapsed_ancestor(&collapsed, "cases"),
-            "自身折叠不算「祖先折叠」（自身由调用方单独判断）"
-        );
+    fn row(uri: &str, rel: &str) -> MemoryRow {
+        MemoryRow {
+            uri: uri.to_string(),
+            name: "x".to_string(),
+            relative_path: rel.to_string(),
+            importance: 0.5,
+            abstract_text: None,
+            overview_text: None,
+            detail_text: None,
+            updated_at: String::new(),
+            tags: Vec::new(),
+        }
     }
 
     #[test]
-    fn nested_ancestor_counts() {
-        let mut collapsed = HashSet::new();
-        collapsed.insert("memory/cases".to_string());
-        assert!(has_collapsed_ancestor(
-            &collapsed,
-            "memory/cases/failed_tasks"
+    fn category_splits_ns_and_dir() {
+        let (ns, dir) = memory_category(&row(
+            "tianyan://memory/cases/failed_tasks/foo",
+            "cases/failed_tasks/foo",
         ));
-        assert!(!has_collapsed_ancestor(&collapsed, "memory/facts"));
+        assert_eq!(ns, "memory");
+        assert_eq!(dir, "cases/failed_tasks");
+
+        let (ns2, dir2) =
+            memory_category(&row("tianyan://user/preferences/bar", "preferences/bar"));
+        assert_eq!(ns2, "user");
+        assert_eq!(dir2, "preferences");
+    }
+
+    #[test]
+    fn ns_rank_orders_memory_then_user_then_agent() {
+        assert!(memory_ns_rank("memory") < memory_ns_rank("user"));
+        assert!(memory_ns_rank("user") < memory_ns_rank("agent"));
+        assert!(memory_ns_rank("agent") < memory_ns_rank("unknown"));
+    }
+
+    #[test]
+    fn known_dirs_have_labels_unknown_falls_back() {
+        assert_eq!(memory_dir_label("cases/failed_tasks"), "案例 / 失败");
+        assert_eq!(memory_dir_label("preferences"), "偏好");
+        assert_eq!(memory_dir_label("made/up"), "made/up");
     }
 }

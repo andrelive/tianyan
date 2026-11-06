@@ -172,7 +172,7 @@ impl ClientApp {
             memories: Vec::new(),
             memories_status: "正在加载记忆…".to_string(),
             memory_selected: None,
-            memory_collapsed: std::collections::HashSet::new(),
+            memory_selected_cat: None,
             memory_detail_open: false,
             insight_stats: None,
             usage_total: None,
