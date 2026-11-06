@@ -13,8 +13,24 @@ use crate::widgets::*;
 use gpui_kit::assets::IconName;
 use gpui_kit::component::text::TextView;
 
+/// 目录 `dir` 是否有**祖先**被折叠（父目录收起时子分组一并隐藏）。
+///
+/// 折叠键是**绝对目录路径**（`cases/failed_tasks`），所以判祖先只需逐级截断路径前缀。
+fn has_collapsed_ancestor(collapsed: &std::collections::HashSet<String>, dir: &str) -> bool {
+    let mut prefix = dir;
+    while let Some((parent, _)) = prefix.rsplit_once('/') {
+        if collapsed.contains(parent) {
+            return true;
+        }
+        prefix = parent;
+    }
+    false
+}
+
 impl ClientApp {
     pub(crate) fn render_memory(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        // 目录树折叠：祖先折叠时子分组整段跳过（见下方 `has_collapsed_ancestor`）。
+        // 折叠状态只影响渲染，不改变数据源——展开后条目原样回来。
         // 按**完整目录路径**建分组，并按路径字典序输出。
         //
         // 旧实现按 `relative_path` 的父段分组、保持后端返回顺序（= 按更新时间），
@@ -69,9 +85,15 @@ impl ClientApp {
             );
         }
         for (gi, (dir, items)) in groups.iter().enumerate() {
+            // 祖先折叠 → 整段跳过：父目录收起时，子分组自然跟着藏起来
+            if has_collapsed_ancestor(&self.memory_collapsed, dir) {
+                continue;
+            }
+            let collapsed = self.memory_collapsed.contains(dir);
             // 层级标题：按 `/` 深度缩进、只显示末段目录名。**没有直属条目的父目录**
             // （items 为空）用更弱的颜色 + 结尾 `/` 标出「这只是导航层」，与真正的
             // 条目容器区分开——否则 `cases` 与 `cases/failed_tasks` 看起来一样。
+            // 标题可点击折叠/展开（▸ 收起 / ▾ 展开）。
             let depth = dir.matches('/').count();
             let leaf = dir.rsplit('/').next().unwrap_or(dir.as_str());
             let indent = 8.0 + depth as f32 * 12.0;
@@ -81,15 +103,26 @@ impl ClientApp {
             } else {
                 colors::TEXT_SECONDARY()
             };
+            let toggle_key = dir.clone();
             let mut section = div().flex().flex_col().gap_1().child(
                 div()
+                    .id(("mem-dir", gi))
                     .pl(px(indent))
                     .pr_2()
                     .py_1()
+                    .rounded_sm()
+                    .cursor_pointer()
                     .flex()
                     .flex_row()
                     .items_center()
                     .gap_2()
+                    .hover(|s| s.bg(rgb(colors::BG_TERTIARY())))
+                    .child(
+                        div()
+                            .text_size(px(9.))
+                            .text_color(rgb(colors::TEXT_TERTIARY()))
+                            .child(if collapsed { "▸" } else { "▾" }),
+                    )
                     .child(div().text_size(px(10.)).text_color(rgb(label_color)).child(
                         if parent_only {
                             format!("{leaf}/")
@@ -102,8 +135,19 @@ impl ClientApp {
                             .text_size(px(10.))
                             .text_color(rgb(colors::TEXT_TERTIARY()))
                             .child(format!("· {}", items.len())),
-                    ),
+                    )
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        // 点标题切换折叠；条目在下方子元素上，各自处理自己的点击
+                        if !this.memory_collapsed.remove(&toggle_key) {
+                            this.memory_collapsed.insert(toggle_key.clone());
+                        }
+                        cx.notify();
+                    })),
             );
+            if collapsed {
+                list = list.child(section);
+                continue;
+            }
             for (ix, m) in items.iter().enumerate() {
                 let is_sel = self.memory_selected.as_deref() == Some(m.uri.as_str());
                 let uri = m.uri.clone();
@@ -467,5 +511,37 @@ impl ClientApp {
             }
         })
         .detach();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::has_collapsed_ancestor;
+    use std::collections::HashSet;
+
+    #[test]
+    fn collapsed_ancestor_hides_children() {
+        let mut collapsed = HashSet::new();
+        collapsed.insert("cases".to_string());
+        assert!(
+            has_collapsed_ancestor(&collapsed, "cases/failed_tasks"),
+            "父目录折叠时子分组必须隐藏"
+        );
+        assert!(!has_collapsed_ancestor(&collapsed, "events/decisions"));
+        assert!(
+            !has_collapsed_ancestor(&collapsed, "cases"),
+            "自身折叠不算「祖先折叠」（自身由调用方单独判断）"
+        );
+    }
+
+    #[test]
+    fn nested_ancestor_counts() {
+        let mut collapsed = HashSet::new();
+        collapsed.insert("memory/cases".to_string());
+        assert!(has_collapsed_ancestor(
+            &collapsed,
+            "memory/cases/failed_tasks"
+        ));
+        assert!(!has_collapsed_ancestor(&collapsed, "memory/facts"));
     }
 }

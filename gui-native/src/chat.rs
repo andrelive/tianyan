@@ -1486,6 +1486,14 @@ impl ClientApp {
                         div()
                             .id(("attach-img", i))
                             .cursor_pointer()
+                            // 超长图（截图长条）会撑破缩略图、压到下方文字上（用户实测）：
+                            // 外层容器**也**定死 64×64 并裁剪，`object_fit(Cover)` 才有边界
+                            // 可用；`flex_shrink_0` 防止它被同一行的文件 chip 挤扁。
+                            .w(px(64.))
+                            .h(px(64.))
+                            .flex_shrink_0()
+                            .overflow_hidden()
+                            .rounded_md()
                             .child(
                                 gpui_kit::img(gpui_kit::ImageSource::Image(arc))
                                     // 对齐 vite `ChatInput` 的 `w-16 h-16 rounded-lg object-cover`：
@@ -1494,8 +1502,7 @@ impl ClientApp {
                                     // 上下/左右留白（用户实测的「缩略图上下有白条」）。
                                     .w(px(64.))
                                     .h(px(64.))
-                                    .object_fit(gpui_kit::ObjectFit::Cover)
-                                    .rounded_md(),
+                                    .object_fit(gpui_kit::ObjectFit::Cover),
                             )
                             .on_click(cx.listener(move |this, _, _w, cx| {
                                 this.zoomed_image = Some(arc_for_click.clone());
