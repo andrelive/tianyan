@@ -227,6 +227,15 @@ impl SqliteDb {
                     [],
                 )?;
             }
+            if !cols.iter().any(|c| c == "access_count") {
+                conn.execute(
+                    "ALTER TABLE vfs_entries ADD COLUMN access_count INTEGER NOT NULL DEFAULT 0",
+                    [],
+                )?;
+            }
+            if !cols.iter().any(|c| c == "last_accessed") {
+                conn.execute("ALTER TABLE vfs_entries ADD COLUMN last_accessed TEXT", [])?;
+            }
         }
         conn.execute_batch(SCHEMA_SQL)?;
         Ok(())
@@ -277,7 +286,10 @@ const SCHEMA_SQL: &str = "
         -- ——界面/排序/加权拿到的全是假值（实测记忆页 131 条清一色 0.50）。
         created_at       TEXT DEFAULT (datetime('now')),
         updated_at       TEXT DEFAULT (datetime('now')),
-        importance       REAL NOT NULL DEFAULT 0.5
+        importance       REAL NOT NULL DEFAULT 0.5,
+        -- 使用计数与最后使用时间：只有「检索命中并注入上下文」才累加
+        access_count     INTEGER NOT NULL DEFAULT 0,
+        last_accessed    TEXT
     );
 
     -- 后台任务状态（ADR-013：任务实体化——状态脱离调用栈持久化，

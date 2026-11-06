@@ -26,6 +26,15 @@ pub struct EntryMetadata {
     pub file_size: Option<u64>,
     /// 重要性评分（0.0-1.0）。
     pub importance: f32,
+    /// 被「使用」的次数（检索命中并注入上下文才计数；读内容不算）。
+    ///
+    /// 此前只存在于 `MemoryEntry` 结构体里、且 `touch()` 零生产调用——记忆页的
+    /// 「访问次数」因此恒为 0。改为元数据字段后它随条目一起持久化。
+    #[serde(default)]
+    pub access_count: u64,
+    /// 最后一次被使用的时间（从未使用为 `None`）。
+    #[serde(default)]
+    pub last_accessed: Option<DateTime<Utc>>,
     /// 标签列表。
     pub tags: Vec<String>,
     /// 创建时间。
@@ -47,6 +56,8 @@ impl Default for EntryMetadata {
             original_name: None,
             file_size: None,
             importance: 0.5,
+            access_count: 0,
+            last_accessed: None,
             tags: Vec::new(),
             created_at: Utc::now(),
             updated_at: Utc::now(),

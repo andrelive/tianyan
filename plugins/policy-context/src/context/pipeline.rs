@@ -405,6 +405,9 @@ impl ContextPipeline {
 
                 let mut rules = Vec::new();
                 let mut memories = Vec::new();
+                // 真正进了上下文的记忆 URI：只有这些算「被使用」（见
+                // `VirtualFileSystem::touch_access` 的调用契约）
+                let mut touched: Vec<tianyan::common::types::TianyanUri> = Vec::new();
                 for (_, r) in scored {
                     let Some(content) = r.content else { continue };
                     if content.trim().is_empty() {
@@ -416,8 +419,15 @@ impl ContextPipeline {
                         }
                         ContextNamespace::Memory if memories.len() < self.default_top_k => {
                             memories.push(content);
+                            touched.push(r.uri.clone());
                         }
                         _ => {}
+                    }
+                }
+                // 记账失败不影响本轮注入（best effort）
+                for uri in &touched {
+                    if let Err(e) = self.vfs.touch_access(uri).await {
+                        tracing::debug!(error = %e, uri = %uri, "记忆使用计数写入失败（跳过）");
                     }
                 }
                 (rules, memories)

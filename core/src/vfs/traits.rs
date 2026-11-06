@@ -152,6 +152,18 @@ pub trait VirtualFileSystem: VfsCore + ContentStore + VfsSearch {
         self.read_content(uri, ContentLevel::Abstract).await
     }
 
+    /// 记录一次「被使用」：访问次数 +1、最后访问时间刷新（见
+    /// [`crate::common::types::EntryMetadata::access_count`]）。
+    ///
+    /// **调用契约**：只有「检索命中并**真正注入上下文**」才算使用。摘要任务读内容、
+    /// 界面打开详情、运维工具遍历都不算——混进来计数就没有意义了。
+    ///
+    /// 默认实现是空操作：没有持久化元数据的后端（测试替身等）保持 0 计数即可，
+    /// 不该因为「不记账」而让调用方报错。`VirtualFileSystemImpl` 覆盖它。
+    async fn touch_access(&self, _uri: &TianyanUri) -> Result<()> {
+        Ok(())
+    }
+
     /// 向量库为空时把存量条目的摘要重新嵌入（启动期自愈回填）。
     ///
     /// 触发场景：LanceDB 表维度变更自动重建（ADR-025 后续）/ 首次建库 /

@@ -1026,52 +1026,21 @@ fn format_last_called(raw: &str) -> String {
 ///
 /// 迁移自 `memory::extractor`（ADR-017 收敛后提取器删除，写入通道保留）。
 fn format_memory_as_markdown(memory: &MemoryEntry) -> String {
-    let mut md = String::new();
-
-    md.push_str(&format!("# 记忆: {}\n\n", memory.id));
-    md.push_str(&format!("- **类别**: {}\n", memory.category));
-    md.push_str(&format!("- **重要性**: {:.2}\n", memory.importance));
-    md.push_str(&format!("- **访问次数**: {}\n", memory.access_count));
-    md.push_str(&format!(
-        "- **创建时间**: {}\n",
-        memory.created_at.to_rfc3339()
-    ));
-    md.push_str(&format!(
-        "- **更新时间**: {}\n",
-        memory.updated_at.to_rfc3339()
-    ));
-
-    if let Some(ref last_accessed) = memory.last_accessed {
-        md.push_str(&format!("- **最后访问**: {}\n", last_accessed.to_rfc3339()));
-    }
-
-    if let Some(ref session_id) = memory.source_session {
-        md.push_str(&format!("- **来源会话**: {}\n", session_id));
-    }
-
-    if !memory.source_message_ids.is_empty() {
-        md.push_str(&format!(
-            "- **来源消息**: {}\n",
-            memory.source_message_ids.join(", ")
-        ));
-    }
-
-    if !memory.tags.is_empty() {
-        md.push_str(&format!("- **标签**: {}\n", memory.tags.join(", ")));
-    }
-
-    if !memory.related_memories.is_empty() {
-        md.push_str(&format!(
-            "- **相关记忆**: {}\n",
-            memory.related_memories.join(", ")
-        ));
-    }
-
-    md.push_str("\n## 内容\n\n");
-    md.push_str(&memory.content);
-    md.push('\n');
-
-    md
+    // **detail 只放内容**，元数据一律不进正文：
+    //
+    // - 它们是**会变的派生值**（访问计数、衰减后的重要性）。写进不可变原文必然与实际
+    //   脱节：实测 detail 里写着「重要性: 0.76」、结构化列却是默认 0.5、界面显示 0.50
+    //   ——同一个字段三个值，就是「元数据混进正文」的直接后果；
+    // - L1 概览对短内容是**直用原文**，元数据头会整块跟到概览里，用户读到的是过期快照
+    //   （改字段不该连带改概览——该改的是这里）；
+    // - 唯一权威是结构化列（`vfs_entries` 的 importance / access_count /
+    //   last_accessed / created_at / updated_at）。
+    //
+    // 来源会话/来源消息/标签/相关记忆目前**没有任何读取消费方**，故不落库（真要用时再加列，
+    // 不为「未来可能需要」预留空字段）。
+    let mut content = memory.content.trim().to_string();
+    content.push('\n');
+    content
 }
 
 /// 归一化条目 id：剥离可能的 URI / 路径前缀，只取 slug 末段。
@@ -2164,10 +2133,11 @@ mod tests {
             .with_tags(vec!["test".to_string(), "preference".to_string()]);
 
         let md = format_memory_as_markdown(&memory);
-        assert!(md.contains("# 记忆: test-1"));
-        assert!(md.contains("**类别**: preference"));
-        assert!(md.contains("**重要性**: 0.80"));
-        assert!(md.contains("这是一个测试记忆"));
+        // 契约：detail **只放内容**，元数据全部走结构化列
+        assert_eq!(md.trim(), "这是一个测试记忆");
+        assert!(!md.contains("重要性"), "元数据不得进正文: {md}");
+        assert!(!md.contains("访问次数"), "元数据不得进正文: {md}");
+        assert!(!md.contains("# 记忆:"), "不得再有标题头: {md}");
     }
 
     #[test]
@@ -2177,8 +2147,10 @@ mod tests {
             .with_source_message_ids(vec!["msg-1".to_string(), "msg-2".to_string()]);
 
         let md = format_memory_as_markdown(&memory);
-        assert!(md.contains("**来源会话**: session-1"));
-        assert!(md.contains("**来源消息**: msg-1, msg-2"));
+        // 溯源字段目前没有读取消费方，故不落正文（真要用时再加结构化列）
+        assert_eq!(md.trim(), "内容");
+        assert!(!md.contains("session-1"), "溯源信息不得进正文: {md}");
+        assert!(!md.contains("msg-1"), "来源消息不得进正文: {md}");
     }
 
     // ── 技能使用统计材料（ADR-049 期 4c-①）───────────────────────────

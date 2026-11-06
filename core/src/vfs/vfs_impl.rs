@@ -580,6 +580,25 @@ impl VfsSearch for VirtualFileSystemImpl {
 
 #[async_trait]
 impl VirtualFileSystem for VirtualFileSystemImpl {
+    /// 记录一次使用：读回条目元数据、累加计数后写回。
+    ///
+    /// 走 `read_entry` + `write_entry` 而不是新增 storage trait 方法——低频（每次注入
+    /// 至多几条记忆）、内容在 SQLite 页缓存里，代价可忽略；换来的是**不改任何后端契约**。
+    /// 目录与「取不到条目」都静默跳过：记账失败不该影响上下文注入。
+    async fn touch_access(&self, uri: &TianyanUri) -> Result<()> {
+        let mut entry = match self.storage.read_entry(uri).await {
+            Ok(e) => e,
+            Err(e) if e.is_not_found() => return Ok(()),
+            Err(e) => return Err(e),
+        };
+        if entry.metadata.is_directory {
+            return Ok(());
+        }
+        entry.metadata.access_count = entry.metadata.access_count.saturating_add(1);
+        entry.metadata.last_accessed = Some(chrono::Utc::now());
+        self.storage.write_entry(&entry).await
+    }
+
     async fn backfill_summary_vectors_if_empty(&self) -> Result<usize> {
         // 表非空 = 无需回填（正常启动路径，一次 count 查询即返回）
         if self.vector_storage.count_rows().await? > 0 {

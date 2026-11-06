@@ -55,7 +55,9 @@ impl SqliteBackend {
                 detail_content   TEXT,
                 created_at       TEXT DEFAULT (datetime('now')),
                 updated_at       TEXT DEFAULT (datetime('now')),
-                importance       REAL NOT NULL DEFAULT 0.5
+                importance       REAL NOT NULL DEFAULT 0.5,
+                access_count     INTEGER NOT NULL DEFAULT 0,
+                last_accessed    TEXT
             );",
         )
         .map_err(|e| TianyanError::Custom(format!("存储后端错误：创建 vfs_entries 表失败: {e}")))?;
@@ -93,7 +95,7 @@ impl StorageBackend for SqliteBackend {
 
         conn.query_row(
             "SELECT is_directory, abstract_content, overview_content, detail_content,
-                    created_at, updated_at, importance
+                    created_at, updated_at, importance, access_count, last_accessed
              FROM vfs_entries WHERE uri = ?1",
             rusqlite::params![&uri_str],
             |row| {
@@ -105,6 +107,12 @@ impl StorageBackend for SqliteBackend {
                 // 重要性从结构化列读。早期它只活在记忆 detail 的 markdown 里，
                 // 这里重建元数据时取默认 0.5 —— 界面 131 条清一色 0.50 就是这个原因。
                 metadata.importance = row.get::<_, f64>("importance").unwrap_or(0.5) as f32;
+                metadata.access_count = row.get::<_, i64>("access_count").unwrap_or(0) as u64;
+                metadata.last_accessed = row
+                    .get::<_, Option<String>>("last_accessed")
+                    .ok()
+                    .flatten()
+                    .and_then(|s| parse_stored_timestamp(&s));
                 if let Some(ref ts) = created_at {
                     if let Some(t) = parse_stored_timestamp(ts) {
                         metadata.created_at = t;
@@ -139,15 +147,17 @@ impl StorageBackend for SqliteBackend {
         conn.execute(
             "INSERT INTO vfs_entries
              (uri, is_directory, abstract_content, overview_content, detail_content,
-              updated_at, importance)
-             VALUES (?1, ?2, ?3, ?4, ?5, datetime('now'), ?6)
+              updated_at, importance, access_count, last_accessed)
+             VALUES (?1, ?2, ?3, ?4, ?5, datetime('now'), ?6, ?7, ?8)
              ON CONFLICT(uri) DO UPDATE SET
                 is_directory = excluded.is_directory,
                 abstract_content = excluded.abstract_content,
                 overview_content = excluded.overview_content,
                 detail_content = excluded.detail_content,
                 updated_at = excluded.updated_at,
-                importance = excluded.importance",
+                importance = excluded.importance,
+                access_count = excluded.access_count,
+                last_accessed = excluded.last_accessed",
             rusqlite::params![
                 uri,
                 is_dir,
@@ -155,6 +165,8 @@ impl StorageBackend for SqliteBackend {
                 entry.overview_content,
                 entry.detail_content,
                 entry.metadata.importance as f64,
+                entry.metadata.access_count as i64,
+                entry.metadata.last_accessed.map(|t| t.to_rfc3339()),
             ],
         )
         .map_err(|e| TianyanError::Custom(format!("存储后端错误：写入条目失败: {e}")))?;
