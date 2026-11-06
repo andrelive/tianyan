@@ -114,13 +114,20 @@ impl ClientApp {
             .cloned();
 
         // 左栏：分类导航（命名空间分组 + 每类条数 + 平均重要性小条）
+        //
+        // **左中之间不画分隔线**，分区完全靠色差：未选中行 = `BG_TERTIARY`（与栏底同色，
+        // 所以整片是连续的一条深色带）、选中行 = `BG_SECONDARY`（与中栏同色，
+        // 于是它看起来像中栏向左延伸出来的一条）、中栏 = `BG_SECONDARY`。
+        //
+        // 为什么不给选中行做圆角（试过 6 版都退回）：圆角削掉的缺口露出的是**父容器**
+        // （栏底），而栏底与未选中行同色 ⇒ 直角与圆角在视觉上没有任何差别；
+        // 要让弧显现必须把栏底再压深一档，左栏就变成「栏底 / 未选中 / 选中」三档深浅，
+        // 层次反而更脏。色差 + 直角是确定的，不依赖"缺口露出什么颜色"。
         let mut nav = div()
             .w(px(190.))
             .h_full()
             .flex()
             .flex_col()
-            .border_r_1()
-            .border_color(rgb(colors::BORDER()))
             .bg(rgb(colors::BG_TERTIARY()))
             .py_2()
             .overflow_y_scrollbar();
@@ -156,15 +163,17 @@ impl ClientApp {
             nav = nav.child(
                 div()
                     .id(("mem-cat", cat_ix))
-                    .mx_1()
+                    // 贴着栏目右边（不设左右外边距、不设圆角）——色带必须顶到中栏，
+                    // 选中行才能与中栏连成一片；一旦留出 4px 边距，色带与中栏之间
+                    // 就会夹一条深色缝，"连成一整条"的效果立刻断掉。
                     .px_2()
                     .py_1()
-                    .rounded_md()
                     .cursor_pointer()
                     .flex()
                     .flex_row()
                     .items_center()
                     .gap_2()
+                    // 未选中 = 深（与栏底同色）；选中 = 浅（与中栏同色）
                     .bg(rgb(if is_cur {
                         colors::BG_SECONDARY()
                     } else {
