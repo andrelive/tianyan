@@ -780,6 +780,7 @@ impl ClientApp {
             self.turn_running = running;
             if !protect_inflight {
                 self.streaming = false;
+                self.remeasure_stream_tail();
             }
             println!(
                 "[事件] 快照 {sid}：{n} 条（replace={} running={running}）",
@@ -1108,6 +1109,7 @@ impl ClientApp {
                 if !self.offline {
                     // 离线（别的会话）时不动当前会话的轮状态与提示条
                     self.streaming = false;
+                    self.remeasure_stream_tail();
                     self.turn_running = false;
                     // 流式错误必须进 toast：否则下一次轮询写状态行就把它盖掉了
                     self.set_error(format!("出错：{msg}"));
@@ -1412,6 +1414,30 @@ impl ClientApp {
     /// 需要提示时再加（那是纯增量）。
     pub(crate) fn scroll_to_end_if_following(&self) {
         if self.follows_tail() {
+            self.msg_list_state.scroll_to_end();
+        }
+    }
+
+    /// 流式结束（或失败）后**重测最后一项**的高度。
+    ///
+    /// 为什么必须显式做：流式期间最后一条消息的高度在持续增长，而 `ListState` 只在
+    /// `splice` / `reset`（**条目数变化**）时重新测量——条目数没变的「内容变高」它
+    /// 不会自己重测，缓存里留着流式中间态的高度。表现正是用户实测的：纯历史会话
+    /// 来回切正常，**流式输出过的会话切回必跳**（切走时按旧高度记下阅读位置，
+    /// 切回时高度已经变了）。
+    ///
+    /// 用 `remeasure_items(last..last+1)` 而不是整体 `remeasure()`：只有最后一项的
+    /// 渲染态变了（`stream_pending` 由 true 变 false），其余项高度没动，全量重测
+    /// 会让整页闪一下。
+    pub(crate) fn remeasure_stream_tail(&self) {
+        let Some(last) = self.messages.len().checked_sub(1) else {
+            return;
+        };
+        // 重测会让该项高度瞬间回到 uniform hint，Top 对齐下视口内容会随之上移——
+        // 原本贴底的用户必须重新贴底，否则流式一结束就「凭空往上跳一段」。
+        let was_at_end = self.follows_tail();
+        self.msg_list_state.remeasure_items(last..last + 1);
+        if was_at_end {
             self.msg_list_state.scroll_to_end();
         }
     }
@@ -1812,6 +1838,7 @@ impl ClientApp {
                 Err(e) => {
                     let _ = this.update(cx, |this, cx| {
                         this.streaming = false;
+                        this.remeasure_stream_tail();
                         this.turn_running = false;
                         this.running_sessions.remove(&sid_for_cleanup);
                         this.set_error(format!("发送失败：{e}"));
