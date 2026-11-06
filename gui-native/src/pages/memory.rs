@@ -160,61 +160,65 @@ impl ClientApp {
             };
             let bar_w = avg.clamp(0.0, 1.0) * 26.0;
             let key_c = key.clone();
-            nav = nav.child(
-                div()
-                    .id(("mem-cat", cat_ix))
-                    // 贴着栏目右边（不设左右外边距、不设圆角）——色带必须顶到中栏，
-                    // 选中行才能与中栏连成一片；一旦留出 4px 边距，色带与中栏之间
-                    // 就会夹一条深色缝，"连成一整条"的效果立刻断掉。
-                    .px_2()
-                    .py_1()
-                    .cursor_pointer()
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap_2()
-                    // 未选中 = 深（与栏底同色）；选中 = 浅（与中栏同色）
-                    .bg(rgb(if is_cur {
-                        colors::BG_SECONDARY()
-                    } else {
-                        colors::BG_TERTIARY()
-                    }))
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .text_size(px(12.5))
-                            .text_color(rgb(label_color))
-                            .whitespace_nowrap()
-                            .text_ellipsis()
-                            .overflow_hidden()
-                            .child(memory_dir_label(dir)),
-                    )
-                    .child(
-                        div()
-                            .text_size(px(10.))
-                            .text_color(rgb(colors::TEXT_TERTIARY()))
-                            .child(format!("{n}")),
-                    )
-                    .child(
-                        div()
-                            .w(px(26.))
-                            .h(px(3.))
-                            .rounded_full()
-                            .bg(rgb(colors::BORDER()))
-                            .child(
-                                div()
-                                    .w(px(bar_w))
-                                    .h(px(3.))
-                                    .rounded_full()
-                                    .bg(rgb(imp_color)),
-                            ),
-                    )
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.memory_selected_cat = Some(key_c.clone());
-                        cx.notify();
-                    })),
-            );
+            let mut row = div()
+                .id(("mem-cat", cat_ix))
+                // 左侧留 6px：色带不顶到栏目左边，留出呼吸空间。
+                // 右侧**不设**外边距——色带必须顶到中栏，选中行才能与中栏连成一条
+                // （右侧一旦留边距，两者之间就夹一条深色缝，"连成一整条"立刻断掉）。
+                .ml(px(6.))
+                .px_2()
+                .py_1()
+                .cursor_pointer()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap_2()
+                // 未选中 = 深（与栏底同色）；选中 = 浅（与中栏同色）
+                .bg(rgb(if is_cur {
+                    colors::BG_SECONDARY()
+                } else {
+                    colors::BG_TERTIARY()
+                }))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .text_size(px(12.5))
+                        .text_color(rgb(label_color))
+                        .whitespace_nowrap()
+                        .text_ellipsis()
+                        .overflow_hidden()
+                        .child(memory_dir_label(dir)),
+                )
+                .child(
+                    div()
+                        .text_size(px(10.))
+                        .text_color(rgb(colors::TEXT_TERTIARY()))
+                        .child(format!("{n}")),
+                )
+                .child(
+                    div()
+                        .w(px(26.))
+                        .h(px(3.))
+                        .rounded_full()
+                        .bg(rgb(colors::BORDER()))
+                        .child(
+                            div()
+                                .w(px(bar_w))
+                                .h(px(3.))
+                                .rounded_full()
+                                .bg(rgb(imp_color)),
+                        ),
+                );
+            if is_cur {
+                // 选中行：只圆左侧两角（`rounded_l` = 左上 + 左下）——缺口露出的是
+                // 深色栏底，所以圆角看得见；右侧保持直角，与中栏同色、无缝隙地相接。
+                row = row.rounded_l(px(6.));
+            }
+            nav = nav.child(row.on_click(cx.listener(move |this, _, _, cx| {
+                this.memory_selected_cat = Some(key_c.clone());
+                cx.notify();
+            })));
         }
 
         // 中栏：当前类目的条目（后端已按更新时间倒排，这里只过滤）
