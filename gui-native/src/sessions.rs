@@ -575,6 +575,20 @@ impl ClientApp {
                     // 跟随被关掉，之后新内容到达就不再自动贴底了。
                     self.msg_list_state.scroll_to_end();
                 }
+                // 锚点这条（及它后面的）**测量缓存可能停在流式中间态**：
+                // `remeasure_stream_tail` 只在流式结束那一刻重测最后一项，切走期间内容
+                // 再变过就没人管了。首帧 layout 会拿这个旧高度同时算两个量 ——
+                // `rendered_height`（视口顶那条到末尾的累计）与 `summary().height`
+                // （总高），两者一起偏小，于是「距底还有一屏」被读成「已经到底」：
+                // 既把位置归一化成「底部对齐」（`rendered_height - available < 一屏`），
+                // 又 `start_following()`（`scroll_offset + available >= total - 1`）。
+                //
+                // 实测就是这么坏的：锚点那条缓存着 450px（真实 2156），首帧把视口顶
+                // 从 (150, 836) 重算成 (147, 9.3)，下一帧跟随已开 ⇒ 直接贴底。
+                // 标记重测后首帧会真渲染它们、量出真实高度，两条判据同时变准。
+                if ix < n {
+                    self.msg_list_state.remeasure_items(ix..n);
+                }
             } else {
                 // 锚点那条已被压缩点替代/删掉：退回底部（`Top` 对齐不自动贴底）
                 self.msg_list_state.scroll_to_end();
