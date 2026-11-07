@@ -770,34 +770,59 @@ impl ClientApp {
                 self.msg_scrolled_up.get()
             ));
         }
-        // 诊断（第 2 探针）：**下一帧**再看一次位置。
+        // 诊断（第 2 探针）：**逐帧**看恢复出来的位置还在不在。
         //
-        // 前面的 `open` 行是在 `restore_view_state()` 刚 `scroll_to()` 完、layout
+        // 上面的 `open` 行是在 `restore_view_state()` 刚 `scroll_to()` 完、layout
         // 还没跑的时刻读的，它等于 park 值本身。但恢复出来的位置有可能在首帧布局
-        // 里被引擎改掉，而这件事没有任何日志。两个探针同打才能分清：
-        //   ① `after` 与 `before` 不同 → 位置是被布局改的（下面那条分支）；
-        //   ② 相同 → 位置没被动过，跳变在别处（项高度缓存/渲染）。
+        // 里被引擎改掉，而这件事此前没有任何日志。两个探针同打才能分清：
+        //   ① 帧内位置变了 → 位置是被布局改的（下面那条分支）；
+        //   ② 一直不变 → 位置没被动过，跳变在别处（项高度缓存 / 渲染）。
         //
-        // 改位置的嫌疑分支（`gpui_pre::list::StateInner::layout_items`）：
-        // 当「从视口顶部那条一直算到内容末尾的高度 < 一屏」时，它把 `offset_in_item`
-        // **无条件重算**成 `rendered_height - available_height`（即让最后一条的底部
-        // 对齐视口底部），`ListAlignment::Top` 下还会写回 `logical_scroll_top`。
-        // 工具卡片密集的会话里单条几千 px，上滚一屏后视口顶部仍在最后一条内部 ⇒
-        // 「从它到末尾」往往不足一屏 ⇒ 一旦 offset 与真实高度对不上，就会被推成贴底。
+        // 改位置的嫌疑分支（`gpui_pre::list::StateInner::layout_items`）：当「从视口
+        // 顶部那条一直算到内容末尾的高度 < 一屏」时，它把 `offset_in_item` **无条件
+        // 重算**成 `rendered_height - available_height`（让最后一条底部对齐视口底部），
+        // `ListAlignment::Top` 下还写回 `logical_scroll_top`。工具卡片密集的会话单条
+        // 几千 px，上滚一屏后视口顶部仍在最后一条内部 ⇒「从它到末尾」往往不足一屏
+        // ⇒ offset 与真实高度一对不上就会被推成贴底。
+        //
+        // 为什么嵌套**三层**：`Context::defer` 的回调在「下次绘制**之前**」执行，此时
+        // 首帧 layout 还没用它新设的位置跑过 —— 只打一层读到的仍是 `scroll_to` 的值，
+        // 等于什么都没测。第二层才是首帧 layout 之后，第三层看它是否继续漂
+        // （`measure_all` 与后续帧的异步渲染都可能改高度）。
         {
             let state = self.msg_list_state.clone();
             let before = self.msg_list_state.logical_scroll_top();
             let len = self.messages.len();
-            cx.defer(move |_cx| {
-                let after = state.logical_scroll_top();
+            cx.defer(move |cx| {
+                let f1 = state.logical_scroll_top();
                 crate::app::diag_log(&format!(
-                    "[保位] after-layout len={len} before_ix={} before_off={:.1} -> after_ix={} after_off={:.1} follow={}",
+                    "[保位] frame1 len={len} before_ix={} before_off={:.1} -> ix={} off={:.1} follow={}",
                     before.item_ix,
                     f32::from(before.offset_in_item),
-                    after.item_ix,
-                    f32::from(after.offset_in_item),
+                    f1.item_ix,
+                    f32::from(f1.offset_in_item),
                     state.is_following_tail()
                 ));
+                let s2 = state.clone();
+                cx.defer(move |cx| {
+                    let f2 = s2.logical_scroll_top();
+                    crate::app::diag_log(&format!(
+                        "[保位] frame2 ix={} off={:.1} follow={}",
+                        f2.item_ix,
+                        f32::from(f2.offset_in_item),
+                        s2.is_following_tail()
+                    ));
+                    let s3 = s2.clone();
+                    cx.defer(move |_cx| {
+                        let f3 = s3.logical_scroll_top();
+                        crate::app::diag_log(&format!(
+                            "[保位] frame3 ix={} off={:.1} follow={}",
+                            f3.item_ix,
+                            f32::from(f3.offset_in_item),
+                            s3.is_following_tail()
+                        ));
+                    });
+                });
             });
         }
         // 历史窗口是否为空：为空说明「有订阅但没有内容」——下面要**强制重订阅**，
