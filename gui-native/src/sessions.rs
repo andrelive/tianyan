@@ -315,6 +315,13 @@ impl ClientApp {
         }
         // ⚠️ 穷尽构造：新增 per-session 字段若不加进 `SessionSnapshot`，这里编译报错
         // ——这是「漏一个补一个」的机制性防线，**不要**改成 `..Default::default()`。
+        // ⚠️ 必须在构造 `SessionSnapshot` **之前**取值。
+        //
+        // 结构体字面量的字段按**书写顺序**求值，而下面 `msg_list_state` 那一格会调
+        // `new_msg_list_state(0, …)` —— 它内部会 `scrolled_up.set(false)`（新列表
+        // 一律贴底）。字段顺序若写成「先 replace 再读」，读到的就是已经被清掉的
+        // false，于是"用户滚离过底部"这个事实在 park 时就被抹掉，切回必然贴底。
+        let msg_scrolled_up_at_park = self.msg_scrolled_up.get();
         let snap = SessionSnapshot {
             // 记下 park 时的事件流代际：切回时据此判断这份投影还能不能当权威内容
             // （见 `projection_usable`；跨代说明断线重连过，缺口不可恢复）。
@@ -325,7 +332,7 @@ impl ClientApp {
                 &mut self.msg_list_state,
                 crate::app::new_msg_list_state(0, self.msg_scrolled_up.clone()),
             )),
-            msg_scrolled_up: self.msg_scrolled_up.get(),
+            msg_scrolled_up: msg_scrolled_up_at_park,
             // 同上：`ExpandRef` 也是 `Rc` 共享语义
             expand: Some(std::mem::replace(
                 &mut self.expand,
