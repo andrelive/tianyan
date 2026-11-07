@@ -1005,7 +1005,17 @@ impl StateInner {
         let padding = self.last_padding.unwrap_or_default();
         let scroll_max =
             (self.items.summary().height + padding.top + padding.bottom - height).max(px(0.));
-        let new_scroll_top = (self.scroll_top(scroll_top) - delta.y)
+        // [天演 patch] 先把当前位置**钳到有效范围**再减 delta。
+        //
+        // 跟随态下 `logical_scroll_top` 是「末尾之后」`(count, 0)`，它的绝对像素位置
+        // 由 `self.scroll_top()` 算出来是**总高**（比 `scroll_max = 总高 - 视口高` 还大）。
+        // 原来的写法 `(超界值 - delta).min(scroll_max)` 会把任何上滚都钳回 `scroll_max`
+        // ——也就是严格贴底：用户往上滚一格，位置纹丝不动，而 `start_following` 每帧
+        // 又判定「已在底部」把它设回跟随，两者叠加表现为**来回跳**（日志里
+        // `follow-override` 与 `normalize` 每帧交替、`prev` 始终是同一个值，就是这个）。
+        //
+        // 先钳再减：`(count, 0)` → `scroll_max` → 减 delta → 真正往上走一格。
+        let new_scroll_top = (self.scroll_top(scroll_top).min(scroll_max) - delta.y)
             .max(px(0.))
             .min(scroll_max);
 
