@@ -2041,20 +2041,18 @@ impl ClientApp {
                                         offset_in_item: anchor_offset,
                                     };
                                     this.msg_list_state.scroll_to(target);
-                                    // 见 `reset_scroll_after_measure` 的文档：首帧的
-                                    // `measure_all` 还没量完高方差项，这里补一次。
-                                    reset_scroll_after_measure(
-                                        &this.msg_list_state,
-                                        Some(target),
-                                        cx,
-                                    );
+                                    // 不再补第二帧的 `scroll_to`：以前补是因为担心首帧
+                                    // `measure_all` 没量完高方差项、按估值定位。现在
+                                    // `measure_all` 由 `measure_all_requested` 保证在
+                                    // `prepaint_items` 里真正跑过、且被 `seed_viewport_height`
+                                    // 给了真实视口高 —— 首帧定位就是终值。补那一次反而会在
+                                    // 下一帧把位置重置一遍（视觉上就是「先显示一下再滚」）。
                                 } else {
                                     diag_log(&format!(
                                         "[保位] 锚点未命中 seq={seq} len={} -> 贴底",
                                         this.messages.len()
                                     ));
                                     this.msg_list_state.scroll_to_end();
-                                    reset_scroll_after_measure(&this.msg_list_state, None, cx);
                                 }
                             } else {
                                 diag_log(&format!(
@@ -2065,7 +2063,6 @@ impl ClientApp {
                                 // `Top` 对齐不会自动贴底（那是 `Bottom` 对齐用 `None` 表达的
                                 // 语义），漏了这句会话会停在顶部/中间。
                                 this.msg_list_state.scroll_to_end();
-                                reset_scroll_after_measure(&this.msg_list_state, None, cx);
                             }
                             this.message_total = total;
                             this.oldest_seq = cursor;
@@ -2670,32 +2667,6 @@ pub(crate) fn reset_msg_list_state(
     // Top 对齐不自动贴底，重置后显式回到底部（新会话/切会话的期望位置）
     state.scroll_to_end();
     scrolled_up.set(false);
-}
-
-/// 下一帧**再定位一次**——修「打开会话时跳一下」。
-///
-/// 为什么需要第二次：新建/重置后的 `ListState` 里每一项都还是未测量状态，
-/// 总高度由 `MSG_ROW_HEIGHT_HINT`（280px）估。此时调 `scroll_to_end()` /
-/// `scroll_to(offset)`，落点按估值算；等 `measure_all` 把真实高度量出来，
-/// 同一位置的像素坐标就变了 —— 表现是打开会话时内容"跳一下"。
-///
-/// 方差小的会话（正文为主，几十到几百 px）几乎看不出来；**工具调用密集**的
-/// 会话最明显：47 条里 37 条是工具卡片，单条从 60px 到上千 px，估值与实际
-/// 差出一倍以上（用户实测：只有那个「定时任务只能新建」的会话会跳，且不需要
-/// 任何流式输出，光是打开就跳）。
-///
-/// 用 `defer`（下一帧）而不是再调一次同步方法：同一帧里测量还没跑，第二次
-/// 结果与第一次相同。下一帧时 `measure_all` 已完成，`total_height` 是真实值。
-pub(crate) fn reset_scroll_after_measure(
-    state: &GpuiListState,
-    target: Option<gpui_kit::ListOffset>,
-    cx: &mut Context<ClientApp>,
-) {
-    let state = state.clone();
-    cx.defer(move |_cx| match target {
-        Some(off) => state.scroll_to(off),
-        None => state.scroll_to_end(),
-    });
 }
 
 fn lerp_u64(from: u64, to: u64, e: f32) -> u64 {

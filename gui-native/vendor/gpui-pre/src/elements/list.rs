@@ -1148,10 +1148,17 @@ impl StateInner {
             if available_width.is_some() {
                 ListItem::Measured { size, focus_handle }
             } else {
-                ListItem::Unmeasured {
-                    size_hint: item.size_hint(),
-                    focus_handle,
-                }
+                // 宽度未知：**完全不更新**，原样保留。
+                //
+                // 早先这里写 `Unmeasured { size_hint: item.size_hint() }`，会制造一个
+                // 每帧循环：`request_layout`（宽度 None）把 Measured 打回 Unmeasured →
+                // `prepaint`（宽度真实）重测回 Measured → 下一帧又被打回……
+                // 两次布局用到的高度不一致，`summary().height` 跟着抖，滚动位置于是
+                // 漂移；一旦总高在某帧变小，「已回到尾部」的判据还会被误触发 ——
+                // 用户实测正是「上滚到用户消息附近偶尔跳回底部」。
+                // 保留原状即可：宽度未知那次只为测量视口内元素，不该改变缓存。
+                let _ = size;
+                item.clone()
             }
         };
 
