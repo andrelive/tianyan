@@ -551,6 +551,13 @@ impl ClientApp {
                 } else if n < old {
                     ls.splice(n..old, 0);
                 }
+                // 但**必须**重新启用全量测量：复用来的实例通常已是「全量测过了」状态，
+                // 新布局不会再测；而切走期间内容变过、或窗口里还有更早分页的项时，
+                // 那些项从没被量过 —— 用户一滚动它们逐个被测量，`summary().height`
+                // 跟着变，列表按累计高度反查出的位置就漂移（实测：**向上滚动遇到
+                // 比较高的元素时页面跳**）。新建实例本来带 `.measure_all()`，所以
+                // 这个回归是「复用实例」带出来的，这里补回去。
+                ls.remeasure_all();
                 ls
             }
             None => crate::app::new_msg_list_state(n, self.msg_scrolled_up.clone()),

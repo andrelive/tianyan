@@ -349,6 +349,21 @@ impl ListState {
         self
     }
 
+    /// [天演 patch] 让**下一次**布局重新全量测量所有项。
+    ///
+    /// 等价于构造时的 [`Self::measure_all`]，但可以在**已有实例**上重新启用。
+    ///
+    /// 为什么需要：`restore_view_state` 现在复用快照里的 `ListState`（为了带上
+    /// `last_layout_bounds`，否则引擎会拿 `overdraw` 当视口高）。但那个实例的
+    /// `measuring_behavior` 通常已经是 `Measure(已测过)`，新布局不会全量测量；
+    /// 切走期间内容变过、或窗口里还有更早分页的项时，这些项都没被量过 ——
+    /// 用户一滚动，它们逐个被测量，`summary().height` 随之变化，虚拟列表按累计
+    /// 高度反查出的位置就漂移（实测表现：**向上滚动遇到比较高的元素时页面跳**）。
+    /// 重新启用全量测量即可让所有高度在首帧就是真值，滚动按绝对像素走，不漂。
+    pub fn remeasure_all(&self) {
+        self.0.borrow_mut().measuring_behavior = ListMeasuringBehavior::Measure(false);
+    }
+
     /// Pre-populate every unmeasured item with a uniform height hint so the scrollbar thumb
     /// is correctly sized from the first frame, without measuring all items up front.
     ///
