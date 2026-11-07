@@ -766,11 +766,58 @@ impl ClientApp {
             let protect_inflight =
                 (self.busy() || self.running_sessions.contains(&sid)) && !self.messages.is_empty();
             if !protect_inflight {
+                // **保留阅读位置**：快照会把窗口整表替换，但用户可能正滚在历史里。
+                //
+                // 早先这里无条件 `scroll_to_end()` —— 于是 `open_session` 刚用
+                // `restore_view_state` 恢复好的位置，被紧随其后的订阅快照帧一脚踢回底部。
+                // 打开会话时 `subscribe_session` 必然发一次订阅，服务端随即推快照，
+                // 所以这个覆盖是**每次打开都发生**的（用户实测：点了两次都跳到底部）。
+                //
+                // 判据用「滚离意图」而不是「位置靠上」：用户没滚过就该贴底看最新，
+                // 滚过就必须原处不动 —— 与 dyad 那条 follow-intent 同口径。
+                let keep = if self.msg_scrolled_up.get() {
+                    let a = self.msg_list_state.logical_scroll_top();
+                    self.messages
+                        .get(a.item_ix)
+                        .map(|m| (m.seq, a.offset_in_item))
+                        .filter(|(s, _)| *s > 0)
+                } else {
+                    None
+                };
                 self.messages = Rc::new(rows);
                 self.msg_list_state =
                     new_msg_list_state(self.messages.len(), self.msg_scrolled_up.clone());
-                // 整表替换后回到最新一条（`Top` 对齐不自动贴底，见 `new_msg_list_state`）
-                self.msg_list_state.scroll_to_end();
+                // 按 seq 找回同一条消息（替换后索引会变，seq 不变）
+                let restored = keep.and_then(|(seq, off)| {
+                    self.messages
+                        .iter()
+                        .position(|m| m.seq == seq)
+                        .map(|ix| (ix, off))
+                });
+                match restored {
+                    Some((ix, off)) => {
+                        self.msg_list_state.scroll_to(gpui_kit::ListOffset {
+                            item_ix: ix,
+                            offset_in_item: off,
+                        });
+                        // `new_msg_list_state` 会把「滚离」标志清掉（新列表一律贴底），
+                        // 这里补回：用户的意图不因一次快照替换而改变。
+                        self.msg_scrolled_up.set(true);
+                        diag_log(&format!(
+                            "[保位] 快照 replace 保持位置 ix={ix} off={:.1} n={}",
+                            f32::from(off),
+                            self.messages.len()
+                        ));
+                    }
+                    None => {
+                        // 没滚过（该看最新一条），或锚点那条已不在窗口里
+                        self.msg_list_state.scroll_to_end();
+                        diag_log(&format!(
+                            "[保位] 快照 replace 贴底 n={}",
+                            self.messages.len()
+                        ));
+                    }
+                }
                 self.message_total = self.messages.len();
                 // 世代号 +1：让**在飞的** `load_messages` 结果作废（见 `messages_epoch`）
                 self.messages_epoch = self.messages_epoch.wrapping_add(1);
