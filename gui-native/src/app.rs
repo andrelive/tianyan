@@ -1952,18 +1952,24 @@ impl ClientApp {
                             // 整页替换后把滚动锚点找回来（只按服务端下发的 seq 查表）
                             if let Some(seq) = anchor_seq {
                                 if let Some(ix) = this.messages.iter().position(|m| m.seq == seq) {
-                                    this.msg_list_state.scroll_to(gpui_kit::ListOffset {
+                                    let target = gpui_kit::ListOffset {
                                         item_ix: ix,
                                         offset_in_item: anchor_offset,
-                                    });
+                                    };
+                                    this.msg_list_state.scroll_to(target);
+                                    // 见 `reset_scroll_after_measure` 的文档：首帧的
+                                    // `measure_all` 还没量完高方差项，这里补一次。
+                                    reset_scroll_after_measure(&this.msg_list_state, Some(target), cx);
                                 } else {
                                     this.msg_list_state.scroll_to_end();
+                                    reset_scroll_after_measure(&this.msg_list_state, None, cx);
                                 }
                             } else {
                                 // 首屏（无锚点）：进会话就该停在最新一条。
                                 // `Top` 对齐不会自动贴底（那是 `Bottom` 对齐用 `None` 表达的
                                 // 语义），漏了这句会话会停在顶部/中间。
                                 this.msg_list_state.scroll_to_end();
+                                reset_scroll_after_measure(&this.msg_list_state, None, cx);
                             }
                             this.message_total = total;
                             this.oldest_seq = cursor;
@@ -2507,6 +2513,19 @@ pub(crate) fn new_msg_list_state(
     let state = GpuiListState::new(item_count, ListAlignment::Top, px(1200.))
         .with_uniform_item_height(px(MSG_ROW_HEIGHT_HINT))
         .measure_all();
+    // 交给引擎自己贴底（Tail）。
+    //
+    // 早期否掉 Tail 的理由是「恢复跟随的判据 `scroll_offset + available_height >=
+    // total_height - 1` 依赖 total_height，而未测量项高度是 0，判据失真，会把刚
+    // 上滚的用户立刻拽回底部」。**那个前提已被 `measure_all()` 消除**：现在每项都是
+    // `ListItem::Measured`，`total_height` 是真实值。
+    //
+    // 而 Tail 在 `layout_items()` 开头贴底用的是 `item_ix = items.summary().count`
+    // —— **只依赖条数、不依赖任何高度**。所以「测量前按 280px 估、测量后是真实
+    // 高度」对它毫无影响：每次 layout 都按条数重新贴到末尾，位置不会漂。这恰好
+    // 是「打开工具卡片密集的会话时跳一下」的根治办法（外部手动 `scroll_to_end()`
+    // 只能贴一次，而贴的那一刻高度还是估值）。
+    state.set_follow_mode(gpui_kit::FollowMode::Tail);
     // 新构造 / 重置后一律贴底（`scrolled_up = false`）
     scrolled_up.set(false);
     state.set_scroll_handler(move |event, _window, _cx| {
@@ -2526,6 +2545,34 @@ pub(crate) fn reset_msg_list_state(
     // Top 对齐不自动贴底，重置后显式回到底部（新会话/切会话的期望位置）
     state.scroll_to_end();
     scrolled_up.set(false);
+}
+
+/// 下一帧**再定位一次**——修「打开会话时跳一下」。
+///
+/// 为什么需要第二次：新建/重置后的 `ListState` 里每一项都还是未测量状态，
+/// 总高度由 `MSG_ROW_HEIGHT_HINT`（280px）估。此时调 `scroll_to_end()` /
+/// `scroll_to(offset)`，落点按估值算；等 `measure_all` 把真实高度量出来，
+/// 同一位置的像素坐标就变了 —— 表现是打开会话时内容"跳一下"。
+///
+/// 方差小的会话（正文为主，几十到几百 px）几乎看不出来；**工具调用密集**的
+/// 会话最明显：47 条里 37 条是工具卡片，单条从 60px 到上千 px，估值与实际
+/// 差出一倍以上（用户实测：只有那个「定时任务只能新建」的会话会跳，且不需要
+/// 任何流式输出，光是打开就跳）。
+///
+/// 用 `defer`（下一帧）而不是再调一次同步方法：同一帧里测量还没跑，第二次
+/// 结果与第一次相同。下一帧时 `measure_all` 已完成，`total_height` 是真实值。
+pub(crate) fn reset_scroll_after_measure(
+    state: &GpuiListState,
+    target: Option<gpui_kit::ListOffset>,
+    cx: &mut Context<ClientApp>,
+) {
+    let state = state.clone();
+    cx.defer(move |_cx| {
+        match target {
+            Some(off) => state.scroll_to(off),
+            None => state.scroll_to_end(),
+        }
+    });
 }
 
 fn lerp_u64(from: u64, to: u64, e: f32) -> u64 {
