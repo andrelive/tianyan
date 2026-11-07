@@ -401,11 +401,6 @@ struct ClientApp {
     /// 0），读到的是 `scroll_to` 刚设的值 —— 等于没测。`render` 每帧开头读到的则是
     /// **上一帧 layout 跑完之后**的位置，是「位置有没有被引擎改掉」唯一看得见的时点。
     pub(crate) restore_probe: u8,
-    /// 恢复位置时存下的锚点，等布局就绪的那一帧再钉一次（见 `render` 里的注释）。
-    /// `None` = 该会话切走时就在底部，届时直接贴底。
-    pub(crate) restore_anchor: Option<gpui_kit::ListOffset>,
-    /// 还差几帧才可以把跟随模式交还给引擎（>0 期间列表停在 `FollowMode::Normal`）。
-    pub(crate) restore_follow_pending: u8,
     /// 用户是否上滚看历史了（由消息列表的滚动监听维护，**不靠位置推算**）。
     /// `true` = 别自动滚到底；`false` = 跟随尾部（新内容到达即贴底）。
     pub(crate) msg_scrolled_up: Rc<std::cell::Cell<bool>>,
@@ -812,24 +807,6 @@ impl Render for ClientApp {
                 self.messages.len(),
                 crate::sessions::pos_brief(&self.msg_list_state)
             ));
-        }
-        // 恢复位置的第二段：等到这一帧，`layout_all_items`（prepaint 里）已把每项测成
-        // 真实高度、`last_layout_bounds` 也有值了，此时再把跟随模式交还 `Tail` 并钉一次
-        // 位置。首帧就交给引擎的话，它会拿「overdraw 当视口高 + 未测量项的估算总高」
-        // 去判「是不是已经回到底部」，把「距底一屏出头」误判成「在底部」并开启跟随
-        // （机制见 `restore_view_state` 里的长注释）。
-        if self.restore_follow_pending > 0 {
-            self.restore_follow_pending -= 1;
-            if self.restore_follow_pending == 0 {
-                self.msg_list_state
-                    .set_follow_mode(gpui_kit::FollowMode::Tail);
-                match self.restore_anchor.take() {
-                    // `scroll_to` 落在末尾之前时会 `stop_following()`，正好是「Tail 模式
-                    // 但不跟随」—— 之后只有用户真的滚回底部才会重新跟随。
-                    Some(off) => self.msg_list_state.scroll_to(off),
-                    None => self.msg_list_state.scroll_to_end(),
-                }
-            }
         }
         // Enter 发送的订阅必须挂在**当前**输入框实体上：换会话 / 重启恢复会话时
         // 输入框是新建的实体，旧订阅留在弃用的那个上 —— 那时回车只换行、不发送。

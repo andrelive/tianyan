@@ -11,14 +11,6 @@ use crate::types::*;
 use gpui_kit::assets::IconName;
 use gpui_kit::component::input::InputState;
 
-/// 恢复位置后，等多少帧再把跟随模式交还给引擎（`Tail`）。
-///
-/// 为什么必须等：首帧 `layout_items` 跑在 `request_layout` 里，而把每项测成真实高度的
-/// `layout_all_items()` 要到 `prepaint` 才跑；同时首帧的 `available_height` 取的是
-/// `overdraw` 而不是真实视口高。两处失真会让引擎的「回到尾部就恢复跟随」判据把
-/// 「距底一屏出头」误判成「已在底部」。等到第 2 帧，这两件事都已就绪。
-const RESTORE_FOLLOW_FRAMES: u8 = 2;
-
 /// [`ClientApp::restore_view_state`] 的结果：调用方据此决定「要不要去服务端拉一页」。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum RestoreOutcome {
@@ -407,9 +399,6 @@ impl ClientApp {
     /// 把视图状态清回默认（首次进入某会话 / park 完一个空会话）。
     pub(crate) fn reset_view_state(&mut self) {
         self.messages = Rc::new(Vec::new());
-        // 瞬态：没有快照就没有「等布局就绪再钉位置」这回事，别让它跨会话残留
-        self.restore_anchor = None;
-        self.restore_follow_pending = 0;
         self.msg_list_state = crate::app::new_msg_list_state(0, self.msg_scrolled_up.clone());
         self.expand = Rc::new(std::cell::RefCell::new(crate::msg::ExpandState::default()));
         self.message_total = 0;
@@ -523,44 +512,51 @@ impl ClientApp {
         // 意图先落定：恢复锚点**不改变**「用户滚离过底部」这个事实，所以取快照里
         // 存的值，而不是下面那句按 `item_ix` 反推。
         let scrolled_up_at_park = snap.msg_scrolled_up;
-        self.msg_list_state =
-            crate::app::new_msg_list_state(self.messages.len(), self.msg_scrolled_up.clone());
-        // ⚠️ 首帧**不能**让引擎自己决定跟随 —— 这是「上滚一屏后切回必贴底」的真凶。
-        // 两处失真叠在一起：
+        // ⚠️ **复用**快照里那个 `ListState`，不要新建。
         //
-        // 1. `List::request_layout` 在没有 `last_layout_bounds`（首帧）时，把
-        //    `available_height` 当成 **`overdraw`**（我们传 1200px）用，而不是真实
-        //    视口高（实测 540px）；
-        // 2. `layout_all_items()`（`measure_all` 的执行点）在 **`prepaint`** 里才跑，
-        //    而 `layout_items()` 在 `request_layout` 里先跑 —— 所以首帧读到的
-        //    `items.summary().height` 还是 `n × 280px` 的估值。
+        // 这是「上滚一屏后切回必贴底」的根因所在，也是唯一不需要任何补帧动作的修法。
+        // 引擎在 `List::request_layout` 里这样取首帧的视口高：
         //
-        // 于是首帧 `layout_items` 末尾这条判据拿到两个失真值：
+        //     let available_height = state.last_layout_bounds
+        //         .map(|b| b.size.height)     // 有上一次布局 → 真实视口高（实测 540px）
+        //         .unwrap_or(state.overdraw); // 首帧没有它 → 拿 overdraw 顶替（我们传 1200px）
+        //
+        // 而 `layout_items` 末尾那条「回到尾部就恢复跟随」的判据是
+        //
         //     if scroll_offset + available_height >= total_height - 1 { start_following() }
-        // 化简后等价于 `off + available >= h_last - 1`：真实视口下只有真贴底才成立，
-        // 而 `available = 1200` 时代入实测值（`off=956` / `h_last=2156`）得
-        // `956 + 1200 = 2156 >= 2155` —— **恰好成立**，引擎据此认定「用户已回到底部」
-        // 并 `start_following()`。`is_following` 一旦为真，之后每帧都在 `layout_items`
-        // 开头 `scroll_top = (count, 0)` 整表贴底，再也不会自己回去。
         //
-        // 它也解释了那个精确的阈值：只有「距底 <= overdraw - 真实视口 = 660px」才中招，
+        // 代入「视口顶落在最后一条内 `off` 处」的情形，它等价于 `off + available >= h_last - 1`。
+        // 真实视口 540 下，只有真贴底（`off >= h_last - 540`）才成立；换成 1200 之后，
+        // 实测值 `off=956 / h_last=2156` 给出 `956 + 1200 = 2156 >= 2155` —— **恰好成立**，
+        // 引擎据此认定「用户已回到底部」并 `start_following()`。而 `is_following` 一旦为真，
+        // 之后每帧都在 `layout_items` 开头把 `scroll_top` 设成「末尾之后」，整表贴底、
+        // 再也不会自己回去。
+        //
+        // 这也解释了那个精确的阈值：中招区间是「距底 <= overdraw - 真实视口 = 660px」，
         // 所以**上滚一屏（540px）必现、多滚几屏反而正常**。
         //
-        // 先退到 `Normal`（不跟随，且 `has_stopped_following()` 为假 ⇒ 上面那条判据
-        // 根本不跑），等 `render` 里数够两帧再交还 `Tail` 并把位置钉回去。
-        self.msg_list_state
-            .set_follow_mode(gpui_kit::FollowMode::Normal);
+        // 新建实例没有 `last_layout_bounds`，必然落进 overdraw 分支；复用快照实例则
+        // 天然带着上一次布局的视口高与各项测量缓存 —— 首帧画出来就是对的，不需要
+        // 「先不跟随、两帧后再钉一次」那种补丁（那会在屏幕上闪一下）。
+        let n = self.messages.len();
+        self.msg_list_state = match snap.msg_list_state {
+            Some(ls) => {
+                // 只对齐条数：等价于「末尾追加 / 末尾截断」，**不碰**已有项的测量缓存。
+                // 不能用 `reset` / `reset_with_uniform_height` —— 它们走
+                // `splice(0..old, n)`，会把每一项重建成 `Unmeasured`，测量缓存与首帧
+                // 视口高一起没了（那正是上面那条 overdraw 分支被走到的原因）。
+                let old = ls.item_count();
+                if n > old {
+                    ls.splice(old..old, n - old);
+                } else if n < old {
+                    ls.splice(n..old, 0);
+                }
+                ls
+            }
+            None => crate::app::new_msg_list_state(n, self.msg_scrolled_up.clone()),
+        };
         if let Some(seq) = anchor_seq {
             if let Some(ix) = self.messages.iter().position(|m| m.seq == seq) {
-                let anchor = gpui_kit::ListOffset {
-                    item_ix: ix,
-                    offset_in_item: anchor_offset,
-                };
-                self.msg_list_state.scroll_to(anchor);
-                // 交还 `Tail` 的那一帧要把位置再钉一次（`set_follow_mode` 会把位置
-                // 设成「末尾之后」），所以锚点得留到那时。
-                self.restore_anchor = Some(anchor);
-                self.restore_follow_pending = RESTORE_FOLLOW_FRAMES;
                 // 后续新内容/流式增量不得把用户拉回底部 —— 依据是**他切走前就在
                 // 滚离状态**，不是"这条消息是不是最后一条"。
                 //
@@ -568,6 +564,17 @@ impl ClientApp {
                 // 内部时 `ix == len - 1`，推导出 false，等于宣布"他在底部"，
                 // 切回后任何跟随都会贴底（用户实测：上滚一屏必现，多滚几屏反而正常）。
                 self.msg_scrolled_up.set(scrolled_up_at_park);
+                if scrolled_up_at_park {
+                    self.msg_list_state.scroll_to(gpui_kit::ListOffset {
+                        item_ix: ix,
+                        offset_in_item: anchor_offset,
+                    });
+                } else {
+                    // 切走时就在底部：走 `scroll_to_end`（设「末尾之后」且**不**停跟随）。
+                    // 不能沿用 `scroll_to` —— 落在末尾之前它会 `stop_following()`，
+                    // 跟随被关掉，之后新内容到达就不再自动贴底了。
+                    self.msg_list_state.scroll_to_end();
+                }
             } else {
                 // 锚点那条已被压缩点替代/删掉：退回底部（`Top` 对齐不自动贴底）
                 self.msg_list_state.scroll_to_end();
