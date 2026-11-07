@@ -98,3 +98,17 @@ rustybuzz = { opt-level = 3 }
 taffy = { opt-level = 3 }
 ttf-parser = { opt-level = 3 }
 
+
+# ── 本地 patch 的 gpui-pre ──────────────────────────────────────────────
+#
+# gpui-pre/src/elements/list.rs 的 layout_items 会在**宽度未知**时
+# （List::request_layout 传 `available_width = None）也做两件事：
+#   1. 「下方不足一屏就把位置重算成底部对齐」；
+#   2. 「回到尾部就恢复跟随」判定。
+# 宽度未知时元素按 MaxContent 布局，长消息不换行，量出的高度只有真实值的零头
+# （实测同一条 450 vs 2156），这两条判据因此全会错 —— 直接后果是切回会话时
+# 位置被改成贴底并开启跟随。两处都加了 `available_width.is_some() 前置条件。
+#
+# 升级 gpui-pre 时必须同步这两处（搜索「[天演 patch]」）。
+[patch.crates-io]
+gpui-pre = { path = "vendor/gpui-pre" }

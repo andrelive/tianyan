@@ -564,30 +564,39 @@ impl ClientApp {
                 // 内部时 `ix == len - 1`，推导出 false，等于宣布"他在底部"，
                 // 切回后任何跟随都会贴底（用户实测：上滚一屏必现，多滚几屏反而正常）。
                 self.msg_scrolled_up.set(scrolled_up_at_park);
+                // 定位分三步，顺序不能换（每步都在拆掉下一步的坑）：
+                //
+                // ① 重测锚点那条及它后面的。它们的测量缓存可能停在「内容还没长成
+                //    现在这样」的那一刻（折叠态变过 / 异步渲染 / 流式中间态都算），
+                //    而首帧 layout 会拿这个旧高度同时算 `rendered_height`（视口顶那条
+                //    到末尾的累计）和 `summary().height`（总高）。两个一起偏小，于是
+                //    「距底还有一屏」被读成「已经到底」：既把位置归一化成底部对齐，
+                //    又 `start_following()` 开启跟随 ⇒ 下一帧整表贴底。
+                //    实测就是 `(150, 836)` 在首帧被算成 `(147, 9.3)`。
+                //
+                // ② 清掉 ① 埋下的 `pending_scroll`。`remeasure_items` 会把它设成
+                //    「当前锚点 + 像素偏移」，而首帧 layout 里有一句
+                //        scroll_top.offset_in_item = offset.min(element_size.height);
+                //    —— 拿**首帧渲染出的**高度去钳偏移。那个高度可能小于稳定高度
+                //    （折叠态还没恢复 / 内容异步），一钳偏移就变小，接着又触发第 ① 条
+                //    说的归一化。`scroll_to_end()` 是唯一会 `pending_scroll = None` 的
+                //    公开入口。
+                //
+                // ③ 再定位。此时 `pending_scroll` 已是 None，`scroll_to` 的
+                //    `rebase_pending_scroll` 对 None 是空操作，首帧拿到的偏移原样生效。
+                //
+                // 切走时本就在底部（`scrolled_up_at_park == false`）就停在 ② 的结果上：
+                // 「末尾之后」既贴底又**不**停跟随（不能换成 `scroll_to` —— 它落在末尾
+                // 之前会 `stop_following()`，之后新内容到达就不再自动贴底了）。
+                if ix < n {
+                    self.msg_list_state.remeasure_items(ix..n);
+                }
+                self.msg_list_state.scroll_to_end();
                 if scrolled_up_at_park {
                     self.msg_list_state.scroll_to(gpui_kit::ListOffset {
                         item_ix: ix,
                         offset_in_item: anchor_offset,
                     });
-                } else {
-                    // 切走时就在底部：走 `scroll_to_end`（设「末尾之后」且**不**停跟随）。
-                    // 不能沿用 `scroll_to` —— 落在末尾之前它会 `stop_following()`，
-                    // 跟随被关掉，之后新内容到达就不再自动贴底了。
-                    self.msg_list_state.scroll_to_end();
-                }
-                // 锚点这条（及它后面的）**测量缓存可能停在流式中间态**：
-                // `remeasure_stream_tail` 只在流式结束那一刻重测最后一项，切走期间内容
-                // 再变过就没人管了。首帧 layout 会拿这个旧高度同时算两个量 ——
-                // `rendered_height`（视口顶那条到末尾的累计）与 `summary().height`
-                // （总高），两者一起偏小，于是「距底还有一屏」被读成「已经到底」：
-                // 既把位置归一化成「底部对齐」（`rendered_height - available < 一屏`），
-                // 又 `start_following()`（`scroll_offset + available >= total - 1`）。
-                //
-                // 实测就是这么坏的：锚点那条缓存着 450px（真实 2156），首帧把视口顶
-                // 从 (150, 836) 重算成 (147, 9.3)，下一帧跟随已开 ⇒ 直接贴底。
-                // 标记重测后首帧会真渲染它们、量出真实高度，两条判据同时变准。
-                if ix < n {
-                    self.msg_list_state.remeasure_items(ix..n);
                 }
             } else {
                 // 锚点那条已被压缩点替代/删掉：退回底部（`Top` 对齐不自动贴底）
@@ -1488,11 +1497,12 @@ pub(crate) fn pos_brief(state: &gpui_kit::ListState) -> String {
         .bounds_for_item(o.item_ix)
         .map_or(0.0, |b| f32::from(b.size.height));
     format!(
-        "ix={} off={:.1} vh={:.1} ih={:.1} follow={}",
+        "ix={} off={:.1} vh={:.1} ih={:.1} items={} follow={}",
         o.item_ix,
         f32::from(o.offset_in_item),
         vh,
         ih,
+        state.item_count(),
         state.is_following_tail()
     )
 }
