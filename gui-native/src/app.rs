@@ -788,40 +788,45 @@ impl ClientApp {
                     None
                 };
                 self.messages = Rc::new(rows);
-                self.msg_list_state = new_msg_list_state(
-                    self.messages.len(),
-                    self.msg_scrolled_up.clone(),
-                    self.last_viewport_h,
-                );
-                // 按 seq 找回同一条消息（替换后索引会变，seq 不变）
-                let restored = keep.and_then(|(seq, off)| {
-                    self.messages
-                        .iter()
-                        .position(|m| m.seq == seq)
-                        .map(|ix| (ix, off))
-                });
-                match restored {
-                    Some((ix, off)) => {
-                        self.msg_list_state.scroll_to(gpui_kit::ListOffset {
-                            item_ix: ix,
-                            offset_in_item: off,
-                        });
-                        // `new_msg_list_state` 会把「滚离」标志清掉（新列表一律贴底），
-                        // 这里补回：用户的意图不因一次快照替换而改变。
-                        self.msg_scrolled_up.set(true);
-                        diag_log(&format!(
-                            "[保位] 快照 replace 保持位置 ix={ix} off={:.1} n={}",
-                            f32::from(off),
-                            self.messages.len()
-                        ));
-                    }
-                    None => {
-                        // 没滚过（该看最新一条），或锚点那条已不在窗口里
-                        self.msg_list_state.scroll_to_end();
-                        diag_log(&format!(
-                            "[保位] 快照 replace 贴底 n={}",
-                            self.messages.len()
-                        ));
+                // ⚠️ 这里**不能重建** `ListState`。
+                //
+                // 早先的写法是「new_msg_list_state(...) 再按 seq scroll_to 找回位置」。
+                // 新建实例的 `set_follow_mode(Tail)` 会把位置设成 `(count, 0)` —— 而
+                // 服务端每推一帧快照就走一次，于是位置在 `(count,0)` 与找回值之间反复
+                // 跳；日志里每次 `scroll_to` 的 `prev` 都是 `(151, 0.0)`、请求值却各不
+                // 相同，就是这个循环的签名（用户实测：上下跳动）。
+                //
+                // 改为只对齐条数：`splice` 在末尾追加/截断，已有项的测量缓存与当前
+                // `logical_scroll_top` 都保留（`splice` 会自动把 item_ix 跟着挪），
+                // 位置完全不动 —— 快照帧于是变成一次「无感刷新」。
+                let n = self.messages.len();
+                let old_items = self.msg_list_state.item_count();
+                if n > old_items {
+                    self.msg_list_state
+                        .splice(old_items..old_items, n - old_items);
+                } else if n < old_items {
+                    self.msg_list_state.splice(n..old_items, 0);
+                }
+                // 内容可能整表换过（工具卡片结果更新等）→ 下次布局重新全量测量，
+                // 否则按旧高度排版会出现「同一位置忽高忽低」。
+                self.msg_list_state.remeasure_all();
+                // 位置：只有「用户本来滚在历史里」且锚点还能找到、并且确实与当前值
+                // 不同时才动它。在底部（`keep` 为 None）就交给跟随，一句都不必写。
+                if let Some((seq, off)) = keep {
+                    if let Some(ix) = self.messages.iter().position(|m| m.seq == seq) {
+                        let cur = self.msg_list_state.logical_scroll_top();
+                        let same =
+                            cur.item_ix == ix && f32::from(cur.offset_in_item) == f32::from(off);
+                        if !same {
+                            self.msg_list_state.scroll_to(gpui_kit::ListOffset {
+                                item_ix: ix,
+                                offset_in_item: off,
+                            });
+                            diag_log(&format!(
+                                "[保位] 快照 splice 校正位置 ix={ix} off={:.1} n={n}",
+                                f32::from(off)
+                            ));
+                        }
                     }
                 }
                 self.message_total = self.messages.len();
@@ -2182,19 +2187,23 @@ impl ClientApp {
                 // 3. 程序 splice 不触发滚动监听，`msg_scrolled_up` 原值保持（上滚中仍是
                 //    true），后续 delta 不会把视图拽回底部。
                 if added > 0 {
-                    // 前插后**必须**给新项补高度 hint：`splice` 内部把新项设成
-                    // `size_hint: None`（gpui 视作 0px），而这一页动辄 50 条——
-                    // 用户接着上滚时按累计高度反查会连续跨项（「中间的 user 被跳过」）。
-                    // gpui 没有「给 splice 项设 hint」的公开 API，只能重建 +
-                    // 统一 hint + 把锚点显式搬回原处（`reset` 会清空
-                    // `logical_scroll_top`，所以下面这次 `scroll_to` 不能用省）。
-                    let anchor = this.msg_list_state.logical_scroll_top();
-                    this.msg_list_state
-                        .reset_with_uniform_height(this.messages.len(), px(MSG_ROW_HEIGHT_HINT));
-                    this.msg_list_state.scroll_to(gpui_kit::ListOffset {
-                        item_ix: anchor.item_ix + added,
-                        offset_in_item: anchor.offset_in_item,
-                    });
+                    // ⚠️ 用 `splice` 前插，**不要** `reset_with_uniform_height`。
+                    //
+                    // 早先这里走 reset：它会清空 `logical_scroll_top`（诊断日志里每次
+                    // `scroll_to` 的 `prev` 都是 `(count, 0)` 就是这个签名）、把所有项
+                    // 的测量缓存丢成 280px 估值，再靠一次 `scroll_to` 把锚点搬回原处。
+                    // 结果每加载一页就整表按估值重排 → 新高度测出来后位置再变一次
+                    // （用户实测：向上滚动遇到用户消息上跳、来回跳）。
+                    //
+                    // 当初改用 reset 的理由是「`splice` 给新项设 `size_hint: None`
+                    // （视作 0px），一页 50 条会让人按累计高度反查时跨项」。那个问题
+                    // 现在由 `remeasure_all()` 解决：下一次布局把这些新项也量成真实
+                    // 高度，不必牺牲位置稳定性。
+                    //
+                    // `splice(0..0, added)` 会把 `logical_scroll_top.item_ix` 自动 +added
+                    // —— 正好跟着同一条消息走，用户正看着的那一行纹丝不动。
+                    this.msg_list_state.splice(0..0, added);
+                    this.msg_list_state.remeasure_all();
                 }
                 this.message_total = this.messages.len();
                 // 标题跟着走（「还有更早」随 has_more 出现/消失）
