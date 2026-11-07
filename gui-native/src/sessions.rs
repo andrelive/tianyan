@@ -327,18 +327,13 @@ impl ClientApp {
         // 前面几轮都在查「切回后为什么贴底」，日志却显示 restore 侧一切正常
         // （`scrolled_up=true`、偏移没被钳）。把 park 侧也打出来才能分清：
         // 究竟是「切回丢的」还是「切走前就已经在底部」。
-        {
-            let a = self.msg_list_state.logical_scroll_top();
-            crate::app::diag_log(&format!(
-                "[保位] park id={:?} len={} anchor_ix={} anchor_off={:.1} follow={} scrolled_up={}",
-                self.current_session,
-                self.messages.len(),
-                a.item_ix,
-                f32::from(a.offset_in_item),
-                self.msg_list_state.is_following_tail(),
-                msg_scrolled_up_at_park
-            ));
-        }
+        crate::app::diag_log(&format!(
+            "[保位] park id={:?} len={} {} scrolled_up={}",
+            self.current_session,
+            self.messages.len(),
+            pos_brief(&self.msg_list_state),
+            msg_scrolled_up_at_park
+        ));
         let snap = SessionSnapshot {
             // 记下 park 时的事件流代际：切回时据此判断这份投影还能不能当权威内容
             // （见 `projection_usable`；跨代说明断线重连过，缺口不可恢复）。
@@ -757,19 +752,14 @@ impl ClientApp {
         // `next_before_seq` 游标走。
         let use_projection = matches!(restored, RestoreOutcome::Fresh);
         // 诊断：切回时的决策输入（排查「切回贴底」）
-        {
-            let a = self.msg_list_state.logical_scroll_top();
-            crate::app::diag_log(&format!(
-                "[保位] open id={} outcome={:?} len={} anchor_ix={} anchor_off={:.1} follow={} scrolled_up={}",
-                id,
-                restored,
-                self.messages.len(),
-                a.item_ix,
-                f32::from(a.offset_in_item),
-                self.msg_list_state.is_following_tail(),
-                self.msg_scrolled_up.get()
-            ));
-        }
+        crate::app::diag_log(&format!(
+            "[保位] open id={} outcome={:?} len={} {} scrolled_up={}",
+            id,
+            restored,
+            self.messages.len(),
+            pos_brief(&self.msg_list_state),
+            self.msg_scrolled_up.get()
+        ));
         // 诊断（第 2 探针）：**逐帧**看恢复出来的位置还在不在。
         //
         // 上面的 `open` 行是在 `restore_view_state()` 刚 `scroll_to()` 完、layout
@@ -794,33 +784,18 @@ impl ClientApp {
             let before = self.msg_list_state.logical_scroll_top();
             let len = self.messages.len();
             cx.defer(move |cx| {
-                let f1 = state.logical_scroll_top();
                 crate::app::diag_log(&format!(
-                    "[保位] frame1 len={len} before_ix={} before_off={:.1} -> ix={} off={:.1} follow={}",
+                    "[保位] frame1 len={len} before=({}, {:.1}) -> {}",
                     before.item_ix,
                     f32::from(before.offset_in_item),
-                    f1.item_ix,
-                    f32::from(f1.offset_in_item),
-                    state.is_following_tail()
+                    pos_brief(&state)
                 ));
                 let s2 = state.clone();
                 cx.defer(move |cx| {
-                    let f2 = s2.logical_scroll_top();
-                    crate::app::diag_log(&format!(
-                        "[保位] frame2 ix={} off={:.1} follow={}",
-                        f2.item_ix,
-                        f32::from(f2.offset_in_item),
-                        s2.is_following_tail()
-                    ));
+                    crate::app::diag_log(&format!("[保位] frame2 {}", pos_brief(&s2)));
                     let s3 = s2.clone();
                     cx.defer(move |_cx| {
-                        let f3 = s3.logical_scroll_top();
-                        crate::app::diag_log(&format!(
-                            "[保位] frame3 ix={} off={:.1} follow={}",
-                            f3.item_ix,
-                            f32::from(f3.offset_in_item),
-                            s3.is_following_tail()
-                        ));
+                        crate::app::diag_log(&format!("[保位] frame3 {}", pos_brief(&s3)));
                     });
                 });
             });
@@ -1461,6 +1436,35 @@ impl ClientApp {
             cx.notify();
         }
     }
+}
+
+/// 诊断用：把列表当前的位置压成一行读得懂的字。
+///
+/// 只打 `(item_ix, offset_in_item)` 是不够判断「在不在底部」的 —— 同一个偏移在
+/// 长消息和短消息里含义完全不同。所以连带打两个基准量：
+///
+/// - `vh` = 视口高度（`available_height` 的来源）。贴底时 `off == ih - vh`，这是
+///   唯一能一眼认出「这行就是贴底」的等式；不知道 `vh` 就只能靠猜偏移大小。
+/// - `ih` = 锚点那条消息**实测**高度（`bounds_for_item` 拿的是渲染后的真实 bounds）。
+///   它才是判断「切回时那条消息有没有变矮」的直接证据 —— `offset` 是相对这条消息
+///   顶部算的，它一变，同一个 offset 指的物理位置就变了。
+///
+/// 该项尚未渲染时 `bounds_for_item` 返回 `None`，此时 `ih` 记 0（**不是**「高度为零」，
+/// 而是「还没量」）——看日志时别误读。
+fn pos_brief(state: &gpui_kit::ListState) -> String {
+    let o = state.logical_scroll_top();
+    let vh = f32::from(state.viewport_bounds().size.height);
+    let ih = state
+        .bounds_for_item(o.item_ix)
+        .map_or(0.0, |b| f32::from(b.size.height));
+    format!(
+        "ix={} off={:.1} vh={:.1} ih={:.1} follow={}",
+        o.item_ix,
+        f32::from(o.offset_in_item),
+        vh,
+        ih,
+        state.is_following_tail()
+    )
 }
 
 #[cfg(test)]
