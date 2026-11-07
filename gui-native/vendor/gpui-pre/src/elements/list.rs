@@ -1301,7 +1301,18 @@ impl StateInner {
             cursor.item().is_none_or(|item| item.size().is_some())
         };
         let offset_plausible = anchor_measured && scroll_top.offset_in_item <= rendered_height;
+        // [天演 patch] 归一化只服务**一种**输入：「末尾之后」`(count, 0)` ——
+        // 那是 `scroll_to_end()` 留下的「贴底意图」，必须展开成
+        // `(last, 总高 − 视口高)` 才能真正贴到底。
+        //
+        // 之前它对**任何**「下方不足一屏」的输入都会动手，于是用户正常滚动到
+        // 靠近底部的地方（尤其是那条消息还没被测准的时候），位置就被重算成
+        // 「底部对齐」——这就是「切回落到底部」「上滚往返跳」的通用来源。
+        // 而正常滚动根本不需要它：`scroll()` 里已有 `.min(scroll_max)` 钳制，
+        // 用户永远滚不出内容末尾。
+        let needs_normalize = scroll_top.item_ix >= self.items.summary().count;
         if available_width.is_some()
+            && needs_normalize
             && offset_plausible
             && rendered_height - scroll_top.offset_in_item < available_height
         {
