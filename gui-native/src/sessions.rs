@@ -322,6 +322,23 @@ impl ClientApp {
         // 一律贴底）。字段顺序若写成「先 replace 再读」，读到的就是已经被清掉的
         // false，于是"用户滚离过底部"这个事实在 park 时就被抹掉，切回必然贴底。
         let msg_scrolled_up_at_park = self.msg_scrolled_up.get();
+        // 诊断：park 那一刻的真实位置与意图。
+        //
+        // 前面几轮都在查「切回后为什么贴底」，日志却显示 restore 侧一切正常
+        // （`scrolled_up=true`、偏移没被钳）。把 park 侧也打出来才能分清：
+        // 究竟是「切回丢的」还是「切走前就已经在底部」。
+        {
+            let a = self.msg_list_state.logical_scroll_top();
+            crate::app::diag_log(&format!(
+                "[保位] park id={:?} len={} anchor_ix={} anchor_off={:.1} follow={} scrolled_up={}",
+                self.current_session,
+                self.messages.len(),
+                a.item_ix,
+                f32::from(a.offset_in_item),
+                self.msg_list_state.is_following_tail(),
+                msg_scrolled_up_at_park
+            ));
+        }
         let snap = SessionSnapshot {
             // 记下 park 时的事件流代际：切回时据此判断这份投影还能不能当权威内容
             // （见 `projection_usable`；跨代说明断线重连过，缺口不可恢复）。
