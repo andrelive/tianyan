@@ -1891,9 +1891,9 @@ impl ClientApp {
         anchor_offset: gpui_kit::Pixels,
         cx: &mut Context<Self>,
     ) {
-        // 与 `restore_view_state` 同口径钳制（见 `RECENT_ANCHOR_MAX_OFFSET`）：
-        // 重拉一页后那条消息的渲染高度可能变了，旧偏移不能无条件信。
-        let anchor_offset = anchor_offset.clamp(px(0.), px(RECENT_ANCHOR_MAX_OFFSET));
+        // 不钳位：与 `restore_view_state` 同口径（那里有完整论证）。旧实现在这里把
+        // 偏移钳到 1200px，长消息内部的阅读位置会被截断成"接近底部"。
+        let anchor_offset = anchor_offset.max(px(0.));
         println!(
             "[消息] 重拉定位: seq={anchor_seq:?} offset={:?} base={base}",
             anchor_offset
@@ -2492,15 +2492,6 @@ pub(crate) fn diag_log(msg: &str) {
         let _ = writeln!(f, "{} {msg}", chrono::Local::now().format("%m-%d %H:%M:%S%.3f"));
     }
 }
-
-/// 恢复滚动位置时允许的最大「消息内偏移」（px）。
-///
-/// `offset_in_item` 的语义是「视口顶部在那条消息内部多深」，前提是那条消息的高度
-/// 没变。切走期间它可能变矮（重拉后渲染宽度变化、被压缩点替代、流式收尾重排），
-/// 旧偏移超过自身高度时 `layout_items` 会把该项顶到负 y 之外，视口落到**后面某一项**
-/// —— 表现是「这个会话不管怎么切都定在中间那个位置」（实测：长回复密集的会话如此，
-/// 短消息会话正常）。钳到一屏多：最坏是「偏高一条消息」，不会整条错位。
-pub(crate) const RECENT_ANCHOR_MAX_OFFSET: f32 = 1200.;
 
 pub(crate) fn new_msg_list_state(
     item_count: usize,
