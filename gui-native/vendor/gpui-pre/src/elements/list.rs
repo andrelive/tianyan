@@ -614,6 +614,13 @@ impl ListState {
     pub fn scroll_to_end(&self) {
         let state = &mut *self.0.borrow_mut();
         let item_count = state.items.summary().count;
+        // [天演 patch] 诊断：每次写入都留痕（谁把位置设成「末尾之后」）
+        diag_write(&format!(
+            "[list] scroll_to_end  prev={:?} count={item_count}",
+            state
+                .logical_scroll_top
+                .map(|o| (o.item_ix, f32::from(o.offset_in_item)))
+        ));
         state.pending_scroll = None;
         state.logical_scroll_top = Some(ListOffset {
             item_ix: item_count,
@@ -627,6 +634,13 @@ impl ListState {
     /// following occurs.
     pub fn set_follow_mode(&self, mode: FollowMode) {
         let state = &mut *self.0.borrow_mut();
+        // [天演 patch] 诊断
+        diag_write(&format!(
+            "[list] set_follow_mode {mode:?} prev={:?}",
+            state
+                .logical_scroll_top
+                .map(|o| (o.item_ix, f32::from(o.offset_in_item)))
+        ));
 
         match mode {
             FollowMode::Normal => {
@@ -679,6 +693,16 @@ impl ListState {
     pub fn scroll_to(&self, mut scroll_top: ListOffset) {
         let state = &mut *self.0.borrow_mut();
         let item_count = state.items.summary().count;
+        // [天演 patch] 诊断：连同钳制后的结果一起记（若 item_ix 被钳成 count，
+        // 说明调用方给的索引超出了 items 的条数 —— 那本身就是一个 bug 信号）
+        diag_write(&format!(
+            "[list] scroll_to req=({},{:.1}) count={item_count} prev={:?}",
+            scroll_top.item_ix,
+            f32::from(scroll_top.offset_in_item),
+            state
+                .logical_scroll_top
+                .map(|o| (o.item_ix, f32::from(o.offset_in_item)))
+        ));
         if scroll_top.item_ix >= item_count {
             scroll_top.item_ix = item_count;
             scroll_top.offset_in_item = px(0.);
@@ -1060,10 +1084,19 @@ impl StateInner {
         let mut scroll_top = self.logical_scroll_top();
 
         if self.follow_state.is_following() {
+            let prev = scroll_top;
             scroll_top = ListOffset {
                 item_ix: self.items.summary().count,
                 offset_in_item: px(0.),
             };
+            // [天演 patch] 诊断：跟随态下每帧都会把 `scroll_top` 强制成「末尾之后」，
+            // 若看到这一行的 prev 是用户位置、count 又是条数，就说明是它在覆盖。
+            diag_write(&format!(
+                "[list] layout follow-override count={} prev=({},{:.1})",
+                self.items.summary().count,
+                prev.item_ix,
+                f32::from(prev.offset_in_item)
+            ));
             self.logical_scroll_top = Some(scroll_top);
         }
 
@@ -3096,5 +3129,22 @@ mod test {
              the bottom of its track, even when content has grown during the drag \
              (so frozen_bottom < live_bottom)"
         );
+    }
+}
+#[allow(dead_code)]
+/// [天演 patch] 诊断：把列表状态的写入记到 `%TEMP%\tianyan_list_diag.log`。
+///
+/// 排查「切回会话位置被改」时用的最后一次定位手段 —— 前几轮都在猜是哪个调用点，
+/// 这里直接把**每一次**写入（`scroll_to` / `scroll_to_end` / `set_follow_mode`）
+/// 连同调用前的值一起记下来，谁改的一目了然。
+fn diag_write(msg: &str) {
+    use std::io::Write as _;
+    let path = std::env::temp_dir().join("tianyan_list_diag.log");
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    {
+        let _ = writeln!(f, "{msg}");
     }
 }
