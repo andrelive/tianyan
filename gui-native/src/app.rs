@@ -1952,6 +1952,11 @@ impl ClientApp {
                             // 整页替换后把滚动锚点找回来（只按服务端下发的 seq 查表）
                             if let Some(seq) = anchor_seq {
                                 if let Some(ix) = this.messages.iter().position(|m| m.seq == seq) {
+                                    diag_log(&format!(
+                                        "[保位] 锚点命中 seq={seq} -> ix={ix} off={:.1} len={}",
+                                        f32::from(anchor_offset),
+                                        this.messages.len()
+                                    ));
                                     let target = gpui_kit::ListOffset {
                                         item_ix: ix,
                                         offset_in_item: anchor_offset,
@@ -1961,10 +1966,18 @@ impl ClientApp {
                                     // `measure_all` 还没量完高方差项，这里补一次。
                                     reset_scroll_after_measure(&this.msg_list_state, Some(target), cx);
                                 } else {
+                                    diag_log(&format!(
+                                        "[保位] 锚点未命中 seq={seq} len={} -> 贴底",
+                                        this.messages.len()
+                                    ));
                                     this.msg_list_state.scroll_to_end();
                                     reset_scroll_after_measure(&this.msg_list_state, None, cx);
                                 }
                             } else {
+                                diag_log(&format!(
+                                    "[保位] 无锚点 -> 贴底 len={}",
+                                    this.messages.len()
+                                ));
                                 // 首屏（无锚点）：进会话就该停在最新一条。
                                 // `Top` 对齐不会自动贴底（那是 `Bottom` 对齐用 `None` 表达的
                                 // 语义），漏了这句会话会停在顶部/中间。
@@ -2462,6 +2475,23 @@ impl ClientApp {
 /// 取值 280：接近消息项高度的中位数（短 user 气泡 60–120，长回复上千）。
 /// 太大 → 测量后收缩、视口内容下移；太小 → 仍会跨项。
 pub(crate) const MSG_ROW_HEIGHT_HINT: f32 = 280.;
+
+/// 诊断日志（仅用于排查滚动/保位这类“看不见的状态”问题）。
+///
+/// 写 `{data_dir}/gui_diag.log`，不用 `println!`：release 版没有控制台（
+/// `windows_subsystem = "windows"`），打了也看不到。
+pub(crate) fn diag_log(msg: &str) {
+    use std::io::Write as _;
+    let dir = tianyan::config::get_config().storage.data_dir.clone();
+    let path = std::path::Path::new(&dir).join("gui_diag.log");
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    {
+        let _ = writeln!(f, "{} {msg}", chrono::Local::now().format("%m-%d %H:%M:%S%.3f"));
+    }
+}
 
 /// 恢复滚动位置时允许的最大「消息内偏移」（px）。
 ///

@@ -718,6 +718,20 @@ impl ClientApp {
         // （整轮不会被切开，见 [`MESSAGE_BASE`] 的注释），前端只要按
         // `next_before_seq` 游标走。
         let use_projection = matches!(restored, RestoreOutcome::Fresh);
+        // 诊断：切回时的决策输入（排查「切回贴底」）
+        {
+            let a = self.msg_list_state.logical_scroll_top();
+            crate::app::diag_log(&format!(
+                "[保位] open id={} outcome={:?} len={} anchor_ix={} anchor_off={:.1} follow={} scrolled_up={}",
+                id,
+                restored,
+                self.messages.len(),
+                a.item_ix,
+                f32::from(a.offset_in_item),
+                self.msg_list_state.is_following_tail(),
+                self.msg_scrolled_up.get()
+            ));
+        }
         // 历史窗口是否为空：为空说明「有订阅但没有内容」——下面要**强制重订阅**，
         // 因为 resident 幂等会把正常重发挡掉，而这个会话可能从来没拿到过快照
         // （vite `useSessionHistory` 的 `needForce` 同口径）。
@@ -741,6 +755,13 @@ impl ClientApp {
                 .get(anchor.item_ix)
                 .map(|m| m.seq)
                 .filter(|s| *s > 0);
+            crate::app::diag_log(&format!(
+                "[保位] 拉取分支 anchor_ix={} len={} anchor_seq={:?} off={:.1}",
+                anchor.item_ix,
+                self.messages.len(),
+                anchor_seq,
+                f32::from(anchor.offset_in_item)
+            ));
             self.load_messages_with(id, MESSAGE_BASE, anchor_seq, anchor.offset_in_item, cx);
         }
         self.load_session_usage(cx);
