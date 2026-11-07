@@ -28,7 +28,7 @@ use tianyan::agent::ToolRegistry;
 use tianyan::executor::SecurityPolicy;
 use tianyan::goals::GoalStore;
 use tianyan::todos::TodoStore;
-use tianyan_server::scheduled_tasks::tool::ScheduleTaskTool;
+use tianyan_server::scheduled_tasks::tool::{ScheduleTaskTool, UpdateScheduledTaskTool};
 // 目录渲染与 freshness 比较口径（ADR-049 期 3-T5：实现已出 core，随工具管线插件走）。
 use tianyan_tool_pipeline::tool_catalog;
 
@@ -56,7 +56,10 @@ async fn main() {
     // 组件工具：一次性通道装配（只为取 definition，不执行任何操作）。
     let (req_tx, _req_rx) = tokio::sync::mpsc::channel(1);
     registry
-        .register_dynamic_tool(Arc::new(ScheduleTaskTool::new(req_tx)))
+        .register_dynamic_tool(Arc::new(ScheduleTaskTool::new(req_tx.clone())))
+        .await;
+    registry
+        .register_dynamic_tool(Arc::new(UpdateScheduledTaskTool::new(req_tx)))
         .await;
 
     let generated = tool_catalog::render(&registry).await;

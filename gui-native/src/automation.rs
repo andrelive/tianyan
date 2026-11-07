@@ -616,10 +616,16 @@ impl ClientApp {
                 "count": self.sched_tasks.len(),
                 "status": &self.sched_status,
                 "form_open": self.sched_form_open,
+                // 正在编辑的任务 id（None = 新建态；保存会走 PUT 而不是 POST）
+                "editing": &self.sched_editing,
+                // 表单里的启用 / 停用（仅编辑态提交；新建总是启用）
+                "form_enabled": self.sched_enabled_form,
                 "preset": self.sched_preset,
                 "items": self.sched_tasks.iter().map(|t| serde_json::json!({
                     "id": &t.id, "name": &t.name, "interval_secs": t.interval_secs,
                     "workspace": &t.workspace, "prompt": &t.prompt, "enabled": t.enabled,
+                    // 结构化生效值（编辑回填的依据；可断言「表单拿到的就是这条任务的规格」）
+                    "schedule": &t.schedule, "missed": &t.missed,
                     "last_run_at": t.last_run_at, "next_run_at": t.next_run_at,
                     // 页面实际显示的那行字（与渲染同一函数生成）：把「时间戳 → 相对时间」
                     // 整条链也纳入可断言范围，否则只能靠看图确认
@@ -1428,6 +1434,78 @@ impl ClientApp {
                 }
                 let workspace = arg_opt(cmd, "workspace").unwrap_or_default();
                 self.create_sched_task_direct(name, secs, workspace, prompt, cx);
+            }
+            // 编辑已有任务：与「卡片上的编辑按钮」同一条路径（把现值回填进表单）
+            "sched_edit" => {
+                let id = arg_str(cmd, "id")?;
+                let Some(row) = self.sched_tasks.iter().find(|t| t.id == id).cloned() else {
+                    return Err(format!("没有该定时任务：{id}"));
+                };
+                // 数据半（编辑态 / 模式 / 星期 / 错过策略）就地设置；
+                // 文本半要 `&mut Window`，只能借窗口句柄现取（与 `set_input_text` 同手法）
+                let fill = self.apply_sched_edit(&row);
+                let name_input = self.sched_name.clone();
+                let workspace_input = self.sched_workspace.clone();
+                let prompt_input = self.sched_prompt.clone();
+                let at_input = self.sched_at.clone();
+                let secs_input = self.sched_custom_secs.clone();
+                let grace_input = self.sched_grace.clone();
+                let handle = self.window_handle;
+                handle
+                    .update(cx, move |view, window, cx| {
+                        // `&mut *window` 是**重借用**：闭包被多次调用，不能把 window 移进去
+                        name_input.update(cx, |s, cx| {
+                            s.set_value(fill.name.as_str(), &mut *window, cx)
+                        });
+                        workspace_input.update(cx, |s, cx| {
+                            s.set_value(fill.workspace.as_str(), &mut *window, cx)
+                        });
+                        prompt_input.update(cx, |s, cx| {
+                            s.set_value(fill.prompt.as_str(), &mut *window, cx)
+                        });
+                        at_input
+                            .update(cx, |s, cx| s.set_value(fill.at.as_str(), &mut *window, cx));
+                        secs_input.update(cx, |s, cx| {
+                            s.set_value(fill.custom_secs.as_str(), &mut *window, cx)
+                        });
+                        grace_input.update(cx, |s, cx| {
+                            s.set_value(fill.grace_hours.as_str(), &mut *window, cx)
+                        });
+                        // `AnyWindowHandle::update` 给的是 `&mut AnyView`（拿不到 `ClientApp`），
+                        // 状态刷新由闭包外的 `cx.notify()` 负责
+                        let _ = view;
+                    })
+                    .map_err(|e| format!("窗口已关闭：{e}"))?;
+                cx.notify();
+            }
+            // 改已有任务（部分字段：只改传了的项；间隔走间隔制）
+            "sched_update" => {
+                let id = arg_str(cmd, "id")?;
+                let name = arg_opt(cmd, "name");
+                let secs = cmd.get("interval_secs").and_then(|v| v.as_u64());
+                if let Some(secs) = secs {
+                    if secs < 60 {
+                        return Err("间隔至少 60 秒".to_string());
+                    }
+                }
+                let workspace = arg_opt(cmd, "workspace");
+                let prompt = arg_opt(cmd, "prompt");
+                if name.is_none() && secs.is_none() && workspace.is_none() && prompt.is_none() {
+                    return Err(
+                        "至少要给一个要改的字段（name / interval_secs / workspace / prompt）"
+                            .to_string(),
+                    );
+                }
+                self.update_sched_task_direct(id, name, secs, workspace, prompt, cx);
+            }
+            // 启用 / 停用（保留定义，不触发）
+            "sched_enabled" => {
+                let id = arg_str(cmd, "id")?;
+                let enabled = cmd
+                    .get("enabled")
+                    .and_then(|v| v.as_bool())
+                    .ok_or("缺少参数 enabled（true / false）")?;
+                self.set_sched_enabled(id, enabled, cx);
             }
             "sched_delete" => self.delete_sched_task(arg_str(cmd, "id")?, cx),
             // ---- 外观 ----

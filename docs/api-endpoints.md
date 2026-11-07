@@ -58,8 +58,8 @@
 | `/api/v1/roles/stats` | GET | 角色使用统计 |
 | `/api/v1/roles/{name}` | GET / DELETE | 角色详情 / 退役 |
 | `/api/v1/roles/{name}/reset` | POST | 回退内置种子（恢复出厂定义） |
-| `/api/v1/scheduled-tasks` | GET / POST | 定时智能体任务（间隔制 + 补跑，ADR-024） |
-| `/api/v1/scheduled-tasks/{id}` | DELETE | 删除定时任务 |
+| `/api/v1/scheduled-tasks` | GET / POST | 定时智能体任务（调度规格 + 错过策略，ADR-024） |
+| `/api/v1/scheduled-tasks/{id}` | PUT / PATCH / DELETE | 修改（部分字段：名称 / 指令 / 调度 / 错过后补跑策略 / 启停）/ 删除定时任务 |
 | `/api/v1/workspace/tree` | GET | 工作区文件树 |
 | `/api/v1/workspace/dirs` | GET | 工作区目录列表 |
 | `/api/v1/workspace/read` | GET | 工作区文件读取 |

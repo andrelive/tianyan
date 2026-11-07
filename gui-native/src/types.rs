@@ -598,6 +598,12 @@ pub(crate) struct SchedTaskRow {
     pub(crate) schedule_desc: String,
     /// 错过策略的可读描述（如「错过就跳过，等下一个时刻」）。
     pub(crate) missed_desc: String,
+    /// **结构化**调度规格原样（后端 `schedule` 字段：`{"kind":"daily","at":"15:30"}`
+    /// 等，与 `Schedule` 同形）。编辑表单靠它回填——`schedule_desc` 是给人看的
+    /// 字符串，反解不回来。旧服务器不返回 → `None`（回填退化成间隔制）。
+    pub(crate) schedule: Option<serde_json::Value>,
+    /// **结构化**错过策略原样（`{"kind":"skip"}` / `{"kind":"within","grace_secs":…}`）。
+    pub(crate) missed: Option<serde_json::Value>,
     pub(crate) workspace: String,
     pub(crate) prompt: String,
     pub(crate) enabled: bool,

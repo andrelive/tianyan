@@ -729,6 +729,25 @@ impl TaskScheduler {
         definition: TaskDefinition,
         initial_last_run: Option<i64>,
     ) -> crate::common::error::Result<()> {
+        self.register_task_with_state(definition, initial_last_run, None)
+            .await
+    }
+
+    /// 注册任务并同时指定初始 `last_run` 与**调度游标** `last_fire`。
+    ///
+    /// 游标只影响日历类（`Daily` / `Weekly` / `Once`）的判定：`anchor <= last_fire`
+    /// 视为「该时刻点已结算」，不会再按 [`MissedPolicy`] 判补跑。
+    ///
+    /// 用途（编辑已有任务）：注销后用同一 id 重新注册时，内存里的游标会随
+    /// `unregister_task` 一起丢掉，若新注册不带上「当前时刻点已结算」，一条
+    /// `RunOnce` 的每日任务每保存一次就会立刻补跑一次（编辑 prompt 却触发了执行，
+    /// 用户完全预料不到）。**改调度规格时不要带游标**——新规格应当从零判定。
+    pub async fn register_task_with_state(
+        &self,
+        definition: TaskDefinition,
+        initial_last_run: Option<i64>,
+        initial_last_fire: Option<i64>,
+    ) -> crate::common::error::Result<()> {
         let mut tasks = self.tasks.write().await;
         if tasks.iter().any(|t| t.definition.id == definition.id) {
             return Err(TianyanError::Custom(format!(
@@ -748,7 +767,7 @@ impl TaskScheduler {
         tasks.push(RegisteredTask {
             definition,
             last_run: initial_last_run,
-            last_fire: None,
+            last_fire: initial_last_fire,
             run_count: 0,
             last_error: None,
             last_skipped: None,
@@ -778,6 +797,21 @@ impl TaskScheduler {
         _ctx: Arc<TaskContext>,
     ) -> crate::common::error::Result<()> {
         self.register_task_with_last_run(definition, last_run).await
+    }
+
+    /// 运行期动态注册任务（带初始 last_run **与调度游标**；用于编辑后重新注册）。
+    ///
+    /// 语义见 [`Self::register_task_with_state`]：改prompt/名称/工作区不该让日历类
+    /// 任务多跑一次，改调度规格则该从零判定（调用方传 `None`）。
+    pub async fn register_dynamic_task_with_state(
+        self: &Arc<Self>,
+        definition: TaskDefinition,
+        last_run: Option<i64>,
+        last_fire: Option<i64>,
+        _ctx: Arc<TaskContext>,
+    ) -> crate::common::error::Result<()> {
+        self.register_task_with_state(definition, last_run, last_fire)
+            .await
     }
 
     /// 注销任务（幂等；持久化状态保留——同 id 重注册可延续）。
@@ -1116,6 +1150,49 @@ mod tests {
         assert!(
             raw.contains("late"),
             "注册后应立即写入 scheduler_state.json，实际：{raw}"
+        );
+    }
+
+    /// **编辑已有任务**：注销后同一 id 重新注册必须能带上「当前时刻点已结算」的游标。
+    ///
+    /// 判别力：不带游标（旧路径）时，一条 `RunOnce` 的每日任务**每保存一次就立刻
+    /// 补跑一次**——用户只是改了提示词，却被触发了一次执行。两条断言互为对照：
+    /// 带游标 → 不到期；不带 → 立刻到期。
+    #[tokio::test]
+    async fn test_register_with_initial_last_fire_settles_current_occurrence() {
+        let now = Utc::now().timestamp();
+        let daily = Schedule::Daily {
+            at: "15:30".to_string(),
+        };
+        let anchor = daily
+            .most_recent_occurrence(now)
+            .expect("日历类必有最近时刻点");
+        let def = || {
+            TaskDefinition::new("edited", "编辑后重注册", 86400, make_handler())
+                .with_schedule(daily.clone(), MissedPolicy::RunOnce)
+        };
+
+        // 带游标：该时刻点已结算 → 不到期（即便 RunOnce 且已过很久）
+        let settled = TaskScheduler::new();
+        settled
+            .register_task_with_state(def(), Some(anchor), Some(anchor))
+            .await
+            .unwrap();
+        assert!(
+            due_ids(&settled).await.is_empty(),
+            "游标已结算的时刻点不得重复补跑（编辑 prompt 不应触发执行）"
+        );
+
+        // 对照：不传游标（旧行为）→ 立刻补跑
+        let fresh = TaskScheduler::new();
+        fresh
+            .register_task_with_state(def(), Some(anchor), None)
+            .await
+            .unwrap();
+        assert_eq!(
+            due_ids(&fresh).await,
+            vec!["edited".to_string()],
+            "不带游标时保持旧的补跑语义（对照：证明上一条不是恒真）"
         );
     }
 

@@ -158,6 +158,11 @@ struct ClientApp {
     pub(crate) sched_tasks: Vec<SchedTaskRow>,
     /// 定时任务页：新建表单是否展开
     pub(crate) sched_form_open: bool,
+    /// 定时任务页：正在编辑的任务 id（`None` = 新建；表单与新建共用，按钮文案
+    /// 与提交端点由它分派 —— 这是「只能新建、不能改」缺失的那一半状态）
+    pub(crate) sched_editing: Option<String>,
+    /// 定时任务页：表单里的「启用 / 停用」（仅编辑态显示并提交——新建总是启用）
+    pub(crate) sched_enabled_form: bool,
     /// 定时任务页：表单选中的间隔预设（秒；`0` = 自定义，读 `sched_custom_secs`）
     pub(crate) sched_preset: u64,
     /// 定时任务页：表单输入框（名称 / 自定义秒 / 工作目录 / 指令）

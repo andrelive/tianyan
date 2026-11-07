@@ -141,6 +141,14 @@ pub struct ScheduledTaskResponse {
     pub schedule_desc: String,
     /// 错过策略的可读描述。
     pub missed_desc: String,
+    /// **结构化**调度规格（= `effective_schedule()`，`{"kind":"daily","at":"15:30"}`）。
+    ///
+    /// 编辑表单必须拿到原样的结构才能回填（`schedule_desc` 是给人看的字符串，反解
+    /// 不了）。缺省字段（旧任务）在这里同样是**生效值**——调用方不必再自己兜
+    /// 「`schedule` 为空 → 按间隔制推」那套语义。
+    pub schedule: tianyan::scheduler::Schedule,
+    /// **结构化**错过策略（= `effective_missed()`）。
+    pub missed: tianyan::scheduler::MissedPolicy,
 }
 
 impl From<&ScheduledAgentTask> for ScheduledTaskResponse {
@@ -160,6 +168,8 @@ impl From<&ScheduledAgentTask> for ScheduledTaskResponse {
             last_result: task.last_result.clone(),
             schedule_desc: task.effective_schedule().describe(),
             missed_desc: task.effective_missed().describe(),
+            schedule: task.effective_schedule(),
+            missed: task.effective_missed(),
         }
     }
 }
@@ -187,6 +197,49 @@ pub struct CreateScheduledTaskRequest {
     pub workspace: String,
     /// 给智能体的指令。
     pub prompt: String,
+}
+
+/// 更新定时任务请求（**部分字段**语义：`None` = 保持原值）。
+///
+/// 为什么不复用 [`CreateScheduledTaskRequest`]：创建要求给全（name / workspace /
+/// prompt 必填），而编辑场景里用户常常只改一处（改个提示词、换个时刻、停用一下）。
+/// 用创建请求当更新请求会逼调用方把没打算改的字段原样抄回来——抄漏一个就把工作区
+/// 或指令**清空**了。
+///
+/// 字段语义：
+/// - `name` / `prompt`：给了就必须非空（去空白后），否则 `invalid_input`；
+/// - `workspace`：允许空串（= 默认目录）；
+/// - `schedule`：给了就整体替换；`interval_secs` 只有在**没给** `schedule` 时才生效
+///   （等价于 `Schedule::Every { secs }`）。想把日历任务降回间隔制，传
+///   `{"kind":"every","secs":N}`——JSON `null` 与缺省一样表示「不改」；
+/// - `missed`：给了就替换（`Skip` / `Within` / `RunOnce`）；
+/// - `enabled`：`false` 注销调度器（任务保留在列表里，可再启用）。
+///
+/// 落盘仍是 [`ScheduledAgentTask`]：`schedule` → `interval_secs` 双写由 manager
+/// 统一做（可回退，见 [`ScheduledAgentTask::sync_legacy_interval`]）。
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct UpdateScheduledTaskRequest {
+    /// 任务显示名称（`None` = 不改）。
+    #[serde(default)]
+    pub name: Option<String>,
+    /// 执行间隔（秒；仅在没给 `schedule` 时生效）。
+    #[serde(default)]
+    pub interval_secs: Option<u64>,
+    /// 调度规格（整体替换）。
+    #[serde(default)]
+    pub schedule: Option<tianyan::scheduler::Schedule>,
+    /// 错过策略（整体替换）。
+    #[serde(default)]
+    pub missed: Option<tianyan::scheduler::MissedPolicy>,
+    /// 工作目录（`Some("")` = 默认目录）。
+    #[serde(default)]
+    pub workspace: Option<String>,
+    /// 给智能体的指令。
+    #[serde(default)]
+    pub prompt: Option<String>,
+    /// 是否启用（`false` = 注销调度器）。
+    #[serde(default)]
+    pub enabled: Option<bool>,
 }
 
 #[cfg(test)]
@@ -303,5 +356,68 @@ mod tests {
             "last_run_at 也要转换"
         );
         assert!(resp.next_run_at.is_none());
+    }
+
+    /// 更新请求是**部分字段**语义：只传一处也能解析（其余 `None` = 不改）。
+    ///
+    /// 判别力：若照搬创建请求（name/workspace/prompt 必填），下面的 JSON 会解析失败
+    /// ——编辑一个提示词就得先读全量再抄回来。
+    #[test]
+    fn update_request_accepts_partial_fields() {
+        let only_prompt: UpdateScheduledTaskRequest =
+            serde_json::from_str(r#"{"prompt":"换成新的指令"}"#).expect("只改指令应可解析");
+        assert_eq!(only_prompt.prompt.as_deref(), Some("换成新的指令"));
+        assert!(only_prompt.name.is_none());
+        assert!(only_prompt.workspace.is_none());
+        assert!(only_prompt.schedule.is_none());
+        assert!(only_prompt.missed.is_none());
+        assert!(only_prompt.enabled.is_none());
+
+        // 调度规格 + 启停（前端「编辑」与「启用/停用」按钮共用一个端点）
+        let sched: UpdateScheduledTaskRequest = serde_json::from_str(
+            r#"{"schedule":{"kind":"daily","at":"16:05"},"missed":{"kind":"skip"},"enabled":false}"#,
+        )
+        .expect("调度规格应可解析");
+        assert_eq!(
+            sched.schedule,
+            Some(tianyan::scheduler::Schedule::Daily { at: "16:05".into() })
+        );
+        assert_eq!(sched.missed, Some(tianyan::scheduler::MissedPolicy::Skip));
+        assert_eq!(sched.enabled, Some(false));
+
+        // 旧客户端只给 interval_secs：解析成间隔制字段（由 manager 落到 schedule）
+        let legacy: UpdateScheduledTaskRequest =
+            serde_json::from_str(r#"{"interval_secs":3600}"#).expect("旧字段应可解析");
+        assert_eq!(legacy.interval_secs, Some(3600));
+        assert!(legacy.schedule.is_none(), "两者互斥：schedule 优先");
+    }
+
+    /// 响应必须同时给出**结构化**的生效调度与错过策略（编辑表单要回填原样结构，
+    /// 光有人类可读的 `schedule_desc` 反解不回来）。
+    #[test]
+    fn response_exposes_structured_schedule_and_missed() {
+        // 旧任务（无 schedule/missed 字段）→ 生效值应是间隔制 + 「错过补跑」
+        let legacy = sample();
+        let resp = ScheduledTaskResponse::from(&legacy);
+        assert_eq!(
+            resp.schedule,
+            tianyan::scheduler::Schedule::Every { secs: 60 }
+        );
+        assert_eq!(resp.missed, tianyan::scheduler::MissedPolicy::RunOnce);
+
+        // 显式设置 → 原样输出（前端按 kind 分派回填）
+        let mut task = sample();
+        task.schedule = Some(tianyan::scheduler::Schedule::Weekly {
+            weekdays: vec![1, 3],
+            at: "09:00".into(),
+        });
+        task.missed = Some(tianyan::scheduler::MissedPolicy::Within {
+            grace_secs: 8 * 3600,
+        });
+        let json = serde_json::to_value(ScheduledTaskResponse::from(&task)).expect("序列化");
+        assert_eq!(json["schedule"]["kind"], "weekly");
+        assert_eq!(json["schedule"]["weekdays"], serde_json::json!([1, 3]));
+        assert_eq!(json["missed"]["kind"], "within");
+        assert_eq!(json["missed"]["grace_secs"], 28_800);
     }
 }

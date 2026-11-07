@@ -34,29 +34,32 @@ use crate::api::clipboard::tool::ClipboardWriteTool;
 use crate::api::clipboard::types::PendingCapture;
 use crate::assembly::{ManifestAssemblies, PolicyAssemblies, ProviderAssemblies};
 use crate::mcp_bridge::McpToolManager;
-use crate::scheduled_tasks::tool::{CreateTaskRequest, ScheduleTaskTool};
+use crate::scheduled_tasks::tool::{ScheduleTaskTool, TaskAdminRequest, UpdateScheduledTaskTool};
 
 /// 构造模型服务创建错误（统一错误前缀，避免调用点重复拼装）。
 fn model_services_error(e: impl std::fmt::Display) -> TianyanError {
     TianyanError::Custom(format!("模型服务错误：模型服务创建失败：{e}"))
 }
 
-/// 构造组件工具清单（**server 自有能力**：`schedule_task`）。
+/// 构造组件工具清单（**server 自有能力**：`schedule_task` / `update_scheduled_task`）。
 ///
 /// **顺序即注册顺序**（工具定义是提示词前缀的一部分，顺序抖动会白掉前缀缓存）。
+/// 顺序：先「建」后「改」（`schedule_task` → `update_scheduled_task`）——与用户
+/// 的操作流一致，也让目录生成与运行时装配同序。
 ///
 /// 归属变更（ADR-049 期 1）：`todo` / `goal` 已随实现迁至 `plugins/tools-todo`，
 /// 由**插件清单**在 `create_app_inner` 注册（server 库不依赖插件 crate，否则改
-/// 一行工具就重编 server）。本清单只剩 `schedule_task`——它依赖 server 内部的
+/// 一行工具就重编 server）。本清单只剩定时任务管理——它依赖 server 内部的
 /// 定时任务管理器通道（`scheduled_task_tx`），属 server 自有能力。
 ///
 /// 抽成纯函数便于单测——不依赖 `AppState` 的 DB / VFS / 模型服务。
 pub(crate) fn build_component_tools(
-    schedule_tx: Option<tokio::sync::mpsc::Sender<CreateTaskRequest>>,
+    schedule_tx: Option<tokio::sync::mpsc::Sender<TaskAdminRequest>>,
 ) -> Vec<Arc<dyn tianyan::agent::DynamicToolExecutor>> {
     let mut tools: Vec<Arc<dyn tianyan::agent::DynamicToolExecutor>> = Vec::new();
     if let Some(tx) = schedule_tx {
-        tools.push(Arc::new(ScheduleTaskTool::new(tx)));
+        tools.push(Arc::new(ScheduleTaskTool::new(tx.clone())));
+        tools.push(Arc::new(UpdateScheduledTaskTool::new(tx)));
     }
     tools
 }
@@ -337,12 +340,13 @@ pub struct AppState {
     scheduler: Arc<RwLock<Option<Arc<TaskScheduler>>>>,
     /// 定时智能体任务管理器（start_server 创建后装配；无 Provider 时为 None）。
     scheduled_agent_tasks: Arc<RwLock<Option<Arc<ScheduledAgentTaskManager>>>>,
-    /// `schedule_task` 工具的创建请求通道发送端（**跨 agent 重建复用**）。
+    /// 定时任务管理请求通道发送端（`schedule_task` / `update_scheduled_task`
+    /// **跨 agent 重建复用**）。
     ///
     /// 组件工具是逐次注入的：通道若随 agent 重建而丢，热重载后 `schedule_task`
     /// 会静默消失（直到重启进程）。由 [`Self::attach_agent_task_manager`]
     /// 创建一次，[`Self::component_dynamic_tools`] 每次装配时克隆同一发送端。
-    scheduled_task_tx: Arc<RwLock<Option<tokio::sync::mpsc::Sender<CreateTaskRequest>>>>,
+    scheduled_task_tx: Arc<RwLock<Option<tokio::sync::mpsc::Sender<TaskAdminRequest>>>>,
     /// 待办清单存储（todos.json；用户跟踪多步任务）。
     todo_store: Arc<TodoStore>,
     /// 目标存储（goals.json；长期目标 + 进度跟踪）。
@@ -995,15 +999,31 @@ impl AppState {
         if slot.is_some() {
             return;
         }
-        let (tx, mut rx) = tokio::sync::mpsc::channel::<CreateTaskRequest>(32);
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<TaskAdminRequest>(32);
         let weak = Arc::downgrade(&manager);
         tokio::spawn(async move {
             while let Some(request) = rx.recv().await {
-                let result = match weak.upgrade() {
-                    Some(m) => Ok(m.create(&request.req).await),
-                    None => Err("定时任务管理器不可用".to_string()),
-                };
-                let _ = request.resp_tx.send(result);
+                // 两个动作共用一个消费者（见 `TaskAdminRequest`：通道是工具↔装配层的
+                // 异步边界，与动作无关）。`Update` 先按「id 或名称」定位任务。
+                match request {
+                    TaskAdminRequest::Create { req, resp_tx } => {
+                        let result = match weak.upgrade() {
+                            Some(m) => Ok(m.create(&req).await),
+                            None => Err("定时任务管理器不可用".to_string()),
+                        };
+                        let _ = resp_tx.send(result);
+                    }
+                    TaskAdminRequest::Update { task, req, resp_tx } => {
+                        let result = match weak.upgrade() {
+                            Some(m) => match m.resolve_key(&task).await {
+                                Ok(id) => m.update(&id, &req).await.map_err(|e| e.to_string()),
+                                Err(e) => Err(e.to_string()),
+                            },
+                            None => Err("定时任务管理器不可用".to_string()),
+                        };
+                        let _ = resp_tx.send(result);
+                    }
+                }
             }
         });
         *slot = Some(tx);
@@ -1220,14 +1240,15 @@ mod tests {
     /// MCP 变更）后永久丢失（`tool: 未知工具：schedule_task`），直到重启进程。
     #[tokio::test]
     async fn test_component_tools_include_schedule_task_only() {
-        let (tx, _rx) = tokio::sync::mpsc::channel::<CreateTaskRequest>(1);
+        let (tx, _rx) = tokio::sync::mpsc::channel::<TaskAdminRequest>(1);
 
         let tools = build_component_tools(Some(tx));
         let names: Vec<String> = tools.iter().map(|t| t.tool_name()).collect();
         assert_eq!(
             names,
-            vec!["schedule_task"],
-            "组件工具只剩 server 自有能力（todo / goal 已迁 plugins/tools-todo）"
+            vec!["schedule_task", "update_scheduled_task"],
+            "组件工具只剩 server 自有能力（todo / goal 已迁 plugins/tools-todo）；\
+             顺序固定：先建后改（工具定义是提示词前缀的一部分）"
         );
     }
 

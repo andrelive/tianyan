@@ -157,6 +157,8 @@ impl ClientApp {
             skills_status: "正在加载技能…".to_string(),
             sched_tasks: Vec::new(),
             sched_form_open: false,
+            sched_editing: None,
+            sched_enabled_form: true,
             sched_preset: 21600,
             sched_name,
             sched_custom_secs,

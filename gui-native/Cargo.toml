@@ -4,7 +4,7 @@
 name = "tianyan-gui-native"
 # 版本与服务端 / `gui-vite` 版对齐（打包成 MSI 后 ARP 里显示的就是这个号，
 # 不一致会让两个壳看起来像两个产品）
-version = "1.2.4"
+version = "1.2.5"
 edition = "2021"
 description = "天演原生桌面客户端（GPUI，与 gui-vite 并存）"
 publish = false

@@ -17,5 +17,11 @@ pub fn routes() -> Router<Arc<AppState>> {
             "/scheduled-tasks",
             get(handlers::list_tasks).post(handlers::create_task),
         )
-        .route("/scheduled-tasks/{id}", delete(handlers::delete_task))
+        .route(
+            "/scheduled-tasks/{id}",
+            // PUT 与 PATCH 同一个处理器：语义是「只改传了的字段」（见 handler 文档）
+            delete(handlers::delete_task)
+                .put(handlers::update_task)
+                .patch(handlers::update_task),
+        )
 }

@@ -23,6 +23,7 @@ use tianyan::session::{SessionHeader, SessionManager};
 use tianyan::TianyanError;
 use tokio::sync::RwLock;
 
+use crate::scheduled_tasks::types::UpdateScheduledTaskRequest;
 use crate::scheduled_tasks::types::{CreateScheduledTaskRequest, ScheduledAgentTask};
 
 /* ───────── 分层接口：结果回写（handler → manager，经接口 + Weak） ───────── */
@@ -69,11 +70,19 @@ impl TaskResultSink for ResultSinkBridge {
 /// 装配层实现 [`SchedulerRegistrar`] 并注入，依赖方向：manager → 接口 →调度器。
 #[async_trait::async_trait]
 pub trait TaskRegistrar: Send + Sync {
-    /// 注册任务到调度器（handler 已构建；注册即起 cron 循环）。
+    /// 注册任务到调度器（handler 已构建；注册即起扫描判定）。
+    ///
+    /// `settled_fire`：注册时视为**已结算**的调度时刻点（epoch 秒）。注销会让
+    /// 调度器丢掉内存游标（`last_fire`），编辑任务后重新注册时传「最近一个已过的
+    /// 时刻点」即可保住「这个时刻点处理过了」——否则一条 `RunOnce` 的每日任务会
+    /// 因为游标为空而立刻补跑一次（用户只是改了提示词）。新建 / 启动恢复传 `None`
+    /// （保持既有的「错过就补跑一次」语义）。间隔制任务不受它影响（游标由
+    /// `last_run` 承担）。
     async fn register(
         &self,
         task: &ScheduledAgentTask,
         handler: Arc<dyn TaskHandler>,
+        settled_fire: Option<i64>,
     ) -> Result<(), String>;
     /// 从调度器注销任务（任务不存在时幂等）。
     async fn unregister(&self, task_id: &str);
@@ -121,6 +130,7 @@ impl TaskRegistrar for SchedulerRegistrar {
         &self,
         task: &ScheduledAgentTask,
         handler: Arc<dyn TaskHandler>,
+        settled_fire: Option<i64>,
     ) -> Result<(), String> {
         let Some(sched) = self.scheduler.read().await.clone() else {
             return Ok(()); // 调度器未装配（无 Provider）：静默跳过
@@ -140,7 +150,8 @@ impl TaskRegistrar for SchedulerRegistrar {
         sched
             // 传任务自身持久化的上次运行时间：调度器启动时该任务尚未注册
             // （load_state 覆盖不到），不传会被判"从未执行"→ 每次重启立即补跑
-            .register_dynamic_task_with_last_run(definition, task.last_run_at, ctx)
+            // 另传「已结算的时刻点」：编辑后重新注册时保住游标（见 trait 文档）
+            .register_dynamic_task_with_state(definition, task.last_run_at, settled_fire, ctx)
             .await
             .map_err(|e| e.to_string())
     }
@@ -287,6 +298,72 @@ impl ScheduledAgentTaskHandler {
     }
 }
 
+/// 把**部分字段**更新应用到任务定义（纯函数：校验 + 落盘双写 + 重算 `next_run_at`）。
+///
+/// 抽成自由函数是为了可测：`update` 要碰调度器注册（装配件），而「哪些字段被改、
+/// 改成什么、要不要同步 `interval_secs`、停用时清不清 `next_run_at`」这套语义与
+/// 调度器无关。
+///
+/// `last_run_at` / `last_result` **不动**：它们记录真实历史，编辑定义不该改写它们，
+/// 它们也不参与「是否该跑」的判定（那是调度器游标的职责）。
+fn apply_update(
+    old: &ScheduledAgentTask,
+    req: &UpdateScheduledTaskRequest,
+    now: i64,
+) -> Result<ScheduledAgentTask, TianyanError> {
+    let mut task = old.clone();
+    if let Some(name) = req.name.as_deref() {
+        let name = name.trim();
+        if name.is_empty() {
+            return Err(TianyanError::invalid_input(
+                "server: scheduled_tasks: 任务名称不能为空",
+            ));
+        }
+        task.name = name.to_string();
+    }
+    if let Some(prompt) = req.prompt.as_deref() {
+        let prompt = prompt.trim();
+        if prompt.is_empty() {
+            return Err(TianyanError::invalid_input(
+                "server: scheduled_tasks: 任务指令不能为空",
+            ));
+        }
+        task.prompt = prompt.to_string();
+    }
+    if let Some(workspace) = req.workspace.as_deref() {
+        // 空串是合法值（= 默认目录），不做非空校验
+        task.workspace = workspace.trim().to_string();
+    }
+    match (&req.schedule, req.interval_secs) {
+        // `schedule` 优先（整体替换）；只给 `interval_secs` 时等价于间隔制
+        (Some(schedule), _) => task.schedule = Some(schedule.clone()),
+        (None, Some(secs)) => task.schedule = Some(tianyan::scheduler::Schedule::Every { secs }),
+        (None, None) => {}
+    }
+    if let Some(missed) = req.missed {
+        task.missed = Some(missed);
+    }
+    if let Some(enabled) = req.enabled {
+        task.enabled = enabled;
+    }
+    // 间隔下限与创建 / 工具同口径：个人 PC 上更短的间隔只会刷屏
+    if let tianyan::scheduler::Schedule::Every { secs } = task.effective_schedule() {
+        if secs < 60 {
+            return Err(TianyanError::invalid_input(
+                "server: scheduled_tasks: 间隔最小 60 秒",
+            ));
+        }
+    }
+    // 落盘双写：`schedule` → `interval_secs`（旧版本读新文件仍能跑）
+    task.sync_legacy_interval();
+    task.next_run_at = if task.enabled {
+        task.estimated_next_run(now)
+    } else {
+        None
+    };
+    Ok(task)
+}
+
 /// 执行结果 → （回写文本, 任务结果）映射单点。
 ///
 /// 失败必须映射为 [`TaskResult::failed`]（T0-11）：调度器据此统计
@@ -301,6 +378,29 @@ fn map_run_outcome(run: Result<String, String>) -> (String, TaskResult) {
             ))),
         ),
     }
+}
+
+/// 把任务清单渲染成一句话（「按名称找任务」失败时的提示用）。
+///
+/// 让模型**看到有哪些任务**再重试，比只回一句「找不到」有用得多——这也正是不再
+/// 额外需要一个「列出定时任务」工具的理由。
+fn describe_all(tasks: &[ScheduledAgentTask]) -> String {
+    if tasks.is_empty() {
+        return "（当前没有任何定时任务）".to_string();
+    }
+    tasks
+        .iter()
+        .map(|t| {
+            format!(
+                "「{}」id={} · {}{}",
+                t.name,
+                t.id,
+                t.effective_schedule().describe(),
+                if t.enabled { "" } else { " · 已停用" }
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("；")
 }
 
 #[async_trait::async_trait]
@@ -413,7 +513,8 @@ impl ScheduledAgentTaskManager {
         let tasks = self.tasks.read().await.clone();
         for task in tasks.values() {
             if task.enabled {
-                self.register(task).await;
+                // 启动恢复：不传已结算时刻点（保持既有的「错过就补跑一次」语义）
+                self.register(task, None).await;
             }
         }
         tracing::info!(count = tasks.len(), "已恢复并注册定时智能体任务");
@@ -439,7 +540,7 @@ impl ScheduledAgentTaskManager {
             .insert(task.id.clone(), task.clone());
         self.save().await;
         if task.enabled {
-            self.register(&task).await;
+            self.register(&task, None).await;
         }
         tracing::info!(
             name = %task.name,
@@ -449,6 +550,62 @@ impl ScheduledAgentTaskManager {
             "已创建定时智能体任务",
         );
         task
+    }
+
+    /// 更新定时任务（**部分字段**语义；不存在 → `not_found`，参数非法 → `invalid_input`）。
+    ///
+    /// 三件必须做对的事：
+    /// 1. **重建 handler**：执行器在构造时就把 `workspace` / `prompt` 克隆走了，
+    ///    改完不重新注册等于什么都没改（下次触发仍按旧指令跑）；
+    /// 2. **不误触发**：注销会丢掉调度器的内存游标，调度规格没变时要把「当前时刻点
+    ///    已结算」带回去（见 [`TaskRegistrar::register`]）——只改提示词不该让任务
+    ///    多跑一次；改了规格则从零判定（用户期望新时刻表立即生效）；
+    /// 3. **落盘双写**：`schedule` → `interval_secs`（旧版本读新文件仍能跑）。
+    ///
+    /// `last_run_at` / `last_result` 一律保留：它们记录的是**真实历史**，编辑定义
+    /// 不改变「上次什么时候真的跑过」，也不该被用来当「是否该跑」的初值。
+    pub async fn update(
+        self: &Arc<Self>,
+        id: &str,
+        req: &UpdateScheduledTaskRequest,
+    ) -> Result<ScheduledAgentTask, TianyanError> {
+        let old = self.tasks.read().await.get(id).cloned().ok_or_else(|| {
+            TianyanError::not_found(format!("server: scheduled_tasks: 定时任务不存在：{id}"))
+        })?;
+
+        let now = chrono::Utc::now().timestamp();
+        // 字段语义（校验 / 双写 / 重算 next_run）在纯函数里，单独可测
+        let task = apply_update(&old, req, now)?;
+        // 调度规格是否变了：决定重新注册时要不要带上「当前时刻点已结算」
+        let schedule_changed = task.effective_schedule() != old.effective_schedule();
+
+        self.tasks
+            .write()
+            .await
+            .insert(task.id.clone(), task.clone());
+        self.save().await;
+
+        // 先注销旧注册（其 handler 持旧 workspace/prompt 的克隆），再按 enabled 重注册
+        self.unregister(id).await;
+        if task.enabled {
+            let settled = if schedule_changed {
+                None // 新规格从零判定（该补跑就补跑）
+            } else {
+                task.effective_schedule().most_recent_occurrence(now)
+            };
+            self.register(&task, settled).await;
+        }
+
+        tracing::info!(
+            id = %task.id,
+            name = %task.name,
+            schedule = %task.effective_schedule().describe(),
+            missed = %task.effective_missed().describe(),
+            enabled = task.enabled,
+            schedule_changed,
+            "已更新定时智能体任务",
+        );
+        Ok(task)
     }
 
     /// 删除定时任务（注销 + 移除持久化）。
@@ -467,6 +624,38 @@ impl ScheduledAgentTaskManager {
         let mut v: Vec<ScheduledAgentTask> = tasks.values().cloned().collect();
         v.sort_by_key(|a| a.created_at);
         v
+    }
+
+    /// 按「id 或名称」定位任务（`update_scheduled_task` 工具用：智能体手里通常只有名称）。
+    ///
+    /// 规则：先精确匹配 id；再按名称匹配（忽略首尾空白与大小写）。**多义即报错**——
+    /// 猜一条去改，比让模型再问一句的代价大得多。
+    pub async fn resolve_key(&self, key: &str) -> Result<String, TianyanError> {
+        let key = key.trim();
+        let tasks = self.list().await;
+        if tasks.iter().any(|t| t.id == key) {
+            return Ok(key.to_string());
+        }
+        let lowered = key.to_lowercase();
+        let hits: Vec<&ScheduledAgentTask> = tasks
+            .iter()
+            .filter(|t| t.name.trim().to_lowercase() == lowered)
+            .collect();
+        match hits.len() {
+            1 => Ok(hits[0].id.clone()),
+            0 => Err(TianyanError::not_found(format!(
+                "server: scheduled_tasks: 找不到定时任务「{key}」；现有任务：{}",
+                describe_all(&tasks)
+            ))),
+            _ => Err(TianyanError::invalid_input(format!(
+                "server: scheduled_tasks: 有 {} 个任务都叫「{key}」，请改用 id 指定：{}",
+                hits.len(),
+                hits.iter()
+                    .map(|t| format!("{}（id={}）", t.name, t.id))
+                    .collect::<Vec<_>>()
+                    .join("；")
+            ))),
+        }
     }
 
     /// 记录一次执行结果（handler 经接口回写；更新 last_run_at / last_result / next_run_at）。
@@ -498,7 +687,9 @@ impl ScheduledAgentTaskManager {
     }
 
     /// 将单个任务注册进调度器（构建 handler，经 registrar 接口注册）。
-    async fn register(self: &Arc<Self>, task: &ScheduledAgentTask) {
+    ///
+    /// `settled_fire` 见 [`TaskRegistrar::register`]（编辑后重新注册时保住游标）。
+    async fn register(self: &Arc<Self>, task: &ScheduledAgentTask, settled_fire: Option<i64>) {
         let handler = Arc::new(ScheduledAgentTaskHandler::new(
             self.agent_lock.clone(),
             self.session_manager.clone(),
@@ -508,7 +699,7 @@ impl ScheduledAgentTaskManager {
             task.prompt.clone(),
             self.result_sink(),
         ));
-        if let Err(e) = self.registrar.register(task, handler).await {
+        if let Err(e) = self.registrar.register(task, handler, settled_fire).await {
             tracing::warn!(error = %e, task = %task.id, "定时智能体任务注册失败");
         }
     }
@@ -564,6 +755,157 @@ mod tests {
         assert_eq!(
             ScheduledAgentTaskHandler::session_id_for("abc"),
             "sched-task-abc"
+        );
+    }
+
+    /// 编辑测试样本：间隔制任务，已跑过一次（有历史）。
+    fn sched_sample() -> ScheduledAgentTask {
+        let mut t = ScheduledAgentTask::new(
+            "收盘复盘".to_string(),
+            1800,
+            "F:\\trade".to_string(),
+            "跑收盘管线".to_string(),
+        );
+        t.last_run_at = Some(1_700_000_000);
+        t.last_result = Some("上次结果".to_string());
+        t.next_run_at = Some(1_700_001_800);
+        t
+    }
+
+    /// 只改指令：调度规格与历史都不动（改 prompt 不该改变「何时跑」）。
+    #[test]
+    fn update_only_prompt_keeps_schedule_and_history() {
+        let old = sched_sample();
+        let req = UpdateScheduledTaskRequest {
+            prompt: Some("换成新的指令".to_string()),
+            ..Default::default()
+        };
+        let now = 1_800_000_000;
+        let task = apply_update(&old, &req, now).expect("只改指令应成功");
+        assert_eq!(task.prompt, "换成新的指令");
+        assert_eq!(task.name, old.name, "没传的字段保持原值");
+        assert_eq!(task.workspace, old.workspace);
+        assert_eq!(task.effective_schedule(), old.effective_schedule());
+        assert_eq!(task.interval_secs, old.interval_secs);
+        assert_eq!(task.last_run_at, old.last_run_at, "历史保留");
+        assert_eq!(task.last_result, old.last_result);
+        assert_eq!(task.next_run_at, Some(now + 1800), "next_run 按规格重算");
+    }
+
+    /// 改调度规格：日历类要**双写** `interval_secs`（旧版本读新文件仍能跑）。
+    #[test]
+    fn update_schedule_dual_writes_interval() {
+        let old = sched_sample();
+        let req = UpdateScheduledTaskRequest {
+            schedule: Some(tianyan::scheduler::Schedule::Daily { at: "15:30".into() }),
+            ..Default::default()
+        };
+        let task = apply_update(&old, &req, 1_800_000_000).expect("改调度应成功");
+        assert_eq!(
+            task.interval_secs,
+            24 * 3600,
+            "落盘双写等价间隔（旧版本可读）"
+        );
+        assert_eq!(
+            task.effective_schedule(),
+            tianyan::scheduler::Schedule::Daily { at: "15:30".into() }
+        );
+    }
+
+    /// 只给 `interval_secs`（旧客户端）→ 等价于间隔制。
+    #[test]
+    fn update_interval_secs_means_every() {
+        let old = sched_sample();
+        let req = UpdateScheduledTaskRequest {
+            interval_secs: Some(3600),
+            ..Default::default()
+        };
+        let task = apply_update(&old, &req, 1_800_000_000).expect("改间隔应成功");
+        assert_eq!(
+            task.effective_schedule(),
+            tianyan::scheduler::Schedule::Every { secs: 3600 }
+        );
+        assert_eq!(task.interval_secs, 3600);
+    }
+
+    /// 停用：清 `next_run_at`（列表显示「待定」），定义与历史保留。
+    #[test]
+    fn update_disable_clears_next_run_but_keeps_definition() {
+        let old = sched_sample();
+        let req = UpdateScheduledTaskRequest {
+            enabled: Some(false),
+            ..Default::default()
+        };
+        let task = apply_update(&old, &req, 1_800_000_000).expect("停用应成功");
+        assert!(!task.enabled);
+        assert!(task.next_run_at.is_none(), "停用后不该再显示下次时间");
+        assert_eq!(task.prompt, old.prompt, "停用不动定义");
+        assert_eq!(task.last_run_at, old.last_run_at);
+    }
+
+    /// 非法输入：空名称 / 空指令 / 间隔过短 → `invalid_input`（handler 映射 400）。
+    #[test]
+    fn update_rejects_invalid_inputs() {
+        let old = sched_sample();
+        let now = 1_800_000_000;
+        for req in [
+            UpdateScheduledTaskRequest {
+                name: Some("   ".into()),
+                ..Default::default()
+            },
+            UpdateScheduledTaskRequest {
+                prompt: Some(String::new()),
+                ..Default::default()
+            },
+            UpdateScheduledTaskRequest {
+                interval_secs: Some(10),
+                ..Default::default()
+            },
+            UpdateScheduledTaskRequest {
+                schedule: Some(tianyan::scheduler::Schedule::Every { secs: 59 }),
+                ..Default::default()
+            },
+        ] {
+            let err = apply_update(&old, &req, now).expect_err("非法输入必须报错");
+            assert!(
+                err.is_invalid_input(),
+                "应判定为 invalid_input，实际：{err}"
+            );
+        }
+    }
+
+    /// 工作区允许空串（= 默认目录）：这是合法值，不是「未提供」。
+    #[test]
+    fn update_accepts_empty_workspace() {
+        let old = sched_sample();
+        let req = UpdateScheduledTaskRequest {
+            workspace: Some(String::new()),
+            ..Default::default()
+        };
+        let task = apply_update(&old, &req, 1_800_000_000).expect("空工作区应合法");
+        assert!(task.workspace.is_empty());
+    }
+
+    /// 「按 id 或名称定位」的**歧义**与**候选提示**（工具侧 `task` 参数靠它）。
+    ///
+    /// 纯函数层面测 `describe_all`：定位失败时错误必须带上现有任务清单——模型据此
+    /// 重试，而不是收到一句「找不到」就再无抓手。
+    #[test]
+    fn describe_all_lists_tasks_with_id_and_schedule() {
+        let a = sched_sample();
+        let mut b = sched_sample();
+        b.id = "sched-task-b".to_string();
+        b.name = "早盘巡检".to_string();
+        b.enabled = false;
+        let text = describe_all(&[a.clone(), b]);
+        assert!(text.contains(&a.name), "必须列出名称：{text}");
+        assert!(text.contains(&a.id), "必须列出 id（重试要用它）：{text}");
+        assert!(text.contains("每 1800 秒"), "必须给出当前调度：{text}");
+        assert!(text.contains("已停用"), "停用状态要标出来：{text}");
+        assert_eq!(
+            describe_all(&[]),
+            "（当前没有任何定时任务）",
+            "空清单也要有可读提示"
         );
     }
 }
