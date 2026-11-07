@@ -2011,7 +2011,11 @@ impl ClientApp {
                                     this.msg_list_state.scroll_to(target);
                                     // 见 `reset_scroll_after_measure` 的文档：首帧的
                                     // `measure_all` 还没量完高方差项，这里补一次。
-                                    reset_scroll_after_measure(&this.msg_list_state, Some(target), cx);
+                                    reset_scroll_after_measure(
+                                        &this.msg_list_state,
+                                        Some(target),
+                                        cx,
+                                    );
                                 } else {
                                     diag_log(&format!(
                                         "[保位] 锚点未命中 seq={seq} len={} -> 贴底",
@@ -2536,7 +2540,11 @@ pub(crate) fn diag_log(msg: &str) {
         .append(true)
         .open(path)
     {
-        let _ = writeln!(f, "{} {msg}", chrono::Local::now().format("%m-%d %H:%M:%S%.3f"));
+        let _ = writeln!(
+            f,
+            "{} {msg}",
+            chrono::Local::now().format("%m-%d %H:%M:%S%.3f")
+        );
     }
 }
 
@@ -2647,11 +2655,9 @@ pub(crate) fn reset_scroll_after_measure(
     cx: &mut Context<ClientApp>,
 ) {
     let state = state.clone();
-    cx.defer(move |_cx| {
-        match target {
-            Some(off) => state.scroll_to(off),
-            None => state.scroll_to_end(),
-        }
+    cx.defer(move |_cx| match target {
+        Some(off) => state.scroll_to(off),
+        None => state.scroll_to_end(),
     });
 }
 
