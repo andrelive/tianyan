@@ -1286,7 +1286,21 @@ impl StateInner {
         //   ② 位置本身越界。
         // 两种情况下都不该拿这个高度去「向上补齐」重算位置 —— 那正是把用户阅读位置
         // 改成贴底的最后一刀。此时保持输入原样，下一次布局高度就绪后自会判对。
-        let offset_plausible = scroll_top.offset_in_item <= rendered_height;
+        // [天演 patch] 还有一条：锚点那条必须**已经测过**。
+        //
+        // `rendered_height` 是「从锚点到末尾的累计」，其中未测量的项按 `size_hint`
+        // 计（`splice` 新项甚至是 0）。首帧锚点常常还没被量出来（实测 `ih` 从 0 →
+        // 177 → 2156 要三帧），此时 `rendered_height` 远小于真实值 ⇒「下方不足一屏」
+        // 成立 ⇒ 位置被向上补齐、跟随被打开，下一帧整表贴底。
+        //
+        // 判断方法：看 `self.items` 里锚点那条是不是 `Measured`。不是就说明这次的
+        // 高度不可信 —— 本次布局不做任何位置修正，等它被量出来再判。
+        let anchor_measured = {
+            let mut cursor = self.items.cursor::<Count>(());
+            cursor.seek(&Count(scroll_top.item_ix), Bias::Right);
+            cursor.item().is_none_or(|item| item.size().is_some())
+        };
+        let offset_plausible = anchor_measured && scroll_top.offset_in_item <= rendered_height;
         if available_width.is_some()
             && offset_plausible
             && rendered_height - scroll_top.offset_in_item < available_height
