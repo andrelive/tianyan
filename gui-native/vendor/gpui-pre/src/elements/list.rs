@@ -1212,7 +1212,19 @@ impl StateInner {
         // （`layout_items(Some(bounds.size.width), …)`），但位置已经被改坏了。
         //
         // 表现：切回一个「上滚过」的会话，先跳到一个中间位置、再贴到底部（闪两下）。
-        if available_width.is_some() && rendered_height - scroll_top.offset_in_item < available_height {
+        // [天演 patch] 除「宽度已知」之外，还要求**输入自洽**：
+        // `offset_in_item` 是「视口顶部落在锚点那条内部多深」，它不可能超过「从锚点
+        // 到末尾的累计高度」`rendered_height`。超过了只有两种可能：
+        //   ① `rendered_height` 是脏的（测量缓存里存着按 MaxContent 量出的高度，
+        //      实测同一条消息 66 vs 真实 2156）；
+        //   ② 位置本身越界。
+        // 两种情况下都不该拿这个高度去「向上补齐」重算位置 —— 那正是把用户阅读位置
+        // 改成贴底的最后一刀。此时保持输入原样，下一次布局高度就绪后自会判对。
+        let offset_plausible = scroll_top.offset_in_item <= rendered_height;
+        if available_width.is_some()
+            && offset_plausible
+            && rendered_height - scroll_top.offset_in_item < available_height
+        {
             // [天演 patch] 诊断：位置被归一化改写的现场全部输入，一次打全。
             // 路径 `%TEMP%\tianyan_list_diag.log`。要看的是：
             //   rendered_h —— 从 scroll_top.item_ix 到末尾累计出来的高度；
@@ -1330,7 +1342,7 @@ impl StateInner {
         // 把一个「距底还有 780px」的位置判成「已在底部」并 `start_following()`，
         // 之后每帧都在 `layout_items` 开头把 `scroll_top` 设成「末尾之后」——
         // 一旦开启就再也不会自己回去。
-        if available_width.is_some() && self.follow_state.has_stopped_following() {
+        if available_width.is_some() && offset_plausible && self.follow_state.has_stopped_following() {
             let padding = self.last_padding.unwrap_or_default();
             let total_height = self.items.summary().height + padding.top + padding.bottom;
             let scroll_offset = self.scroll_top(&scroll_top);
