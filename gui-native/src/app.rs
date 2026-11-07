@@ -1634,11 +1634,36 @@ impl ClientApp {
         self.messages = Rc::new(next);
         self.message_total = self.messages.len();
         if !self.offline {
-            reset_msg_list_state(
-                &self.msg_list_state,
+            // ⚠️ 这里**不能**用 `reset_msg_list_state`：它内部是
+            // `reset_with_uniform_height` + `scroll_to_end()` + 把「上滚」标志清零，
+            // 等于**任何一条边界消息到达都把正在看历史的用户踢回底部**，而且清掉的
+            // 标志让后面的 `scroll_to_end_if_following` 继续贴底。
+            //
+            // 实测代价：切回一个上滚过的会话（151 条、含定时任务），11ms 内位置从
+            // `(150, 776)` 变成「末尾之后」，随后被判成「已在底部」并贴底。引擎侧
+            // 诊断记下的 `ix=151`（= count）正是 `scroll_to_end()` 留下的签名。
+            //
+            // 边界消息只是往窗口里插一行：用 `splice(pos..pos, 1)` 原位插入即可 ——
+            // 已有项的测量缓存不动，`logical_scroll_top.item_ix` 在 `old_range.end <= ix`
+            // 时会 +1，正好跟着同一条消息走，阅读位置纹丝不动。
+            let old_len = self.msg_list_state.item_count();
+            diag_log(&format!(
+                "[保位] 边界消息 append id={} pos={pos} old_len={old_len} new_len={} scrolled_up={}",
+                id,
                 self.messages.len(),
-                &self.msg_scrolled_up,
-            );
+                self.msg_scrolled_up.get()
+            ));
+            if self.messages.len() == old_len + 1 && pos <= old_len {
+                self.msg_list_state.splice(pos..pos, 1);
+            } else {
+                // 窗口被 `trim_loaded_front` 裁剪过（条数没按预期增长）：只能重建。
+                // 这种情况本来就丢项，重建后至少让「跟随者」贴底、上滚者留在原地。
+                reset_msg_list_state(
+                    &self.msg_list_state,
+                    self.messages.len(),
+                    &self.msg_scrolled_up,
+                );
+            }
             self.scroll_to_end_if_following();
         }
     }
