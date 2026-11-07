@@ -11,6 +11,14 @@ use crate::types::*;
 use gpui_kit::assets::IconName;
 use gpui_kit::component::input::InputState;
 
+/// 恢复位置后，等多少帧再把跟随模式交还给引擎（`Tail`）。
+///
+/// 为什么必须等：首帧 `layout_items` 跑在 `request_layout` 里，而把每项测成真实高度的
+/// `layout_all_items()` 要到 `prepaint` 才跑；同时首帧的 `available_height` 取的是
+/// `overdraw` 而不是真实视口高。两处失真会让引擎的「回到尾部就恢复跟随」判据把
+/// 「距底一屏出头」误判成「已在底部」。等到第 2 帧，这两件事都已就绪。
+const RESTORE_FOLLOW_FRAMES: u8 = 2;
+
 /// [`ClientApp::restore_view_state`] 的结果：调用方据此决定「要不要去服务端拉一页」。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum RestoreOutcome {
@@ -399,6 +407,9 @@ impl ClientApp {
     /// 把视图状态清回默认（首次进入某会话 / park 完一个空会话）。
     pub(crate) fn reset_view_state(&mut self) {
         self.messages = Rc::new(Vec::new());
+        // 瞬态：没有快照就没有「等布局就绪再钉位置」这回事，别让它跨会话残留
+        self.restore_anchor = None;
+        self.restore_follow_pending = 0;
         self.msg_list_state = crate::app::new_msg_list_state(0, self.msg_scrolled_up.clone());
         self.expand = Rc::new(std::cell::RefCell::new(crate::msg::ExpandState::default()));
         self.message_total = 0;
@@ -514,12 +525,42 @@ impl ClientApp {
         let scrolled_up_at_park = snap.msg_scrolled_up;
         self.msg_list_state =
             crate::app::new_msg_list_state(self.messages.len(), self.msg_scrolled_up.clone());
+        // ⚠️ 首帧**不能**让引擎自己决定跟随 —— 这是「上滚一屏后切回必贴底」的真凶。
+        // 两处失真叠在一起：
+        //
+        // 1. `List::request_layout` 在没有 `last_layout_bounds`（首帧）时，把
+        //    `available_height` 当成 **`overdraw`**（我们传 1200px）用，而不是真实
+        //    视口高（实测 540px）；
+        // 2. `layout_all_items()`（`measure_all` 的执行点）在 **`prepaint`** 里才跑，
+        //    而 `layout_items()` 在 `request_layout` 里先跑 —— 所以首帧读到的
+        //    `items.summary().height` 还是 `n × 280px` 的估值。
+        //
+        // 于是首帧 `layout_items` 末尾这条判据拿到两个失真值：
+        //     if scroll_offset + available_height >= total_height - 1 { start_following() }
+        // 化简后等价于 `off + available >= h_last - 1`：真实视口下只有真贴底才成立，
+        // 而 `available = 1200` 时代入实测值（`off=956` / `h_last=2156`）得
+        // `956 + 1200 = 2156 >= 2155` —— **恰好成立**，引擎据此认定「用户已回到底部」
+        // 并 `start_following()`。`is_following` 一旦为真，之后每帧都在 `layout_items`
+        // 开头 `scroll_top = (count, 0)` 整表贴底，再也不会自己回去。
+        //
+        // 它也解释了那个精确的阈值：只有「距底 <= overdraw - 真实视口 = 660px」才中招，
+        // 所以**上滚一屏（540px）必现、多滚几屏反而正常**。
+        //
+        // 先退到 `Normal`（不跟随，且 `has_stopped_following()` 为假 ⇒ 上面那条判据
+        // 根本不跑），等 `render` 里数够两帧再交还 `Tail` 并把位置钉回去。
+        self.msg_list_state
+            .set_follow_mode(gpui_kit::FollowMode::Normal);
         if let Some(seq) = anchor_seq {
             if let Some(ix) = self.messages.iter().position(|m| m.seq == seq) {
-                self.msg_list_state.scroll_to(gpui_kit::ListOffset {
+                let anchor = gpui_kit::ListOffset {
                     item_ix: ix,
                     offset_in_item: anchor_offset,
-                });
+                };
+                self.msg_list_state.scroll_to(anchor);
+                // 交还 `Tail` 的那一帧要把位置再钉一次（`set_follow_mode` 会把位置
+                // 设成「末尾之后」），所以锚点得留到那时。
+                self.restore_anchor = Some(anchor);
+                self.restore_follow_pending = RESTORE_FOLLOW_FRAMES;
                 // 后续新内容/流式增量不得把用户拉回底部 —— 依据是**他切走前就在
                 // 滚离状态**，不是"这条消息是不是最后一条"。
                 //
@@ -760,46 +801,14 @@ impl ClientApp {
             pos_brief(&self.msg_list_state),
             self.msg_scrolled_up.get()
         ));
-        // 诊断（第 2 探针）：**逐帧**看恢复出来的位置还在不在。
+        // 诊断（第 2 探针）：接下来几帧在 `render` 里各打一次位置。
         //
-        // 上面的 `open` 行是在 `restore_view_state()` 刚 `scroll_to()` 完、layout
-        // 还没跑的时刻读的，它等于 park 值本身。但恢复出来的位置有可能在首帧布局
-        // 里被引擎改掉，而这件事此前没有任何日志。两个探针同打才能分清：
-        //   ① 帧内位置变了 → 位置是被布局改的（下面那条分支）；
-        //   ② 一直不变 → 位置没被动过，跳变在别处（项高度缓存 / 渲染）。
-        //
-        // 改位置的嫌疑分支（`gpui_pre::list::StateInner::layout_items`）：当「从视口
-        // 顶部那条一直算到内容末尾的高度 < 一屏」时，它把 `offset_in_item` **无条件
-        // 重算**成 `rendered_height - available_height`（让最后一条底部对齐视口底部），
-        // `ListAlignment::Top` 下还写回 `logical_scroll_top`。工具卡片密集的会话单条
-        // 几千 px，上滚一屏后视口顶部仍在最后一条内部 ⇒「从它到末尾」往往不足一屏
-        // ⇒ offset 与真实高度一对不上就会被推成贴底。
-        //
-        // 为什么嵌套**三层**：`Context::defer` 的回调在「下次绘制**之前**」执行，此时
-        // 首帧 layout 还没用它新设的位置跑过 —— 只打一层读到的仍是 `scroll_to` 的值，
-        // 等于什么都没测。第二层才是首帧 layout 之后，第三层看它是否继续漂
-        // （`measure_all` 与后续帧的异步渲染都可能改高度）。
-        {
-            let state = self.msg_list_state.clone();
-            let before = self.msg_list_state.logical_scroll_top();
-            let len = self.messages.len();
-            cx.defer(move |cx| {
-                crate::app::diag_log(&format!(
-                    "[保位] frame1 len={len} before=({}, {:.1}) -> {}",
-                    before.item_ix,
-                    f32::from(before.offset_in_item),
-                    pos_brief(&state)
-                ));
-                let s2 = state.clone();
-                cx.defer(move |cx| {
-                    crate::app::diag_log(&format!("[保位] frame2 {}", pos_brief(&s2)));
-                    let s3 = s2.clone();
-                    cx.defer(move |_cx| {
-                        crate::app::diag_log(&format!("[保位] frame3 {}", pos_brief(&s3)));
-                    });
-                });
-            });
-        }
+        // 上面那行 `open` 是在 `restore_view_state()` 刚 `scroll_to()` 完、layout 还没
+        // 跑的时刻读的，它等于 park 值本身。而实测证明 `cx.defer` 测不到布局之后
+        // （嵌套三层的回调在同一次绘制前被一次性 flush，时间戳相差 < 1ms、并且
+        // `viewport_bounds()` 全为 0），所以改挂到 `render` 开头：那里读到的是**上
+        // 一帧 layout 跑完之后**的位置。
+        self.restore_probe = 6;
         // 历史窗口是否为空：为空说明「有订阅但没有内容」——下面要**强制重订阅**，
         // 因为 resident 幂等会把正常重发挡掉，而这个会话可能从来没拿到过快照
         // （vite `useSessionHistory` 的 `needForce` 同口径）。
@@ -1451,7 +1460,7 @@ impl ClientApp {
 ///
 /// 该项尚未渲染时 `bounds_for_item` 返回 `None`，此时 `ih` 记 0（**不是**「高度为零」，
 /// 而是「还没量」）——看日志时别误读。
-fn pos_brief(state: &gpui_kit::ListState) -> String {
+pub(crate) fn pos_brief(state: &gpui_kit::ListState) -> String {
     let o = state.logical_scroll_top();
     let vh = f32::from(state.viewport_bounds().size.height);
     let ih = state

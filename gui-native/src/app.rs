@@ -127,6 +127,10 @@ impl ClientApp {
         let mut app = Self {
             session_rows: Vec::new(),
             sessions_data: Vec::new(),
+            // 切会话位置诊断与「等布局就绪再交还跟随模式」的瞬态（见字段文档）
+            restore_probe: 0,
+            restore_anchor: None,
+            restore_follow_pending: 0,
             collapsed_groups: std::collections::HashSet::new(),
             expanded_groups: std::collections::HashMap::new(),
             hovered_session: None,
