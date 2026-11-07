@@ -2550,8 +2550,20 @@ pub(crate) fn new_msg_list_state(
     // 新构造 / 重置后一律贴底（`scrolled_up = false`）
     scrolled_up.set(false);
     state.set_scroll_handler(move |event, _window, _cx| {
-        // 可见范围到达最后一项 = 用户回到了尾部（恢复跟随）；否则视为上滚看历史。
-        scrolled_up.set(event.visible_range.end < event.count);
+        // 「是否滚离底部」取**引擎的显式意图**，不用可见范围推导。
+        //
+        // 旧写法 `event.visible_range.end < event.count` 有个致命盲区：视口里
+        // 还看得见最后一条消息时两者相等，于是判定「用户还在底部」——而工具卡片
+        // 密集的会话，单条消息几千 px，用户**上滚一屏后最后一条仍占满视口**。
+        // 结果：他明明在看历史，标志却是 false，切回后任何跟随逻辑（
+        // `scroll_to_end_if_following`）都名正言顺地贴底。
+        //
+        // `is_following_tail` 是 gpui 的显式状态：只在用户真的向上滚
+        // （`scroll()` 里 `delta.y > 0`）时 `stop_following()`，回到末尾
+        // （layout 里判 `scroll_offset + available >= total`）才重新跟随。
+        // 这与 dyad 那条修法同口径：*follow intent 独立于底部距离，只有显式
+        // 滚离才暂停它*。
+        scrolled_up.set(!event.is_following_tail);
     });
     state
 }

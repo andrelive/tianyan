@@ -683,6 +683,14 @@ pub(crate) struct SessionSnapshot {
     pub(crate) messages: Rc<Vec<MsgRow>>,
     /// 虚拟列表状态：滚动位置 + 每项测量缓存（见上面的 `mem::replace` 说明）
     pub(crate) msg_list_state: Option<GpuiListState>,
+    /// 「用户已经滚离底部」这个**意图**，随会话一起存。
+    ///
+    /// 不能等恢复时再用 `item_ix + 1 < len` 推导：视口顶部落在**最后一条长消息
+    /// 内部**时（工具卡片密集的会话，单条几千 px），`item_ix` 恰好是 `len-1`，
+    /// 推导结果说「你在底部」——于是切回后任何跟随逻辑都名正言顺地贴底。
+    /// 意图是用户行为的结果（`scroll` handler 里按 `visible_range` 判定），
+    /// 存下来才是真的。见 `restore_view_state`。
+    pub(crate) msg_scrolled_up: bool,
     pub(crate) message_total: usize,
     pub(crate) oldest_seq: Option<i64>,
     pub(crate) has_more_history: bool,

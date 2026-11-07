@@ -325,6 +325,7 @@ impl ClientApp {
                 &mut self.msg_list_state,
                 crate::app::new_msg_list_state(0, self.msg_scrolled_up.clone()),
             )),
+            msg_scrolled_up: self.msg_scrolled_up.get(),
             // 同上：`ExpandRef` 也是 `Rc` 共享语义
             expand: Some(std::mem::replace(
                 &mut self.expand,
@@ -489,6 +490,9 @@ impl ClientApp {
             self.messages.len()
         );
         self.messages = snap.messages;
+        // 意图先落定：恢复锚点**不改变**「用户滚离过底部」这个事实，所以取快照里
+        // 存的值，而不是下面那句按 `item_ix` 反推。
+        let scrolled_up_at_park = snap.msg_scrolled_up;
         self.msg_list_state =
             crate::app::new_msg_list_state(self.messages.len(), self.msg_scrolled_up.clone());
         if let Some(seq) = anchor_seq {
@@ -497,9 +501,13 @@ impl ClientApp {
                     item_ix: ix,
                     offset_in_item: anchor_offset,
                 });
-                // 视线停在中间 = 用户不在尾部：后续新内容/流式增量不得把他拉回底部。
-                // （`scroll_to` 是程序滚动，不触发滚动监听，标志必须显式设。）
-                self.msg_scrolled_up.set(ix + 1 < self.messages.len());
+                // 后续新内容/流式增量不得把用户拉回底部 —— 依据是**他切走前就在
+                // 滚离状态**，不是"这条消息是不是最后一条"。
+                //
+                // 早先这里写的是 `set(ix + 1 < len)`：视口顶部落在最后一条长消息
+                // 内部时 `ix == len - 1`，推导出 false，等于宣布"他在底部"，
+                // 切回后任何跟随都会贴底（用户实测：上滚一屏必现，多滚几屏反而正常）。
+                self.msg_scrolled_up.set(scrolled_up_at_park);
             } else {
                 // 锚点那条已被压缩点替代/删掉：退回底部（`Top` 对齐不自动贴底）
                 self.msg_list_state.scroll_to_end();
