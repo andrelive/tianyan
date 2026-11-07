@@ -1083,6 +1083,29 @@ impl StateInner {
         let mut max_item_width = px(0.);
         let mut scroll_top = self.logical_scroll_top();
 
+        // [天演 patch] 测量结果的写回策略。
+        //
+        // `List::request_layout` 调本函数时传的是 `available_width = None` —— 元素按
+        // `MaxContent` 排版，**不换行**，长消息会被量成一行高（实测同一条消息 66px，
+        // 真实 2156px）。这个值一旦写进 `items`，下一次 `prepaint_items` 用真实宽度
+        // 布局时 `item.size()` 会直接命中它、不再重新测量，于是 `rendered_height`
+        // 远小于真实值，「下方不足一屏就把位置重算成底部对齐」那条判据随即把用户的
+        // 阅读位置改成贴底 —— 切回会话跳变、闪烁的最后一环就在这儿。
+        //
+        // 宽度未知时保留条目原状（只留原有 hint，供滚动条估算用），绝不写入按
+        // 「不换行」量出来的高度；这样真实宽度那次布局仍会重新渲染测量。
+        let store_measurement = |size: Size<Pixels>, item: &ListItem| -> ListItem {
+            let focus_handle = item.focus_handle();
+            if available_width.is_some() {
+                ListItem::Measured { size, focus_handle }
+            } else {
+                ListItem::Unmeasured {
+                    size_hint: item.size_hint(),
+                    focus_handle,
+                }
+            }
+        };
+
         if self.follow_state.is_following() {
             let prev = scroll_top;
             scroll_top = ListOffset {
@@ -1169,10 +1192,7 @@ impl StateInner {
             let size = size.unwrap();
             rendered_height += size.height;
             max_item_width = max_item_width.max(size.width);
-            measured_items.push_back(ListItem::Measured {
-                size,
-                focus_handle: item.focus_handle(),
-            });
+            measured_items.push_back(store_measurement(size, item));
         }
         rendered_height += padding.bottom;
 
@@ -1239,10 +1259,8 @@ impl StateInner {
                     let element_size = element.layout_as_root(available_item_space, window, cx);
                     let focus_handle = item.focus_handle();
                     rendered_height += element_size.height;
-                    measured_items.push_front(ListItem::Measured {
-                        size: element_size,
-                        focus_handle,
-                    });
+                    let _ = focus_handle;
+                    measured_items.push_front(store_measurement(element_size, item));
                     item_layouts.push_front(ItemLayout {
                         index: item_index,
                         element,
@@ -1289,10 +1307,7 @@ impl StateInner {
                 };
 
                 leading_overdraw += size.height;
-                measured_items.push_front(ListItem::Measured {
-                    size,
-                    focus_handle: item.focus_handle(),
-                });
+                measured_items.push_front(store_measurement(size, item));
             } else {
                 break;
             }
