@@ -342,7 +342,11 @@ impl ClientApp {
             // `ListState` 内部是 `Rc<RefCell<..>>`：clone 会共享滚动位置，必须换走
             msg_list_state: Some(std::mem::replace(
                 &mut self.msg_list_state,
-                crate::app::new_msg_list_state(0, self.msg_scrolled_up.clone()),
+                crate::app::new_msg_list_state(
+                    0,
+                    self.msg_scrolled_up.clone(),
+                    self.last_viewport_h,
+                ),
             )),
             msg_scrolled_up: msg_scrolled_up_at_park,
             // 同上：`ExpandRef` 也是 `Rc` 共享语义
@@ -399,7 +403,8 @@ impl ClientApp {
     /// 把视图状态清回默认（首次进入某会话 / park 完一个空会话）。
     pub(crate) fn reset_view_state(&mut self) {
         self.messages = Rc::new(Vec::new());
-        self.msg_list_state = crate::app::new_msg_list_state(0, self.msg_scrolled_up.clone());
+        self.msg_list_state =
+            crate::app::new_msg_list_state(0, self.msg_scrolled_up.clone(), self.last_viewport_h);
         self.expand = Rc::new(std::cell::RefCell::new(crate::msg::ExpandState::default()));
         self.message_total = 0;
         self.oldest_seq = None;
@@ -560,7 +565,11 @@ impl ClientApp {
                 ls.remeasure_all();
                 ls
             }
-            None => crate::app::new_msg_list_state(n, self.msg_scrolled_up.clone()),
+            None => crate::app::new_msg_list_state(
+                n,
+                self.msg_scrolled_up.clone(),
+                self.last_viewport_h,
+            ),
         };
         if let Some(seq) = anchor_seq {
             if let Some(ix) = self.messages.iter().position(|m| m.seq == seq) {
@@ -990,8 +999,11 @@ impl ClientApp {
                             this.streaming = false;
                             this.turn_running = false;
                             this.messages = Rc::new(Vec::new());
-                            this.msg_list_state =
-                                crate::app::new_msg_list_state(0, this.msg_scrolled_up.clone());
+                            this.msg_list_state = crate::app::new_msg_list_state(
+                                0,
+                                this.msg_scrolled_up.clone(),
+                                this.last_viewport_h,
+                            );
                             this.message_total = 0;
                             this.current_title = "选择左侧会话查看消息".to_string();
                             this.session_usage = None;

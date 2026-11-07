@@ -401,6 +401,13 @@ struct ClientApp {
     /// 0），读到的是 `scroll_to` 刚设的值 —— 等于没测。`render` 每帧开头读到的则是
     /// **上一帧 layout 跑完之后**的位置，是「位置有没有被引擎改掉」唯一看得见的时点。
     pub(crate) restore_probe: u8,
+    /// 最近一次布局得到的消息区视口高度。
+    ///
+    /// 新建 `ListState` 时把它预置进去（`seed_viewport_height`），否则首帧
+    /// `request_layout` 会拿 `overdraw`（1200px）当视口高，「贴底」被算成
+    /// 「内容高 − 1200」，视口顶部比真实底部高 660px，下一帧才修正 ——
+    /// 用户看到的就是「第一次打开会话时闪一下」。
+    pub(crate) last_viewport_h: Pixels,
     /// 用户是否上滚看历史了（由消息列表的滚动监听维护，**不靠位置推算**）。
     /// `true` = 别自动滚到底；`false` = 跟随尾部（新内容到达即贴底）。
     pub(crate) msg_scrolled_up: Rc<std::cell::Cell<bool>>,
@@ -796,6 +803,12 @@ impl ClientApp {
 
 impl Render for ClientApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // 记住消息区视口高：新建 `ListState` 时预置进去，避免首帧拿 overdraw 当视口高
+        // （那会让「贴底」偏高 660px，表现为第一次打开会话闪一下）。
+        let vh = self.msg_list_state.viewport_bounds().size.height;
+        if vh > px(0.) {
+            self.last_viewport_h = vh;
+        }
         // 诊断：切会话恢复位置后的头几帧。这一行读的是**上一帧 layout 跑完之后**
         // 的位置（本帧 layout 还没开始），配合 `park` 行就能闭合整条链路：
         //   park 的 (ix, off) → open 恢复出同样的值 → render#N 是否还是它。

@@ -83,6 +83,9 @@ struct StateInner {
     ///
     /// 恢复阅读位置的那一帧必须把它压掉；之后立刻复位，正常交互不受影响。
     suppress_autoscroll: bool,
+    /// [天演 patch] 「全量测量」请求标记（见 `remeasure_all`）。
+    /// 单独存一份是因为 `prepaint` 里宽度变化会 `measuring_behavior.reset()`。
+    measure_all_requested: bool,
 }
 
 /// Deferred scroll adjustment applied after the scroll-top item has been remeasured.
@@ -336,6 +339,7 @@ impl ListState {
             pending_scroll: None,
             follow_state: FollowState::default(),
             suppress_autoscroll: false,
+            measure_all_requested: false,
         })));
         this.splice(0..0, item_count);
         this
@@ -346,6 +350,11 @@ impl ListState {
     /// This is useful for ensuring that the scrollbar size is correct instead of based on only rendered elements.
     pub fn measure_all(self) -> Self {
         self.0.borrow_mut().measuring_behavior = ListMeasuringBehavior::Measure(false);
+        // [天演 patch] 同时立请求标记：`prepaint` 里「宽度变化 ⇒ reset 测量状态」那段
+        // 会把 `Measure(false)` 打回 `Visible`，新建实例的首帧（宽度从 0 变成真实值）
+        // 正好命中 —— 于是 `measure_all()` 形同虚设，所有项都没被全量测量，用户滚动
+        // 时逐个被量、累计高度变化 ⇒ 位置漂。标记让它在宽度检查之后重新生效。
+        self.0.borrow_mut().measure_all_requested = true;
         self
     }
 
@@ -361,7 +370,32 @@ impl ListState {
     /// 高度反查出的位置就漂移（实测表现：**向上滚动遇到比较高的元素时页面跳**）。
     /// 重新启用全量测量即可让所有高度在首帧就是真值，滚动按绝对像素走，不漂。
     pub fn remeasure_all(&self) {
-        self.0.borrow_mut().measuring_behavior = ListMeasuringBehavior::Measure(false);
+        let mut state = self.0.borrow_mut();
+        state.measuring_behavior = ListMeasuringBehavior::Measure(false);
+        // 同时立一个「已请求」标记：`prepaint` 里「宽度变化 ⇒ reset 测量状态」那段
+        // 会把上面这句冲掉（`reset()` 把 Measure(false) 打回 Visible），全量测量
+        // 于是根本不发生 —— 未测量的项留到用户滚动时才逐个测量，累计高度随之变化，
+        // 位置就漂。这个标记在宽度检查之后再重新生效一次。
+        state.measure_all_requested = true;
+    }
+
+    /// [天演 patch] 给新建的实例预置「视口高」，让首帧布局不必退回 `overdraw`。
+    ///
+    /// `List::request_layout` 在没有 `last_layout_bounds` 时拿 `overdraw`（我们传
+    /// 1200px）当视口高 —— 比真实视口（实测 540px）大得多，于是「贴底」被算成
+    /// `内容高 - 1200`，视口顶部偏高 660px；下一帧拿到真实高度后才修正。
+    /// 用户看到的就是**第一次打开会话时闪一下**。
+    ///
+    /// 宽度留 0 是故意的：宽度未知时仍然走 `MaxContent`（不改测量口径），
+    /// 只是让 `available_height` 一开始就是真值。
+    pub fn seed_viewport_height(&self, height: Pixels) {
+        let mut state = self.0.borrow_mut();
+        if state.last_layout_bounds.is_none() && height > px(0.) {
+            state.last_layout_bounds = Some(Bounds::new(
+                point(px(0.), px(0.)),
+                size(px(0.), height),
+            ));
+        }
     }
 
     /// Pre-populate every unmeasured item with a uniform height hint so the scrollbar thumb
@@ -1729,6 +1763,14 @@ impl Element for List {
 
             state.items = new_items;
             state.measuring_behavior.reset();
+        }
+
+        // [天演 patch] 上面那段「宽度变化 ⇒ reset 测量状态」会把 `remeasure_all()`
+        // 设下的 `Measure(false)` 一起冲掉，全量测量就永远不发生。请求标记单独存着，
+        // 在这里（宽度检查之后、`prepaint_items` 之前）重新生效。
+        if state.measure_all_requested {
+            state.measuring_behavior = ListMeasuringBehavior::Measure(false);
+            state.measure_all_requested = false;
         }
 
         let padding = style

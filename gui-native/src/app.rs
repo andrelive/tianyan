@@ -129,6 +129,7 @@ impl ClientApp {
             sessions_data: Vec::new(),
             // 切会话位置诊断倒计数（见字段文档）
             restore_probe: 0,
+            last_viewport_h: px(0.),
             collapsed_groups: std::collections::HashSet::new(),
             expanded_groups: std::collections::HashMap::new(),
             hovered_session: None,
@@ -251,7 +252,7 @@ impl ClientApp {
             dialog_input: None,
             messages,
             msg_scrolled_up: scrolled_up.clone(),
-            msg_list_state: new_msg_list_state(0, scrolled_up.clone()),
+            msg_list_state: new_msg_list_state(0, scrolled_up.clone(), px(0.)),
             older_btn_shown: std::cell::Cell::new(false),
             message_total: total,
             status: "正在连接后端…".to_string(),
@@ -787,8 +788,11 @@ impl ClientApp {
                     None
                 };
                 self.messages = Rc::new(rows);
-                self.msg_list_state =
-                    new_msg_list_state(self.messages.len(), self.msg_scrolled_up.clone());
+                self.msg_list_state = new_msg_list_state(
+                    self.messages.len(),
+                    self.msg_scrolled_up.clone(),
+                    self.last_viewport_h,
+                );
                 // 按 seq 找回同一条消息（替换后索引会变，seq 不变）
                 let restored = keep.and_then(|(seq, off)| {
                     self.messages
@@ -2022,6 +2026,7 @@ impl ClientApp {
                             this.msg_list_state = new_msg_list_state(
                                 this.messages.len(),
                                 this.msg_scrolled_up.clone(),
+                                this.last_viewport_h,
                             );
                             // 整页替换后把滚动锚点找回来（只按服务端下发的 seq 查表）
                             if let Some(seq) = anchor_seq {
@@ -2578,6 +2583,7 @@ pub(crate) fn diag_log(msg: &str) {
 pub(crate) fn new_msg_list_state(
     item_count: usize,
     scrolled_up: Rc<std::cell::Cell<bool>>,
+    seed_viewport_h: Pixels,
 ) -> GpuiListState {
     // overdraw = 视口上下各**预测量**多少像素。gpui 文档原话：它就是为了
     // 「滚动时不让列表闪烁/弹跳」（elements within this area will be measured
@@ -2629,6 +2635,10 @@ pub(crate) fn new_msg_list_state(
     // 是「打开工具卡片密集的会话时跳一下」的根治办法（外部手动 `scroll_to_end()`
     // 只能贴一次，而贴的那一刻高度还是估值）。
     state.set_follow_mode(gpui_kit::FollowMode::Tail);
+    // 预置视口高：没有它，首帧 `request_layout` 会拿 `overdraw`（1200px）当视口高，
+    // 「贴底」被算成「内容高 − 1200」，视口顶部比真实底部高 660px；下一帧拿到真实
+    // 高度后才修正 —— 用户看到的就是「第一次打开会话时闪一下」。
+    state.seed_viewport_height(seed_viewport_h);
     // 新构造 / 重置后一律贴底（`scrolled_up = false`）
     scrolled_up.set(false);
     state.set_scroll_handler(move |event, _window, _cx| {
