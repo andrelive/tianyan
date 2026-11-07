@@ -610,6 +610,11 @@ impl ClientApp {
             self.msg_list_state.scroll_to_end();
             self.msg_scrolled_up.set(false);
         }
+        // 首帧 prepaint 要把列表内元素发来的 autoscroll 请求压掉（vendor 里的 patch）：
+        // 焦点恢复会让可聚焦元素（卡片 / 复制按钮…）请求「把我滚进视口」，引擎会直接
+        // 用那个位置覆盖刚恢复好的阅读位置 —— 实测 `(150, 776)` 被改成 `(147, 9.3)`，
+        // 随后跟随又被带开，下一帧整表贴底。一次性抑制，之后交互不受影响。
+        self.msg_list_state.suppress_autoscroll_once();
         self.expand = snap.expand.unwrap_or_else(|| {
             Rc::new(std::cell::RefCell::new(crate::msg::ExpandState::default()))
         });

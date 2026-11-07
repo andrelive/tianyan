@@ -73,6 +73,16 @@ struct StateInner {
     measuring_behavior: ListMeasuringBehavior,
     pending_scroll: Option<PendingScroll>,
     follow_state: FollowState,
+    /// [天演 patch] 下一次 prepaint 不应用子元素发来的 autoscroll 请求。
+    ///
+    /// `List::prepaint` 在 `prepaint_items` 返回 `Err(autoscroll_request)` 时会把
+    /// `logical_scroll_top` 直接设成那个请求的位置 —— 也就是「列表里任何一个元素
+    /// 请求把它滚进视口」都能覆盖当前阅读位置。切回一个带可聚焦元素的会话时，
+    /// 焦点恢复会触发这类请求：实测位置被从 `(150, 776)` 改成 `(147, 9.3)`
+    /// （正是该分支「向上走进更早的项直到 offset >= 0」的形状），随后还带开了跟随。
+    ///
+    /// 恢复阅读位置的那一帧必须把它压掉；之后立刻复位，正常交互不受影响。
+    suppress_autoscroll: bool,
 }
 
 /// Deferred scroll adjustment applied after the scroll-top item has been remeasured.
@@ -325,6 +335,7 @@ impl ListState {
             measuring_behavior: ListMeasuringBehavior::default(),
             pending_scroll: None,
             follow_state: FollowState::default(),
+            suppress_autoscroll: false,
         })));
         this.splice(0..0, item_count);
         this
@@ -645,6 +656,14 @@ impl ListState {
     /// to the end.
     pub fn pause_following_tail(&self) {
         self.0.borrow_mut().follow_state.stop_following();
+    }
+
+    /// [天演 patch] 让**下一次** prepaint 忽略子元素发来的 autoscroll 请求。
+    ///
+    /// 用于「刚把阅读位置恢复好，不让焦点恢复把视口拽到别处」这一帧。
+    /// 一次性：应用后立即复位，之后所有正常滚动行为不变。
+    pub fn suppress_autoscroll_once(&self) {
+        self.0.borrow_mut().suppress_autoscroll = true;
     }
 
     /// Returns whether the list is currently actively following the
@@ -1564,7 +1583,12 @@ impl Element for List {
         {
             let new_items = SumTree::from_iter(
                 state.items.iter().map(|item| ListItem::Unmeasured {
-                    size_hint: None,
+                    // [天演 patch] 原来这里是 `None` —— 宽度一变就把**所有**已知高度
+                    // 丢掉，`summary().height` 在重测之前直接归零。而「是否已回到
+                    // 底部」这类判据全依赖它，归零后必然算错（实测：切回会话被误判
+                    // 成「已在底部」并开启跟随）。保留旧高度当估算值，项一经渲染就会
+                    // 被真实高度替换，既不影响正确性，也不会让总高瞬间归零。
+                    size_hint: item.size_hint(),
                     focus_handle: item.focus_handle(),
                 }),
                 (),
@@ -1577,16 +1601,44 @@ impl Element for List {
         let padding = style
             .padding
             .to_pixels(bounds.size.into(), window.rem_size());
-        let layout =
-            match state.prepaint_items(bounds, padding, true, &mut self.render_item, window, cx) {
-                Ok(layout) => layout,
-                Err(autoscroll_request) => {
-                    state.logical_scroll_top = Some(autoscroll_request);
-                    state
-                        .prepaint_items(bounds, padding, false, &mut self.render_item, window, cx)
-                        .unwrap()
+        // [天演 patch] 「恢复阅读位置的那一帧」压掉子元素的 autoscroll 请求：
+        // 否则列表内任何可聚焦元素（焦点恢复时）都能把视口从恢复好的位置拽走。
+        let suppress_autoscroll = state.suppress_autoscroll;
+        state.suppress_autoscroll = false;
+        let layout = match state.prepaint_items(
+            bounds,
+            padding,
+            !suppress_autoscroll,
+            &mut self.render_item,
+            window,
+            cx,
+        ) {
+            Ok(layout) => layout,
+            Err(autoscroll_request) => {
+                // [天演 patch] 诊断：这个分支一旦命中就会覆盖阅读位置，留一行痕迹
+                // （路径 = `%TEMP%\tianyan_list_diag.log`，无环境变量依赖）。
+                {
+                    use std::io::Write as _;
+                    let path = std::env::temp_dir().join("tianyan_list_diag.log");
+                    if let Ok(mut f) = std::fs::OpenOptions::new()
+                        .create(true)
+                        .append(true)
+                        .open(path)
+                    {
+                        let _ = writeln!(
+                            f,
+                            "[list] autoscroll 覆盖位置 -> ix={} off={:.1}",
+                            autoscroll_request.item_ix,
+                            f32::from(autoscroll_request.offset_in_item)
+                        );
+                    }
                 }
-            };
+                state.logical_scroll_top = Some(autoscroll_request);
+                state
+                    .prepaint_items(bounds, padding, false, &mut self.render_item, window, cx)
+                    .unwrap()
+            }
+        };
 
         state.last_layout_bounds = Some(bounds);
         state.last_padding = Some(padding);
