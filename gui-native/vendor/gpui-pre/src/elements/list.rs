@@ -1160,6 +1160,44 @@ impl StateInner {
         //
         // 表现：切回一个「上滚过」的会话，先跳到一个中间位置、再贴到底部（闪两下）。
         if available_width.is_some() && rendered_height - scroll_top.offset_in_item < available_height {
+            // [天演 patch] 诊断：位置被归一化改写的现场全部输入，一次打全。
+            // 路径 `%TEMP%\tianyan_list_diag.log`。要看的是：
+            //   rendered_h —— 从 scroll_top.item_ix 到末尾累计出来的高度；
+            //   first      —— 锚点那条自己是 Measured(已测) 还是 Unmeasured(未测 + 估算值)；
+            //   avail_w / avail_h —— 这次布局用的宽度与视口高；
+            //   total_h    —— summary().height（跟随判据用的就是它）。
+            {
+                use std::io::Write as _;
+                let path = std::env::temp_dir().join("tianyan_list_diag.log");
+                if let Ok(mut f) = std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(path)
+                {
+                    let anchor_heights = {
+                        let mut c = self.items.cursor::<Count>(());
+                        c.seek(&Count(scroll_top.item_ix), Bias::Right);
+                        c.item().map(|item| {
+                            (
+                                item.size().map(|s| f32::from(s.height)),
+                                item.size_hint().map(|s| f32::from(s.height)),
+                            )
+                        })
+                    };
+                    let _ = writeln!(
+                        f,
+                        "[list] normalize ix={} off={:.1} rendered_h={:.1} avail_h={:.1} avail_w={:?} items={} total_h={:.1} anchor(measured,unmeasured_hint)={:?}",
+                        scroll_top.item_ix,
+                        f32::from(scroll_top.offset_in_item),
+                        f32::from(rendered_height),
+                        f32::from(available_height),
+                        available_width.map(f32::from),
+                        self.items.summary().count,
+                        f32::from(self.items.summary().height),
+                        anchor_heights
+                    );
+                }
+            }
             while rendered_height < available_height {
                 cursor.prev();
                 if let Some(item) = cursor.item() {
@@ -1249,6 +1287,26 @@ impl StateInner {
             let total_height = self.items.summary().height + padding.top + padding.bottom;
             let scroll_offset = self.scroll_top(&scroll_top);
             if scroll_offset + available_height >= total_height - px(1.0) {
+                // [天演 patch] 诊断：误开跟随时把等式两边的数都留下
+                {
+                    use std::io::Write as _;
+                    let path = std::env::temp_dir().join("tianyan_list_diag.log");
+                    if let Ok(mut f) = std::fs::OpenOptions::new()
+                        .create(true)
+                        .append(true)
+                        .open(path)
+                    {
+                        let _ = writeln!(
+                            f,
+                            "[list] start_following scroll_offset={:.1} + avail_h={:.1} >= total_h={:.1} - 1  (ix={} off={:.1})",
+                            f32::from(scroll_offset),
+                            f32::from(available_height),
+                            f32::from(total_height),
+                            scroll_top.item_ix,
+                            f32::from(scroll_top.offset_in_item)
+                        );
+                    }
+                }
                 self.follow_state.start_following();
             }
         }
