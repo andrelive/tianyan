@@ -814,8 +814,13 @@ impl ClientApp {
                     // 靠累计高度反查位置，一跨过它们就会跳过好几条（用户实测：
                     // 上滚到用户消息附近会跳过去 / 速度突然变快）。先补估值，
                     // 下一次布局再全量测量收敛到真值。
-                    self.msg_list_state
-                        .set_uniform_item_height(px(MSG_ROW_HEIGHT_HINT));
+                    // 估值优先用已有项的**真实平均**：TanStack Virtual 的官方建议是
+                    // 「估小了必然在测量后展开，从而滚动跳跃」，所以别凭空给常数。
+                    let hint = self
+                        .msg_list_state
+                        .average_item_height()
+                        .unwrap_or(px(MSG_ROW_HEIGHT_HINT));
+                    self.msg_list_state.set_uniform_item_height(hint);
                     self.msg_list_state.remeasure_all();
                 }
                 // 位置：只有「用户本来滚在历史里」且锚点还能找到、并且确实与当前值
@@ -2215,8 +2220,12 @@ impl ClientApp {
                     // `scroll()` 正是靠累计高度反查位置 —— 一跨过这些 0 高度项就会
                     // 跳过好几条（用户实测「上滚到用户消息附近跳过去 / 速度突变」）。
                     // 先补一个估值，紧接着的 `remeasure_all` 会在下次布局量出真值。
-                    this.msg_list_state
-                        .set_uniform_item_height(px(MSG_ROW_HEIGHT_HINT));
+                    // 估值优先用已有项的真实平均（估小了必跳，见 `MSG_ROW_HEIGHT_HINT`）。
+                    let hint = this
+                        .msg_list_state
+                        .average_item_height()
+                        .unwrap_or(px(MSG_ROW_HEIGHT_HINT));
+                    this.msg_list_state.set_uniform_item_height(hint);
                     this.msg_list_state.remeasure_all();
                 }
                 this.message_total = this.messages.len();
@@ -2577,7 +2586,16 @@ impl ClientApp {
 ///
 /// 取值 280：接近消息项高度的中位数（短 user 气泡 60–120，长回复上千）。
 /// 太大 → 测量后收缩、视口内容下移；太小 → 仍会跨项。
-pub(crate) const MSG_ROW_HEIGHT_HINT: f32 = 280.;
+/// 消息项的**默认估值**（没有已测量项可参考时用）。
+///
+/// 取 600 而不是 280：TanStack Virtual 的官方建议是「估值宁可偏大 —— 估小了必然在
+/// 测量后展开，从而产生滚动跳跃；估大了测量后收缩，观感自然」。我们的消息高度方差
+/// 极大（user 气泡 ~70px ↔ 长回复/工具卡片 2000px+），280 属于系统性低估，等于让
+/// 每一条被量出来时都"变大"，滚动就一路在跳。
+///
+/// 更准的做法是用 [`GpuiListState::average_item_height`] 按已有项的真实平均来估；
+/// 这个常量只在完全没有参考（首次进入会话）时兜底。
+pub(crate) const MSG_ROW_HEIGHT_HINT: f32 = 600.;
 
 /// 诊断日志（仅用于排查滚动/保位这类“看不见的状态”问题）。
 ///

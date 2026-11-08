@@ -471,6 +471,30 @@ impl ListState {
         self.apply_uniform_item_height(height);
     }
 
+    /// [天演 patch] 当前列表里**已测量项的平均高度**，给「估值」用。
+    ///
+    /// 为什么要它：TanStack Virtual 的官方建议是「估值宁可偏大 —— 估小了必然在
+    /// 测量后展开，从而产生滚动跳跃」。我们原来用固定 280px，而消息动辄 2000+，
+    /// 是系统性低估，于是每量一条都在「变大」，滚动条随之跳。
+    /// 用已有项的真实平均来估新项，量级就对上了，测量后的变化幅度只剩个位数百分比。
+    pub fn average_item_height(&self) -> Option<Pixels> {
+        let state = &*self.0.borrow();
+        let mut measured = 0usize;
+        let mut total = px(0.);
+        let mut cursor = state.items.cursor::<Count>(());
+        for item in cursor.by_ref() {
+            if let Some(size) = item.size() {
+                measured += 1;
+                total += size.height;
+            }
+        }
+        if measured == 0 {
+            None
+        } else {
+            Some(total / measured as f32)
+        }
+    }
+
     /// Remeasure all items while preserving proportional scroll position.
     ///
     /// Use this when item heights may have changed (e.g., font size changes)
