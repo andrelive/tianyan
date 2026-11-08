@@ -821,7 +821,12 @@ impl ClientApp {
                         .average_item_height()
                         .unwrap_or(px(MSG_ROW_HEIGHT_HINT));
                     self.msg_list_state.set_uniform_item_height(hint);
-                    self.msg_list_state.remeasure_all();
+                    // ⚠️ **不要**再 `remeasure_all()`：那会把全部 151 项重新
+                    // render+layout 一遍（markdown 渲染很贵），那一帧高度模型整个重建，
+                    // 位置就跳一下 —— 现象正是「有时跳有时不跳」「滚动不丝滑」
+                    // （只在快照帧/加载帧撞上整表重测时才跳）。
+                    // 新项已经有上面这句 hint，会在 overdraw 覆盖范围内被正常测量
+                    // 逐步收敛，不需要整表重来。
                 }
                 // 位置：只有「用户本来滚在历史里」且锚点还能找到、并且确实与当前值
                 // 不同时才动它。在底部（`keep` 为 None）就交给跟随，一句都不必写。
@@ -2210,7 +2215,8 @@ impl ClientApp {
                     //
                     // 当初改用 reset 的理由是「`splice` 给新项设 `size_hint: None`
                     // （视作 0px），一页 50 条会让人按累计高度反查时跨项」。那个问题
-                    // 现在由 `remeasure_all()` 解决：下一次布局把这些新项也量成真实
+                    // 现在由 `set_uniform_item_height`（补估值）+ overdraw 范围内的
+                    // 正常测量解决：新项会在滚动到它们附近时被逐步量成真实高度
                     // 高度，不必牺牲位置稳定性。
                     //
                     // `splice(0..0, added)` 会把 `logical_scroll_top.item_ix` 自动 +added
@@ -2219,14 +2225,17 @@ impl ClientApp {
                     // `splice` 把新项建成「无 hint」= 0px，累计高度因此偏小；而
                     // `scroll()` 正是靠累计高度反查位置 —— 一跨过这些 0 高度项就会
                     // 跳过好几条（用户实测「上滚到用户消息附近跳过去 / 速度突变」）。
-                    // 先补一个估值，紧接着的 `remeasure_all` 会在下次布局量出真值。
-                    // 估值优先用已有项的真实平均（估小了必跳，见 `MSG_ROW_HEIGHT_HINT`）。
+                    // 先补一个估值（优先用已有项的真实平均，估小了必跳，见
+                    // `MSG_ROW_HEIGHT_HINT`），新项随后在 overdraw 覆盖范围内被正常
+                    // 测量收敛。
+                    //
+                    // ⚠️ **不要** `remeasure_all()`：整表重测一帧会让位置跳一下
+                    // （「有时跳有时不跳」「不丝滑」就是这个）。
                     let hint = this
                         .msg_list_state
                         .average_item_height()
                         .unwrap_or(px(MSG_ROW_HEIGHT_HINT));
                     this.msg_list_state.set_uniform_item_height(hint);
-                    this.msg_list_state.remeasure_all();
                 }
                 this.message_total = this.messages.len();
                 // 标题跟着走（「还有更早」随 has_more 出现/消失）
