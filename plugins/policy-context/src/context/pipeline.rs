@@ -966,6 +966,51 @@ mod tests {
         assert_eq!(ctx.memories, vec!["User prefers dark mode."]);
     }
 
+    /// 访问计数只记「**真正进了上下文**」的条目（`touch_access` 的调用契约）。
+    ///
+    /// 判别力（三种真实缺陷各对应一条断言）：
+    /// - 实现改成「检索到就计数」→ 被语义门槛丢掉的那条也会出现；
+    /// - 规则也一起计数 → `agent/learned/*` 会出现在记录里；
+    /// - 压根不记账（漏调用，或后端退回默认空操作）→ 记录为空。
+    ///
+    /// 为什么值得锁：记忆页的「访问次数」和后续的动态重要性都只吃这一个数，
+    /// 虚高（噪声条目也算）和恒零（没人记账）都会让权重失去意义 —— 而后者在
+    /// 界面上和前者难以区分（都只是「数字不动」）。
+    #[tokio::test]
+    async fn test_run_records_access_only_for_injected_memories() {
+        let soul_uri = AgentPath::Soul.uri();
+        let rule_uri = make_uri(ContextNamespace::Agent, &["learned", "rule1"]);
+        let hit = make_uri(ContextNamespace::Memory, &["facts", "hit"]);
+        let noise = make_uri(ContextNamespace::Memory, &["facts", "noise"]);
+        let vfs = Arc::new(
+            MockVfs::builder()
+                .with_content(&soul_uri, ContentLevel::Detail, "soul")
+                .with_content(&rule_uri, ContentLevel::Overview, "规则：先验证再改。")
+                .with_content(&hit, ContentLevel::Overview, "用户偏好深色模式。")
+                .with_content(&hit, ContentLevel::Detail, "用户偏好深色模式。")
+                .with_content(&noise, ContentLevel::Overview, "很久以前的一条无关记忆。")
+                .with_content(&noise, ContentLevel::Detail, "很久以前的一条无关记忆。")
+                .with_search_results(vec![
+                    make_search_result(&rule_uri, 0.95),
+                    make_search_result(&hit, 0.90),
+                    // 检索命中但远低于语义门槛（`min_combined_score`）——不该注入，也不该计数
+                    make_search_result(&noise, 0.02),
+                ])
+                .build(),
+        );
+        let (pipeline, vfs) = make_pipeline(vfs);
+        let mut conversation = vec![];
+
+        let (ctx, _) = pipeline.run("test", &mut conversation, 0).await.unwrap();
+
+        assert_eq!(ctx.memories, vec!["用户偏好深色模式。"]);
+        assert_eq!(
+            vfs.touch_calls(),
+            vec![hit.to_string()],
+            "只有真正注入上下文的那条记忆算「被使用」：规则不算、被门槛丢掉的不算"
+        );
+    }
+
     #[tokio::test]
     async fn test_run_memories_retrieval_error_returns_empty() {
         let soul_uri = AgentPath::Soul.uri();

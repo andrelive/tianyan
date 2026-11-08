@@ -43,6 +43,8 @@ pub struct MockVfs {
     moved: RwLock<Vec<(String, String)>>,
     /// 向量更新错误（Some = 模拟 update_summary_vectors 失败）。
     summary_vector_error: RwLock<Option<String>>,
+    /// touch_access 调用记录（uri 字符串），供断言「被使用」的记账语义。
+    touched: RwLock<Vec<String>>,
 }
 
 impl MockVfs {
@@ -57,6 +59,7 @@ impl MockVfs {
             search_error: RwLock::new(None),
             moved: RwLock::new(vec![]),
             summary_vector_error: RwLock::new(None),
+            touched: RwLock::new(vec![]),
         }
     }
 
@@ -156,6 +159,14 @@ impl MockVfs {
     /// 返回 move_entry 调用记录（(src, dst) 字符串对）。
     pub fn move_calls(&self) -> Vec<(String, String)> {
         self.moved.read().unwrap().clone()
+    }
+
+    /// 返回 touch_access 调用记录（uri 字符串，按调用顺序）。
+    ///
+    /// 用于断言 [`VirtualFileSystem::touch_access`] 的调用契约：
+    /// 只有「检索命中并**真正注入上下文**」的条目才该出现在这里。
+    pub fn touch_calls(&self) -> Vec<String> {
+        self.touched.read().unwrap().clone()
     }
 
     /// 设置搜索结果。
@@ -325,7 +336,18 @@ impl VfsSearch for MockVfs {
     }
 }
 
-impl VirtualFileSystem for MockVfs {}
+#[async_trait]
+impl VirtualFileSystem for MockVfs {
+    /// 记录一次「被使用」，而不是走默认的空操作。
+    ///
+    /// 默认实现什么都不做 —— 那样「只有真正进了上下文的条目才计数」这条契约在
+    /// 测试里**不可观测**：把计数扩到「检索命中的全部结果」或「规则也算使用」
+    /// 都照样全绿（用户侧表现为记忆页的访问次数莫名虚高，且重要性排序被污染）。
+    async fn touch_access(&self, uri: &TianyanUri) -> Result<()> {
+        self.touched.write().unwrap().push(uri.to_string());
+        Ok(())
+    }
+}
 
 // ── MockVfsBuilder ───────────────────────────────────────────────────────
 
