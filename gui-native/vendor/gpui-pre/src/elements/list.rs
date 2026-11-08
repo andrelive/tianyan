@@ -1141,6 +1141,15 @@ impl StateInner {
         let mut rendered_height = padding.top;
         let mut max_item_width = px(0.);
         let mut scroll_top = self.logical_scroll_top();
+        // [天演 patch] 记下「进入本次布局时的锚点索引」。
+        //
+        // 下面「恢复跟随」的判据要用它做一道硬门槛：只有锚点已经是**最后一条**
+        // （或越界到末尾之后）时才允许重新开启跟随。否则只要 `summary().height`
+        // 在某帧变小（项被重新测量、内容更新都会），`scroll_offset + available
+        // >= total - 1` 就会在一个很靠上的位置成立 —— 于是 `start_following()`
+        // 把下一帧的位置设成「末尾之后」，再归一化成贴底：用户上滚得越多越容易
+        // 撞上，表现正是「滚得多了就跳回最底部」。
+        let entry_anchor_ix = scroll_top.item_ix;
 
         // [天演 patch] 测量结果的写回策略。
         //
@@ -1437,7 +1446,15 @@ impl StateInner {
             let padding = self.last_padding.unwrap_or_default();
             let total_height = self.items.summary().height + padding.top + padding.bottom;
             let scroll_offset = self.scroll_top(&scroll_top);
-            if scroll_offset + available_height >= total_height - px(1.0) {
+            // [天演 patch] 硬门槛：**锚点必须已经是最后一条**（或越界到末尾之后）。
+            //
+            // 只看 `scroll_offset + available >= total - 1` 是不够的：`total_height`
+            // 会随项目被重新测量而变小，那一瞬间一个很靠上的位置也能满足这个不等式，
+            // 于是 `start_following()` 把下一帧设成「末尾之后」→ 归一化成贴底。
+            // 用户上滚得越多（越靠上、上方未测项越多），越容易撞上——正是「滚多了
+            // 就跳回最底部」。
+            let anchor_is_tail = entry_anchor_ix + 1 >= self.items.summary().count;
+            if anchor_is_tail && scroll_offset + available_height >= total_height - px(1.0) {
                 // [天演 patch] 诊断：误开跟随时把等式两边的数都留下
                 {
                     use std::io::Write as _;
