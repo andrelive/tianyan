@@ -145,6 +145,9 @@ impl FollowState {
         matches!(self, FollowState::Tail { is_following: true })
     }
 
+    // [天演 patch] 布局侧不再用这个判据恢复跟随（见 `layout_items` 里的说明），
+    // 保留定义是为了让 `FollowState` 的语义完整、便于将来排错。
+    #[allow(dead_code)]
     fn has_stopped_following(&self) -> bool {
         matches!(
             self,
@@ -1037,8 +1040,18 @@ impl StateInner {
             self.logical_scroll_top = Some(scroll_top);
         }
 
+        // [天演 patch] 跟随状态**只由用户的滚动动作决定**：
+        //   上滚 → 停跟随；滚到 `scroll_max`（内容末尾）→ 重新跟随。
+        //
+        // 原来「恢复跟随」是布局阶段按
+        // `scroll_offset + available >= total - 1` 判的，而 `total` 会随项目测量
+        // 变化，一个还在长消息中间的位置也可能满足 —— 那会把用户直接拽到最底部。
+        // 改成在这里判：`new_scroll_top` 已经过 `scroll_max` 钳制，语义明确。
         if delta.y > px(0.) {
             self.follow_state.stop_following();
+        }
+        if new_scroll_top >= scroll_max - px(1.0) {
+            self.follow_state.start_following();
         }
 
         if let Some(handler) = self.scroll_handler.as_mut() {
@@ -1433,51 +1446,23 @@ impl StateInner {
         new_items.append(cursor.suffix(), ());
         self.items = new_items;
 
-        // If follow_tail mode is on but the user scrolled away
-        // (is_following is false), check whether the current scroll
-        // position has returned to the bottom.
+        // [天演 patch] **不再在布局里自动恢复跟随。**
         //
-        // [天演 patch] 同上：宽度未知时 `summary().height` 与 `scroll_offset` 都是按
-        // `MaxContent` 量出来的，判据「是否已回到尾部」会得出错误结论。实测这里
-        // 把一个「距底还有 780px」的位置判成「已在底部」并 `start_following()`，
-        // 之后每帧都在 `layout_items` 开头把 `scroll_top` 设成「末尾之后」——
-        // 一旦开启就再也不会自己回去。
-        if available_width.is_some() && offset_plausible && self.follow_state.has_stopped_following() {
-            let padding = self.last_padding.unwrap_or_default();
-            let total_height = self.items.summary().height + padding.top + padding.bottom;
-            let scroll_offset = self.scroll_top(&scroll_top);
-            // [天演 patch] 硬门槛：**锚点必须已经是最后一条**（或越界到末尾之后）。
-            //
-            // 只看 `scroll_offset + available >= total - 1` 是不够的：`total_height`
-            // 会随项目被重新测量而变小，那一瞬间一个很靠上的位置也能满足这个不等式，
-            // 于是 `start_following()` 把下一帧设成「末尾之后」→ 归一化成贴底。
-            // 用户上滚得越多（越靠上、上方未测项越多），越容易撞上——正是「滚多了
-            // 就跳回最底部」。
-            let anchor_is_tail = entry_anchor_ix + 1 >= self.items.summary().count;
-            if anchor_is_tail && scroll_offset + available_height >= total_height - px(1.0) {
-                // [天演 patch] 诊断：误开跟随时把等式两边的数都留下
-                {
-                    use std::io::Write as _;
-                    let path = std::env::temp_dir().join("tianyan_list_diag.log");
-                    if let Ok(mut f) = std::fs::OpenOptions::new()
-                        .create(true)
-                        .append(true)
-                        .open(path)
-                    {
-                        let _ = writeln!(
-                            f,
-                            "[list] start_following scroll_offset={:.1} + avail_h={:.1} >= total_h={:.1} - 1  (ix={} off={:.1})",
-                            f32::from(scroll_offset),
-                            f32::from(available_height),
-                            f32::from(total_height),
-                            scroll_top.item_ix,
-                            f32::from(scroll_top.offset_in_item)
-                        );
-                    }
-                }
-                self.follow_state.start_following();
-            }
-        }
+        // 原判据是 `scroll_offset + available_height >= total_height - 1`，其中
+        // `total_height = items.summary().height` 会随项目被重新测量而变化 ——
+        // 它一变小，任何位置都能满足这个不等式，于是 `start_following()` 把下一帧
+        // 的 `scroll_top` 设成「末尾之后」→ 归一化成贴底。
+        //
+        // 之前试过两道门槛（宽度已知、锚点已测、锚点必须是最后一条）都挡不住：
+        // 最后一条消息往往就是很长的那条（工具卡片 / 长回复），用户滚到它**内部**
+        // 时锚点仍然是最后一条，判据照样能成立 —— 用户实测「滚到长回复中间再切回
+        // 就跳到最底部」。
+        //
+        // 恢复跟随改由**用户滚动**驱动（见 `scroll()`：只有真的滚到 `scroll_max`
+        // 才重新开启），布局这一侧永远不再自作主张。应用层本身还有
+        // `msg_scrolled_up` + `scroll_to_end_if_following` 这套自己的跟随语义，
+        // 不依赖引擎的自动恢复。
+        let _ = (offset_plausible, entry_anchor_ix);
 
         // If none of the visible items are focused, check if an off-screen item is focused
         // and include it to be rendered after the visible items so keyboard interaction continues
