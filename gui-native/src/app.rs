@@ -2657,7 +2657,13 @@ pub(crate) fn new_msg_list_state(
     // `splice(0..0, n)` 前插时只要 item_ix 后移 n 指回同一项，画面就纹丝不动。
     // 代价：Top 对齐不会自动贴底（Bottom 才用 None 表示末尾），由调用方在数据
     // 就绪后显式 `scroll_to_end()`（见 `load_messages` / `reset_msg_list_state`）。
-    let state = GpuiListState::new(item_count, ListAlignment::Top, px(1200.))
+    // overdraw 1200 → 2400：gpui 文档对这个参数的原话就是「滚动时不让列表闪烁/弹跳
+    // （elements within this area will be measured even though they are not visible）」。
+    // 1200px ≈ 2 屏，向上滚到「用户消息 + 它上方的高元素」交界时，需要新测量的项
+    // 正好落在测量窗口边缘 —— 于是出现「边滚边测」的单帧不一致（视觉上是闪一下）。
+    // 2400px ≈ 4 屏，把一次连续滚动会经过的区域提前量完。
+    // 代价：每帧多测量几条（markdown 渲染是主要开销），可接受。
+    let state = GpuiListState::new(item_count, ListAlignment::Top, px(2400.))
         .with_uniform_item_height(px(MSG_ROW_HEIGHT_HINT))
         .measure_all();
     // 交给引擎自己贴底（Tail）。

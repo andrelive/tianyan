@@ -1827,7 +1827,12 @@ impl Element for List {
                     } else {
                         // If we don't have the last layout bounds (first render),
                         // we might just use the overdraw value as the available height to layout enough items.
-                        state.overdraw
+                        //
+                        // [天演 patch] 但 overdraw 本身可能远大于视口（我们设 2400px：
+                        // 它是「上下各预测量多少」的参数，不是视口高）。拿它当视口高会
+                        // 让「贴底」被算成 `总高 - 2400`，比真实底部高出一千多像素。
+                        // 这里加个上限，贴近典型视口高度即可。
+                        state.overdraw.min(px(600.))
                     };
                     let padding = style.padding.to_pixels(
                         state.last_layout_bounds.unwrap_or_default().size.into(),
