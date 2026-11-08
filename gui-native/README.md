@@ -18,6 +18,9 @@
 `tauri/` 已于 2026-10 删除；`gui-vite/` 保留作对照前端（同一套 HTTP/SSE 协议），不随包发布。
 
 技术选型：**`gpui-kit 0.6`**（Longbridge 门面，绑 `gpui-pre 0.3.6` 快照）。
+快照经 `Cargo.toml` 的 `[patch.crates-io]` 接入 `vendor/gpui-pre`，其中
+`src/elements/list.rs` 带 21 处本地修改（消息列表的滚动位置与保位），清单见
+[`vendor/gpui-pre/PATCHES.md`](vendor/gpui-pre/PATCHES.md)。
 不直接用官方 `gpui`（crates.io 停在 0.2.2、315 天未发版），也不用 `gpui-ce`（采用面小）。
 
 ## 实测量总表（本机 Windows，非调研推测）

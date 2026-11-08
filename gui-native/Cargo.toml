@@ -101,14 +101,13 @@ ttf-parser = { opt-level = 3 }
 
 # ── 本地 patch 的 gpui-pre ──────────────────────────────────────────────
 #
-# gpui-pre/src/elements/list.rs 的 layout_items 会在**宽度未知**时
-# （List::request_layout 传 `available_width = None）也做两件事：
-#   1. 「下方不足一屏就把位置重算成底部对齐」；
-#   2. 「回到尾部就恢复跟随」判定。
-# 宽度未知时元素按 MaxContent 布局，长消息不换行，量出的高度只有真实值的零头
-# （实测同一条 450 vs 2156），这两条判据因此全会错 —— 直接后果是切回会话时
-# 位置被改成贴底并开启跟随。两处都加了 `available_width.is_some() 前置条件。
+# 这是一份**维护中的分叉**，不是可随手 `cargo update` 的依赖：
+# `vendor/gpui-pre/src/elements/list.rs` 里有 21 处本地修改（标记
+# `[天演 patch]`），修的是上游的滚动位置缺陷（宽度未知时按 MaxContent 量高度、
+# 布局层自动归一化成贴底、`scroll()` 先减后钳）。
 #
-# 升级 gpui-pre 时必须同步这两处（搜索「[天演 patch]」）。
+# 修改清单、每处的理由与**升级流程**见 `vendor/gpui-pre/PATCHES.md`。
+# 升级 gpui-pre 时必须逐条平移这 21 处，否则切回会话跳变会静默复活
+# （编译照过、单测照绿，只有用户切回时才表现为「又跳了」）。
 [patch.crates-io]
 gpui-pre = { path = "vendor/gpui-pre" }
