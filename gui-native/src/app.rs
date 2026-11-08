@@ -801,15 +801,23 @@ impl ClientApp {
                 // 位置完全不动 —— 快照帧于是变成一次「无感刷新」。
                 let n = self.messages.len();
                 let old_items = self.msg_list_state.item_count();
-                if n > old_items {
+                // 只有条数真的变了才动列表状态：快照帧绝大多数时候条数不变，
+                // 那时什么都不该做（每帧全量测量 151 项会把滚动拖卡）。
+                if n != old_items {
+                    if n > old_items {
+                        self.msg_list_state
+                            .splice(old_items..old_items, n - old_items);
+                    } else {
+                        self.msg_list_state.splice(n..old_items, 0);
+                    }
+                    // 新项是「无 hint」= 0px，累计高度因此偏小 —— 而 `scroll()` 正是
+                    // 靠累计高度反查位置，一跨过它们就会跳过好几条（用户实测：
+                    // 上滚到用户消息附近会跳过去 / 速度突然变快）。先补估值，
+                    // 下一次布局再全量测量收敛到真值。
                     self.msg_list_state
-                        .splice(old_items..old_items, n - old_items);
-                } else if n < old_items {
-                    self.msg_list_state.splice(n..old_items, 0);
+                        .set_uniform_item_height(px(MSG_ROW_HEIGHT_HINT));
+                    self.msg_list_state.remeasure_all();
                 }
-                // 内容可能整表换过（工具卡片结果更新等）→ 下次布局重新全量测量，
-                // 否则按旧高度排版会出现「同一位置忽高忽低」。
-                self.msg_list_state.remeasure_all();
                 // 位置：只有「用户本来滚在历史里」且锚点还能找到、并且确实与当前值
                 // 不同时才动它。在底部（`keep` 为 None）就交给跟随，一句都不必写。
                 if let Some((seq, off)) = keep {
@@ -2203,6 +2211,12 @@ impl ClientApp {
                     // `splice(0..0, added)` 会把 `logical_scroll_top.item_ix` 自动 +added
                     // —— 正好跟着同一条消息走，用户正看着的那一行纹丝不动。
                     this.msg_list_state.splice(0..0, added);
+                    // `splice` 把新项建成「无 hint」= 0px，累计高度因此偏小；而
+                    // `scroll()` 正是靠累计高度反查位置 —— 一跨过这些 0 高度项就会
+                    // 跳过好几条（用户实测「上滚到用户消息附近跳过去 / 速度突变」）。
+                    // 先补一个估值，紧接着的 `remeasure_all` 会在下次布局量出真值。
+                    this.msg_list_state
+                        .set_uniform_item_height(px(MSG_ROW_HEIGHT_HINT));
                     this.msg_list_state.remeasure_all();
                 }
                 this.message_total = this.messages.len();

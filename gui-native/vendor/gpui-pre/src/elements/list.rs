@@ -456,6 +456,21 @@ impl ListState {
         state.items = tree;
     }
 
+    /// [天演 patch] 给「未测量」的项补一个高度 hint（已测量的项保持真实值）。
+    ///
+    /// 用于 `splice` 之后：`splice` 把新项建成 `Unmeasured { size_hint: None }`，
+    /// 而 `ListItemSummary::height` 对 `None` 计 **0px** —— 累计高度因此严重偏小。
+    /// `scroll()` 里靠累计高度反查位置（`items.find(&Height(new_scroll_top))`），
+    /// 一跨过这些「0 高度」的项就会跳过好几条：用户实测「向上滚动到用户消息附近
+    /// 会跳过去 / 速度突然变快」正是这个（用户消息本身矮，上方又是高元素，
+    /// 误差在那里最刺眼）。
+    ///
+    /// `apply_uniform_item_height` 只在项没有 hint 时补、已有真实高度不动，
+    /// 所以补完 hint 之后紧接着 `remeasure_all()` 就能让高度逐步收敛到真值。
+    pub fn set_uniform_item_height(&self, height: Pixels) {
+        self.apply_uniform_item_height(height);
+    }
+
     /// Remeasure all items while preserving proportional scroll position.
     ///
     /// Use this when item heights may have changed (e.g., font size changes)
