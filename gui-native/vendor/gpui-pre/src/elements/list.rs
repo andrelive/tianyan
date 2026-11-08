@@ -1065,12 +1065,84 @@ impl StateInner {
             self.pending_scroll = None;
             self.logical_scroll_top = None;
         } else {
-            let (start, ..) =
-                self.items
-                    .find::<ListItemSummary, _>((), &Height(new_scroll_top), Bias::Right);
+            // [天演 patch] **逐项行走**，不再用「按全表累计高度反查」。
+            //
+            // 原来那句 `items.find(&Height(new_scroll_top))` 会把落点建立在**全表**
+            // 累计高度上：任何一项高度不准（未测量项按 `size_hint` 甚至 0 计），
+            // 误差都会线性放大成落点偏差 —— 误差大时跨过几条，误差小时偏几十到
+            // 几百 px。这就是「向上滚动遇到用户消息附近跳过 / 上下跳」的来源，
+            // 也是 TanStack Virtual 文档里那句「estimateSize 设得太小会导致项在
+            // 测量后展开，从而产生滚动跳跃」在逻辑坐标体系下的表现。
+            //
+            // 逐项行走只依赖「当前项到目标项」这一小段的高度：跨到一项没测过的，
+            // 最坏也只是那一条的估值差（几十 px 量级），不会跳几屏。
+            // 位置表达仍是逻辑坐标（`item_ix + offset_in_item`），所以渲染侧
+            // 「同一条消息同一处」的语义不变。
+            let count = self.items.summary().count;
+            let mut ix = scroll_top.item_ix.min(count);
+            let mut offset = if ix < count {
+                scroll_top.offset_in_item.max(px(0.))
+            } else {
+                px(0.)
+            };
+            // 取某项高度：已测量用真值，否则退回估值（没有 hint 时给一个中位数量级）。
+            let height_at = |items: &SumTree<ListItem>, ix: usize| -> Pixels {
+                let mut cursor = items.cursor::<Count>(());
+                cursor.seek(&Count(ix), Bias::Right);
+                cursor
+                    .item()
+                    .map(|item| {
+                        item.size()
+                            .or_else(|| item.size_hint())
+                            .map_or(px(600.), |size| size.height)
+                    })
+                    .unwrap_or(px(600.))
+            };
+
+            // 上滚：视口顶部向上移动，先吃掉当前项内的 offset，再逐项往前。
+            let mut d = delta.y;
+            while d > px(0.) {
+                if offset >= d {
+                    offset -= d;
+                    d = px(0.);
+                    break;
+                }
+                d -= offset;
+                offset = px(0.);
+                if ix == 0 {
+                    break;
+                }
+                ix -= 1;
+                let h = height_at(&self.items, ix);
+                if h >= d {
+                    offset = h - d;
+                    break;
+                } else {
+                    d -= h;
+                }
+            }
+            // 下滚：先吃掉当前项剩余部分，再逐项往后。
+            while d < px(0.) {
+                let h = height_at(&self.items, ix);
+                let remaining_in_item = (h - offset).max(px(0.));
+                let want = -d;
+                if remaining_in_item > want {
+                    offset += want;
+                    break;
+                }
+                d += remaining_in_item;
+                ix += 1;
+                offset = px(0.);
+                if ix >= count {
+                    // 落到「末尾之后」= 贴底意图，交给 layout 的归一化展开。
+                    ix = count;
+                    offset = px(0.);
+                    d = px(0.);
+                }
+            }
             let scroll_top = ListOffset {
-                item_ix: start.count,
-                offset_in_item: new_scroll_top - start.height,
+                item_ix: ix,
+                offset_in_item: offset.max(px(0.)),
             };
             // The user's scroll supersedes the position stashed by a
             // remeasure; re-anchor the pending adjustment so it doesn't revert
