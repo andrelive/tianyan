@@ -322,18 +322,6 @@ impl ClientApp {
         // 一律贴底）。字段顺序若写成「先 replace 再读」，读到的就是已经被清掉的
         // false，于是"用户滚离过底部"这个事实在 park 时就被抹掉，切回必然贴底。
         let msg_scrolled_up_at_park = self.msg_scrolled_up.get();
-        // 诊断：park 那一刻的真实位置与意图。
-        //
-        // 前面几轮都在查「切回后为什么贴底」，日志却显示 restore 侧一切正常
-        // （`scrolled_up=true`、偏移没被钳）。把 park 侧也打出来才能分清：
-        // 究竟是「切回丢的」还是「切走前就已经在底部」。
-        crate::app::diag_log(&format!(
-            "[保位] park id={:?} len={} {} scrolled_up={}",
-            self.current_session,
-            self.messages.len(),
-            pos_brief(&self.msg_list_state),
-            msg_scrolled_up_at_park
-        ));
         let snap = SessionSnapshot {
             // 记下 park 时的事件流代际：切回时据此判断这份投影还能不能当权威内容
             // （见 `projection_usable`；跨代说明断线重连过，缺口不可恢复）。
@@ -843,23 +831,6 @@ impl ClientApp {
         // （整轮不会被切开，见 [`MESSAGE_BASE`] 的注释），前端只要按
         // `next_before_seq` 游标走。
         let use_projection = matches!(restored, RestoreOutcome::Fresh);
-        // 诊断：切回时的决策输入（排查「切回贴底」）
-        crate::app::diag_log(&format!(
-            "[保位] open id={} outcome={:?} len={} {} scrolled_up={}",
-            id,
-            restored,
-            self.messages.len(),
-            pos_brief(&self.msg_list_state),
-            self.msg_scrolled_up.get()
-        ));
-        // 诊断（第 2 探针）：接下来几帧在 `render` 里各打一次位置。
-        //
-        // 上面那行 `open` 是在 `restore_view_state()` 刚 `scroll_to()` 完、layout 还没
-        // 跑的时刻读的，它等于 park 值本身。而实测证明 `cx.defer` 测不到布局之后
-        // （嵌套三层的回调在同一次绘制前被一次性 flush，时间戳相差 < 1ms、并且
-        // `viewport_bounds()` 全为 0），所以改挂到 `render` 开头：那里读到的是**上
-        // 一帧 layout 跑完之后**的位置。
-        self.restore_probe = 6;
         // 历史窗口是否为空：为空说明「有订阅但没有内容」——下面要**强制重订阅**，
         // 因为 resident 幂等会把正常重发挡掉，而这个会话可能从来没拿到过快照
         // （vite `useSessionHistory` 的 `needForce` 同口径）。
@@ -883,13 +854,6 @@ impl ClientApp {
                 .get(anchor.item_ix)
                 .map(|m| m.seq)
                 .filter(|s| *s > 0);
-            crate::app::diag_log(&format!(
-                "[保位] 拉取分支 anchor_ix={} len={} anchor_seq={:?} off={:.1}",
-                anchor.item_ix,
-                self.messages.len(),
-                anchor_seq,
-                f32::from(anchor.offset_in_item)
-            ));
             self.load_messages_with(id, MESSAGE_BASE, anchor_seq, anchor.offset_in_item, cx);
         }
         self.load_session_usage(cx);
@@ -1499,36 +1463,6 @@ impl ClientApp {
             cx.notify();
         }
     }
-}
-
-/// 诊断用：把列表当前的位置压成一行读得懂的字。
-///
-/// 只打 `(item_ix, offset_in_item)` 是不够判断「在不在底部」的 —— 同一个偏移在
-/// 长消息和短消息里含义完全不同。所以连带打两个基准量：
-///
-/// - `vh` = 视口高度（`available_height` 的来源）。贴底时 `off == ih - vh`，这是
-///   唯一能一眼认出「这行就是贴底」的等式；不知道 `vh` 就只能靠猜偏移大小。
-/// - `ih` = 锚点那条消息**实测**高度（`bounds_for_item` 拿的是渲染后的真实 bounds）。
-///   它才是判断「切回时那条消息有没有变矮」的直接证据 —— `offset` 是相对这条消息
-///   顶部算的，它一变，同一个 offset 指的物理位置就变了。
-///
-/// 该项尚未渲染时 `bounds_for_item` 返回 `None`，此时 `ih` 记 0（**不是**「高度为零」，
-/// 而是「还没量」）——看日志时别误读。
-pub(crate) fn pos_brief(state: &gpui_kit::ListState) -> String {
-    let o = state.logical_scroll_top();
-    let vh = f32::from(state.viewport_bounds().size.height);
-    let ih = state
-        .bounds_for_item(o.item_ix)
-        .map_or(0.0, |b| f32::from(b.size.height));
-    format!(
-        "ix={} off={:.1} vh={:.1} ih={:.1} items={} follow={}",
-        o.item_ix,
-        f32::from(o.offset_in_item),
-        vh,
-        ih,
-        state.item_count(),
-        state.is_following_tail()
-    )
 }
 
 #[cfg(test)]

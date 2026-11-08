@@ -145,18 +145,6 @@ impl FollowState {
         matches!(self, FollowState::Tail { is_following: true })
     }
 
-    // [天演 patch] 布局侧不再用这个判据恢复跟随（见 `layout_items` 里的说明），
-    // 保留定义是为了让 `FollowState` 的语义完整、便于将来排错。
-    #[allow(dead_code)]
-    fn has_stopped_following(&self) -> bool {
-        matches!(
-            self,
-            FollowState::Tail {
-                is_following: false
-            }
-        )
-    }
-
     fn start_following(&mut self) {
         if let FollowState::Tail {
             is_following: false,
@@ -705,13 +693,6 @@ impl ListState {
     pub fn scroll_to_end(&self) {
         let state = &mut *self.0.borrow_mut();
         let item_count = state.items.summary().count;
-        // [天演 patch] 诊断：每次写入都留痕（谁把位置设成「末尾之后」）
-        diag_write(&format!(
-            "[list] scroll_to_end  prev={:?} count={item_count}",
-            state
-                .logical_scroll_top
-                .map(|o| (o.item_ix, f32::from(o.offset_in_item)))
-        ));
         state.pending_scroll = None;
         state.logical_scroll_top = Some(ListOffset {
             item_ix: item_count,
@@ -725,14 +706,6 @@ impl ListState {
     /// following occurs.
     pub fn set_follow_mode(&self, mode: FollowMode) {
         let state = &mut *self.0.borrow_mut();
-        // [天演 patch] 诊断
-        diag_write(&format!(
-            "[list] set_follow_mode {mode:?} prev={:?}",
-            state
-                .logical_scroll_top
-                .map(|o| (o.item_ix, f32::from(o.offset_in_item)))
-        ));
-
         match mode {
             FollowMode::Normal => {
                 state.follow_state = FollowState::Normal;
@@ -784,16 +757,6 @@ impl ListState {
     pub fn scroll_to(&self, mut scroll_top: ListOffset) {
         let state = &mut *self.0.borrow_mut();
         let item_count = state.items.summary().count;
-        // [天演 patch] 诊断：连同钳制后的结果一起记（若 item_ix 被钳成 count，
-        // 说明调用方给的索引超出了 items 的条数 —— 那本身就是一个 bug 信号）
-        diag_write(&format!(
-            "[list] scroll_to req=({},{:.1}) count={item_count} prev={:?}",
-            scroll_top.item_ix,
-            f32::from(scroll_top.offset_in_item),
-            state
-                .logical_scroll_top
-                .map(|o| (o.item_ix, f32::from(o.offset_in_item)))
-        ));
         if scroll_top.item_ix >= item_count {
             scroll_top.item_ix = item_count;
             scroll_top.offset_in_item = px(0.);
@@ -1265,15 +1228,6 @@ impl StateInner {
         let mut rendered_height = padding.top;
         let mut max_item_width = px(0.);
         let mut scroll_top = self.logical_scroll_top();
-        // [天演 patch] 记下「进入本次布局时的锚点索引」。
-        //
-        // 下面「恢复跟随」的判据要用它做一道硬门槛：只有锚点已经是**最后一条**
-        // （或越界到末尾之后）时才允许重新开启跟随。否则只要 `summary().height`
-        // 在某帧变小（项被重新测量、内容更新都会），`scroll_offset + available
-        // >= total - 1` 就会在一个很靠上的位置成立 —— 于是 `start_following()`
-        // 把下一帧的位置设成「末尾之后」，再归一化成贴底：用户上滚得越多越容易
-        // 撞上，表现正是「滚得多了就跳回最底部」。
-        let entry_anchor_ix = scroll_top.item_ix;
 
         // [天演 patch] 测量结果的写回策略。
         //
@@ -1306,19 +1260,10 @@ impl StateInner {
         };
 
         if self.follow_state.is_following() {
-            let prev = scroll_top;
             scroll_top = ListOffset {
                 item_ix: self.items.summary().count,
                 offset_in_item: px(0.),
             };
-            // [天演 patch] 诊断：跟随态下每帧都会把 `scroll_top` 强制成「末尾之后」，
-            // 若看到这一行的 prev 是用户位置、count 又是条数，就说明是它在覆盖。
-            diag_write(&format!(
-                "[list] layout follow-override count={} prev=({},{:.1})",
-                self.items.summary().count,
-                prev.item_ix,
-                f32::from(prev.offset_in_item)
-            ));
             self.logical_scroll_top = Some(scroll_top);
         }
 
@@ -1449,44 +1394,6 @@ impl StateInner {
             && offset_plausible
             && rendered_height - scroll_top.offset_in_item < available_height
         {
-            // [天演 patch] 诊断：位置被归一化改写的现场全部输入，一次打全。
-            // 路径 `%TEMP%\tianyan_list_diag.log`。要看的是：
-            //   rendered_h —— 从 scroll_top.item_ix 到末尾累计出来的高度；
-            //   first      —— 锚点那条自己是 Measured(已测) 还是 Unmeasured(未测 + 估算值)；
-            //   avail_w / avail_h —— 这次布局用的宽度与视口高；
-            //   total_h    —— summary().height（跟随判据用的就是它）。
-            {
-                use std::io::Write as _;
-                let path = std::env::temp_dir().join("tianyan_list_diag.log");
-                if let Ok(mut f) = std::fs::OpenOptions::new()
-                    .create(true)
-                    .append(true)
-                    .open(path)
-                {
-                    let anchor_heights = {
-                        let mut c = self.items.cursor::<Count>(());
-                        c.seek(&Count(scroll_top.item_ix), Bias::Right);
-                        c.item().map(|item| {
-                            (
-                                item.size().map(|s| f32::from(s.height)),
-                                item.size_hint().map(|s| f32::from(s.height)),
-                            )
-                        })
-                    };
-                    let _ = writeln!(
-                        f,
-                        "[list] normalize ix={} off={:.1} rendered_h={:.1} avail_h={:.1} avail_w={:?} items={} total_h={:.1} anchor(measured,unmeasured_hint)={:?}",
-                        scroll_top.item_ix,
-                        f32::from(scroll_top.offset_in_item),
-                        f32::from(rendered_height),
-                        f32::from(available_height),
-                        available_width.map(f32::from),
-                        self.items.summary().count,
-                        f32::from(self.items.summary().height),
-                        anchor_heights
-                    );
-                }
-            }
             while rendered_height < available_height {
                 cursor.prev();
                 if let Some(item) = cursor.item() {
@@ -1573,7 +1480,6 @@ impl StateInner {
         // 才重新开启），布局这一侧永远不再自作主张。应用层本身还有
         // `msg_scrolled_up` + `scroll_to_end_if_following` 这套自己的跟随语义，
         // 不依赖引擎的自动恢复。
-        let _ = (offset_plausible, entry_anchor_ix);
 
         // If none of the visible items are focused, check if an off-screen item is focused
         // and include it to be rendered after the visible items so keyboard interaction continues
@@ -1950,24 +1856,6 @@ impl Element for List {
         ) {
             Ok(layout) => layout,
             Err(autoscroll_request) => {
-                // [天演 patch] 诊断：这个分支一旦命中就会覆盖阅读位置，留一行痕迹
-                // （路径 = `%TEMP%\tianyan_list_diag.log`，无环境变量依赖）。
-                {
-                    use std::io::Write as _;
-                    let path = std::env::temp_dir().join("tianyan_list_diag.log");
-                    if let Ok(mut f) = std::fs::OpenOptions::new()
-                        .create(true)
-                        .append(true)
-                        .open(path)
-                    {
-                        let _ = writeln!(
-                            f,
-                            "[list] autoscroll 覆盖位置 -> ix={} off={:.1}",
-                            autoscroll_request.item_ix,
-                            f32::from(autoscroll_request.offset_in_item)
-                        );
-                    }
-                }
                 state.logical_scroll_top = Some(autoscroll_request);
                 state
                     .prepaint_items(bounds, padding, false, &mut self.render_item, window, cx)
@@ -3373,22 +3261,5 @@ mod test {
              the bottom of its track, even when content has grown during the drag \
              (so frozen_bottom < live_bottom)"
         );
-    }
-}
-#[allow(dead_code)]
-/// [天演 patch] 诊断：把列表状态的写入记到 `%TEMP%\tianyan_list_diag.log`。
-///
-/// 排查「切回会话位置被改」时用的最后一次定位手段 —— 前几轮都在猜是哪个调用点，
-/// 这里直接把**每一次**写入（`scroll_to` / `scroll_to_end` / `set_follow_mode`）
-/// 连同调用前的值一起记下来，谁改的一目了然。
-fn diag_write(msg: &str) {
-    use std::io::Write as _;
-    let path = std::env::temp_dir().join("tianyan_list_diag.log");
-    if let Ok(mut f) = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(path)
-    {
-        let _ = writeln!(f, "{msg}");
     }
 }

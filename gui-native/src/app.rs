@@ -127,8 +127,6 @@ impl ClientApp {
         let mut app = Self {
             session_rows: Vec::new(),
             sessions_data: Vec::new(),
-            // 切会话位置诊断倒计数（见字段文档）
-            restore_probe: 0,
             last_viewport_h: px(0.),
             collapsed_groups: std::collections::HashSet::new(),
             expanded_groups: std::collections::HashMap::new(),
@@ -840,10 +838,6 @@ impl ClientApp {
                                 item_ix: ix,
                                 offset_in_item: off,
                             });
-                            diag_log(&format!(
-                                "[保位] 快照 splice 校正位置 ix={ix} off={:.1} n={n}",
-                                f32::from(off)
-                            ));
                         }
                     }
                 }
@@ -1674,12 +1668,6 @@ impl ClientApp {
             // 已有项的测量缓存不动，`logical_scroll_top.item_ix` 在 `old_range.end <= ix`
             // 时会 +1，正好跟着同一条消息走，阅读位置纹丝不动。
             let old_len = self.msg_list_state.item_count();
-            diag_log(&format!(
-                "[保位] 边界消息 append id={} pos={pos} old_len={old_len} new_len={} scrolled_up={}",
-                id,
-                self.messages.len(),
-                self.msg_scrolled_up.get()
-            ));
             if self.messages.len() == old_len + 1 && pos <= old_len {
                 self.msg_list_state.splice(pos..pos, 1);
             } else {
@@ -2054,11 +2042,6 @@ impl ClientApp {
                             // 整页替换后把滚动锚点找回来（只按服务端下发的 seq 查表）
                             if let Some(seq) = anchor_seq {
                                 if let Some(ix) = this.messages.iter().position(|m| m.seq == seq) {
-                                    diag_log(&format!(
-                                        "[保位] 锚点命中 seq={seq} -> ix={ix} off={:.1} len={}",
-                                        f32::from(anchor_offset),
-                                        this.messages.len()
-                                    ));
                                     let target = gpui_kit::ListOffset {
                                         item_ix: ix,
                                         offset_in_item: anchor_offset,
@@ -2071,17 +2054,9 @@ impl ClientApp {
                                     // 给了真实视口高 —— 首帧定位就是终值。补那一次反而会在
                                     // 下一帧把位置重置一遍（视觉上就是「先显示一下再滚」）。
                                 } else {
-                                    diag_log(&format!(
-                                        "[保位] 锚点未命中 seq={seq} len={} -> 贴底",
-                                        this.messages.len()
-                                    ));
                                     this.msg_list_state.scroll_to_end();
                                 }
                             } else {
-                                diag_log(&format!(
-                                    "[保位] 无锚点 -> 贴底 len={}",
-                                    this.messages.len()
-                                ));
                                 // 首屏（无锚点）：进会话就该停在最新一条。
                                 // `Top` 对齐不会自动贴底（那是 `Bottom` 对齐用 `None` 表达的
                                 // 语义），漏了这句会话会停在顶部/中间。
@@ -2606,27 +2581,6 @@ impl ClientApp {
 /// 这个常量只在完全没有参考（首次进入会话）时兜底。
 pub(crate) const MSG_ROW_HEIGHT_HINT: f32 = 1200.;
 
-/// 诊断日志（仅用于排查滚动/保位这类“看不见的状态”问题）。
-///
-/// 写 `{data_dir}/gui_diag.log`，不用 `println!`：release 版没有控制台（
-/// `windows_subsystem = "windows"`），打了也看不到。
-pub(crate) fn diag_log(msg: &str) {
-    use std::io::Write as _;
-    let dir = tianyan::config::get_config().storage.data_dir.clone();
-    let path = std::path::Path::new(&dir).join("gui_diag.log");
-    if let Ok(mut f) = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(path)
-    {
-        let _ = writeln!(
-            f,
-            "{} {msg}",
-            chrono::Local::now().format("%m-%d %H:%M:%S%.3f")
-        );
-    }
-}
-
 pub(crate) fn new_msg_list_state(
     item_count: usize,
     scrolled_up: Rc<std::cell::Cell<bool>>,
@@ -2704,8 +2658,11 @@ pub(crate) fn new_msg_list_state(
         // `scroll_to_end_if_following`）都名正言顺地贴底。
         //
         // `is_following_tail` 是 gpui 的显式状态：只在用户真的向上滚
-        // （`scroll()` 里 `delta.y > 0`）时 `stop_following()`，回到末尾
-        // （layout 里判 `scroll_offset + available >= total`）才重新跟随。
+        // （`scroll()` 里 `delta.y > 0`）时 `stop_following()`；只有用户真的滚到
+        // 内容末尾（`scroll()` 里 `new_scroll_top >= scroll_max`）才重新跟随。
+        // ⚠️ 恢复跟随**不再**由布局阶段判 `scroll_offset + available >= total`：
+        // 那个 `total` 会随项目被重新测量而变小，任何位置都可能满足，曾导致
+        // 「滚到长回复中间切回就跳到底部」。
         // 这与 dyad 那条修法同口径：*follow intent 独立于底部距离，只有显式
         // 滚离才暂停它*。
         scrolled_up.set(!event.is_following_tail);

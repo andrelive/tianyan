@@ -394,13 +394,6 @@ struct ClientApp {
     pub(crate) messages: Rc<Vec<MsgRow>>,
     /// gpui 原生变高虚拟列表的状态（只有可见项会被 render）
     pub(crate) msg_list_state: GpuiListState,
-    /// 诊断倒计数：切会话恢复位置后，接下来这么多帧在 `render` 里打一次位置。
-    ///
-    /// 为什么必须挂在 `render` 而不是 `cx.defer`：`defer` 的回调在**本次绘制之前**
-    /// 一次性 flush（实测嵌套三层的时间戳相差不到 1ms、且 `viewport_bounds()` 全是
-    /// 0），读到的是 `scroll_to` 刚设的值 —— 等于没测。`render` 每帧开头读到的则是
-    /// **上一帧 layout 跑完之后**的位置，是「位置有没有被引擎改掉」唯一看得见的时点。
-    pub(crate) restore_probe: u8,
     /// 最近一次布局得到的消息区视口高度。
     ///
     /// 新建 `ListState` 时把它预置进去（`seed_viewport_height`），否则首帧
@@ -808,18 +801,6 @@ impl Render for ClientApp {
         let vh = self.msg_list_state.viewport_bounds().size.height;
         if vh > px(0.) {
             self.last_viewport_h = vh;
-        }
-        // 诊断：切会话恢复位置后的头几帧。这一行读的是**上一帧 layout 跑完之后**
-        // 的位置（本帧 layout 还没开始），配合 `park` 行就能闭合整条链路：
-        //   park 的 (ix, off) → open 恢复出同样的值 → render#N 是否还是它。
-        if self.restore_probe > 0 {
-            self.restore_probe -= 1;
-            crate::app::diag_log(&format!(
-                "[保位] render#{} len={} {}",
-                self.restore_probe,
-                self.messages.len(),
-                crate::sessions::pos_brief(&self.msg_list_state)
-            ));
         }
         // Enter 发送的订阅必须挂在**当前**输入框实体上：换会话 / 重启恢复会话时
         // 输入框是新建的实体，旧订阅留在弃用的那个上 —— 那时回车只换行、不发送。
