@@ -164,10 +164,10 @@ async fn merge_fragments(
             recent = lines.join("\n"),
             first = keep.detail.trim_end(),
         );
-        let new_abstract = format!(
-            "[规则] {tool} {}（累计 {occurrences} 次，最近 {now}）",
-            class.label()
-        );
+        // 与生产写入侧同一口径（`rule_abstract`）：abstract 是「场景 → 动作」，
+        // 计数在尾部——事件记录式写法检索命中率极低（2026-11-10 验证：83% 规则零命中）。
+        let new_abstract =
+            tianyan::observability::rule_recorder::rule_abstract(&tool, class, occurrences as u32);
 
         if dry_run {
             println!("    dry-run：将改写 {} 的 detail/abstract", keep.name);

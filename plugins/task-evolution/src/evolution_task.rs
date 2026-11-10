@@ -53,6 +53,70 @@ const DIGEST_MAX_TOTAL_CHARS: usize = 12000;
 /// 无水位线（首次运行）时的增量回看窗口（小时）。
 const DIGEST_INITIAL_WINDOW_HOURS: i64 = 72;
 
+/// 单期最多执行的删除条数。
+///
+/// 依据（2026-11-09 只读诊断）：29 天写入 243 条、删除 236 条（比 0.97），单日最高
+/// 删除 19 条（2026-10-20）——「一期集中重写」是摆动的主要形态之一，速率上限直接
+/// 压掉它。超出的不是丢弃，而是留在待删清单等下一期（见 [`gate_deletions`]）。
+const DELETION_CONFIRM_LIMIT: usize = 5;
+
+/// 待删条目最多被提议几期（达到即**强制确认**，避免永远排不上队）。
+const PENDING_MAX_PROPOSALS: u32 = 3;
+
+/// 待删清单在任务状态里的名字（落 `memory/events/task_states/{name}.md`）。
+///
+/// `task_states` 属 `memory_paths::OPERATIONAL_SUBDIRS`，不进摘要与语义检索，
+/// 所以这里存 JSON 文本不会污染任何召回。
+const PENDING_STATE_NAME: &str = "evolution_pending_deletions";
+
+/// 待确认删除项（跨期确认的载体）。
+///
+/// **为什么需要它**：删除是软删除（归档到 `_archive/`）、成本为零，于是「今天删、
+/// 明天写回」没有代价——实测写入与删除几乎 1:1，演化在原地摆动。首次提议只登记、
+/// 不执行，下期仍要删才真正归档：给摆动加上成本，也给模型一次「隔天再看」的机会。
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct PendingDeletion {
+    /// 条目类型：`memory` / `skill` / `rule`。
+    kind: String,
+    /// 条目 id（已归一化）。
+    id: String,
+    /// 最近一次提议给出的删除理由。
+    reason: String,
+    /// 首次提议时间（RFC3339）。
+    first_seen: String,
+    /// 已被提议的期数（含首次）。
+    proposals: u32,
+}
+
+/// 待删清单（持久化为 JSON 文本）。
+#[derive(Debug, Default, Clone, serde::Serialize, serde::Deserialize)]
+struct PendingDeletions {
+    /// 待确认的删除项。
+    #[serde(default)]
+    items: Vec<PendingDeletion>,
+}
+
+/// 删除闸门的输出（跨期确认 + 速率上限）。
+struct DeletionGate {
+    /// 本期真正执行的删除。
+    confirmed: Vec<DeletionPlan>,
+    /// 本期之后应持久化的待删清单。
+    pending: Vec<PendingDeletion>,
+    /// 本期新登记（首次提议 / 超速率上限，暂不执行）条数。
+    withheld: usize,
+    /// 上期提议、本期未再提 → 视为撤回的条数。
+    withdrawn: usize,
+}
+
+/// 一期演化实际落地的统计（写报告用；也是「摆动」的取数口径）。
+#[derive(Debug, Default, Clone, Copy)]
+struct PlanApplied {
+    /// 成功应用的变更条数（新增 / 更新 / 合并 / 删除）。
+    applied: usize,
+    /// 写入时查到归档同 id、被取回的条数（= 摆动计数：删过又写回）。
+    revived: usize,
+}
+
 /// 技能使用统计的回看窗口（天）。与演化任务自身日频匹配：太短（1 天）会因技能使用稀疏
 /// 而恒为空，太长（90 天）会让「最近写得怎么样」被老数据淹没。
 const SKILL_USAGE_WINDOW_DAYS: u32 = 30;
@@ -227,8 +291,22 @@ impl EvolutionTask {
         };
 
         // 阶段 2：记账提交
-        let applied = self.apply_plan(ctx, &plan).await?;
-        self.write_report(ctx, &plan, applied, &last_run_summary)
+        //
+        // 删除先进闸门（跨期确认 + 单期速率上限）：首次提议只登记、下期仍提议才执行。
+        // 动因（2026-11-09 只读诊断）：29 天写入 243 条、删除 236 条（比 0.97），
+        // 单日最高删除 19 条——删了写、写了删在原地摆动，因为软删除成本为零。
+        let now = chrono::Utc::now().to_rfc3339();
+        let prev_pending = self.read_pending_deletions(ctx).await;
+        let gate = gate_deletions(
+            &plan.deletions,
+            &prev_pending,
+            &now,
+            DELETION_CONFIRM_LIMIT,
+            PENDING_MAX_PROPOSALS,
+        );
+        let outcome = self.apply_plan(ctx, &plan, &gate.confirmed).await?;
+        self.write_pending_deletions(ctx, &gate.pending).await;
+        self.write_report(ctx, &plan, &gate, outcome, &last_run_summary)
             .await?;
 
         // 水位线更新（G5 跨运行状态）
@@ -239,13 +317,20 @@ impl EvolutionTask {
 - 综述摘要: {}
 ",
             chrono::Utc::now().to_rfc3339(),
-            applied,
+            outcome.applied,
             plan.summary
         );
         ctx.task_state.write("evolution", &summary).await?;
 
-        tracing::info!("演化任务完成，应用了 {} 项变更", applied);
-        Ok(applied)
+        tracing::info!(
+            applied = outcome.applied,
+            deleted = gate.confirmed.len(),
+            withheld = gate.withheld,
+            withdrawn = gate.withdrawn,
+            revived = outcome.revived,
+            "演化任务完成"
+        );
+        Ok(outcome.applied)
     }
 
     /// 读取上次运行水位线（TaskStateStore）。
@@ -264,6 +349,38 @@ impl EvolutionTask {
                 tracing::warn!(error = %e, "读取演化水位线失败");
                 (None, None)
             }
+        }
+    }
+
+    /// 读取待删清单（不存在 / 解析失败 → 空清单；不阻塞本期演化）。
+    async fn read_pending_deletions(&self, ctx: &TaskContext) -> Vec<PendingDeletion> {
+        match ctx.task_state.read(PENDING_STATE_NAME).await {
+            Ok(Some(text)) => match serde_json::from_str::<PendingDeletions>(&text) {
+                Ok(p) => p.items,
+                Err(e) => {
+                    tracing::warn!(error = %e, "待删清单解析失败，按空清单处理");
+                    Vec::new()
+                }
+            },
+            _ => Vec::new(),
+        }
+    }
+
+    /// 持久化待删清单（撤回项会被清掉；写入失败只告警——本期的增删改已经落地，
+    /// 不该因为状态文件写失败而回滚）。
+    async fn write_pending_deletions(&self, ctx: &TaskContext, items: &[PendingDeletion]) {
+        let payload = PendingDeletions {
+            items: items.to_vec(),
+        };
+        let text = match serde_json::to_string_pretty(&payload) {
+            Ok(text) => text,
+            Err(e) => {
+                tracing::warn!(error = %e, "待删清单序列化失败");
+                return;
+            }
+        };
+        if let Err(e) = ctx.task_state.write(PENDING_STATE_NAME, &text).await {
+            tracing::warn!(error = %e, "待删清单写入失败");
         }
     }
 
@@ -412,7 +529,7 @@ impl EvolutionTask {
 {{
   "memories": [{{"action": "add", "category": "preference|decision|fact|entity|pattern|successful_case|failed_case", "id": "英文 kebab-case 语义短名（必填）", "content": "...", "importance": 0.8}}{merge_example}],
   "skills": [{{"action": "add|update", "id": "kebab-case", "name": "...", "description": "...", "content": "使用说明（Markdown）", "applicable_scenarios": ["..."]}}],
-  "rules": [{{"action": "add", "id": "英文 kebab-case 语义短名（必填）", "abstract": "规则摘要", "content": "规则详情"}}],
+  "rules": [{{"action": "add", "id": "英文 kebab-case 语义短名（必填）", "abstract": "**触发场景 → 动作**（例：apply_patch 连续两次定位失败 → 停止重试，改用唯一短锚点 apply_edit）", "content": "规则详情（证据 + 做法）"}}],
   "roles": [{{"action": "create|retire", "id": "role-name", "system_prompt": "...", "tools": ["..."]}}],
   "deletions": [{{"kind": "memory|skill|rule", "id": "...", "reason": "删除证据"}}],
   "summary": "一句话总结本期变更"
@@ -432,6 +549,9 @@ impl EvolutionTask {
   让人找不到该用它（改 abstract），否则列入 deletions 归档。**不要凭感觉删技能**；
 {consolidation_principle}- 删除必须有证据（被取代 / 已过时 / 低分评审）——过时、被证伪、重复的条目（含记忆）
   应主动列入 deletions；
+- **规则 `abstract` 必须写成「触发场景 → 动作」**：它是检索命中的唯一依据。写成
+  「[规则] xxx 执行失败（累计 N 次）」这类**事件记录**，模型在需要时永远检索不到
+  （实测活跃规则 83% 从未被命中）；「动作」要具体到停下来做什么，而不是复述现象；
 - 不确定的内容宁可少写，不要污染注册表。
 "#,
             last = last,
@@ -445,13 +565,28 @@ impl EvolutionTask {
     }
 
     /// 应用 diff 计划（记忆/技能/规则/角色/删除）。
-    async fn apply_plan(&self, ctx: &TaskContext, plan: &EvolutionPlan) -> Result<usize> {
+    ///
+    /// `deletions` 是**已过删除闸门**（跨期确认 + 速率上限，见 [`gate_deletions`]）的
+    /// 待执行列表——本函数只负责落地，不再做二次判定。
+    ///
+    /// 注意：`merge` 的 `merge_from` 归档**不走闸门**（那是「多条归纳成一条」的必要
+    /// 部分，不是「删除主张」）；所以合并类的摆动不在删除计数里，看报告时别混淆。
+    async fn apply_plan(
+        &self,
+        ctx: &TaskContext,
+        plan: &EvolutionPlan,
+        deletions: &[DeletionPlan],
+    ) -> Result<PlanApplied> {
         let mut applied = 0usize;
+        let mut revived = 0usize;
         let consolidate = ctx.config.memory.auto_consolidation;
         for (seq, m) in plan.memories.iter().enumerate() {
             match m.action.as_str() {
                 "add" => match self.apply_memory(ctx, m, seq).await {
-                    Ok(()) => applied += 1,
+                    Ok(was_revived) => {
+                        applied += 1;
+                        revived += usize::from(was_revived);
+                    }
                     Err(e) => tracing::warn!(content = %m.content, error = %e, "记忆应用失败"),
                 },
                 "merge" if consolidate => match self.apply_memory_merge(ctx, m).await {
@@ -469,7 +604,10 @@ impl EvolutionTask {
                 continue;
             }
             match self.apply_skill(ctx, s).await {
-                Ok(()) => applied += 1,
+                Ok(was_revived) => {
+                    applied += 1;
+                    revived += usize::from(was_revived);
+                }
                 Err(e) => tracing::warn!(skill = %s.id, error = %e, "技能应用失败"),
             }
         }
@@ -478,7 +616,10 @@ impl EvolutionTask {
                 continue;
             }
             match self.apply_rule(ctx, r).await {
-                Ok(()) => applied += 1,
+                Ok(was_revived) => {
+                    applied += 1;
+                    revived += usize::from(was_revived);
+                }
                 Err(e) => tracing::warn!(error = %e, "规则应用失败"),
             }
         }
@@ -488,13 +629,13 @@ impl EvolutionTask {
                 Err(e) => tracing::warn!(role = %role.id, error = %e, "角色应用失败"),
             }
         }
-        for d in &plan.deletions {
+        for d in deletions {
             match self.apply_deletion(ctx, d).await {
                 Ok(()) => applied += 1,
                 Err(e) => tracing::warn!(id = %d.id, error = %e, "删除应用失败"),
             }
         }
-        Ok(applied)
+        Ok(PlanApplied { applied, revived })
     }
 
     /// 应用记忆新增（写入 VFS memory 命名空间 + L0 摘要）。
@@ -502,7 +643,7 @@ impl EvolutionTask {
     /// `seq`：本次演化运行内的记忆序号（0 起）。同一次运行的多条记忆在同一
     /// 秒内生成，纯时间戳 id 会相互重复（跨类别引用歧义，2026-10-17 审计
     /// 实证 3 条同 id），以序号消歧。
-    async fn apply_memory(&self, ctx: &TaskContext, m: &MemoryPlan, seq: usize) -> Result<()> {
+    async fn apply_memory(&self, ctx: &TaskContext, m: &MemoryPlan, seq: usize) -> Result<bool> {
         let category = parse_category(&m.category)?;
         // id 语义化：模型给出的**可用 slug** 优先（构成可读的 URI 文件名），不可用才回退
         // 时间戳。回退必定 `warn!`——否则「模型又开始不给 id」会静默退化成
@@ -530,6 +671,9 @@ impl EvolutionTask {
         entry.source_session = Some("evolution".to_string());
 
         let uri = category.default_uri(&id);
+        // 复活检测：写过又被删过的同 id 条目会在归档里留副本，命中即取回
+        // （这条知识又活了），并计入报告的 `revived`。
+        let revived = revive_from_archive(ctx, "memory", &id).await;
         if let Some(parent) = uri.parent() {
             if !ctx.vfs.exists(&parent).await? {
                 ctx.vfs.create_directory(&parent).await?;
@@ -543,7 +687,7 @@ impl EvolutionTask {
         );
         ctx.vfs.write_abstract(&uri, &abstract_content).await?;
         tracing::info!(uri = %uri, "演化记忆已写入");
-        Ok(())
+        Ok(revived)
     }
 
     /// 应用记忆合并（巩固）：重写目标条目 + 归档被合并条目。
@@ -619,9 +763,11 @@ impl EvolutionTask {
     }
 
     /// 应用技能新增/更新（写入 skill/{id} content + abstract）。
-    async fn apply_skill(&self, ctx: &TaskContext, s: &SkillPlan) -> Result<()> {
+    async fn apply_skill(&self, ctx: &TaskContext, s: &SkillPlan) -> Result<bool> {
         let id = normalize_entry_id(&s.id);
         let uri = TianyanUri::new(ContextNamespace::Skill, vec![id.clone()]);
+        // 复活检测：技能被删过又写回（归档在 `skill/_archive/{id}`）
+        let revived = revive_from_archive(ctx, "skill", &id).await;
         if let Some(parent) = uri.parent() {
             if !ctx.vfs.exists(&parent).await? {
                 ctx.vfs.create_directory(&parent).await?;
@@ -650,13 +796,13 @@ impl EvolutionTask {
         );
         ctx.vfs.write_abstract(&uri, &abstract_content).await?;
         tracing::info!(skill_id = %id, "技能已写入/更新");
-        Ok(())
+        Ok(revived)
     }
 }
 
 impl EvolutionTask {
     /// 应用规则新增（agent/learned/{id}）。
-    async fn apply_rule(&self, ctx: &TaskContext, r: &RulePlan) -> Result<()> {
+    async fn apply_rule(&self, ctx: &TaskContext, r: &RulePlan) -> Result<bool> {
         let ts = chrono::Utc::now().format("%Y%m%d-%H%M%S");
         // 与记忆同理：可用 slug 优先（`rule-evo-{slug}`），否则回退时间戳。
         let slug = r.id.as_deref().and_then(sanitize_slug);
@@ -671,13 +817,23 @@ impl EvolutionTask {
             None => format!("rule-evo-{ts}"),
         };
         let uri = AgentPath::Learned.uri().append(&rule_id);
+        // 复活检测：规则被删过又写回（归档在 `agent/_archive/learned/{id}`）
+        let revived = revive_from_archive(ctx, "rule", &rule_id).await;
         // 同名即同主题：已有条目原地覆盖（演化规则是「最新结论」，旧版本在演化报告留痕）。
         // 与 `RuleRecorder` 的「同主题聚合计数」互补——前者管结论演进，后者管失败频次。
         let replaced = ctx.vfs.exists(&uri).await?;
         if !replaced {
             ctx.vfs.create_file(&uri).await?;
         }
-        let abstract_content = format!("[演化] {} (来源: evolution)", r.abstract_text);
+        // abstract 是检索命中的唯一依据：不带 `[演化]` 这类与用户提问无关的前缀
+        // （实测活跃规则 83% 从未被命中，事件记录式/带前缀的写法是主因之一）。
+        let abstract_content = format!("{}（来源: evolution）", r.abstract_text.trim());
+        if !r.abstract_text.contains('→') {
+            tracing::warn!(
+                rule = %rule_id,
+                "演化规则 abstract 未采用「场景 → 动作」形态，检索命中率会很低"
+            );
+        }
         ctx.vfs.write_abstract(&uri, &abstract_content).await?;
         let detail = format!(
             "来源: evolution（自演化综述）\n\n{}\n\n---\n## 规则元数据\n- 生成时间: {}\n",
@@ -686,7 +842,7 @@ impl EvolutionTask {
         );
         ctx.vfs.write_content(&uri, &detail).await?;
         tracing::info!(rule_uri = %uri, replaced, "规则已写入");
-        Ok(())
+        Ok(revived)
     }
 
     /// 应用角色新增/退役（RoleStore 持久化；退役软删除到 _archive/）。
@@ -797,11 +953,16 @@ impl EvolutionTask {
     }
 
     /// 写演化报告（memory/events/evolution_reports/{ts}.md）。
+    ///
+    /// 报告里的四个删除计数（确认 / 待确认 / 撤回 / 复活取回）就是「摆动」的取数口径：
+    /// 写入与删除之比、以及「删过又写回」的条数，后续靠这些计数跟踪（旧报告只有
+    /// 「删除（N）」一项，是**提议数**而非实际执行数）。
     async fn write_report(
         &self,
         ctx: &TaskContext,
         plan: &EvolutionPlan,
-        applied: usize,
+        gate: &DeletionGate,
+        outcome: PlanApplied,
         last_summary: &Option<String>,
     ) -> Result<()> {
         let ts = chrono::Utc::now().format("%Y%m%d-%H%M%S");
@@ -823,7 +984,14 @@ impl EvolutionTask {
             "# 演化报告 {}\n\n",
             chrono::Utc::now().to_rfc3339()
         ));
-        md.push_str(&format!("- 应用变更: {}\n", applied));
+        md.push_str(&format!("- 应用变更: {}\n", outcome.applied));
+        md.push_str(&format!(
+            "- 删除闸门: 确认 {} / 登记待确认 {} / 撤回 {} / 复活取回 {}\n",
+            gate.confirmed.len(),
+            gate.withheld,
+            gate.withdrawn,
+            outcome.revived
+        ));
         if let Some(prev) = last_summary {
             md.push_str(&format!(
                 "- 上次周期: {}\n",
@@ -847,9 +1015,26 @@ impl EvolutionTask {
         for role in &plan.roles {
             md.push_str(&format!("- [{}] {}\n", role.action, role.id));
         }
-        md.push_str(&format!("\n## 删除（{}）\n", plan.deletions.len()));
-        for d in &plan.deletions {
+        // 段头是「确认 / 提议」两个数：**确认数才是真删除**（提议里含被闸门挡下的）。
+        md.push_str(&format!(
+            "\n## 删除（确认 {} / 提议 {}）\n",
+            gate.confirmed.len(),
+            plan.deletions.len()
+        ));
+        for d in &gate.confirmed {
             md.push_str(&format!("- [{}] {}: {}\n", d.kind, d.id, d.reason));
+        }
+        if gate.withheld > 0 {
+            md.push_str(&format!(
+                "- 另登记待确认 {} 条（下期仍提议才执行）\n",
+                gate.withheld
+            ));
+        }
+        if gate.withdrawn > 0 {
+            md.push_str(&format!(
+                "- 撤回 {} 条（上期提议、本期未再提）\n",
+                gate.withdrawn
+            ));
         }
         ctx.vfs.write_content(&uri, &md).await?;
         Ok(())
@@ -1065,6 +1250,140 @@ fn normalize_entry_id(raw: &str) -> String {
 
 /// `add` 撞已有 id 时最多尝试的序号后缀个数。
 const MAX_ID_SUFFIX: u32 = 9;
+
+/// 删除闸门：跨期确认 + 速率上限（**纯函数**，上限与时间可注入，便于单测）。
+///
+/// 语义（与 [`EvolutionTask::apply_deletion`] 的软删除通道配套）：
+/// - **首次提议** → 只登记不执行（记 `withheld`）；
+/// - **上期已提议、本期再提** → 执行（记 `confirmed`），单期最多 `confirm_limit` 条；
+/// - **超过速率上限** → 留在待删清单等下一期（不丢弃）；
+/// - **被提议满 `max_proposals` 期** → 强制确认，无视上限——连续多期主张同一删除是
+///   强信号，否则会永远排不上队、垃圾条目永久滞留；
+/// - **上期提议、本期未再提** → 视为撤回（记 `withdrawn`），移出清单。
+///
+/// 为什么这不算「机械阈值判内容质量」（ADR-017 已否决的那类）：本函数不判断一条内容
+/// 该不该删，只决定「同一条删除主张要等多久才生效、一期最多生效几条」——管的是变更
+/// 速率与稳定性，内容判断仍全部交给综述智能体。
+fn gate_deletions(
+    plan: &[DeletionPlan],
+    prev: &[PendingDeletion],
+    now: &str,
+    confirm_limit: usize,
+    max_proposals: u32,
+) -> DeletionGate {
+    use std::collections::{BTreeSet, HashMap};
+
+    // 本期提议去重（同一期重复提议同一条只算一次），并归一化 kind/id
+    let mut proposed: Vec<(String, String, String)> = Vec::new();
+    let mut seen: BTreeSet<(String, String)> = BTreeSet::new();
+    for d in plan {
+        let kind = d.kind.trim().to_lowercase();
+        let id = normalize_entry_id(&d.id);
+        if id.is_empty() {
+            continue;
+        }
+        if seen.insert((kind.clone(), id.clone())) {
+            proposed.push((kind, id, d.reason.clone()));
+        }
+    }
+
+    let prev_map: HashMap<(String, String), &PendingDeletion> = prev
+        .iter()
+        .map(|p| ((p.kind.clone(), p.id.clone()), p))
+        .collect();
+
+    let mut confirmed: Vec<DeletionPlan> = Vec::new();
+    let mut pending: Vec<PendingDeletion> = Vec::new();
+    let mut withheld = 0usize;
+
+    for (kind, id, reason) in &proposed {
+        let prev_item = prev_map.get(&(kind.clone(), id.clone()));
+        let proposals = prev_item.map(|p| p.proposals + 1).unwrap_or(1);
+        // 连续主张到上限 → 强制确认（不再受单期上限约束）
+        let forced = proposals >= max_proposals;
+        if prev_item.is_some() && (confirmed.len() < confirm_limit || forced) {
+            confirmed.push(DeletionPlan {
+                kind: kind.clone(),
+                id: id.clone(),
+                reason: reason.clone(),
+            });
+        } else {
+            withheld += 1;
+            pending.push(PendingDeletion {
+                kind: kind.clone(),
+                id: id.clone(),
+                reason: reason.clone(),
+                first_seen: prev_item
+                    .map(|p| p.first_seen.clone())
+                    .unwrap_or_else(|| now.to_string()),
+                proposals,
+            });
+        }
+    }
+
+    // 上期提议、本期未再提 → 撤回（模型已改变判断，不该继续挂着）
+    let proposed_keys: BTreeSet<(String, String)> = proposed
+        .iter()
+        .map(|(k, i, _)| (k.clone(), i.clone()))
+        .collect();
+    let withdrawn = prev
+        .iter()
+        .filter(|p| !proposed_keys.contains(&(p.kind.clone(), p.id.clone())))
+        .count();
+
+    pending.sort_by(|a, b| (&a.first_seen, &a.kind, &a.id).cmp(&(&b.first_seen, &b.kind, &b.id)));
+
+    DeletionGate {
+        confirmed,
+        pending,
+        withheld,
+        withdrawn,
+    }
+}
+
+/// 复活检测：写入前若归档里有同 id 条目，说明这条知识「被删过、现在又被写回」。
+///
+/// 处理：删掉归档副本（取回）并返回 `true`；调用方照常写入新内容（新内容更完整时
+/// 等于一次更新）。归档位置与 [`EvolutionTask::apply_deletion`] 的归档通道一致。
+///
+/// **为什么放在写入侧**：只有写回的那一刻才知道「上次删错了」——这是摆动
+/// （写入≈删除）唯一可逐条计数的信号；放在报告侧只能看到汇总，追溯不到条目。
+async fn revive_from_archive(ctx: &TaskContext, kind: &str, id: &str) -> bool {
+    let archive = match kind {
+        "memory" => TianyanUri::new(
+            ContextNamespace::Memory,
+            vec!["archive".to_string(), id.to_string()],
+        ),
+        "skill" => TianyanUri::new(
+            ContextNamespace::Skill,
+            vec!["_archive".to_string(), id.to_string()],
+        ),
+        "rule" => TianyanUri::new(
+            ContextNamespace::Agent,
+            vec![
+                "_archive".to_string(),
+                "learned".to_string(),
+                id.to_string(),
+            ],
+        ),
+        _ => return false,
+    };
+    match ctx.vfs.exists(&archive).await {
+        Ok(true) => {
+            if let Err(e) = ctx.vfs.delete(&archive).await {
+                tracing::warn!(archive = %archive, error = %e, "归档副本删除失败，复活计为未命中");
+                return false;
+            }
+            tracing::info!(archive = %archive, "检测到复活：归档副本已取回");
+            true
+        }
+        Ok(false) => false,
+        Err(e) => {
+            tracing::warn!(archive = %archive, error = %e, "归档存在性检查失败，按未复活处理");
+            false
+        }
+    }
+}
 
 /// 为 `add` 动作选一个不冲突的记忆 id：撞已有条目时加序号后缀。
 ///
@@ -1827,8 +2146,11 @@ mod tests {
             deletions: Vec::new(),
             summary: "test".to_string(),
         };
-        let applied = task.apply_plan(&ctx, &plan).await.unwrap();
-        assert_eq!(applied, 0, "auto_consolidation=false 时 merge 不应被应用");
+        let outcome = task.apply_plan(&ctx, &plan, &[]).await.unwrap();
+        assert_eq!(
+            outcome.applied, 0,
+            "auto_consolidation=false 时 merge 不应被应用"
+        );
         let content = ctx
             .vfs
             .read_content(&a, ContentLevel::Detail)
@@ -2406,6 +2728,289 @@ mod tests {
                 .await
                 .unwrap(),
             "不可用 id 不得原样成为规则名"
+        );
+    }
+
+    // ── 删除闸门（跨期确认 + 速率上限）与复活检测 ──────────────────────
+    //
+    // 背景（2026-11-09 只读诊断）：29 天写入 243 条、删除 236 条（比 0.97），
+    // 演化在原地摆动。以下用例锁住四件事：首次提议不执行、下期再提才删、
+    // 连续主张到上限强制确认、撤回要清出清单；另加「写回被删条目计复活」。
+
+    fn deletion(kind: &str, id: &str) -> DeletionPlan {
+        DeletionPlan {
+            kind: kind.to_string(),
+            id: id.to_string(),
+            reason: "已过时".to_string(),
+        }
+    }
+
+    /// 首次提议只登记、不执行。
+    ///
+    /// 判别力：把闸门改回「首次即删」（改造前的行为）→ `confirmed` 立刻非空，本用例红。
+    #[test]
+    fn test_gate_first_proposal_is_withheld() {
+        let gate = gate_deletions(
+            &[deletion("memory", "old-rule")],
+            &[],
+            "2026-11-09T00:00:00Z",
+            DELETION_CONFIRM_LIMIT,
+            PENDING_MAX_PROPOSALS,
+        );
+        assert!(gate.confirmed.is_empty(), "首次提议不得直接执行删除");
+        assert_eq!(gate.withheld, 1);
+        assert_eq!(gate.pending.len(), 1);
+        assert_eq!(gate.pending[0].id, "old-rule");
+        assert_eq!(gate.pending[0].proposals, 1);
+        assert_eq!(gate.pending[0].first_seen, "2026-11-09T00:00:00Z");
+    }
+
+    /// 上期已提议、本期再提 → 执行；清单里不再保留。
+    #[test]
+    fn test_gate_second_proposal_confirms() {
+        let prev = vec![PendingDeletion {
+            kind: "memory".to_string(),
+            id: "old-rule".to_string(),
+            reason: "已过时".to_string(),
+            first_seen: "2026-11-08T00:00:00Z".to_string(),
+            proposals: 1,
+        }];
+        let gate = gate_deletions(
+            &[deletion("memory", "old-rule")],
+            &prev,
+            "2026-11-09T00:00:00Z",
+            DELETION_CONFIRM_LIMIT,
+            PENDING_MAX_PROPOSALS,
+        );
+        assert_eq!(gate.confirmed.len(), 1, "第二次提议应确认删除");
+        assert_eq!(gate.confirmed[0].id, "old-rule");
+        assert!(gate.pending.is_empty());
+        assert_eq!(gate.withheld, 0);
+    }
+
+    /// 单期速率上限：超出的转待确认（不丢弃）。
+    #[test]
+    fn test_gate_rate_limit_defers_excess() {
+        let ids: Vec<String> = (0..7).map(|i| format!("item-{i}")).collect();
+        let prev: Vec<PendingDeletion> = ids
+            .iter()
+            .map(|id| PendingDeletion {
+                kind: "memory".to_string(),
+                id: id.clone(),
+                reason: "已过时".to_string(),
+                first_seen: "2026-11-08T00:00:00Z".to_string(),
+                proposals: 1,
+            })
+            .collect();
+        let plan: Vec<DeletionPlan> = ids.iter().map(|id| deletion("memory", id)).collect();
+        let gate = gate_deletions(
+            &plan,
+            &prev,
+            "2026-11-09T00:00:00Z",
+            DELETION_CONFIRM_LIMIT,
+            PENDING_MAX_PROPOSALS,
+        );
+        assert_eq!(
+            gate.confirmed.len(),
+            DELETION_CONFIRM_LIMIT,
+            "单期最多执行 {DELETION_CONFIRM_LIMIT} 条"
+        );
+        assert_eq!(
+            gate.pending.len(),
+            7 - DELETION_CONFIRM_LIMIT,
+            "超出的留在待确认清单（不是丢弃）"
+        );
+        assert_eq!(gate.withheld, 7 - DELETION_CONFIRM_LIMIT);
+    }
+
+    /// 连续主张到上限 → 强制确认（不受速率上限约束），否则永远排不上队。
+    #[test]
+    fn test_gate_forces_after_max_proposals() {
+        let ids: Vec<String> = (0..7).map(|i| format!("item-{i}")).collect();
+        let prev: Vec<PendingDeletion> = ids
+            .iter()
+            .map(|id| PendingDeletion {
+                kind: "memory".to_string(),
+                id: id.clone(),
+                reason: "已过时".to_string(),
+                first_seen: "2026-11-07T00:00:00Z".to_string(),
+                proposals: PENDING_MAX_PROPOSALS - 1,
+            })
+            .collect();
+        let plan: Vec<DeletionPlan> = ids.iter().map(|id| deletion("memory", id)).collect();
+        let gate = gate_deletions(
+            &plan,
+            &prev,
+            "2026-11-09T00:00:00Z",
+            DELETION_CONFIRM_LIMIT,
+            PENDING_MAX_PROPOSALS,
+        );
+        assert_eq!(gate.confirmed.len(), 7, "达到提议上限必须全部确认");
+        assert!(gate.pending.is_empty());
+    }
+
+    /// 撤回：上期提议、本期未再提 → 移出清单并计数。
+    #[test]
+    fn test_gate_withdraws_unproposed() {
+        let prev = vec![PendingDeletion {
+            kind: "skill".to_string(),
+            id: "dead-skill".to_string(),
+            reason: "零调用".to_string(),
+            first_seen: "2026-11-08T00:00:00Z".to_string(),
+            proposals: 1,
+        }];
+        let gate = gate_deletions(
+            &[],
+            &prev,
+            "2026-11-09T00:00:00Z",
+            DELETION_CONFIRM_LIMIT,
+            PENDING_MAX_PROPOSALS,
+        );
+        assert_eq!(gate.withdrawn, 1);
+        assert!(gate.pending.is_empty(), "撤回项必须移出清单");
+        assert!(gate.confirmed.is_empty());
+    }
+
+    /// 复活检测：写回被删过的同 id 条目 → 归档副本被取回，返回 true。
+    ///
+    /// 判别力：不查归档（改造前行为）→ 归档副本仍在，本用例红。
+    #[tokio::test]
+    async fn test_apply_memory_revives_archived_entry() {
+        let vfs = Arc::new(MockVfs::new());
+        let ctx = make_context(vfs.clone());
+        let task = new_task();
+
+        // 模拟「上次被删」：活跃位置无条目，归档里有副本
+        let archive = TianyanUri::new(
+            ContextNamespace::Memory,
+            vec!["archive".to_string(), "revived-note".to_string()],
+        );
+        ctx.vfs.write_content(&archive, "旧内容").await.unwrap();
+        ctx.vfs
+            .write_abstract(&archive, "[已归档] 旧摘要")
+            .await
+            .unwrap();
+
+        let revived = task
+            .apply_memory(&ctx, &memory_plan(Some("revived-note"), "新内容"), 0)
+            .await
+            .unwrap();
+
+        assert!(revived, "写回被删过的条目必须计为复活");
+        assert!(
+            !ctx.vfs.exists(&archive).await.unwrap(),
+            "归档副本应被取回（否则同一条知识在归档与活跃处各一份）"
+        );
+        let active = MemoryCategory::Preference.default_uri("revived-note");
+        assert!(ctx.vfs.exists(&active).await.unwrap(), "新内容应正常写入");
+    }
+
+    /// 端到端：综述提议删除 → 本期只登记不删，下期再提才真删。
+    ///
+    /// 判别力：闸门只做了纯函数、没接进 `run_evolution` 时，第一次跑就会删掉条目 → 本用例红。
+    #[tokio::test]
+    async fn test_run_evolution_withholds_first_deletion_then_confirms() {
+        // 用真实后端（SqliteBackend）：删除走 `find_entry` 递归查找，MockVfs 需要
+        // 手工维护目录树，形态与生产不一致（旧测试的教训）。真实后端上
+        // `write_content` 会自动 upsert 条目，贴近生产链路。
+        let vfs = real_vfs().await;
+        let ctx = make_context_with_config(vfs.clone(), tianyan::config::TianyanConfig::default());
+        let entry = TianyanUri::new(
+            ContextNamespace::Memory,
+            vec![
+                "cases".to_string(),
+                "failed_tasks".to_string(),
+                "old-case".to_string(),
+            ],
+        );
+        ctx.vfs.write_content(&entry, "旧案例").await.unwrap();
+        ctx.vfs.write_abstract(&entry, "旧摘要").await.unwrap();
+
+        let response = serde_json::json!({
+            "memories": [], "skills": [], "rules": [], "roles": [],
+            "deletions": [{ "kind": "memory", "id": "old-case", "reason": "已过时" }],
+            "summary": "清理旧案例"
+        })
+        .to_string();
+        let task = EvolutionTask::new(Arc::new(FakeExecutor { response }), 10);
+
+        // 第一次：只登记
+        task.run_evolution(&ctx).await.unwrap();
+        assert!(
+            ctx.vfs.exists(&entry).await.unwrap(),
+            "首次提议不得删除条目"
+        );
+        let pending = ctx
+            .task_state
+            .read(PENDING_STATE_NAME)
+            .await
+            .unwrap()
+            .unwrap_or_default();
+        assert!(
+            pending.contains("old-case"),
+            "待删清单应记录该条：{pending}"
+        );
+
+        // 第二次：同一提议 → 执行软删除
+        task.run_evolution(&ctx).await.unwrap();
+        assert!(
+            !ctx.vfs.exists(&entry).await.unwrap(),
+            "第二次提议应真正删除"
+        );
+        let archive = TianyanUri::new(
+            ContextNamespace::Memory,
+            vec!["archive".to_string(), "old-case".to_string()],
+        );
+        assert!(
+            ctx.vfs.exists(&archive).await.unwrap(),
+            "删除应走软删除归档（可回退）"
+        );
+    }
+
+    // ── 规则可检索性：abstract 走「场景 → 动作」 ────────────────────────
+    //
+    // 背景（2026-11-10 只读验证）：活跃 65 条规则里 54 条（83%）从未被检索命中。
+    // 写入侧的 abstract 是检索命中的唯一依据——事件记录式写法与带 `[演化]` 前缀都
+    // 会压低相似度。以下用例锁住该形态。
+    /// 演化规则 abstract 不得带 `[演化]` 前缀，且保留「场景 → 动作」与来源标记。
+    ///
+    /// 判别力：把写回 `[演化] {x} (来源: evolution)` 的旧模板 → 本用例红。
+    #[tokio::test]
+    async fn test_apply_rule_abstract_has_no_evolution_prefix() {
+        let vfs = Arc::new(MockVfs::new());
+        let ctx = make_context(vfs.clone());
+        let task = new_task();
+        let plan = RulePlan {
+            action: "add".to_string(),
+            abstract_text: "apply_patch 定位冲突 → 连续两次即停，改用唯一短锚点".to_string(),
+            content: "证据：连续两次冲突即停。".to_string(),
+            id: Some("patch-conflict-stop".to_string()),
+        };
+        task.apply_rule(&ctx, &plan).await.unwrap();
+
+        let uri = AgentPath::Learned
+            .uri()
+            .append("rule-evo-patch-conflict-stop");
+        let text = ctx.vfs.read_abstract(&uri).await.unwrap();
+        assert!(
+            !text.starts_with("[演化]"),
+            "不得带与用户提问无关的前缀：{text}"
+        );
+        assert!(text.contains('→'), "应保留「场景 → 动作」形态：{text}");
+        assert!(text.contains("来源: evolution"), "来源标记保留：{text}");
+    }
+    /// 综述提示词必须要求该形态，并给出「零命中」的事实依据（否则模型不会照做）。
+    #[test]
+    fn test_review_prompt_requires_scenario_action_abstract() {
+        let task = new_task();
+        let input = task.build_review_input(&None, "inventory", true, "digest", "usage");
+        assert!(
+            input.contains("触发场景 → 动作"),
+            "提示词必须给出该形态要求"
+        );
+        assert!(
+            input.contains("83%"),
+            "提示词要给出「零命中」的事实依据，而不是空泛要求"
         );
     }
 }

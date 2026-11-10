@@ -133,6 +133,26 @@ impl FailureClass {
             Self::Other => "执行失败",
         }
     }
+
+    /// 从 label 反推类别（运维脚本按 `detail` 里落下的 label 重建摘要时用）。
+    ///
+    /// label 是写入时落下的**唯一真相**（`主题: tool / label`），比从错误行重新分类
+    /// 更无损；反向映射因此留在本模块——脚本不自己 match 中文。
+    pub fn from_label(label: &str) -> Option<Self> {
+        let label = label.trim();
+        [
+            Self::Permission,
+            Self::NotFound,
+            Self::Conflict,
+            Self::InvalidInput,
+            Self::Timeout,
+            Self::Cancelled,
+            Self::Config,
+            Self::Other,
+        ]
+        .into_iter()
+        .find(|class| class.label() == label)
+    }
 }
 
 /// 规则的聚合主题：`(工具, 失败类别)`。
@@ -328,22 +348,16 @@ impl RuleRecorder {
         let uri = AgentPath::Learned.uri().append(&topic.file_name(ts));
         self.vfs.create_file(&uri).await?;
 
-        // abstract 给人看，会被 SummaryTask 改写；累计计数的权威在 detail。
+        // abstract 统一走「场景 → 动作」口径（[`rule_abstract`]）：它会被 SummaryTask
+        // 改写，也是检索命中的唯一依据；调用方给的 `abstract_text` 是首错摘要，降级
+        // 进 detail 的「首次失败摘要」段——信息不丢，但不再污染检索。
         self.vfs
-            .write_abstract(
-                &uri,
-                &format!(
-                    "[{}] {}（{}）(来源会话: {})",
-                    kind.label(),
-                    abstract_text,
-                    topic.class().label(),
-                    source_session
-                ),
-            )
+            .write_abstract(&uri, &rule_abstract(topic.tool(), topic.class(), 1))
             .await?;
 
         let full_detail = format!(
             "失败类型: {}\n工具: {}\n主题: {} / {}\n累计次数: 1\n最近发生: {}\n\n\
+             ## 首次失败摘要\n{}\n\n\
              ## 最近失败\n{}\n\n\
              ## 首次失败详情\n{}\n\n\
              ---\n## 规则元数据\n- 生成模型: {}\n- Pipeline 版本: {}\n- 生成时间: {}\n",
@@ -352,6 +366,7 @@ impl RuleRecorder {
             topic.tool(),
             topic.class().label(),
             now,
+            abstract_text.trim_end(),
             record_line(now, source_session, detail_text),
             detail_text.trim_end(),
             self.model_version,
@@ -408,21 +423,56 @@ impl RuleRecorder {
         );
         self.vfs.write_content(uri, &merged).await?;
 
+        // 合并路径与首次写入同一口径：abstract 是「场景 → 动作」，计数在尾部
         self.vfs
             .write_abstract(
                 uri,
-                &format!(
-                    "[规则] {} {}（累计 {} 次，最近 {}）",
-                    topic.tool(),
-                    topic.class().label(),
-                    occurrences,
-                    now
-                ),
+                &rule_abstract(topic.tool(), topic.class(), occurrences),
             )
             .await?;
 
         Ok(())
     }
+}
+
+/// 失败类别 → 应对动作（简短、可执行）。
+///
+/// 这是「规则可检索性」的另一半：abstract 只有场景没有动作，检索命中之后模型仍然
+/// 不知道该怎么办。个别工具给特化动作，其余按类别给通用动作。
+pub fn action_hint(tool: &str, class: FailureClass) -> &'static str {
+    match (tool, class) {
+        ("apply_patch" | "apply_edit", FailureClass::Conflict) => {
+            "连续两次冲突即停，改用唯一短锚点（apply_edit）或按真实文本重写"
+        }
+        ("read_file" | "list_dir" | "glob", FailureClass::NotFound) => {
+            "先用 glob / list_dir 确认真实路径，不要换路径猜"
+        }
+        ("execute_command", FailureClass::Timeout) => {
+            "缩短命令或改 background:true 后重试，不要原样重发"
+        }
+        (_, FailureClass::Conflict) => "定位锚点与真实内容不符：先只读核对再改，连续两次即停",
+        (_, FailureClass::NotFound) => "先确认目标是否存在，不要换路径重试",
+        (_, FailureClass::Timeout) => "缩短操作或转后台再试，不要原样重发",
+        (_, FailureClass::InvalidInput) => "对照工具 schema 补齐必填参数，不要凭记忆拼参数",
+        (_, FailureClass::Permission) => "换可写位置或走审批，不要重试同一路径",
+        (_, FailureClass::Config) => "先查明缺哪项配置，不要在缺配置时硬调",
+        (_, FailureClass::Cancelled) => "被取消不重试，先确认这次操作是否还需要",
+        (_, FailureClass::Other) => "先读错误原文再调整参数，不要原样重试",
+    }
+}
+
+/// 规则摘要：**触发场景 → 动作**（+ 累计次数）。
+///
+/// 为什么不再是 `[规则] xxx 执行失败（累计 N 次）`：abstract 是语义检索的唯一依据，
+/// 事件记录式的写法与用户提问的相似度天然低——2026-11-10 只读验证：活跃 65 条规则
+/// 里 54 条（83%）**从未被检索命中**。同一批数据换成「场景 → 动作」的写法，才有被
+/// 命中的可能；累计次数留在尾部供人工判断严重程度。
+pub fn rule_abstract(tool: &str, class: FailureClass, occurrences: u32) -> String {
+    format!(
+        "{tool} {} → {}（累计 {occurrences} 次）",
+        class.label(),
+        action_hint(tool, class)
+    )
 }
 
 /// 单条规则最多保留的「最近失败」记录行数。
@@ -939,5 +989,89 @@ mod tests {
             .unwrap();
 
         assert_eq!(vfs.created_count(), 2, "不同工具是不同的主题，应各成一条");
+    }
+
+    // ── abstract 形态：场景 → 动作（检索可命中性） ──────────────────────
+    //
+    // 背景（2026-11-10 只读验证）：活跃 65 条规则里 54 条（83%）从未被检索命中——
+    // abstract 写成「[规则] xxx 执行失败（累计 N 次）」这类事件记录，与用户提问的
+    // 语义相似度天然低。以下用例把「场景 → 动作」的形态锁进写入侧。
+    /// 摘要必须是「场景 → 动作」，不能退回事件记录式写法。
+    ///
+    /// 判别力：把 `rule_abstract` 改回 `[规则] {tool} {class}（累计 N 次）` → 本用例红。
+    #[test]
+    fn test_rule_abstract_is_scenario_to_action() {
+        let text = rule_abstract("apply_patch", FailureClass::Conflict, 7);
+        assert!(text.contains("apply_patch"), "要带工具名：{text}");
+        assert!(text.contains('→'), "要写成「场景 → 动作」：{text}");
+        assert!(text.contains("累计 7 次"), "计数保留在尾部：{text}");
+        assert!(
+            !text.starts_with("[规则]"),
+            "不得用事件记录式前缀（检索命中率极低）：{text}"
+        );
+    }
+    /// 不同工具 / 类别的动作不同；未知组合落通用动作（不能空）。
+    #[test]
+    fn test_action_hint_specializes_known_pairs() {
+        let patch = action_hint("apply_patch", FailureClass::Conflict);
+        let timeout = action_hint("execute_command", FailureClass::Timeout);
+        let other = action_hint("some_new_tool", FailureClass::Other);
+        assert_ne!(patch, timeout, "不同失败类别应给不同动作");
+        assert!(
+            patch.contains("锚点") || patch.contains("重写"),
+            "补丁冲突要有具体动作：{patch}"
+        );
+        assert!(
+            timeout.contains("background") || timeout.contains("缩短"),
+            "超时要给具体处置：{timeout}"
+        );
+        assert!(!other.is_empty(), "未知组合必须有兜底动作");
+    }
+    /// 写入侧真的用了这个口径（首次写入与合并两条路径都要）。
+    ///
+    /// 判别力：只改纯函数、忘了替换写入模板时，本用例红。
+    #[tokio::test]
+    async fn test_recorded_abstract_uses_scenario_form() {
+        let vfs = Arc::new(SpyVfs::new());
+        let recorder = RuleRecorder::new(vfs.clone());
+
+        recorder
+            .record_with_kind(
+                &RuleTopic::new("write_file", FailureClass::Permission),
+                "write_file 工具执行失败",
+                "工具: write_file\n参数: a\n错误: 拒绝访问（os error 5）\n",
+                "s1",
+                FailureKind::Logic,
+            )
+            .await
+            .unwrap();
+
+        let first = vfs.abstract_of_first();
+        assert!(
+            first.contains('→'),
+            "首次写入的 abstract 应是「场景 → 动作」：{first}"
+        );
+        assert!(
+            !first.starts_with("[规则]"),
+            "不得带事件记录式前缀：{first}"
+        );
+
+        // 合并路径（同一主题第二次失败）也要保持同一口径
+        recorder
+            .record_with_kind(
+                &RuleTopic::new("write_file", FailureClass::Permission),
+                "write_file 工具执行失败",
+                "工具: write_file\n参数: b\n错误: 拒绝访问（os error 5）\n",
+                "s2",
+                FailureKind::Logic,
+            )
+            .await
+            .unwrap();
+        let merged = vfs.abstract_of_first();
+        assert!(
+            merged.contains('→'),
+            "合并后的 abstract 也应保持形态：{merged}"
+        );
+        assert!(merged.contains("累计 2 次"), "合并后计数在尾部：{merged}");
     }
 }
