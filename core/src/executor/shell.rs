@@ -143,7 +143,28 @@ impl ShellSpec {
         }
         c.arg(self.wrap_command(command));
         // Windows：隐藏子进程控制台窗口（防黑窗一闪；Unix 无操作）。
-        crate::executor::command::hide_console_window(c)
+        //
+        // **测试编译下不加这个旗标**（2026-11-10 实测根因）。`CREATE_NO_WINDOW` 的语义是
+        // 「不给子进程分配可见控制台」；但天演本体是 GUI（无控制台），它 spawn 出来的命令
+        // 已处在「无控制台」环境。若**下游再叠加一层**同样旗标（测试 spawn 慢命令正是如此），
+        // pwsh 的 ConsoleHost 会陷入自相矛盾的状态，表现为两种崩溃：
+        //   ① `0xc0000142`（进程无法启动）→ CSRSS 弹 HardError 对话框，**不写 WER**；
+        //   ② `0x80131623`（`Microsoft.PowerShell.ConsoleHost.dll` 未处理异常）→ 写 WER。
+        // 两种都让命令跑不起来，但测试常常仍然通过，于是长期只表现为「弹个框、点掉就好」。
+        //
+        // 对照实验（同代码同用例）：独立终端里跑 21/21 全过、0 弹窗、0 WER；换成天演的
+        // GUI 链条跑则每次弹框。唯一差别是「链条上游有没有一个健康的控制台」。
+        //
+        // 测试进程跑在终端里（有控制台），子进程**继承**即可——既不弹新窗口，也不会
+        // 叠加第二层「无控制台」。生产路径（GUI）保持不变。
+        #[cfg(not(test))]
+        {
+            crate::executor::command::hide_console_window(c)
+        }
+        #[cfg(test)]
+        {
+            c
+        }
     }
 
     /// 命令包装（输出编码注入，对命令语义透明）：

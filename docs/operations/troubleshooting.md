@@ -445,17 +445,49 @@ P5: oft.PowerShell.ConsoleControl+<>c.<.cctor>b__106_1
 初始化失败。触发条件苛刻（并发或资源紧张、无可用控制台），所以「偶发」，但每次跑
 `core` 的 `executor::command` 测试都可能命中（那条测试过去显式调 `powershell`）。
 
-**已知的历史触发源（都别再用）**：
-- `waitfor /t N`（等句柄）；
-- `ping -n N`（要加载网络栈 ws2_32 / iphlpapi）；
-- **裸写 `powershell`**（解析到 5.1；测试里已改为 `pwsh`，见 `executor::command` 的
-  `slow_command`）。
+**真根因（2026-11-10 重查：当年那条归因只治了表面）**
+
+历史触发源换过四代——`waitfor /t N`、`ping -n N`、裸写 `powershell`（→5.1）、以及
+**`pwsh` 7**——每一代都撞过同一个框。当年按「5.1 的 `ConsoleControl` 静态构造有 bug」
+归因、换成了 pwsh，实际只是把异常码换了一个（`0xc0000142` → `0x80131623`），框照弹。
+
+**真根因是「无控制台状态被叠加了两层」**：
+
+```
+天演（GUI，无控制台）
+  └─ CREATE_NO_WINDOW ──▶ pwsh(1)          第一层，pwsh 自己能扛（headless 模式）
+       └─ 继承 ──────────▶ cargo test       继承到「无控制台」
+            └─ CREATE_NO_WINDOW ──▶ pwsh(2) 第二层叠加 → ConsoleHost 自相矛盾 → 崩
+```
+
+崩溃有两种形态，**分别走两条不同的观测通道**：
+
+| 形态 | 异常码 | 是否写 WER / 事件日志 |
+|---|---|---|
+| 进程根本无法启动 | `0xc0000142`（DLL 初始化失败） | **不写**，只有 CSRSS 弹的 HardError 对话框 |
+| 启动成功但 ConsoleHost 抛未处理异常 | `0x80131623`（`Microsoft.PowerShell.ConsoleHost.dll`） | 写（`Get-WinEvent Id=1000`） |
+
+**对照实验（同一份代码、同一个用例）**：
+
+| 启动链路 | 测试 | 弹窗 | WER |
+|---|---|---|---|
+| 天演（GUI，无控制台）→ cargo test | 通过 | **有** | 1 |
+| 独立终端（健康控制台）→ cargo test | 21/21 通过 | **无** | 0 |
+
+唯一差别是「链条上游有没有一个健康的控制台」。所以 `tianyan-server` 这种控制台宿主
+直接 spawn 是安全的，**只有「无控制台父 + 下游再叠加一层」的组合会崩**。
+
+**观测纪律**：只数 `Get-WinEvent Id=1000` 会把 HardError 弹窗整个漏掉——「0 条崩溃」
+可能是假的 0。要同时枚举窗口（类名 `#32770` 即标准对话框），两条通道一起看。
 
 **天演侧的处理**：
 - 子进程退出码为「没起来」类时，工具结果里会带 `startup_failure` 字段给人话诊断
   （`executor::command::startup_failure_hint`，覆盖 `0xC0000142` / `0xC000013A` / `0xC0000005`）；
 - 执行底层默认 `auto`（优先 pwsh 7）—— 5.1 只在你显式配 `[executor].shell = "powershell"`
   或机器没有 pwsh 时才会用到。
+- **测试编译下不再叠加 `CREATE_NO_WINDOW`**（`ShellSpec::build_command` 的 `cfg(test)`
+  分支）：测试进程本身跑在终端里（有控制台），子进程继承即可——既不弹新窗口，也不会
+  叠加第二层「无控制台」。生产路径（GUI）保持原样，实测安全。
 
 **「到底用的是哪个 shell」怎么一眼确认（别再翻日志）**：设置页 → Agent 栏目顶部
 「命令执行环境（当前生效）」卡片，显示 Shell 身份 + 可执行**绝对路径** + 参数模板
