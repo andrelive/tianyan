@@ -578,20 +578,36 @@ impl VfsSearch for VirtualFileSystemImpl {
     }
 }
 
+/// 判断一次读取是否值得记为「被使用」（[`VirtualFileSystem::touch_access`] 的判据）。
+///
+/// 判据是「**有没有内容**」而不是「是不是目录」：
+/// - 纯容器目录（无内容，只用于分组）→ 不记，记它没有意义；
+/// - **内容型目录**（`is_directory=1` 但正文存在节点自身）→ 必须记。现网曾有 13 个
+///   `skill/{id}` 是这种形态（早期 import 遗留），按 `is_directory` 一刀切的结果是
+///   它们无论被读多少次 `access_count` 恒为 0——「零调用」统计里因此混进了一整批
+///   实际在用的通用方法论技能（`tdd` / `diagnosing-bugs` / `rust-best-practices` …），
+///   而演化正拿这份统计判断「该不该删」。
+///
+/// 该形态在 `MockVfs` 下构造不出（它的 `list` 返回的条目不带内容），所以这条契约以
+/// **纯函数**形式单测，而不是绕真实 backend 拼集成测试。
+fn should_touch_access(entry: &ContextEntry) -> bool {
+    !entry.metadata.is_directory || entry.has_content(ContentLevel::Detail)
+}
+
 #[async_trait]
 impl VirtualFileSystem for VirtualFileSystemImpl {
     /// 记录一次使用：读回条目元数据、累加计数后写回。
     ///
     /// 走 `read_entry` + `write_entry` 而不是新增 storage trait 方法——低频（每次注入
     /// 至多几条记忆）、内容在 SQLite 页缓存里，代价可忽略；换来的是**不改任何后端契约**。
-    /// 目录与「取不到条目」都静默跳过：记账失败不该影响上下文注入。
+    /// 「取不到条目」静默跳过：记账失败不该影响上下文注入。
     async fn touch_access(&self, uri: &TianyanUri) -> Result<()> {
         let mut entry = match self.storage.read_entry(uri).await {
             Ok(e) => e,
             Err(e) if e.is_not_found() => return Ok(()),
             Err(e) => return Err(e),
         };
-        if entry.metadata.is_directory {
+        if !should_touch_access(&entry) {
             return Ok(());
         }
         entry.metadata.access_count = entry.metadata.access_count.saturating_add(1);

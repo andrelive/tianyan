@@ -90,10 +90,18 @@ impl SummaryTask {
             if system_paths::is_system_path(entry.uri()) {
                 continue;
             }
+            // 目录有两种形态：**纯容器**（无内容，只往下递归）与**内容型目录**
+            // （正文存节点自身——现网曾有 13 个 `skill/{id}` 空目录如此）。
+            // 后者必须**先按叶节点处理**：否则 `list()` 出空、递归下去什么都没扫到、
+            // 自身永不进 missing，overview 永远是 NULL，而任务日志一片干净
+            // （实测该任务跑了 189 次、`last_error` 为 null、从没碰过那 13 个技能）。
+            if (!entry.is_directory() || entry.has_content(ContentLevel::Detail))
+                && self.needs_summary(ctx, &entry).await?
+            {
+                missing.push(entry.metadata.uri.clone());
+            }
             if entry.is_directory() {
                 Box::pin(self.scan_directory_recursive(ctx, entry.uri(), missing)).await?;
-            } else if self.needs_summary(ctx, &entry).await? {
-                missing.push(entry.metadata.uri.clone());
             }
         }
 

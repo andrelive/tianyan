@@ -600,3 +600,41 @@ async fn test_reconcile_skips_system_paths() {
         "评审记录不得建向量（reconcile 应跳过）"
     );
 }
+
+/// 「被使用」的判据按**有没有内容**划，不按**是不是目录**划。
+///
+/// 判别力：把 `should_touch_access` 退回 `!entry.metadata.is_directory`
+/// （即 `touch_access` 恢复「目录一律跳过」）后，第二条断言立刻变红。
+///
+/// 现网代价（2026-11-10 实测）：13 个技能是 `is_directory=1` 但**子条目为 0** 的
+/// 「内容型目录」（正文存节点自身，早期 import 遗留），按目录一刀切让它们无论被读
+/// 多少次 `access_count` 恒为 0——「零调用」统计里因此混进了一整批实际在用的通用
+/// 方法论技能（`tdd` / `diagnosing-bugs` / `rust-best-practices` / `research` …），
+/// 而演化正拿这份统计判断「该不该删」。对照实验：`diagnosing-bugs` 在目录形态下被
+/// `vfs_read` 读过一次仍为 0，规范化为文件形态后 `tdd` 读一次即 1。
+#[test]
+fn test_should_touch_access_by_content_not_shape() {
+    use super::should_touch_access;
+    use crate::vfs::ContextEntry;
+
+    let uri = TianyanUri::new(ContextNamespace::Skill, vec!["tdd".to_string()]);
+
+    // 纯容器目录（用于分组、自己没有内容）：不记
+    let container = ContextEntry::new_directory(uri.clone());
+    assert!(
+        !should_touch_access(&container),
+        "纯容器目录不该记使用（记它没有意义）"
+    );
+
+    // 内容型目录（空目录 + 正文存节点自身）：必须记
+    let mut contentful = ContextEntry::new_directory(uri.clone());
+    contentful.detail_content = Some("# 正文".to_string());
+    assert!(
+        should_touch_access(&contentful),
+        "内容型目录必须记使用——现网 13 个技能踩的就是这条"
+    );
+
+    // 普通文件条目：恒记
+    let file = ContextEntry::new_file(uri);
+    assert!(should_touch_access(&file), "文件条目恒记");
+}
