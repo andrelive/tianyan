@@ -16,6 +16,17 @@ pub struct SkillSummary {
     pub id: String,
     /// 技能描述（L0 摘要）。
     pub description: String,
+    /// 该技能被**模型读过**的次数（`touch_access` 记账）。
+    ///
+    /// 含全部入口：`call_skill`、`vfs_read tianyan://skill/{id}`、以及未来任何
+    /// 读技能的路径——判据是「模型是否看见」，不是「哪个工具调的」。此前三条
+    /// 记账路径各记各的（`skill_calls` 按工具名散记、`doc_access` 只记检索、
+    /// `access_count` 只由记忆注入维护），于是「这个技能被用过几次」在数据层
+    /// **没有任何一处可答**，演化只能看到 `call_skill` 的 23 次而漏掉 `vfs_read`
+    /// 的 42 次，把在用技能误判成零调用并提议删除。
+    pub access_count: u64,
+    /// 最后读取时间（`None` = 从未被读过）。
+    pub last_accessed: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 /// VFS 技能管理器。
@@ -58,7 +69,12 @@ impl SkillManager {
                 .read_abstract(entry.uri())
                 .await
                 .unwrap_or_default();
-            skills.push(SkillSummary { id, description });
+            skills.push(SkillSummary {
+                id,
+                description,
+                access_count: entry.metadata.access_count,
+                last_accessed: entry.metadata.last_accessed,
+            });
         }
         Ok(skills)
     }

@@ -416,6 +416,11 @@ impl ContextPipeline {
                     match r.uri.namespace() {
                         ContextNamespace::Agent if rules.len() < self.learned_rules_top_k => {
                             rules.push(content);
+                            // 规则与记忆同属「真正进了上下文」——此前只记记忆，
+                            // 规则的 access_count 永远是 0，于是「这条规则有没有
+                            // 被用上」在数据层根本不可答（演化只能看 doc_access
+                            // 的检索命中，看不到注入）。
+                            touched.push(r.uri.clone());
                         }
                         ContextNamespace::Memory if memories.len() < self.default_top_k => {
                             memories.push(content);
@@ -474,8 +479,11 @@ impl ContextPipeline {
 
     /// 加载可用技能清单（L0：id + 摘要）。
     ///
-    /// 技能是准静态内容，全量列出即可（现网 44 个 ≈ 5K tokens），不做语义筛选
-    /// ——筛选会把「模型不知道自己有这个技能」的问题原样搬回来。
+    /// **全量列 abstract 原文，不截断、不分层**。清单必须全量（缺了它模型无从
+    /// 知道有哪些方法论可调），所以体积靠**摘要本身写短**控制——见
+    /// [`tianyan::skills`] 模块文档的「abstract 写法」一节（一句话：场景 + 用途，
+    /// ≤ 60 字符）。读取侧裁剪试过并否掉了：按首句切 + 上限截断会把一句话切成
+    /// 半句带半个引号（现网 34/60 条如此），比不列更难判断该用哪个。
     ///
     /// 失败不阻塞：清单只是「发现」辅助，取不到就退化成没清单（模型仍可
     /// `search_vfs` 或凭 id 试 `call_skill`），不该让整轮组装失败。
@@ -968,16 +976,21 @@ mod tests {
 
     /// 访问计数只记「**真正进了上下文**」的条目（`touch_access` 的调用契约）。
     ///
+    /// 判据按**「模型是否看见」**划，不按命名空间划：注入的规则与记忆**都算**。
+    /// 早先只记记忆、规则不记，代价是「这条规则被注入过几次」在数据层根本不可答
+    /// ——演化只能看到 `doc_access` 的检索命中，看不到真正进上下文那一步。
+    ///
     /// 判别力（三种真实缺陷各对应一条断言）：
-    /// - 实现改成「检索到就计数」→ 被语义门槛丢掉的那条也会出现；
-    /// - 规则也一起计数 → `agent/learned/*` 会出现在记录里；
+    /// - 实现改成「检索到就计数」→ 被语义门槛丢掉的那条（`noise`）也会出现；
+    /// - 只记记忆、漏掉规则 → 记录里少一条 `agent/learned/*`；
     /// - 压根不记账（漏调用，或后端退回默认空操作）→ 记录为空。
     ///
-    /// 为什么值得锁：记忆页的「访问次数」和后续的动态重要性都只吃这一个数，
-    /// 虚高（噪声条目也算）和恒零（没人记账）都会让权重失去意义 —— 而后者在
-    /// 界面上和前者难以区分（都只是「数字不动」）。
+    /// 为什么不锁「规则不算」：`access_count` 是裸计数，`set_importance` 是另一条
+    /// 独立路径（无自动换算），所以规则计入不会污染记忆页的权重。反过来，
+    /// 技能分层判据要用同一个口径（`skill/` 命名空间的 access_count），
+    /// 记账点按命名空间分裂一次，这个判据就不可信了。
     #[tokio::test]
-    async fn test_run_records_access_only_for_injected_memories() {
+    async fn test_run_records_access_for_injected_entries() {
         let soul_uri = AgentPath::Soul.uri();
         let rule_uri = make_uri(ContextNamespace::Agent, &["learned", "rule1"]);
         let hit = make_uri(ContextNamespace::Memory, &["facts", "hit"]);
@@ -1004,10 +1017,16 @@ mod tests {
         let (ctx, _) = pipeline.run("test", &mut conversation, 0).await.unwrap();
 
         assert_eq!(ctx.memories, vec!["用户偏好深色模式。"]);
+        // 顺序无关：`scored` 会按项目作用域重排（跨项目条目降权），规则与记忆的
+        // 相对次序随工作目录而变——锁顺序等于锁死一个与契约无关的实现细节。
+        let mut touched = vfs.touch_calls();
+        touched.sort();
+        let mut expected = vec![rule_uri.to_string(), hit.to_string()];
+        expected.sort();
         assert_eq!(
-            vfs.touch_calls(),
-            vec![hit.to_string()],
-            "只有真正注入上下文的那条记忆算「被使用」：规则不算、被门槛丢掉的不算"
+            touched, expected,
+            "注入的规则与记忆都算「被使用」（判据 = 模型是否看见）；\
+             被语义门槛丢掉的不算"
         );
     }
 

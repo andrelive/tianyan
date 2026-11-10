@@ -68,6 +68,14 @@ impl ToolContext {
         // 时头部截断至 2000 行/50KB（附"使用 offset 继续"，正文不再无上限倾泻）；
         // 指定时按行取段（对齐目录 L1 中的章节行号）。
         let window = detail_window(&l2.unwrap_or_default(), params.offset, params.limit)?;
+        // 记账：工具返回值即**进了模型上下文**的内容，与「检索命中并注入」同义
+        // （见 `VirtualFileSystem::touch_access` 的调用契约）。此前只有记忆注入
+        // 记账，工具读取路径完全绕过了它——现网后果是「技能被 vfs_read 读了 42 次，
+        // 三个统计表里一条记录都没有」，演化因此把在用条目误判为零调用。
+        // best effort：记账失败不影响读取结果。
+        if let Err(e) = vfs.touch_access(&parsed).await {
+            tracing::debug!(error = %e, uri = %params.uri, "VFS 访问计数写入失败（跳过）");
+        }
         Ok(serde_json::json!({
             "uri": params.uri,
             "abstract": vfs_content_field(l0),

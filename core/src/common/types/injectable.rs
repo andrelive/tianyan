@@ -14,6 +14,10 @@ use serde::{Deserialize, Serialize};
 ///
 /// 只带 id 与一句摘要：模型据此判断「该不该为这件事调 `call_skill`」；
 /// 技能正文（L2，平均 2.5 KB）不进前缀，按需加载——渐进式披露的前半段。
+///
+/// `description` 是技能 abstract 的**原文**（不截断）：清单全量常驻前缀，所以
+/// 体积靠 abstract 本身写短来控制，不靠读取侧裁剪——见
+/// [`crate::skills`](crate::skills) 模块文档的「abstract 写法」一节。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct InjectableSkill {
     /// 技能 ID（`call_skill` 的入参）。

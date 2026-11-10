@@ -126,6 +126,20 @@ impl SummaryTask {
         let has_abstract = metadata.contains_key(&ContentLevel::Abstract);
         let has_overview = metadata.contains_key(&ContentLevel::Overview);
 
+        // 缺层（摘要或概览任一缺失）→ **必须补**，不受 processed 缓存影响。
+        //
+        // 缓存记录的是「这个 URI 处理过」，但条目可能在那之后被搬移或重建：
+        // `move_entry` 逐层复制内容，源条目缺某层则目标也缺。此时缓存仍认为
+        // 已处理，缺层就永远补不上。现网代价（2026-11-11 只读验证）：13 个技能
+        // 的 `overview_content` 恒为 NULL，摘要任务跑了 189 次、`last_error` 为
+        // null，日志里却一次都没碰过它们。
+        //
+        // 判据分层：**内容完整性（缺不缺）与内容新鲜度（新不新）都不看缓存**；
+        // 缓存只用于「内容没变就别重复花钱调 LLM」。
+        if !has_abstract || !has_overview {
+            return Ok(true);
+        }
+
         if has_abstract && has_overview {
             // 内容被编辑（Detail 比摘要新）→ 必须重建（无视 processed 缓存）
             let detail_newer_than = |level: &ContentLevel| {
@@ -141,7 +155,7 @@ impl SummaryTask {
             }
         }
 
-        // 内容未变（或摘要缺失）：processed 缓存防重复处理
+        // 摘要齐全且内容未变：processed 缓存防重复处理
         let uri_str = entry.metadata.uri.to_string();
         let is_processed = {
             let processed = self.processed.read().await;
@@ -151,7 +165,9 @@ impl SummaryTask {
             return Ok(false);
         }
 
-        Ok(!has_abstract || !has_overview)
+        // 摘要齐全、内容未变、且本轮没处理过：无需重建（缓存只是省一次判断，
+        // 不构成「要不要补」的依据——那是上面两条的职责）。
+        Ok(false)
     }
 
     /// 处理单个 URI。
@@ -512,6 +528,61 @@ mod tests {
         assert_eq!(
             abstract_content, content,
             "token 低于阈值的中文内容不应被 LLM 摘要（字节/token 误判 bug）"
+        );
+    }
+
+    // ── 缺层补全 vs processed 缓存（缺层必须补，缓存只管不重复花钱） ──
+
+    /// 缺 overview 的条目**即使已在 processed 缓存里也必须进 missing**。
+    ///
+    /// 判别力：把 `if !has_abstract || !has_overview { return Ok(true) }` 挪回
+    /// `is_processed` 短路之后，本用例立刻变红。现网代价：13 个技能的
+    /// `overview_content` 恒为 NULL——摘要任务跑了 189 次、`last_error` 为 null，
+    /// 日志里却一次没碰过它们（缓存认为「处理过」，缺层就永远补不上）。
+    #[tokio::test]
+    async fn test_missing_overview_scanned_despite_processed_cache() {
+        let vfs = Arc::new(MockVfs::new());
+        let root = TianyanUri::new(ContextNamespace::Memory, vec![]);
+        let cases = root.append("cases");
+        vfs.add_directory(&root, &cases);
+        let entry_uri = cases.append("needs-overview");
+        vfs.add_entry(&cases, &entry_uri);
+        // 有 detail + abstract、缺 overview —— 正是现网那 13 个技能的形态
+        vfs.add_content_metadata(&entry_uri, ContentLevel::Detail);
+        vfs.add_content_metadata(&entry_uri, ContentLevel::Abstract);
+
+        let ctx = make_context(vfs.clone(), MockChatService::new());
+        let task = SummaryTask::new();
+        task.record_processed(entry_uri.as_str()).await;
+
+        let missing = task.scan_missing_summaries(&ctx).await.unwrap();
+        assert!(
+            missing.iter().any(|u| u.as_str() == entry_uri.as_str()),
+            "缺 overview 的条目在缓存里也必须进 missing，否则缺层永远补不上：{missing:?}"
+        );
+    }
+
+    /// 摘要齐全且内容未变的条目，在缓存里就不再重扫（避免重复烧 LLM 调用）。
+    #[tokio::test]
+    async fn test_complete_entry_in_cache_is_not_rescanned() {
+        let vfs = Arc::new(MockVfs::new());
+        let root = TianyanUri::new(ContextNamespace::Memory, vec![]);
+        let cases = root.append("cases");
+        vfs.add_directory(&root, &cases);
+        let entry_uri = cases.append("complete");
+        vfs.add_entry(&cases, &entry_uri);
+        vfs.add_content_metadata(&entry_uri, ContentLevel::Detail);
+        vfs.add_content_metadata(&entry_uri, ContentLevel::Abstract);
+        vfs.add_content_metadata(&entry_uri, ContentLevel::Overview);
+
+        let ctx = make_context(vfs.clone(), MockChatService::new());
+        let task = SummaryTask::new();
+        task.record_processed(entry_uri.as_str()).await;
+
+        let missing = task.scan_missing_summaries(&ctx).await.unwrap();
+        assert!(
+            missing.iter().all(|u| u.as_str() != entry_uri.as_str()),
+            "摘要齐全且已处理过的条目不该重扫（每重扫一次就烧一次 LLM）：{missing:?}"
         );
     }
 

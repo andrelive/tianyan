@@ -5,8 +5,10 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use tokio::sync::Mutex;
 
+use crate::agent::tool_params::VfsReadParams;
 use crate::agent::RoleRegistry;
 use crate::common::error::TianyanError;
+use crate::common::types::{ContextNamespace, TianyanUri};
 use crate::executor::approval::ApprovalGate;
 use crate::executor::SecurityPolicy;
 use crate::knowledge::KnowledgeIngestor;
@@ -680,6 +682,31 @@ impl ToolRegistry {
             .copied()
             .unwrap_or_default()
     }
+    /// 按**实际入参**查询展示意图（A2；未知工具返回 Generic）。
+    ///
+    /// 与 [`Self::presentation`] 的区别：展示意图有时取决于「这次调用读了什么」，
+    /// 而不只是「用了哪个工具」。典型是 `vfs_read` 读 `tianyan://skill/{id}`——
+    /// 与 `call_skill` 是同一件事的两条入口（同一份内容、同一个记账点），展示也
+    /// 必须是同一种卡片，否则同一次技能阅读在前端会长成两种形态、统计面板与
+    /// 会话视图各说各话。
+    ///
+    /// 判定只按**命名空间**做，不看内容；新增「命名空间专属展示」时在此加映射，
+    /// 不要在工具实现里塞展示逻辑——展示意图的唯一出处仍是本注册表。
+    pub fn presentation_for_call(&self, name: &str, arguments: &str) -> ToolPresentation {
+        let base = self.presentation(name);
+        if base == ToolPresentation::Skill || name != "vfs_read" {
+            return base;
+        }
+        // 解析失败按原意图处理：展示意图不该因为参数残缺而报错。
+        if let Ok(params) = serde_json::from_str::<VfsReadParams>(arguments) {
+            if let Ok(uri) = TianyanUri::parse(&params.uri) {
+                if uri.namespace() == ContextNamespace::Skill {
+                    return ToolPresentation::Skill;
+                }
+            }
+        }
+        base
+    }
 
     /// 注册工具执行前置监听器（A1 管线阶段 1，fail-closed）。
     ///
@@ -1091,6 +1118,36 @@ mod tests {
         assert!(defs.iter().any(|d| d.function.name == "vfs_list"));
         assert!(defs.iter().any(|d| d.function.name == "self_check"));
         assert!(defs.iter().any(|d| d.function.name == "knowledge_ingest"));
+    }
+
+    /// `vfs_read` 读技能命名空间 = 技能阅读：展示与 `call_skill` 同一种卡片。
+    ///
+    /// 判别力：把 `presentation_for_call` 退回 `presentation`（只按工具名判定）
+    /// 后本用例变红。两条入口的记账已经统一到同一个 `touch_access` 点，展示若
+    /// 还分叉，同一次技能阅读在前端会呈现成「读文件」与「调技能」两种形态。
+    #[test]
+    fn test_presentation_for_call_maps_skill_namespace() {
+        let registry = ToolRegistry::new(SecurityPolicy::default());
+        assert_eq!(
+            registry.presentation_for_call("vfs_read", r#"{"uri":"tianyan://skill/planning"}"#),
+            ToolPresentation::Skill,
+            "读 skill/ 命名空间应展示为技能卡片"
+        );
+        assert_eq!(
+            registry.presentation_for_call("vfs_read", r#"{"uri":"tianyan://knowledge/doc1"}"#),
+            ToolPresentation::Read,
+            "非技能命名空间的读取保持原展示意图"
+        );
+        assert_eq!(
+            registry.presentation_for_call("call_skill", "{}"),
+            ToolPresentation::Skill,
+            "call_skill 自身已是 Skill，参数残缺不影响"
+        );
+        assert_eq!(
+            registry.presentation_for_call("vfs_read", "not-json"),
+            ToolPresentation::Read,
+            "参数解析失败按原意图处理，展示意图不该因残缺参数报错"
+        );
     }
 
     /// A2 展示契约：内置工具展示意图映射齐全，未知工具回退 Generic。

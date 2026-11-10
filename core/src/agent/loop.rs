@@ -1476,7 +1476,7 @@ impl AgentLoop {
             arguments: tc.function.arguments.clone(),
             presentation: self
                 .tool_registry
-                .presentation(&tc.function.name)
+                .presentation_for_call(&tc.function.name, &tc.function.arguments)
                 .as_str()
                 .to_string(),
         }

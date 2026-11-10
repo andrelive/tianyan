@@ -337,6 +337,13 @@ impl ToolRegistry {
             )));
         }
 
+        // 记账：技能正文进了模型上下文（`touch_access` 契约）。与 `vfs_read`
+        // 读同一 uri 走的是同一个计数点——两条入口等价化的记账半边。
+        // best effort：记账失败不影响读取结果。
+        if let Err(e) = vfs.touch_access(&uri).await {
+            tracing::debug!(error = %e, skill_id = %params.skill_id, "技能访问计数写入失败（跳过）");
+        }
+
         let mut data = HashMap::new();
         data.insert(
             "skill_id".to_string(),

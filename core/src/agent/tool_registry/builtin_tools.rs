@@ -210,7 +210,7 @@ fn def_vfs_list(name: &'static str) -> ToolDefinition {
 fn def_call_skill(name: &'static str) -> ToolDefinition {
     ToolDefinition::function(FunctionDefinition::from_schema::<CallSkillParams>(
         name,
-        "按 ID 读取 VFS 技能文档（方法论文档：L0 摘要 + L2 详情）。技能无执行语义——读到内容后参考方法论自行用基础工具执行。可用技能清单见 system 前缀的「## 可用技能」段（id + 一句摘要），直接按其中 id 调用；清单里没有的能力先用 search_vfs 找。",
+        "按 ID 读取 VFS 技能文档（方法论文档：L0 摘要 + L2 详情）。技能无执行语义——读到内容后参考方法论自行用基础工具执行。可用技能清单见 system 前缀的「## 可用技能」段（近期用过的带完整摘要，其余只有一行标签）——标签够判断就直接按 id 调用；标签看不出是否匹配、或清单里没有的能力，先用 search_vfs 按内容找。",
     ))
 }
 

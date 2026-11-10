@@ -5,8 +5,8 @@
 
 use crate::common::types::InjectableContext;
 use crate::common::types::{
-    FunctionCall, Message, MessageRole, Part, PartTime, StructuredMessage, TokenUsage,
-    ToolCall as CoreToolCall, ToolCallType,
+    FunctionCall, InjectableSkill, Message, MessageRole, Part, PartTime, StructuredMessage,
+    TokenUsage, ToolCall as CoreToolCall, ToolCallType,
 };
 use crate::context::SessionImages;
 use std::borrow::Cow;
@@ -120,17 +120,15 @@ impl ContextAssembler {
             let mut parts: Vec<String> = Vec::with_capacity(injectable.skills.len() + 2);
             parts.push("## 可用技能\n".to_string());
             parts.push(
-                "以下是可用的方法论文档。判断这件事有方法论可循时，用 `call_skill` 按 id 取完整内容——\n\
+                "方法论文档。判断这件事有方法论可循时，用 `call_skill` 按 id 取完整内容——\n\
                  它只返回文档，不执行任何操作；具体执行仍由你按文档用基础工具完成。\n"
                     .to_string(),
             );
+            // 全量列 abstract 原文，不截断、不分层：体积由 abstract 写法控制
+            // （见 `crate::skills` 文档「abstract 写法」）。读取侧裁剪会把一句话
+            // 切成半句带半个引号，比不列更难判断该用哪个。
             for skill in &injectable.skills {
-                let desc = skill.description.trim();
-                if desc.is_empty() {
-                    parts.push(format!("- {}\n", skill.id));
-                } else {
-                    parts.push(format!("- {}：{}\n", skill.id, desc));
-                }
+                push_skill_line(&mut parts, skill);
             }
             messages.push(Message::system(parts.concat()));
         }
@@ -405,6 +403,16 @@ impl ContextAssembler {
         token_usage: Option<TokenUsage>,
     ) -> StructuredMessage {
         StructuredMessage::from_message(msg, session_id, parent_id, token_usage)
+    }
+}
+
+/// 渲染一行技能清单条目：有描述用「id：描述」，无描述只列 id（不留「id：」空值）。
+fn push_skill_line(parts: &mut Vec<String>, skill: &InjectableSkill) {
+    let desc = skill.description.trim();
+    if desc.is_empty() {
+        parts.push(format!("- {}\n", skill.id));
+    } else {
+        parts.push(format!("- {}：{}\n", skill.id, desc));
     }
 }
 

@@ -499,6 +499,44 @@ async fn test_call_skill_missing_skill_errors() {
     assert!(result.is_err());
     assert!(result.unwrap_err().to_string().contains("不存在"));
 }
+/// 记账：`call_skill` 读到技能即记一次 access，且 uri 与 `vfs_read` 读同一技能时
+/// 完全一致——这是「两条入口等价化」的记账半边（统计层不再有路径分叉）。
+///
+/// 判别力：删掉 `execute_call_skill` 里的 `touch_access` 调用后本用例变红。
+#[tokio::test]
+async fn test_call_skill_records_access() {
+    let vfs = Arc::new(crate::test_utils::MockVfs::new());
+    let skill_uri = TianyanUri::new(ContextNamespace::Skill, vec!["planning".to_string()]);
+    vfs.set_content(&skill_uri, ContentLevel::Abstract, "计划阶段软约束");
+    vfs.set_content(&skill_uri, ContentLevel::Detail, "# 计划阶段\n\n只读研究");
+    let registry = ToolRegistry::new(default_strict_policy()).with_vfs(vfs.clone());
+
+    registry
+        .execute_call_skill(r#"{"skill_id":"planning"}"#)
+        .await
+        .unwrap();
+    assert_eq!(
+        vfs.touch_calls(),
+        vec!["tianyan://skill/planning".to_string()],
+        "call_skill 读到技能必须记一次 access，且 uri 口径与 vfs_read 相同"
+    );
+}
+
+/// 失败不记账：技能不存在时提前返回错误，不得留下 access 记录
+/// （否则「试错」会被算成「用过」，统计反而更不可信）。
+#[tokio::test]
+async fn test_call_skill_missing_does_not_record_access() {
+    let vfs = Arc::new(crate::test_utils::MockVfs::new());
+    let registry = ToolRegistry::new(default_strict_policy()).with_vfs(vfs.clone());
+
+    let _ = registry
+        .execute_call_skill(r#"{"skill_id":"not_exist"}"#)
+        .await;
+    assert!(
+        vfs.touch_calls().is_empty(),
+        "读取失败的技能不得计入访问次数"
+    );
+}
 
 // ── ask_user ─────────────────────────────────────────────────────────────
 

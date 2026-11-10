@@ -119,6 +119,32 @@ async fn test_vfs_read_success_with_content() {
     assert_eq!(result["overview"].as_str().unwrap(), "");
     assert_eq!(result["detail"].as_str().unwrap(), "");
 }
+/// 记账：`vfs_read` 读到内容即记一次 access——与「检索命中并注入」同一契约
+/// （见 `VirtualFileSystem::touch_access`：判据是「模型是否看见」，不是「哪个工具调的」）。
+///
+/// 判别力：删掉 `execute_vfs_read` 里的 `touch_access` 调用后本用例变红。现网代价
+/// 正是这条缺失造成的——技能被 `vfs_read` 读了 42 次，三个统计表里零记录，
+/// 演化侧据此把在用条目误判成「零调用」并提议删除。
+#[tokio::test]
+async fn test_vfs_read_records_access() {
+    let uri = TianyanUri::new(ContextNamespace::Knowledge, vec!["doc1".to_string()]);
+    let vfs = Arc::new(
+        MockVfs::builder()
+            .with_content(&uri, ContentLevel::Abstract, "the abstract")
+            .build(),
+    );
+    let registry = ToolRegistry::new(default_strict_policy()).with_vfs(vfs.clone());
+
+    registry
+        .execute_vfs_read(r#"{"uri":"tianyan://knowledge/doc1"}"#)
+        .await
+        .unwrap();
+    assert_eq!(
+        vfs.touch_calls(),
+        vec!["tianyan://knowledge/doc1".to_string()],
+        "vfs_read 读到内容必须记一次 access"
+    );
+}
 
 #[tokio::test]
 async fn test_vfs_read_rejects_invalid_uri() {

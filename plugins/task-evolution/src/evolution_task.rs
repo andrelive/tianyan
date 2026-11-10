@@ -552,6 +552,12 @@ impl EvolutionTask {
 - **规则 `abstract` 必须写成「触发场景 → 动作」**：它是检索命中的唯一依据。写成
   「[规则] xxx 执行失败（累计 N 次）」这类**事件记录**，模型在需要时永远检索不到
   （实测活跃规则 83% 从未被命中）；「动作」要具体到停下来做什么，而不是复述现象；
+- **技能 `abstract` 必须写成一句话「什么场景用 + 它给什么」（≤ 60 字符，含来源标记）**：
+  技能清单**全量常驻** system 前缀，每条 abstract 是**每轮都在付**的固定成本。不要拼成
+  「长描述 | 适用场景: 全部场景 | 来源: evolution」——实测现网 60 条因此均值 208 字、
+  合计 12.5K 字符（≈6.6K tokens，占固定前缀四成），而其中被用过的只有 28 条。
+  展开说明、步骤、反模式、**全部适用场景**都写进 `content`（L2 正文），那里按需加载
+  才付成本。正例：`排查 bug / 改动没生效：先造红得起来的反馈回路再谈假设（来源: evolution）`；
 - 不确定的内容宁可少写，不要污染注册表。
 "#,
             last = last,
@@ -789,11 +795,23 @@ impl EvolutionTask {
         md.push_str(&s.content);
         md.push('\n');
         ctx.vfs.write_content(&uri, &md).await?;
-        let abstract_content = format!(
-            "{} | 适用场景: {} | 来源: evolution",
-            s.description,
-            s.applicable_scenarios.join(", ")
-        );
+        // abstract 只写**一句话**（场景 + 用途）：技能清单全量常驻 system 前缀，
+        // 每条 abstract 的前缀成本是每轮都付的。旧模板把「描述 + 全部适用场景 +
+        // 来源」拼在一起，实测现网 60 条均值 208 字、合计 12.5K 字符 ≈ 6.6K tokens
+        // （占固定前缀四成）。适用场景已经在上面写进 L2 正文的「## 适用场景」段，
+        // 那里按需加载才付成本——拼进 abstract 等于让每个场景每轮都收一次费。
+        let abstract_content = format!("{}（来源: evolution）", s.description.trim());
+        let abstract_chars = abstract_content.chars().count();
+        if abstract_chars > tianyan::skills::SKILL_ABSTRACT_MAX_CHARS {
+            // 只告警不截断：读取侧裁剪会把一句话切成半句带半个引号，比不列更难
+            // 判断该用哪个（试过并否掉）。写短是写入侧的责任。
+            tracing::warn!(
+                skill_id = %id,
+                chars = abstract_chars,
+                limit = tianyan::skills::SKILL_ABSTRACT_MAX_CHARS,
+                "演化技能 abstract 超长：技能清单全量常驻前缀，每条每轮都付成本"
+            );
+        }
         ctx.vfs.write_abstract(&uri, &abstract_content).await?;
         tracing::info!(skill_id = %id, "技能已写入/更新");
         Ok(revived)
@@ -1902,6 +1920,56 @@ mod tests {
             plan.memories[0].merge_from,
             vec!["a".to_string(), "b".to_string()]
         );
+    }
+
+    /// 技能 abstract = 一句话（场景 + 用途）+ 来源标记；**不得**拼「适用场景」列表。
+    ///
+    /// 判别力：把 abstract 构造退回旧的
+    /// `"{description} | 适用场景: {scenarios} | 来源: evolution"` 后本用例变红。
+    /// 现网代价：60 条技能因此均值 208 字、合计 12.5K 字符 ≈ 6.6K tokens，**全部
+    /// 常驻 system 前缀（每轮都付）**，而其中被用过的只有 28 条。
+    #[tokio::test]
+    async fn test_apply_skill_abstract_is_one_line() {
+        let vfs = Arc::new(MockVfs::new());
+        let ctx = make_context(vfs.clone());
+        let task = EvolutionTask::new(
+            Arc::new(FakeExecutor {
+                response: "{}".to_string(),
+            }),
+            10,
+        );
+        let s = SkillPlan {
+            action: "add".to_string(),
+            id: "one-line-skill".to_string(),
+            name: "一行摘要技能".to_string(),
+            description: "排查 bug / 改动没生效：先造红得起来的反馈回路再谈假设".to_string(),
+            content: "## 步骤\n\n1. 先造反馈回路".to_string(),
+            applicable_scenarios: vec!["调试".to_string(), "间歇故障".to_string()],
+        };
+        task.apply_skill(&ctx, &s).await.unwrap();
+
+        let uri = TianyanUri::new(ContextNamespace::Skill, vec!["one-line-skill".to_string()]);
+        let abstract_text = ctx.vfs.read_abstract(&uri).await.unwrap();
+        assert!(
+            !abstract_text.contains("| 适用场景:"),
+            "abstract 不得拼场景列表（清单全量常驻前缀，每轮付费）: {abstract_text}"
+        );
+        assert!(
+            abstract_text.contains("来源: evolution"),
+            "来源标记保留: {abstract_text}"
+        );
+        assert!(
+            abstract_text.starts_with("排查 bug"),
+            "abstract 以 description 打头: {abstract_text}"
+        );
+        // 场景不能丢——它要留在 L2 正文（按需加载那侧才付成本）
+        let detail = ctx
+            .vfs
+            .read_content(&uri, ContentLevel::Detail)
+            .await
+            .unwrap();
+        assert!(detail.contains("## 适用场景"), "场景段应留在正文: {detail}");
+        assert!(detail.contains("间歇故障"), "{detail}");
     }
 
     #[test]
