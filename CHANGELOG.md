@@ -85,6 +85,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   上。现网表现是任务跑了 189 次、`last_error` 为 `null`、日志里一次没碰过这些技能。
   判据改成按性质分层：**内容完整性（缺不缺）与新鲜度（新不新）不看缓存**，缓存只负责
   「内容没变就别重复花钱调 LLM」。
+- **跑测试时的 `pwsh.exe - Application Error` 弹窗**：真根因是「无控制台」状态被
+  叠加了两层——天演本体是 GUI（无控制台），它 spawn 的命令已在无控制台环境；下游
+  （`cargo test` 里的测试 spawn 慢命令）再叠一层 `CREATE_NO_WINDOW`，pwsh 的
+  ConsoleHost 就自相矛盾。两种形态走两条观测通道：`0xc0000142`（进程起不来）由 CSRSS
+  弹 HardError 对话框且**不写 WER**，`0x80131623`（`ConsoleHost.dll` 未处理异常）写 WER
+  ——只数事件日志会把它误判成「换掉 5.1 就好了」，实际换 pwsh 只是换了个异常码。
+  历史四代触发源（`waitfor` / `ping` / `powershell` / `pwsh`）撞的是同一件事。
+  修复：测试编译下不再叠加该旗标（测试进程跑在终端里、子进程继承即可）；生产路径
+  （GUI）实测安全、保持不变。
 
 ### Changed
 
