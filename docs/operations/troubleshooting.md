@@ -500,6 +500,55 @@ P5: oft.PowerShell.ConsoleControl+<>c.<.cctor>b__106_1
 是否有脚本/命令在调 5.1，改成 `pwsh`。弹窗本身无法由调用方拦下（HardError 由系统弹），
 只能从「不产生这种子进程」入手。
 
+## 7. 回退报「快照对象缺失」（`snapshot: 快照对象缺失（<路径> → <hash>）`）
+
+**现象**：回退到某条消息时失败，错误里带一个相对路径与 64 位 sha256。
+
+**先定性**：这**不是数据损坏**。恢复是「先全量校验后动手」——任一对象缺失即中止，工作区
+一个字节都没改，消息链也没截断（ADR-040）。所以不会出现「消息回退了、文件只回退一半」。
+
+**根因**：快照对象库是内容寻址（`<data_dir>/snapshots/objects/<hash 前2位>/<hash>.bin`，
+gzip 压缩），对象键 = **raw 内容的 sha256**。缺失说明该内容的对象文件不在了，而某个树仍然
+引用它（典型来源：树条目被运维工具重写或手工清理后，对象被 GC 判为孤儿回收）。
+
+**修复路径 A：从 git 历史精确重建（推荐）**
+
+树里的 hash 是内容哈希，所以只要该内容在 git 历史里存在过，就能**逐字节重建**：
+
+```powershell
+$hash = '<错误信息里的 64 位 hash>'
+$rel  = '<错误信息里的相对路径>'
+# 逐个候选提交算 sha256 比对（git blob 是 LF；Windows 工作区快照可能是 CRLF，两种都试）
+foreach ($c in git log --format=%h -- $rel) {
+  cmd /c "git show ${c}:$rel > $env:TEMP\blob.bin"
+  (Get-FileHash $env:TEMP\blob.bin -Algorithm SHA256).Hash.ToLower()
+}
+```
+
+命中后写入对象（gzip 压缩；写完**必须**解压复核 sha256 一致再算完成）：
+
+```powershell
+$raw = [IO.File]::ReadAllBytes("$env:TEMP\blob.bin")
+$ms  = New-Object IO.MemoryStream
+$gz  = New-Object IO.Compression.GZipStream($ms, [IO.Compression.CompressionLevel]::Optimal)
+$gz.Write($raw, 0, $raw.Length); $gz.Dispose()
+[IO.File]::WriteAllBytes("<data_dir>\snapshots\objects\$($hash.Substring(0,2))\$hash.bin", $ms.ToArray())
+```
+
+实测（2026-11-12）：唯一的缺失对象 `62c91891…` 命中 `ca78b61c` 提交里
+`server/src/scheduled_tasks/manager.rs` 的 LF 形态（22,519 字节 → gzip 6.9 KB），解压复核
+sha256 一致，全库活引用缺失归零。
+
+**修复路径 B：接受该文件不被回退**
+
+从引用它的树里删掉这条 entry（改树前先停服务；树文件是原子写，但读-改-写窗口内服务的
+capture 可能覆盖）。代价：回退到该锚点时这个文件保持当前内容、不回到快照版本。
+
+**预防**（1.2.6 起）：缓存命中 mtime/size 前会先确认对象存在（`object_path(hash).exists()`），
+`prune_snapshot_trees` 重写树后也会自动清掉 `latest.cache.json` 与 `redo/tree-*.cache.json`
+（实测一次清理后有 44,233 条缓存记录指向已删对象——它们会让人误判「文件未变」而复用失效
+hash，让新树引用悬空对象）。
+
 ## 附：本手册核实来源
 
 - `gui-native/src/main.rs`（`init_logging` 调用点、`panic_hook::install`、`windows_subsystem`、`ensure_server`）
