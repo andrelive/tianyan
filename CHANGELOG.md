@@ -38,6 +38,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   这一步。演化规则同时去掉 `[演化]` 前缀（不携带任何检索信号），综述提示词新增
   「abstract 必须是触发场景 → 动作」的硬要求并附上零命中事实。
 
+### Fixed
+
+- **回退不再删除「归属不明」的工作区文件**（数据安全，ADR-055）。旧实现判断「目标树
+  里没有 = 回退点之后新增」并直接删除，无任何校验；该前提在四种情况下不成立，最坏
+  会清空工作区：快照捕获在 A 目录而回退绑到 B 目录（会话改绑工作区）、树文件损坏但
+  仍是合法 JSON（`{}`）、文件在捕获时未纳入（`.gitignore` / 超 2 MB / 读取失败）、
+  排除规则在捕获与回退之间变化。现改为：
+  - 快照树升到 **v2**（`{workdir, files, skipped}`）——记录捕获目录与「存在但未纳入
+    快照」的路径；解析入口只有一处，v1 裸 map 仍可读（删除走上限 200 保守兜底）。
+  - 删除前过四道护栏：**空树 / 工作目录不符 / 属主不明（命中 `skipped`）/ 数量超限**
+    （v2 树 5,000）→ 命中即**保留该文件**，恢复本身照做（不中止回退）；
+  - 抑制结果经 `RollbackOutcome` / `RedoOutcome`（`deletion_suppressed` +
+    `suppression_reason`）回报，桌面端在发生保留时提示「回退了，但 N 个文件按护栏
+    保留：原因」。
+  参考实现对账：opencode 有同类事故（一次 revert 5 秒删 421 个文件），其后补了路径
+  归属 + owner 校验 + `maxDeletions`。
+- **快照排除规则读取 `.gitignore`**：遍历前调 `git ls-files --others --ignored
+  --exclude-standard --directory -z` 一次取回被忽略清单（嵌套 `.gitignore`、
+  `!` 取反、`.git/info/exclude`、全局 excludesfile 全部由 git 解释），命中目录**整棵
+  剪枝**。非 git 仓库 / git 不可用 / 超时（3 s）→ 只用内置排除，不阻断快照。动因：
+  排除规则此前只有 4 个目录名（`.git` / `node_modules` / `target` / `snapshots`），
+  实测某会话 9,462 个快照文件里 4,935 个是 Playwright 截图，另有 `.vitepress/cache`、
+  `dist-old` 等——它们都写在 `.gitignore` 里；快照目录当时占数据目录 84%（6,729 MB）。
+- **回退的空目录清理收窄到「本次删除的父目录链」**：只从真正删掉文件的父目录逐级向上
+  尝试 `remove_dir`（非空即失败）。此前 `prune_empty_dirs` 无排除地遍历整棵工作区
+  （实测 1.8 万个目录，含 `target/`、`node_modules/`，零文件变更时也照跑，是回退
+  「几秒」的主要来源），且会删掉工作区里**原本就存在**的空目录（用户有意保留的占位
+  目录）。
+
 ## [1.2.5] - 2026-11-08
 
 ### Added
