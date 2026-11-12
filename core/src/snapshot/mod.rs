@@ -982,9 +982,16 @@ impl SnapshotManager {
                 // 命中缓存:同 mtime(纳秒) + 同 size → 复用 hash,不读内容
                 if let Some(prev) = prev_cache.and_then(|c| c.get(&rel)) {
                     // 小文件不走短路：等长改写 + mtime 撞车会漏检（见 SMALL_FILE_BYTES）
+                    //
+                    // **对象必须还在**才敢复用：树条目可能被外部清理（运维重写存量树
+                    // 后 GC 回收其对象；实测 `D:\tianyan` 一次清理后 44,233 条缓存记录
+                    // 指向已删对象）。复用失效 hash 会让新树引用不存在的对象——该锚点
+                    // 的回退在预校验阶段中止（`快照对象缺失`）。缓存是纯优化，一次
+                    // stat 换掉一类悬空引用。
                     if prev.mtime_ns == mtime_ns
                         && prev.size == meta.len()
                         && meta.len() > SMALL_FILE_BYTES
+                        && self.object_path(&prev.hash).exists()
                     {
                         tree.insert(rel.clone(), prev.hash.clone());
                         cache.insert(
@@ -1119,9 +1126,14 @@ impl SnapshotManager {
                 // 命中缓存：同 mtime(纳秒) + 同 size → 复用哈希，不读内容
                 if let Some(prev) = prev_cache.and_then(|c| c.get(&rel)) {
                     // 小文件不走短路（与 walk_and_capture 同判据，见 SMALL_FILE_BYTES）
+                    //
+                    // 对象缺失时**不能**复用（同 `walk_and_capture` 的判据）：否则
+                    // 「当前工作区内容 == 目标树」的判定会用两个都失效的 hash 成立，
+                    // 掩盖「对象其实已被回收」的事实（diff 随后读对象失败）。
                     if prev.mtime_ns == mtime_ns
                         && prev.size == meta.len()
                         && meta.len() > SMALL_FILE_BYTES
+                        && self.object_path(&prev.hash).exists()
                     {
                         tree.insert(rel, prev.hash.clone());
                         continue;
@@ -2596,5 +2608,45 @@ mod tests {
         assert!(path_under("a/b.txt", &set));
         assert!(!path_under("dist2/bundle.js", &set), "同前缀不同目录不命中");
         assert!(!path_under("src/main.rs", &set));
+    }
+
+    /// 缓存短路必须确认对象还在：树条目被外部清理（运维重写存量树 + GC 回收对象）
+    /// 后，缓存 hash 可能指向已删对象——复用会让新树引用悬空对象，该锚点回退在
+    /// 预校验阶段中止（`快照对象缺失`）。
+    #[tokio::test]
+    async fn test_capture_does_not_reuse_cache_hash_whose_object_vanished() {
+        let (_dir, mgr) = setup().await;
+        // 必须大于 SMALL_FILE_BYTES 才走 mtime/size 短路
+        let big = "x".repeat(SMALL_FILE_BYTES as usize + 512);
+        write(&mgr.workdir, "big.txt", &big);
+        mgr.capture("s1", "0").await.unwrap();
+        let h0 = mgr
+            .load_tree("s1", "0")
+            .await
+            .unwrap()
+            .files
+            .get("big.txt")
+            .cloned()
+            .unwrap();
+        assert!(mgr.object_path(&h0).exists(), "首次捕获应写入对象");
+
+        // 模拟「树条目被重写掉 + GC 回收其对象」
+        std::fs::remove_file(mgr.object_path(&h0)).unwrap();
+
+        // 文件内容与 mtime/size 都没变 → 旧实现直接复用缓存 hash，不写回对象
+        mgr.capture("s1", "1").await.unwrap();
+        let h1 = mgr
+            .load_tree("s1", "1")
+            .await
+            .unwrap()
+            .files
+            .get("big.txt")
+            .cloned()
+            .unwrap();
+        assert_eq!(h1, h0, "内容未变 → hash 不变");
+        assert!(
+            mgr.object_path(&h1).exists(),
+            "对象必须被重新写回（否则新树引用悬空对象）"
+        );
     }
 }

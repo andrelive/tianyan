@@ -36,6 +36,10 @@
 //! 「最新树」被本脚本的通用规则版覆盖，下一次捕获会写回精确版）。**`--gc` 必须
 //! 停服务**：标记-清扫与运行中的捕获有竞态（对象已写、树未落盘时会被判成孤儿），
 //! 脚本探测到 `127.0.0.1:3000` 有监听即拒绝执行。
+//!
+//! 重写后脚本会自动清掉**陈旧的 mtime/size 缓存**（`latest.cache.json` 与
+//! `redo/tree-*.cache.json`）：缓存里的 hash 可能指向本次剔除、随后被 GC 回收的
+//! 对象，复用会让新树引用不存在的对象（实测一次清理后有 44,233 条这样的记录）。
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -260,6 +264,17 @@ async fn run() -> Result<()> {
     if dry_run {
         println!("\n>>> dry-run：未写入任何文件（去掉 --dry-run 即执行）");
     } else {
+        // 重写之后**必须**清掉 mtime/size 缓存：缓存记录 `{路径 → 捕获时 hash}`，
+        // 本次剔除的条目（以及随后被 GC 回收的对象）仍留在缓存里——下次捕获遇到
+        // 「mtime/size 未变」会直接复用那个 hash，让新树引用不存在的对象（该锚点
+        // 回退在预校验阶段中止）。缓存是纯优化：删掉只是下一次捕获全量重算一遍哈希。
+        if stats.trees_rewritten > 0 {
+            let (files, bytes) = clear_caches(&snap_root);
+            println!(
+                "  清理陈旧 mtime/size 缓存：{files} 个文件 / {:.1} MB（下次捕获全量重算一次）",
+                bytes as f64 / 1_048_576.0
+            );
+        }
         println!(
             "\n下一步：孤儿对象由快照 GC 回收（`snapshot_gc` 定时任务，12 小时一次）；\
              想立刻回收就停服务后加 --gc 重跑。"
@@ -365,6 +380,46 @@ fn collect_tree_files(snap_root: &Path) -> Vec<PathBuf> {
     }
     out.sort();
     out
+}
+
+/// 删除所有会话的 mtime/size 缓存（`latest.cache.json` 与 `redo/tree-*.cache.json`）。
+///
+/// 为什么必须清：缓存记录 `{路径 → 捕获时 hash}`，重写剔除的条目（以及随后被 GC
+/// 回收的对象）仍留在缓存里——下次捕获遇到「mtime/size 未变」会直接复用那个 hash，
+/// 让新树引用不存在的对象（该锚点回退在预校验阶段中止）。缓存是纯优化，删掉只是
+/// 下一次捕获全量重算一遍哈希（各会话一次）。`SnapshotManager` 侧另有「对象存在才
+/// 复用」的兜底检查，但清掉更彻底。
+fn clear_caches(snap_root: &Path) -> (usize, u64) {
+    let mut files = 0usize;
+    let mut bytes = 0u64;
+    let Ok(sessions) = std::fs::read_dir(snap_root) else {
+        return (files, bytes);
+    };
+    for session in sessions.flatten() {
+        let dir = session.path();
+        if !dir.is_dir() {
+            continue;
+        }
+        let mut targets = vec![dir.join("latest.cache.json")];
+        if let Ok(entries) = std::fs::read_dir(dir.join("redo")) {
+            for entry in entries.flatten() {
+                let name = entry.file_name().to_string_lossy().to_string();
+                if name.starts_with("tree-") && name.ends_with(".cache.json") {
+                    targets.push(entry.path());
+                }
+            }
+        }
+        for path in targets {
+            let Ok(meta) = std::fs::metadata(&path) else {
+                continue;
+            };
+            if std::fs::remove_file(&path).is_ok() {
+                files += 1;
+                bytes += meta.len();
+            }
+        }
+    }
+    (files, bytes)
 }
 
 /// 跑一次快照 GC（孤儿对象 + 空会话目录）。要求服务已停止。
