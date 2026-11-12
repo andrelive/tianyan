@@ -1024,8 +1024,27 @@ impl ClientApp {
             let res = post_json(url, serde_json::json!({ "message_id": message_id })).await;
             let _ = this.update(cx, |this, cx| {
                 match res {
-                    Ok(_) => {
-                        this.set_status("已回退".to_string());
+                    Ok(v) => {
+                        // 安全护栏（回退删除收窄）：有文件按护栏保留时**必须**明示——
+                        // 否则用户以为工作区文件也整体退回到了该点（实际上多留了文件，
+                        // 但绝无删除，因为归属不明时宁可保留）。
+                        let suppressed = v
+                            .pointer("/rollback/deletion_suppressed")
+                            .and_then(serde_json::Value::as_u64)
+                            .unwrap_or(0);
+                        let reason = v
+                            .pointer("/rollback/suppression_reason")
+                            .and_then(serde_json::Value::as_str)
+                            .unwrap_or("归属不明");
+                        if suppressed > 0 {
+                            this.set_status(format!("已回退（{suppressed} 个文件按护栏保留）"));
+                            this.push_notice(
+                                format!("回退完成，但 {suppressed} 个文件未删除：{reason}"),
+                                true,
+                            );
+                        } else {
+                            this.set_status("已回退".to_string());
+                        }
                         // 把被回退的那条用户输入**放回输入框**（用户实测指出
                         // 「回退后没有回到输入框中，导致要重新输入」）。
                         // 异步回调拿不到 `&mut Window`，所以写进待回填槽位，

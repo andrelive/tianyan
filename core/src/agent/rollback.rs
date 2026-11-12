@@ -39,6 +39,17 @@ pub struct RollbackOutcome {
     pub truncated: usize,
     /// 恢复 / 删除的工作区文件数。
     pub restored_files: usize,
+    /// 被安全护栏抑制的删除数（这些文件**仍在**工作区）。
+    ///
+    /// 非零时前端必须明示：回退了消息与文件内容，但「回退点之后新增的文件」
+    /// 有一部分按护栏保留了下来（原因见 [`Self::suppression_reason`]）。
+    /// 典型触发：快照捕获在另一个工作目录、旧格式快照树无归属信息、
+    /// 待删文件在捕获时未被纳入（`.gitignore` / 超大 / 读取失败）。
+    #[serde(default)]
+    pub deletion_suppressed: usize,
+    /// 抑制删除的原因（人类可读；护栏未触发时为 `None`）。
+    #[serde(default)]
+    pub suppression_reason: Option<String>,
     /// 会话生效的工作目录；`None` = 未绑定工作区（**文件未回退**）。
     pub workdir: Option<String>,
     /// 可撤销回退（重做数据已保存）。
@@ -54,6 +65,12 @@ pub struct RedoOutcome {
     pub restored_messages: usize,
     /// 恢复的工作区文件数。
     pub restored_files: usize,
+    /// 被安全护栏抑制的删除数（这些文件仍在工作区）。
+    #[serde(default)]
+    pub deletion_suppressed: usize,
+    /// 抑制删除的原因（护栏未触发时为 `None`）。
+    #[serde(default)]
+    pub suppression_reason: Option<String>,
 }
 
 impl Agent {
@@ -118,6 +135,8 @@ impl Agent {
                     .path()
                     .map(std::path::Path::to_path_buf);
                 let mut restored_files = 0usize;
+                let mut deletion_suppressed = 0usize;
+                let mut suppression_reason: Option<String> = None;
                 let mut redo_available = false;
 
                 if let Some(sm) = &self.snapshot_manager {
@@ -136,7 +155,11 @@ impl Agent {
                         // ④ **先恢复文件**：失败即整体中止（链保持不动）。
                         //    恢复本身「先校验后动手」（对象缺失即中止，工作区未改动）。
                         match sm.restore(session_id, message_id).await {
-                            Ok(n) => restored_files = n,
+                            Ok(report) => {
+                                restored_files = report.touched();
+                                deletion_suppressed = report.deletion_suppressed;
+                                suppression_reason = report.suppression_reason;
+                            }
                             // 该锚点无快照树（未捕获 / 已被 GC）→ 无文件可回退，
                             // 与「未绑定工作区」同类：仅回退消息，不算失败。
                             Err(e) if e.is_not_found() => tracing::warn!(
@@ -156,6 +179,8 @@ impl Agent {
                 Ok(RollbackOutcome {
                     truncated: truncated.len(),
                     restored_files,
+                    deletion_suppressed,
+                    suppression_reason,
                     workdir: workdir.map(|p| p.display().to_string()),
                     redo_available,
                     cancelled_tasks,
@@ -202,7 +227,7 @@ impl Agent {
                              请为该会话绑定工作区。",
                         )
                     })?;
-                let Some((messages, restored_files)) = sm
+                let Some((messages, report)) = sm
                     .with_workdir(workdir)
                     .load_redo(session_id, message_id)
                     .await?
@@ -218,7 +243,9 @@ impl Agent {
 
                 Ok(RedoOutcome {
                     restored_messages,
-                    restored_files,
+                    restored_files: report.touched(),
+                    deletion_suppressed: report.deletion_suppressed,
+                    suppression_reason: report.suppression_reason,
                 })
             })
             .await

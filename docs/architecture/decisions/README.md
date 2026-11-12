@@ -65,3 +65,4 @@
 | 052 | GUI 自动化端口（`GET /state` + `POST /act`） | [052-gui-automation-port.md](052-gui-automation-port.md) |
 | 053 | 上下文自治：模型主动压缩 + 按目标自动续跑 | [053-context-autonomy.md](053-context-autonomy.md) |
 | 054 | Web 端（`gui-vite`）退役 | [054-retire-web-frontend.md](054-retire-web-frontend.md) |
+| 055 | 快照排除边界与回退删除护栏（树格式 v2 + `.gitignore` + 父链清理） | [055-snapshot-exclusion-and-deletion-guard.md](055-snapshot-exclusion-and-deletion-guard.md) |

@@ -11,7 +11,7 @@ use tokio::fs;
 use crate::common::error::{Result, TianyanError};
 use crate::common::types::StructuredMessage;
 
-use super::{SnapshotManager, SnapshotTree};
+use super::{parse_tree_file, RestoreReport, SnapshotManager};
 
 impl SnapshotManager {
     /// 回退时保存重做状态：捕获当前工作区树 + 被截断的消息。
@@ -66,11 +66,15 @@ impl SnapshotManager {
     /// 重做：恢复重做工作区树,返回被截断的消息与恢复的文件数。
     ///
     /// 重做成功后自动清理该消息的重做数据（一次性语义）。
+    ///
+    /// 树同样走 v2 格式（`save_redo` 经 [`SnapshotManager::capture_tree_to`] 捕获），
+    /// 因此重做的删除也受同一套护栏约束——重做把「回退前的工作区」放回来，
+    /// 期间用户新建的文件同样不能因归属不明被删。
     pub async fn load_redo(
         &self,
         session_id: &str,
         message_id: &str,
-    ) -> Result<Option<(Vec<StructuredMessage>, usize)>> {
+    ) -> Result<Option<(Vec<StructuredMessage>, RestoreReport)>> {
         self.validate_session_id(session_id)?;
 
         let key = super::sanitize_key(message_id);
@@ -81,21 +85,21 @@ impl SnapshotManager {
         }
 
         // 1. 恢复工作区树
-        let mut restored = 0usize;
+        let mut report = RestoreReport::default();
         let tree_path = redo_dir.join(format!("tree-{key}.json"));
         if tree_path.exists() {
             let content = fs::read_to_string(&tree_path)
                 .await
                 .map_err(|e| TianyanError::Custom(format!("snapshot: 读取重做树失败: {e}")))?;
-            let tree: SnapshotTree = serde_json::from_str(&content)
+            let tree = parse_tree_file(&content)
                 .map_err(|e| TianyanError::Custom(format!("snapshot: 解析重做树失败: {e}")))?;
             // 增量：复用 latest 缓存短路未变更文件（同 save_redo 的加速路径）
             let prev_cache = self
                 .load_cache(&self.latest_cache_path(session_id))
                 .await
                 .unwrap_or(None);
-            restored = self
-                .restore_tree(tree, &self.workdir, prev_cache.as_ref())
+            report = self
+                .restore_tree(&tree, &self.workdir, prev_cache.as_ref())
                 .await?;
         }
 
@@ -114,8 +118,15 @@ impl SnapshotManager {
             tracing::debug!(error = %e, session = %session_id, "snapshot: 清理重做树文件失败");
         }
 
-        tracing::info!(session = %session_id, message_id, restored, "已重做工作区文件");
-        Ok(Some((messages, restored)))
+        tracing::info!(
+            session = %session_id,
+            message_id,
+            written = report.written,
+            deleted = report.deleted,
+            suppressed = report.deletion_suppressed,
+            "已重做工作区文件"
+        );
+        Ok(Some((messages, report)))
     }
 
     /// 检查指定消息的重做状态是否存在。

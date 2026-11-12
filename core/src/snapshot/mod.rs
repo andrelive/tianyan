@@ -16,10 +16,45 @@
 //! sha256（`hex_sha256`），全局去重语义保持不变。读取时以 gzip 魔数 `0x1f 0x8b`
 //! 识别：命中则 `GzDecoder` 解压，否则按 legacy 未压缩对象处理 —— 旧版本快照库
 //! 保持可读，混合存储亦可正确恢复。
+//!
+//! # 排除规则（两道）
+//!
+//! 1. **内置**：目录名命中 [`DEFAULT_EXCLUDED_DIRS`]（`.git` / `node_modules` /
+//!    `target` / `snapshots`）与超过 [`MAX_FILE_BYTES`] 的单文件；
+//! 2. **git 忽略**：调 `git ls-files --others --ignored --exclude-standard
+//!    --directory` 取工作区被忽略清单（见 [`SnapshotManager::git_ignored_paths`]），
+//!    由 git 自己解释 `.gitignore` / `.git/info/exclude` / 全局 excludesfile。
+//!    非 git 仓库、git 不可用、超时 → 空清单（只有第一道生效，绝不阻断快照）。
+//!
+//! 第二道是「快照体积」的主开关：实测某会话 9,462 个快照文件里 4,935 个是
+//! Playwright 截图、另有 `.vitepress/cache`、`dist-old` 等构建产物——它们全在
+//! `.gitignore` 里，而旧实现只认 4 个目录名。忽略清单在**遍历前一次性取回**，
+//! 命中目录**整棵剪枝**（不进入子目录），因此同时是遍历成本的优化点。
+//!
+//! # 回退删除护栏（数据安全）
+//!
+//! 恢复的第三步是「删除目标树中不存在、但当前工作区存在的文件」——这一步的
+//! 前提是「当前工作区扫描结果 − 目标树 = 回退点之后新增的文件」。前提在四种
+//! 情况下不成立，旧实现无任何校验，最坏会清空工作区：
+//!
+//! | 破绽 | 后果 |
+//! |------|------|
+//! | 快照捕获在 A 目录、回退时绑到 B 目录（ADR-015 允许任意 `with_workdir`） | B 目录**全部**文件被删 |
+//! | 目标树为空/损坏但仍能解析（`{}` 是合法 JSON） | 工作区**全部**文件被删 |
+//! | 文件在捕获时未纳入（`.gitignore` / 超大 / 读取失败），回退时纳入了 | 该文件被删 |
+//! | 排除规则在捕获与回退之间变化（用户改了 `.gitignore`） | 同上 |
+//!
+//! 因此树文件升到 **v2**（`{workdir, files, skipped}`）记录「捕获时的归属」与
+//! 「存在但未纳入的路径」，恢复时由 [`SnapshotManager::deletion_plan`] 判定：
+//! 归属不符 / 空树 / 候选命中 `skipped` / 候选数超上限 → **抑制删除**（恢复本身
+//! 照做，绝不中止回退）。抑制不丢数据（只是多留文件），因此比「中止回退」更可取，
+//! 但必须经 [`RestoreReport`] 一路回报到前端——用户要知道「文件没回退干净」。
+//! 旧格式（v1 裸 `{path → hash}`）无归属证据，只保留一道数量上限兜底。
 
 use std::collections::{HashMap, HashSet};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
 use flate2::read::GzDecoder;
 use flate2::write::GzEncoder;
@@ -47,6 +82,43 @@ const SMALL_FILE_BYTES: u64 = 64 * 1024;
 /// 默认排除的目录名（不区分大小写）。
 const DEFAULT_EXCLUDED_DIRS: [&str; 4] = [".git", "node_modules", "target", "snapshots"];
 
+/// 单次恢复允许删除的文件数上限（**v2 树**：带 workdir 与 skipped 归属信息）。
+///
+/// 归属证据齐备时删除按语义就该发生（回退点之后新增的文件），上限只兜住
+/// 「未预料的破绽」——例如某路径既不在树里、也不在 `skipped` 里（捕获侧
+/// 目录枚举与恢复侧不一致）。取 5000：正常回退（一轮几十个文件、整段回退几百
+/// 个）完全不受影响，而「删掉上万文件」必然是异常。
+const MAX_DELETIONS_VERIFIED: usize = 5_000;
+
+/// 单次恢复允许删除的文件数上限（**v1 树**：裸 `{path → hash}`，无归属信息）。
+///
+/// 无证据时只能保守：旧树会把「捕获时未纳入的文件」误判成新增（`.gitignore`
+/// 改造后尤其明显），因此上限压到正常回退量级（一轮几十个 + 余量）。超限即
+/// 抑制删除——树会在后续每轮捕获中逐步升级为 v2，v1 树是过渡态。
+const MAX_DELETIONS_LEGACY: usize = 200;
+
+/// `git ls-files` 采集忽略清单的超时（超时按「无忽略规则」处理）。
+///
+/// 该调用在每条用户消息前的捕获路径上；大仓库冷启动（git 索引不在页缓存）
+/// 可能到秒级，超时后降级为只用内置排除——快照宁可多存几个文件，也不能卡住
+/// 消息处理。
+const GIT_IGNORE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// git 忽略清单的进程内缓存有效期。
+///
+/// 一次回退里有三次遍历（`save_redo` 捕获 + `restore_tree` 扫描 + `diff` 可选）
+/// 都要同一份清单，每条用户消息前还要再取一次——每次都 spawn git 是纯浪费
+/// （实测 tianyan 仓库单次 100–200 ms）。TTL 内复用；`.gitignore` 的改动最多
+/// 延迟一个 TTL 生效，且**不影响正确性**：清单只决定「哪些路径不进快照」，
+/// 多存几个文件无害，漏存的由 `skipped` 属主兜底。
+const GIT_IGNORE_TTL: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// git 忽略清单缓存条目：`(取回时刻, 清单)`。
+type IgnoreCacheEntry = (std::time::Instant, HashSet<String>);
+
+/// git 忽略清单缓存（`workdir → 条目`），经 `Arc<Mutex<…>>` 在克隆间共享。
+type IgnoreCache = Arc<Mutex<HashMap<PathBuf, IgnoreCacheEntry>>>;
+
 /// 工作区快照管理器。
 ///
 /// 同一会话内按消息索引组织快照树；不同会话存储隔离。
@@ -58,10 +130,103 @@ pub struct SnapshotManager {
     pub(crate) workdir: PathBuf,
     /// 额外排除的相对路径或目录名。
     excludes: Vec<String>,
+    /// git 忽略清单缓存（`workdir → (取回时刻, 清单)`），`Arc` 让同一管理器的
+    /// 所有 `with_workdir` 克隆共享（会话级工作区不重复 spawn git）。
+    ignore_cache: IgnoreCache,
 }
 
 /// 单个快照树条目。
 pub(crate) type SnapshotTree = HashMap<String, String>;
+
+/// 快照树落盘格式（**v2**）：文件树 + 捕获时归属信息。
+///
+/// 归属信息是回退删除的唯一证据来源（见模块文档「回退删除护栏」）：
+/// `workdir` 证明这棵树属于哪个目录，`skipped` 证明哪些路径「当时存在但没
+/// 纳入快照」——两者缺一，恢复侧就只能靠数量上限兜底。
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub(crate) struct TreeFileV2 {
+    /// 捕获时的工作目录（[`SnapshotManager::normalize_workdir`] 的结果）。
+    pub(crate) workdir: String,
+    /// 文件树：`{相对路径 → 内容 sha256}`。
+    pub(crate) files: SnapshotTree,
+    /// 捕获时存在但**未纳入快照**的相对路径（内置排除 / git 忽略 / 超大文件 /
+    /// 读取失败；目录以其自身路径记录，不展开子项）。
+    ///
+    /// 排序后落盘（写幂等：同一工作区两次捕获产出逐字相同的 JSON）。
+    #[serde(default)]
+    pub(crate) skipped: Vec<String>,
+}
+
+/// 树文件解析（兼容 v1 裸 map）。
+///
+/// 变体顺序即匹配优先级：v1 格式是 `{相对路径 → hash}`，v2 是
+/// `{workdir, files: {…}, skipped: […]}`——v2 的 `files` 值必须是对象，因此
+/// 裸 map（值是字符串）不会误匹配 v2；反过来 `files` 恰好是工作区里的一个
+/// 文件名时（值是 hash 字符串），v2 解析失败、正确落到 v1。
+#[derive(Debug, serde::Deserialize)]
+#[serde(untagged)]
+enum TreeFile {
+    /// 当前格式。
+    V2(TreeFileV2),
+    /// 0.x 旧格式：裸 `{path → hash}`。
+    V1(SnapshotTree),
+}
+
+/// 载入的快照树（统一 v1/v2 差异）。
+pub(crate) struct LoadedTree {
+    /// 文件树。
+    pub(crate) files: SnapshotTree,
+    /// 捕获时的工作目录；`None` = v1 树（无归属信息）。
+    pub(crate) workdir: Option<String>,
+    /// 捕获时未纳入快照的路径（v1 树为空）。
+    pub(crate) skipped: HashSet<String>,
+}
+
+/// 捕获遍历期的可写上下文：git 忽略清单 + 「存在但未纳入快照」的路径记录。
+///
+/// 收成一个结构而不是两个参数：`walk_and_capture` 的形参已到 clippy 上限
+/// （`too_many_arguments`），且这两项语义上是一体的——它们共同构成「这一轮
+/// 遍历的归属证据」，只在捕获侧需要（恢复侧的 `walk_current` 只读 `ignored`）。
+struct CaptureScan<'a> {
+    /// git 忽略清单（相对路径，目录不展开子项）。
+    ignored: &'a HashSet<String>,
+    /// 捕获时存在但未纳入快照的路径（内置排除 / git 忽略 / 超大 / 读取失败）。
+    skipped: &'a mut HashSet<String>,
+}
+
+/// 工作区恢复结果。
+///
+/// 三个计数分开报：`written` / `deleted` 是真正发生的动作，
+/// `deletion_suppressed` 是**被护栏拦下**的删除数（原因见
+/// `suppression_reason`）——前端必须能区分「回退了」与「只回退了一部分」。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RestoreReport {
+    /// 写入（恢复）的文件数。
+    pub(crate) written: usize,
+    /// 删除的文件数。
+    pub(crate) deleted: usize,
+    /// 被护栏抑制的删除数。
+    pub(crate) deletion_suppressed: usize,
+    /// 抑制原因（人类可读；`None` = 护栏未触发）。
+    pub(crate) suppression_reason: Option<String>,
+}
+
+impl RestoreReport {
+    /// 实际改动的工作区文件数（写入 + 删除）。
+    pub(crate) fn touched(&self) -> usize {
+        self.written + self.deleted
+    }
+}
+
+/// 删除护栏的判定结果。
+struct DeletionPlan<'a> {
+    /// 允许删除的相对路径。
+    allowed: Vec<&'a String>,
+    /// 被抑制的删除数。
+    suppressed: usize,
+    /// 抑制原因（`None` = 未触发护栏）。
+    reason: Option<String>,
+}
 
 /// 缓存文件条目（mtime + size 未变时复用 hash,避免全量读取）。
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -150,6 +315,7 @@ impl SnapshotManager {
             root,
             workdir,
             excludes: Vec::new(),
+            ignore_cache: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -172,6 +338,7 @@ impl SnapshotManager {
             root: self.root.clone(),
             workdir,
             excludes: self.excludes.clone(),
+            ignore_cache: Arc::clone(&self.ignore_cache),
         }
     }
 
@@ -207,8 +374,12 @@ impl SnapshotManager {
     /// 恢复到指定消息 ID 的快照（回退调用）。
     ///
     /// 增量恢复：对比当前工作区与目标树，恢复内容差异的文件、删除目标树中不存在的文件。
-    /// 返回恢复/删除的文件数。
-    pub async fn restore(&self, session_id: &str, anchor_message_id: &str) -> Result<usize> {
+    /// 删除受护栏约束（[`Self::deletion_plan`]），结果见 [`RestoreReport`]。
+    pub async fn restore(
+        &self,
+        session_id: &str,
+        anchor_message_id: &str,
+    ) -> Result<RestoreReport> {
         self.validate_session_id(session_id)?;
 
         let tree = self.load_tree(session_id, anchor_message_id).await?;
@@ -217,7 +388,7 @@ impl SnapshotManager {
             .load_cache(&self.latest_cache_path(session_id))
             .await
             .unwrap_or(None);
-        self.restore_tree(tree, &self.workdir, prev_cache.as_ref())
+        self.restore_tree(&tree, &self.workdir, prev_cache.as_ref())
             .await
     }
 
@@ -233,14 +404,15 @@ impl SnapshotManager {
 
         let mut current: SnapshotTree = HashMap::new();
         if self.workdir.exists() {
-            self.walk_current(&self.workdir, "", &mut current, None)
+            let ignored = self.git_ignored_paths(&self.workdir).await;
+            self.walk_current(&self.workdir, "", &mut current, None, &ignored)
                 .await?;
         }
 
         let mut files: Vec<FileDiff> = Vec::new();
 
         // 1. 快照树侧：removed / binary / modified（unchanged 跳过）
-        for (path, tree_hash) in &tree {
+        for (path, tree_hash) in &tree.files {
             let work_path = self.workdir.join(path);
             match current.get(path) {
                 Some(cur_hash) if cur_hash == tree_hash => continue,
@@ -311,7 +483,7 @@ impl SnapshotManager {
 
         // 2. 当前工作区侧：added（二进制 → binary）
         for path in current.keys() {
-            if tree.contains_key(path) {
+            if tree.files.contains_key(path) {
                 continue;
             }
             let work_path = self.workdir.join(path);
@@ -550,6 +722,10 @@ impl SnapshotManager {
     /// 捕获工作区到指定树文件（核心逻辑,供 capture / save_redo 复用）。
     ///
     /// 传入上一轮缓存时,仅对 mtime/size 变化的文件重新读取并哈希。
+    ///
+    /// 落盘为 v2 格式（`{workdir, files, skipped}`）：`workdir` 与 `skipped`
+    /// 是恢复侧删除护栏的证据来源，因此**必须**在这里一并采集（见模块文档
+    /// 「回退删除护栏」）。
     pub(crate) async fn capture_tree_to(
         &self,
         workdir: &Path,
@@ -559,7 +735,13 @@ impl SnapshotManager {
     ) -> Result<()> {
         let mut tree: SnapshotTree = HashMap::new();
         let mut cache: FileCache = HashMap::new();
-        self.walk_and_capture(workdir, "", &mut tree, &mut cache, prev_cache)
+        let mut skipped: HashSet<String> = HashSet::new();
+        let ignored = self.git_ignored_paths(workdir).await;
+        let mut scan = CaptureScan {
+            ignored: &ignored,
+            skipped: &mut skipped,
+        };
+        self.walk_and_capture(workdir, "", &mut tree, &mut cache, prev_cache, &mut scan)
             .await?;
 
         if let Some(parent) = tree_path.parent() {
@@ -567,7 +749,18 @@ impl SnapshotManager {
                 .await
                 .map_err(|e| TianyanError::Custom(format!("snapshot: 创建目录失败: {e}")))?;
         }
-        let json = serde_json::to_string(&tree)
+        // 排序后落盘：同一工作区两次捕获产出逐字相同的 JSON（写幂等，
+        // 也便于人工比对树文件差异）
+        let mut skipped: Vec<String> = skipped.into_iter().collect();
+        skipped.sort_unstable();
+        let files_len = tree.len();
+        let skipped_len = skipped.len();
+        let file = TreeFileV2 {
+            workdir: Self::normalize_workdir(workdir).await,
+            files: tree,
+            skipped,
+        };
+        let json = serde_json::to_string(&file)
             .map_err(|e| TianyanError::Custom(format!("snapshot: 序列化快照树失败: {e}")))?;
         write_atomic(tree_path, &json).await?;
 
@@ -576,35 +769,36 @@ impl SnapshotManager {
             .map_err(|e| TianyanError::Custom(format!("snapshot: 序列化缓存失败: {e}")))?;
         write_atomic(cache_path, &cache_json).await?;
 
-        tracing::debug!(files = tree.len(), "已捕获工作区快照");
+        tracing::debug!(files = files_len, skipped = skipped_len, "已捕获工作区快照");
         Ok(())
     }
 
     /// 将工作区恢复到目标树（核心逻辑,供 restore / load_redo 复用）。
     ///
     /// 增量恢复：对比当前工作区与目标树，恢复内容差异的文件、删除目标树中不存在的文件。
-    /// 返回恢复/删除的文件数。
+    /// 删除受护栏约束（[`Self::deletion_plan`]）：证据不足即抑制删除、恢复照做。
     /// `prev_cache` 提供时增量收集当前工作区（mtime/size 短路——大工作区
     /// 恢复路径的加速点；判据见 [`Self::walk_current`]）。
     pub(crate) async fn restore_tree(
         &self,
-        tree: SnapshotTree,
+        tree: &LoadedTree,
         workdir: &Path,
         prev_cache: Option<&FileCache>,
-    ) -> Result<usize> {
+    ) -> Result<RestoreReport> {
         if !workdir.exists() {
-            return Ok(0);
+            return Ok(RestoreReport::default());
         }
 
         // 1. 收集当前工作区状态
         let mut current: SnapshotTree = HashMap::new();
-        self.walk_current(workdir, "", &mut current, prev_cache)
+        let ignored = self.git_ignored_paths(workdir).await;
+        self.walk_current(workdir, "", &mut current, prev_cache, &ignored)
             .await?;
 
         // 1'. 预校验：需要写入的对象必须全部存在——先全量校验再动手，
         // 避免写到一半才发现对象缺失、留下半恢复的工作区（非原子恢复的
         // 主要失败来源）。缺失即中止（工作区未改动）。
-        for (rel_path, hash) in &tree {
+        for (rel_path, hash) in &tree.files {
             let need_write = !matches!(current.get(rel_path), Some(cur) if cur == hash);
             if need_write && fs::metadata(self.object_path(hash)).await.is_err() {
                 return Err(TianyanError::Custom(format!(
@@ -613,10 +807,10 @@ impl SnapshotManager {
             }
         }
 
-        let mut restored = 0usize;
+        let mut written = 0usize;
 
         // 2. 恢复目标树中的文件（内容不同或缺失时从对象库复制）
-        for (rel_path, hash) in &tree {
+        for (rel_path, hash) in &tree.files {
             match current.get(rel_path) {
                 Some(cur_hash) if cur_hash == hash => continue,
                 _ => {
@@ -637,41 +831,70 @@ impl SnapshotManager {
                     fs::write(&target, bytes).await.map_err(|e| {
                         TianyanError::Custom(format!("snapshot: 恢复文件失败 {rel_path}: {e}"))
                     })?;
-                    restored += 1;
+                    written += 1;
                 }
             }
         }
 
-        // 3. 删除目标树中不存在（回退点之后新增）的文件
-        for rel_path in current.keys() {
-            if !tree.contains_key(rel_path) {
-                let target = workdir.join(rel_path);
-                if fs::remove_file(&target).await.is_ok() {
-                    restored += 1;
+        // 3. 删除目标树中不存在（回退点之后新增）的文件——先过护栏，
+        //    证据不足的候选一律保留（宁可多留文件，不可误删）。
+        let candidates: Vec<&String> = current
+            .keys()
+            .filter(|p| !tree.files.contains_key(*p))
+            .collect();
+        let current_workdir = Self::normalize_workdir(workdir).await;
+        let plan = Self::deletion_plan(tree, &current_workdir, &candidates);
+        let mut deleted = 0usize;
+        let mut touched_dirs: HashSet<PathBuf> = HashSet::new();
+        for rel_path in &plan.allowed {
+            let target = workdir.join(rel_path.as_str());
+            if fs::remove_file(&target).await.is_ok() {
+                deleted += 1;
+                if let Some(parent) = target.parent() {
+                    touched_dirs.insert(parent.to_path_buf());
                 }
             }
         }
+        if plan.suppressed > 0 {
+            tracing::warn!(
+                session_workdir = %workdir.display(),
+                suppressed = plan.suppressed,
+                deleted,
+                reason = plan.reason.as_deref().unwrap_or("未标注"),
+                "快照回退：删除被护栏抑制（保留文件，恢复本身已完成）"
+            );
+        }
 
-        // 4. 清理空目录（可选，尽力而为）
-        Self::prune_empty_dirs(workdir).await;
+        // 4. 清理**本次删除造成**的空目录（只沿受影响父目录链向上，
+        //    不遍历整棵工作区；见 `prune_empty_ancestors`）
+        Self::prune_empty_ancestors(workdir, &touched_dirs).await;
 
-        Ok(restored)
+        Ok(RestoreReport {
+            written,
+            deleted,
+            deletion_suppressed: plan.suppressed,
+            suppression_reason: plan.reason,
+        })
     }
 
-    async fn load_tree(&self, session_id: &str, key: &str) -> Result<SnapshotTree> {
+    async fn load_tree(&self, session_id: &str, key: &str) -> Result<LoadedTree> {
         let tree_path = self
             .trees_dir(session_id)
             .join(format!("{}.json", sanitize_key(key)));
         let content = fs::read_to_string(&tree_path).await.map_err(|e| {
             TianyanError::not_found(format!("快照不存在（会话 {session_id} 键 {key}）: {e}"))
         })?;
-        serde_json::from_str(&content)
+        parse_tree_file(&content)
             .map_err(|e| TianyanError::Custom(format!("snapshot: 解析快照树失败: {e}")))
     }
 
     /// 递归遍历工作目录,将纳入快照的文件写入 tree 并复制缺失对象。
     ///
     /// 有上一轮缓存时,仅对 mtime/size 变化的文件重新读取并哈希。
+    ///
+    /// `ignored`（git 忽略清单）与内置排除命中时**同时**记入 `skipped`：那里
+    /// 记录「当时存在但没进快照」的路径，是恢复侧不乱删的证据。目录级命中只
+    /// 记目录自身一条（不展开子项——否则一个 `target/` 就是十万条）。
     async fn walk_and_capture(
         &self,
         dir: &Path,
@@ -679,6 +902,7 @@ impl SnapshotManager {
         tree: &mut SnapshotTree,
         cache: &mut FileCache,
         prev_cache: Option<&FileCache>,
+        scan: &mut CaptureScan<'_>,
     ) -> Result<()> {
         let mut entries = fs::read_dir(dir).await.map_err(|e| {
             TianyanError::Custom(format!("snapshot: 读取目录失败 {}: {e}", dir.display()))
@@ -688,14 +912,16 @@ impl SnapshotManager {
             TianyanError::Custom(format!("snapshot: 遍历目录失败 {}: {e}", dir.display()))
         })? {
             let name = entry.file_name().to_string_lossy().to_string();
-            if self.is_excluded(&name) {
-                continue;
-            }
             let rel = if prefix.is_empty() {
                 name.clone()
             } else {
                 format!("{}/{}", prefix, name)
             };
+            // 两道排除：内置目录名 / 超大文件（下文）+ git 忽略清单
+            if self.is_excluded(&name) || path_under(&rel, scan.ignored) {
+                scan.skipped.insert(rel);
+                continue;
+            }
 
             let file_type = entry
                 .file_type()
@@ -703,7 +929,7 @@ impl SnapshotManager {
                 .map_err(|e| TianyanError::Custom(format!("snapshot: 读取文件类型失败: {e}")))?;
 
             if file_type.is_dir() {
-                Box::pin(self.walk_and_capture(&entry.path(), &rel, tree, cache, prev_cache))
+                Box::pin(self.walk_and_capture(&entry.path(), &rel, tree, cache, prev_cache, scan))
                     .await?;
             } else if file_type.is_file() {
                 let meta = entry
@@ -711,6 +937,7 @@ impl SnapshotManager {
                     .await
                     .map_err(|e| TianyanError::Custom(format!("snapshot: 读取元数据失败: {e}")))?;
                 if meta.len() > MAX_FILE_BYTES {
+                    scan.skipped.insert(rel);
                     continue;
                 }
                 let mtime_ns = meta
@@ -752,9 +979,13 @@ impl SnapshotManager {
                             },
                         );
                     }
-                    Ok(None) => {}
+                    // 未产出对象（当前实现不产生该分支，保留兼容）→ 没进快照，记属主
+                    Ok(None) => {
+                        scan.skipped.insert(rel);
+                    }
                     Err(e) => {
                         tracing::warn!(path = %rel, error = %e, "snapshot: 跳过无法读取的文件");
+                        scan.skipped.insert(rel);
                     }
                 }
             }
@@ -803,12 +1034,17 @@ impl SnapshotManager {
     /// 不读内容）——大工作区恢复路径（回退 / 重做）的主要加速点，判据与
     /// `walk_and_capture` 完全一致（文件系统级事实：mtime 纳秒级 + size 未变
     /// ⇒ 内容未变；毫秒截断曾致同毫秒改写漏检，见 [`CachedFile`] 文档）。
+    ///
+    /// 排除规则必须与 `walk_and_capture` **逐条一致**（内置 + git 忽略）：
+    /// 两侧不一致会让「捕获时不在树里、恢复时在 current 里」的路径变成删除
+    /// 候选——`skipped` 属主记录是第一道兜底，一致性才是根本。
     async fn walk_current(
         &self,
         dir: &Path,
         prefix: &str,
         tree: &mut SnapshotTree,
         prev_cache: Option<&FileCache>,
+        ignored: &HashSet<String>,
     ) -> Result<()> {
         let mut entries = fs::read_dir(dir).await.map_err(|e| {
             TianyanError::Custom(format!("snapshot: 读取目录失败 {}: {e}", dir.display()))
@@ -818,14 +1054,14 @@ impl SnapshotManager {
             TianyanError::Custom(format!("snapshot: 遍历目录失败 {}: {e}", dir.display()))
         })? {
             let name = entry.file_name().to_string_lossy().to_string();
-            if self.is_excluded(&name) {
-                continue;
-            }
             let rel = if prefix.is_empty() {
                 name.clone()
             } else {
                 format!("{}/{}", prefix, name)
             };
+            if self.is_excluded(&name) || path_under(&rel, ignored) {
+                continue;
+            }
 
             let file_type = entry
                 .file_type()
@@ -833,7 +1069,7 @@ impl SnapshotManager {
                 .map_err(|e| TianyanError::Custom(format!("snapshot: 读取文件类型失败: {e}")))?;
 
             if file_type.is_dir() {
-                Box::pin(self.walk_current(&entry.path(), &rel, tree, prev_cache)).await?;
+                Box::pin(self.walk_current(&entry.path(), &rel, tree, prev_cache, ignored)).await?;
             } else if file_type.is_file() {
                 let meta = entry
                     .metadata()
@@ -892,31 +1128,240 @@ impl SnapshotManager {
             .any(|e| e.eq_ignore_ascii_case(name) || e.eq_ignore_ascii_case(&lower))
     }
 
-    /// 清理空目录（尽力而为）。
-    async fn prune_empty_dirs(root: &Path) {
-        let mut dirs: Vec<PathBuf> = Vec::new();
-        let mut stack = vec![root.to_path_buf()];
-        while let Some(dir) = stack.pop() {
-            if let Ok(mut rd) = fs::read_dir(&dir).await {
-                let mut empty = true;
-                while let Ok(Some(entry)) = rd.next_entry().await {
-                    empty = false;
-                    if entry.file_type().await.map(|t| t.is_dir()).unwrap_or(false) {
-                        stack.push(entry.path());
+    /// 删除文件后清理其**受影响父目录链**上的空目录（尽力而为）。
+    ///
+    /// 只从「本次真正删掉文件的父目录」出发逐级向上 `remove_dir`：目录非空
+    /// 时调用失败（忽略），因此**绝不会删掉工作区里原本就存在的空目录**
+    /// （旧实现遍历全树删空目录，会误删用户有意保留的空目录，例如占位目录）。
+    ///
+    /// 性能：复杂度是「被删文件的父目录链」而非整棵工作区——旧
+    /// `prune_empty_dirs` 无排除地扫全部目录（实测 1.8 万个，含 `target/`、
+    /// `node_modules/`），且**0 文件变更时也照跑**，是回退「几秒」的主要来源。
+    async fn prune_empty_ancestors(root: &Path, touched_dirs: &HashSet<PathBuf>) {
+        for start in touched_dirs {
+            let mut dir = start.clone();
+            loop {
+                // 到根为止（含根本身不删——工作区根不能被快照删掉）
+                if dir == root || !dir.starts_with(root) {
+                    break;
+                }
+                if fs::remove_dir(&dir).await.is_err() {
+                    break;
+                }
+                match dir.parent() {
+                    Some(p) => dir = p.to_path_buf(),
+                    None => break,
+                }
+            }
+        }
+    }
+
+    /// 删除护栏：判定本次恢复允许删除哪些「目标树中不存在」的工作区文件。
+    ///
+    /// 前提「current − tree = 回退点之后新增」在四种情况下不成立（见模块文档
+    /// 「回退删除护栏」）。这里按代价从低到高逐条否决：
+    ///
+    /// 1. **空树**：树里一个文件都没有、工作区却有 → 树多半损坏/未捕获，全抑制；
+    /// 2. **归属不符**：树记录的捕获目录与当前恢复目录不同（ADR-015 会话工作区
+    ///    可变，`with_workdir` 可绑到任意目录）→ 全抑制；
+    /// 3. **属主不明**：候选命中 `skipped`（捕获时该路径存在但未纳入快照：git
+    ///    忽略 / 超大 / 读取失败）→ 逐条抑制；
+    /// 4. **数量超限**：剩余候选超过上限 → 全抑制（正常回退不会到此）。
+    ///
+    /// 抑制是**跳过删除**、不是中止恢复：文件写回照做，只是多留几个文件，
+    /// 绝不丢数据。
+    fn deletion_plan<'a>(
+        tree: &LoadedTree,
+        current_workdir: &str,
+        candidates: &[&'a String],
+    ) -> DeletionPlan<'a> {
+        if candidates.is_empty() {
+            return DeletionPlan {
+                allowed: Vec::new(),
+                suppressed: 0,
+                reason: None,
+            };
+        }
+        if tree.files.is_empty() {
+            return DeletionPlan {
+                allowed: Vec::new(),
+                suppressed: candidates.len(),
+                reason: Some(format!(
+                    "目标快照树为空（{} 个待删文件全部保留，疑快照损坏或未捕获）",
+                    candidates.len()
+                )),
+            };
+        }
+        if let Some(captured) = &tree.workdir {
+            if captured != current_workdir {
+                return DeletionPlan {
+                    allowed: Vec::new(),
+                    suppressed: candidates.len(),
+                    reason: Some(format!(
+                        "快照捕获于另一工作目录（{captured}），与当前目录（{current_workdir}）不同：\
+                         {} 个文件全部保留",
+                        candidates.len()
+                    )),
+                };
+            }
+        }
+
+        let mut allowed: Vec<&String> = Vec::with_capacity(candidates.len());
+        let mut unowned = 0usize;
+        for rel in candidates {
+            if path_under(rel, &tree.skipped) {
+                unowned += 1;
+            } else {
+                allowed.push(rel);
+            }
+        }
+        let limit = if tree.workdir.is_some() {
+            MAX_DELETIONS_VERIFIED
+        } else {
+            MAX_DELETIONS_LEGACY
+        };
+        if allowed.len() > limit {
+            return DeletionPlan {
+                allowed: Vec::new(),
+                suppressed: candidates.len(),
+                reason: Some(format!(
+                    "本次回退将删除 {} 个文件（上限 {limit}，{}）：全部保留",
+                    allowed.len(),
+                    if tree.workdir.is_some() {
+                        "带归属信息"
+                    } else {
+                        "旧格式快照树无归属信息"
                     }
-                }
-                if empty && dir != root {
-                    dirs.push(dir);
+                )),
+            };
+        }
+
+        let reason = (unowned > 0).then(|| {
+            format!(
+                "{unowned} 个文件在快照捕获时未纳入（.gitignore / 排除 / 超大 / 读取失败）：已保留"
+            )
+        });
+        DeletionPlan {
+            allowed,
+            suppressed: unowned,
+            reason,
+        }
+    }
+
+    /// 规范化工作目录路径（树内归属记录与比对用）。
+    ///
+    /// `fs::canonicalize` 消除 `\\?\` 前缀、大小写与符号链接差异，避免
+    /// `F:\work\x` 与 `f:\work\x\` 被当成两个目录。规范化失败（路径刚被删等）
+    /// 时退化为原样 `display()`：宁可归属比对不通过（走保守分支）也不能因为
+    /// 规范化失败丢掉整条记录。
+    async fn normalize_workdir(path: &Path) -> String {
+        match fs::canonicalize(path).await {
+            Ok(p) => p.display().to_string(),
+            Err(_) => path.display().to_string(),
+        }
+    }
+
+    /// 采集工作区的 git 忽略清单（相对 `workdir` 的路径集合，条目不带尾 `/`）。
+    ///
+    /// 口径对齐 opencode：让 git 自己解释 `.gitignore`（含嵌套、`!` 取反、
+    /// `**`、路径锚定）+ `.git/info/exclude` + 全局 excludesfile，**不自研
+    /// 解析**（语义细节多，自研必然漂移）。
+    ///
+    /// 命令取 `--others --ignored --exclude-standard --directory`：`--others`
+    /// 限定未跟踪文件（已跟踪文件不受 `.gitignore` 影响，这正是 git 语义），
+    /// `--directory` 把整棵被忽略目录折叠成一条 —— 于是命中目录可在遍历时
+    /// **整棵剪枝**（快照体积与遍历成本的双重收益）。
+    ///
+    /// 非 git 仓库（无 `.git`）/ git 不可用 / 超时 / 非零退出 → 空清单：
+    /// 只有内置排除生效，绝不阻断快照。
+    async fn git_ignored_paths(&self, workdir: &Path) -> HashSet<String> {
+        let key = workdir.to_path_buf();
+        {
+            let cache = match self.ignore_cache.lock() {
+                Ok(g) => g,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            if let Some((at, set)) = cache.get(&key) {
+                if at.elapsed() < GIT_IGNORE_TTL {
+                    return set.clone();
                 }
             }
         }
-        // 从最深目录开始删除
-        dirs.sort_by_key(|d| std::cmp::Reverse(d.components().count()));
-        for dir in dirs {
-            if let Err(e) = fs::remove_dir(&dir).await {
-                tracing::debug!(error = %e, ?dir, "snapshot: 清理空目录失败");
-            }
+        let set = Self::collect_git_ignored(workdir).await;
+        {
+            let mut cache = match self.ignore_cache.lock() {
+                Ok(g) => g,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            cache.insert(key, (std::time::Instant::now(), set.clone()));
         }
+        set
+    }
+
+    /// 真正采集一次 git 忽略清单（不含缓存；见 [`Self::git_ignored_paths`]）。
+    async fn collect_git_ignored(workdir: &Path) -> HashSet<String> {
+        // 前置：没有 `.git`（目录，或 worktree 的 gitfile）就不 spawn 子进程。
+        // 子目录形式的仓库（workdir 在仓库内、非根）会因此漏掉忽略规则——天演
+        // 工作目录通常是仓库根，此处以「不 spawn 的确定性」优先。
+        if !workdir.join(".git").exists() {
+            return HashSet::new();
+        }
+        let started = std::time::Instant::now();
+        let cmd =
+            crate::executor::command::hide_console_window(tokio::process::Command::new("git"))
+                .arg("-C")
+                .arg(workdir)
+                .args([
+                    "ls-files",
+                    "--others",
+                    "--ignored",
+                    "--exclude-standard",
+                    "--directory",
+                    "-z",
+                ])
+                // stdin 置 null：tokio 默认给管道，git 不会读它，但保持与其它子进程
+                // 调用一致的最小环境（见 executor::fs::collect_rg_files 的同类注释）
+                .stdin(std::process::Stdio::null())
+                .output();
+        let output = match tokio::time::timeout(GIT_IGNORE_TIMEOUT, cmd).await {
+            Ok(Ok(o)) => o,
+            Ok(Err(e)) => {
+                tracing::debug!(error = %e, "snapshot: git 不可用，忽略清单为空");
+                return HashSet::new();
+            }
+            Err(_) => {
+                tracing::debug!(
+                    timeout = ?GIT_IGNORE_TIMEOUT,
+                    "snapshot: 采集 git 忽略清单超时，忽略清单为空"
+                );
+                return HashSet::new();
+            }
+        };
+        if !output.status.success() {
+            tracing::debug!(
+                code = output.status.code().unwrap_or(-1),
+                stderr = %String::from_utf8_lossy(&output.stderr).trim(),
+                "snapshot: git 忽略清单采集失败（可能不是 git 仓库），忽略清单为空"
+            );
+            return HashSet::new();
+        }
+        let raw = String::from_utf8_lossy(&output.stdout);
+        let set: HashSet<String> = raw
+            .split('\0')
+            // 只裁行尾（`-z` 下不应有换行，Windows 上偶带 `\r`）：文件名首尾的
+            // 空格是合法字符，`trim()` 会把它误裁成另一个路径
+            .map(|s| s.trim_end_matches(['\r', '\n']).replace('\\', "/"))
+            .map(|s| s.trim_end_matches('/').to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+        if !set.is_empty() {
+            tracing::debug!(
+                ignored = set.len(),
+                elapsed_ms = started.elapsed().as_millis() as u64,
+                "snapshot: 已采集 git 忽略清单"
+            );
+        }
+        set
     }
 
     fn trees_dir(&self, session_id: &str) -> PathBuf {
@@ -995,8 +1440,10 @@ async fn collect_tree_hashes(dir: &Path, prefix: &str, reachable: &mut HashSet<S
             continue;
         }
         match fs::read_to_string(entry.path()).await {
-            Ok(content) => match serde_json::from_str::<SnapshotTree>(&content) {
-                Ok(tree) => reachable.extend(tree.values().cloned()),
+            // 解析必须走 v1/v2 兼容入口：v2 树的 `files` 是嵌套对象，直接按
+            // `SnapshotTree` 解析必然失败 → GC 永久跳过清扫（保守但等于不回收）
+            Ok(content) => match parse_tree_file(&content) {
+                Ok(tree) => reachable.extend(tree.files.into_values()),
                 Err(e) => {
                     tracing::warn!(path = %name, error = %e, "snapshot: 树文件无法解析（本轮清扫跳过，防误删活对象）");
                     return false;
@@ -1009,6 +1456,47 @@ async fn collect_tree_hashes(dir: &Path, prefix: &str, reachable: &mut HashSet<S
         }
     }
     true
+}
+
+/// 解析树文件内容（v1 裸 map / v2 `{workdir, files, skipped}` 兼容）。
+///
+/// 解析入口只有这一个：树格式的版本差异必须在一处收敛，散落到调用方
+/// （restore / diff / redo / GC 标记）就会各自漂移——GC 曾因直接按
+/// `SnapshotTree` 解析而在 v2 树上永久跳过清扫。
+fn parse_tree_file(content: &str) -> std::result::Result<LoadedTree, serde_json::Error> {
+    match serde_json::from_str::<TreeFile>(content)? {
+        TreeFile::V2(v2) => Ok(LoadedTree {
+            files: v2.files,
+            workdir: Some(v2.workdir),
+            skipped: v2.skipped.into_iter().collect(),
+        }),
+        TreeFile::V1(files) => Ok(LoadedTree {
+            files,
+            workdir: None,
+            skipped: HashSet::new(),
+        }),
+    }
+}
+
+/// `rel` 是否命中集合（集合元素为相对路径，目录不展开子项）。
+///
+/// 逐级检查祖先：`a/b/c.txt` 会命中集合中的 `a`、`a/b` 或完整路径本身。
+/// 这是 `skipped`（捕获时未纳入）与 git 忽略清单共用的匹配口径 —— 两者都记
+/// 目录条目而**不展开**子项（否则一个 `target/` 就是十万条），因此匹配必须
+/// 支持前缀命中。
+fn path_under(rel: &str, set: &HashSet<String>) -> bool {
+    if set.contains(rel) {
+        return true;
+    }
+    let mut start = 0usize;
+    while let Some(pos) = rel[start..].find('/') {
+        let end = start + pos;
+        if set.contains(&rel[..end]) {
+            return true;
+        }
+        start = end + 1;
+    }
+    false
 }
 
 /// 原子写（temp + rename 同目录替换）。
@@ -1174,7 +1662,7 @@ mod tests {
         write(&mgr.workdir, "a.txt", "被修改的内容");
         mgr.capture("s1", "1").await.unwrap();
 
-        let restored = mgr.restore("s1", "0").await.unwrap();
+        let restored = mgr.restore("s1", "0").await.unwrap().touched();
         assert_eq!(restored, 1);
         assert_eq!(read(&mgr.workdir, "a.txt"), "原始内容");
     }
@@ -1188,7 +1676,7 @@ mod tests {
         write(&mgr.workdir, "new.txt", "新增文件");
         mgr.capture("s1", "1").await.unwrap();
 
-        let restored = mgr.restore("s1", "0").await.unwrap();
+        let restored = mgr.restore("s1", "0").await.unwrap().touched();
         assert_eq!(restored, 1);
         assert!(!mgr.workdir.join("new.txt").exists());
     }
@@ -1203,7 +1691,7 @@ mod tests {
         std::fs::remove_file(mgr.workdir.join("gone.txt")).unwrap();
         mgr.capture("s1", "1").await.unwrap();
 
-        let restored = mgr.restore("s1", "0").await.unwrap();
+        let restored = mgr.restore("s1", "0").await.unwrap().touched();
         assert_eq!(restored, 1);
         assert_eq!(read(&mgr.workdir, "gone.txt"), "将被删除");
     }
@@ -1216,7 +1704,7 @@ mod tests {
         write(&mgr.workdir, "target/debug/app", "ignored");
 
         mgr.capture("s1", "0").await.unwrap();
-        let tree = mgr.load_tree("s1", "0").await.unwrap();
+        let tree = mgr.load_tree("s1", "0").await.unwrap().files;
         assert!(tree.contains_key("src/main.rs"));
         assert!(!tree.contains_key("node_modules/pkg/index.js"));
         assert!(!tree.contains_key("target/debug/app"));
@@ -1230,7 +1718,7 @@ mod tests {
         std::fs::write(mgr.workdir.join("big.bin"), big).unwrap();
 
         mgr.capture("s1", "0").await.unwrap();
-        let tree = mgr.load_tree("s1", "0").await.unwrap();
+        let tree = mgr.load_tree("s1", "0").await.unwrap().files;
         assert!(tree.contains_key("small.txt"));
         assert!(!tree.contains_key("big.bin"));
     }
@@ -1261,13 +1749,13 @@ mod tests {
         // 回退:保存 redo(当前=v1) + 恢复快照0(原始)
         mgr.save_redo("s1", "msg_1", &[]).await.unwrap();
         assert!(mgr.has_redo("s1", "msg_1").await);
-        mgr.restore("s1", "0").await.unwrap();
+        mgr.restore("s1", "0").await.unwrap().touched();
         assert_eq!(read(&mgr.workdir, "a.txt"), "原始");
 
         // 重做:恢复 v1 + 取回消息
-        let (msgs, restored) = mgr.load_redo("s1", "msg_1").await.unwrap().unwrap();
+        let (msgs, report) = mgr.load_redo("s1", "msg_1").await.unwrap().unwrap();
         assert!(msgs.is_empty());
-        assert_eq!(restored, 1);
+        assert_eq!(report.touched(), 1);
         assert_eq!(read(&mgr.workdir, "a.txt"), "v1");
 
         // 重做数据一次性:再次加载返回 None
@@ -1303,7 +1791,7 @@ mod tests {
         write(&mgr.workdir, "a.txt", "原始内容");
 
         mgr.capture("s1", "0").await.unwrap();
-        let tree = mgr.load_tree("s1", "0").await.unwrap();
+        let tree = mgr.load_tree("s1", "0").await.unwrap().files;
         let hash = tree.get("a.txt").unwrap();
 
         // 对象文件必须是 gzip 流（魔数 0x1f 0x8b）
@@ -1312,7 +1800,7 @@ mod tests {
 
         // 删除工作区文件后恢复 → 逐字节一致
         std::fs::remove_file(mgr.workdir.join("a.txt")).unwrap();
-        let restored = mgr.restore("s1", "0").await.unwrap();
+        let restored = mgr.restore("s1", "0").await.unwrap().touched();
         assert_eq!(restored, 1);
         assert_eq!(read(&mgr.workdir, "a.txt"), "原始内容");
     }
@@ -1336,7 +1824,7 @@ mod tests {
         // 工作区写入不同内容,触发真实恢复路径
         write(&mgr.workdir, "legacy.txt", "不同内容");
 
-        let restored = mgr.restore("s1", "0").await.unwrap();
+        let restored = mgr.restore("s1", "0").await.unwrap().touched();
         assert_eq!(restored, 1);
         assert_eq!(read(&mgr.workdir, "legacy.txt"), "遗留未压缩对象内容");
     }
@@ -1348,7 +1836,7 @@ mod tests {
         std::fs::write(mgr.workdir.join("rep.txt"), &content).unwrap();
 
         mgr.capture("s1", "0").await.unwrap();
-        let tree = mgr.load_tree("s1", "0").await.unwrap();
+        let tree = mgr.load_tree("s1", "0").await.unwrap().files;
         let hash = tree.get("rep.txt").unwrap();
         let stored = object_bytes(&mgr, hash);
 
@@ -1378,7 +1866,7 @@ mod tests {
         write(&mgr.workdir, "raw.txt", "原始对象内容");
         mgr.capture("s1", "0").await.unwrap();
 
-        let tree = mgr.load_tree("s1", "0").await.unwrap();
+        let tree = mgr.load_tree("s1", "0").await.unwrap().files;
         // 把 raw.txt 的对象替换为 legacy 未压缩字节 → 混合存储
         let raw_hash = tree.get("raw.txt").unwrap();
         write_object_raw(&mgr, raw_hash, "原始对象内容".as_bytes());
@@ -1386,7 +1874,7 @@ mod tests {
         write(&mgr.workdir, "comp.txt", "修改1");
         write(&mgr.workdir, "raw.txt", "修改2");
 
-        let restored = mgr.restore("s1", "0").await.unwrap();
+        let restored = mgr.restore("s1", "0").await.unwrap().touched();
         assert_eq!(restored, 2);
         assert_eq!(read(&mgr.workdir, "comp.txt"), "压缩对象内容");
         assert_eq!(read(&mgr.workdir, "raw.txt"), "原始对象内容");
@@ -1440,7 +1928,7 @@ mod tests {
 
         // 目标树：a.txt（对象存在）+ ghost.txt（对象不存在）
         let a_hash = {
-            let tree = mgr.load_tree("s1", "0").await.unwrap();
+            let tree = mgr.load_tree("s1", "0").await.unwrap().files;
             tree.get("a.txt").cloned().unwrap()
         };
         let mut target: SnapshotTree = HashMap::new();
@@ -1451,7 +1939,15 @@ mod tests {
         write(&mgr.workdir, "a.txt", "新内容");
 
         let err = mgr
-            .restore_tree(target, &mgr.workdir, None)
+            .restore_tree(
+                &LoadedTree {
+                    files: target,
+                    workdir: None,
+                    skipped: HashSet::new(),
+                },
+                &mgr.workdir,
+                None,
+            )
             .await
             .expect_err("对象缺失应中止恢复");
         assert!(err.to_string().contains("对象缺失"), "错误信息: {err}");
@@ -1472,12 +1968,12 @@ mod tests {
 
         // 修改（mtime/size 变化）→ 恢复必须检测到差异并写回 v1，不得因缓存漏掉
         write(&mgr.workdir, "a.txt", "v2-longer");
-        let restored = mgr.restore("s1", "0").await.unwrap();
+        let restored = mgr.restore("s1", "0").await.unwrap().touched();
         assert!(restored >= 1, "内容变更应被检测并恢复");
         assert_eq!(read(&mgr.workdir, "a.txt"), "v1");
 
         // 再次恢复（当前内容 == 目标树）：无差异 → 不应写文件、内容不变
-        let restored_again = mgr.restore("s1", "0").await.unwrap();
+        let restored_again = mgr.restore("s1", "0").await.unwrap().touched();
         assert_eq!(read(&mgr.workdir, "a.txt"), "v1");
         assert_eq!(restored_again, 0, "无差异时不应写文件");
     }
@@ -1799,7 +2295,11 @@ mod tests {
         // 与"键 = 消息 ID"的本测试意图无关；同 `test_gc_keeps_all_live_trees`
         // 的规避手法）。
         write(&mgr.workdir, "a.txt", "v2-changed");
-        let restored = mgr.restore("s1", "msg_1758000000000_1").await.unwrap();
+        let restored = mgr
+            .restore("s1", "msg_1758000000000_1")
+            .await
+            .unwrap()
+            .touched();
         assert_eq!(restored, 1);
         assert_eq!(read(&mgr.workdir, "a.txt"), "v1");
     }
@@ -1817,7 +2317,7 @@ mod tests {
 
         write(&mgr.workdir, "b.txt", "v2");
         mgr.capture("s1", "msg_B").await.unwrap();
-        let tree = mgr.load_tree("s1", "msg_B").await.unwrap();
+        let tree = mgr.load_tree("s1", "msg_B").await.unwrap().files;
         assert!(tree.contains_key("b.txt"), "第二次捕获的树应完整");
         assert!(tree.contains_key("a.txt"));
 
@@ -1826,5 +2326,242 @@ mod tests {
             !mgr.trees_dir("s1").join("latest.cache.json").exists(),
             "缓存指针不得落在 trees/ 目录内"
         );
+    }
+
+    // ─── 回退删除护栏（数据安全）────────────────────────────────
+
+    /// 环境是否有 git（`.gitignore` 相关测试的唯一外部依赖，缺失即跳过）。
+    async fn git_available(workdir: &Path) -> bool {
+        let _ = workdir;
+        crate::executor::command::hide_console_window(tokio::process::Command::new("git"))
+            .arg("--version")
+            .stdin(std::process::Stdio::null())
+            .status()
+            .await
+            .map(|s| s.success())
+            .unwrap_or(false)
+    }
+
+    /// 护栏 1（工作目录）：快照捕获在 A、恢复到 B → 一律不删。
+    ///
+    /// ADR-015 允许会话改绑工作区，`with_workdir` 可绑到任意目录；无此护栏时
+    /// 「B 里的文件都不在 A 的树里」会被当成新增，最坏清空 B。
+    #[tokio::test]
+    async fn test_restore_keeps_files_when_workdir_changed() {
+        let (_dir, mgr) = setup().await;
+        write(&mgr.workdir, "a.txt", "A 的文件");
+        mgr.capture("s1", "0").await.unwrap();
+
+        // 另一个工作目录：内容完全不同（模拟会话改绑工作区）
+        let other = mgr.workdir.parent().unwrap().join("other");
+        std::fs::create_dir_all(&other).unwrap();
+        std::fs::write(other.join("b.txt"), "B 的文件").unwrap();
+
+        let tree = mgr.load_tree("s1", "0").await.unwrap();
+        let report = mgr.restore_tree(&tree, &other, None).await.unwrap();
+        assert_eq!(report.deletion_suppressed, 1, "归属不符 → 一个都不删");
+        assert!(other.join("b.txt").exists(), "B 的文件必须保留");
+        assert!(
+            report
+                .suppression_reason
+                .as_deref()
+                .unwrap_or_default()
+                .contains("另一工作目录"),
+            "原因须可读：{:?}",
+            report.suppression_reason
+        );
+    }
+
+    /// 护栏 2（空树）：`{}` 也是合法 JSON——树为空时绝不删除。
+    #[tokio::test]
+    async fn test_restore_keeps_files_when_tree_empty() {
+        let (_dir, mgr) = setup().await;
+        write(&mgr.workdir, "a.txt", "内容");
+        write(&mgr.workdir, "b.txt", "另一个文件");
+
+        let tree = LoadedTree {
+            files: SnapshotTree::new(),
+            workdir: None,
+            skipped: HashSet::new(),
+        };
+        let report = mgr.restore_tree(&tree, &mgr.workdir, None).await.unwrap();
+        assert_eq!(report.deletion_suppressed, 2, "空树 → 两个文件都保留");
+        assert_eq!(report.deleted, 0);
+        assert!(mgr.workdir.join("a.txt").exists());
+        assert!(mgr.workdir.join("b.txt").exists());
+    }
+
+    /// 护栏 3（属主）：捕获时未纳入的路径（`.gitignore` / 超大 / 读取失败）
+    /// 在回退时**不得**被当成新增删除；同目录下未记录的候选照常删。
+    #[tokio::test]
+    async fn test_restore_keeps_paths_skipped_at_capture() {
+        let (_dir, mgr) = setup().await;
+        write(&mgr.workdir, "src/main.rs", "fn main() {}");
+        mgr.capture("s1", "0").await.unwrap();
+        // 捕获时被忽略的目录，在回退点之后产生文件
+        write(&mgr.workdir, "dist/bundle.js", "built");
+        write(&mgr.workdir, "dist/sub/chunk.js", "built2");
+        // 同一轮里没被忽略的新增文件 → 仍应被删除（护栏不能把回退变成不动）
+        write(&mgr.workdir, "src/added.rs", "new");
+
+        let mut tree = mgr.load_tree("s1", "0").await.unwrap();
+        tree.skipped.insert("dist".to_string());
+        let report = mgr.restore_tree(&tree, &mgr.workdir, None).await.unwrap();
+        assert_eq!(
+            report.deletion_suppressed, 2,
+            "dist/ 下两个文件属主不明 → 保留"
+        );
+        assert_eq!(report.deleted, 1, "src/added.rs 归属明确 → 删除");
+        assert!(mgr.workdir.join("dist/bundle.js").exists());
+        assert!(mgr.workdir.join("dist/sub/chunk.js").exists());
+        assert!(!mgr.workdir.join("src/added.rs").exists());
+    }
+
+    /// 护栏 4（上限）：纯函数判定——等于上限放行、超一个即全抑制。
+    #[test]
+    fn test_deletion_plan_upper_bound() {
+        let tree = LoadedTree {
+            files: HashMap::from([("a.txt".to_string(), "h".to_string())]),
+            workdir: None,
+            skipped: HashSet::new(),
+        };
+        let names: Vec<String> = (0..=MAX_DELETIONS_LEGACY)
+            .map(|i| format!("f{i}.txt"))
+            .collect();
+
+        let at_limit: Vec<&String> = names[..MAX_DELETIONS_LEGACY].iter().collect();
+        let plan = SnapshotManager::deletion_plan(&tree, "/w", &at_limit);
+        assert_eq!(plan.allowed.len(), MAX_DELETIONS_LEGACY, "等于上限应放行");
+        assert!(plan.reason.is_none());
+
+        let over: Vec<&String> = names.iter().collect();
+        let plan = SnapshotManager::deletion_plan(&tree, "/w", &over);
+        assert!(plan.allowed.is_empty(), "超上限应全抑制");
+        assert_eq!(plan.suppressed, MAX_DELETIONS_LEGACY + 1);
+        assert!(plan.reason.as_deref().unwrap_or_default().contains("上限"));
+    }
+
+    /// 改造 3：只清理**本次删除造成**的空目录——工作区原有的空目录必须留下
+    /// （旧实现遍历全树删空目录，用户有意保留的占位目录会被一并删掉）。
+    #[tokio::test]
+    async fn test_prune_keeps_unrelated_empty_dirs() {
+        let (_dir, mgr) = setup().await;
+        write(&mgr.workdir, "src/main.rs", "fn main() {}");
+        // 工作区原有的空目录（无文件 → 不在快照里，也不该被删）
+        std::fs::create_dir_all(mgr.workdir.join("keep/empty")).unwrap();
+        mgr.capture("s1", "0").await.unwrap();
+        // 回退点之后新增的文件：其父目录链应被清理
+        write(&mgr.workdir, "gen/deep/out.txt", "x");
+
+        mgr.restore("s1", "0").await.unwrap();
+        assert!(
+            !mgr.workdir.join("gen").exists(),
+            "新增文件的空目录链应被清理"
+        );
+        assert!(
+            mgr.workdir.join("keep/empty").is_dir(),
+            "工作区原有的空目录必须保留"
+        );
+    }
+
+    /// 改造 1：`.gitignore` 命中的目录不进快照（目录级剪枝）且记入 skipped 属主。
+    ///
+    /// 依赖真实 git；不可用时打印原因并跳过（不伪造实现）。
+    #[tokio::test]
+    async fn test_gitignored_dir_not_snapshotted() {
+        let (_dir, mgr) = setup().await;
+        if !git_available(&mgr.workdir).await {
+            eprintln!("跳过 test_gitignored_dir_not_snapshotted：环境无 git");
+            return;
+        }
+        std::fs::write(mgr.workdir.join(".gitignore"), "dist/\n*.log\n").unwrap();
+        write(&mgr.workdir, "src/main.rs", "fn main() {}");
+        write(&mgr.workdir, "dist/bundle.js", "built");
+        write(&mgr.workdir, "debug.log", "log");
+        let ok = crate::executor::command::hide_console_window(tokio::process::Command::new("git"))
+            .arg("init")
+            .arg("-q")
+            .arg(&mgr.workdir)
+            .stdin(std::process::Stdio::null())
+            .status()
+            .await
+            .map(|s| s.success())
+            .unwrap_or(false);
+        assert!(ok, "git init 应成功");
+
+        mgr.capture("s1", "0").await.unwrap();
+        let tree = mgr.load_tree("s1", "0").await.unwrap();
+        assert!(tree.files.contains_key("src/main.rs"));
+        assert!(
+            !tree.files.contains_key("dist/bundle.js"),
+            ".gitignore 目录不应进入快照: {:?}",
+            tree.files.keys().collect::<Vec<_>>()
+        );
+        assert!(!tree.files.contains_key("debug.log"));
+        assert!(
+            tree.skipped.contains("dist"),
+            "被忽略目录应记入 skipped 属主: {:?}",
+            tree.skipped
+        );
+        assert!(tree.skipped.contains("debug.log"));
+    }
+
+    /// 旧格式（v1 裸 map）兼容：仍可恢复、仍按语义删除（上限走 legacy 值）。
+    #[tokio::test]
+    async fn test_legacy_v1_tree_still_restores_and_deletes() {
+        let (_dir, mgr) = setup().await;
+        write(&mgr.workdir, "a.txt", "旧内容");
+        mgr.capture("s1", "0").await.unwrap();
+
+        // 用 v1 格式重写树文件（模拟升级前落盘的树）
+        let files = mgr.load_tree("s1", "0").await.unwrap().files;
+        std::fs::write(
+            mgr.trees_dir("s1").join("0.json"),
+            serde_json::to_string(&files).unwrap(),
+        )
+        .unwrap();
+
+        write(&mgr.workdir, "a.txt", "新内容");
+        write(&mgr.workdir, "new.txt", "回退点后新增");
+        let report = mgr.restore("s1", "0").await.unwrap();
+        assert_eq!(read(&mgr.workdir, "a.txt"), "旧内容");
+        assert!(!mgr.workdir.join("new.txt").exists(), "v1 树仍按语义删除");
+        assert_eq!(report.written, 1);
+        assert_eq!(report.deleted, 1);
+        assert_eq!(report.deletion_suppressed, 0);
+    }
+
+    /// 树解析必须在一处收敛 v1/v2——`files` 恰好是工作区文件名时不得误判。
+    #[test]
+    fn test_parse_tree_file_versions() {
+        let v2 =
+            parse_tree_file(r#"{"workdir":"W","files":{"a.txt":"h"},"skipped":["dist"]}"#).unwrap();
+        assert_eq!(v2.workdir.as_deref(), Some("W"));
+        assert_eq!(v2.files.get("a.txt").map(String::as_str), Some("h"));
+        assert!(v2.skipped.contains("dist"));
+
+        let v1 = parse_tree_file(r#"{"a.txt":"h"}"#).unwrap();
+        assert!(v1.workdir.is_none(), "v1 无归属信息");
+        assert_eq!(v1.files.get("a.txt").map(String::as_str), Some("h"));
+        assert!(v1.skipped.is_empty());
+
+        // 「files」恰好是工作区里的文件名（值是 hash 字符串）→ 不得误判为 v2
+        let tricky = parse_tree_file(r#"{"files":"abc"}"#).unwrap();
+        assert!(tricky.workdir.is_none());
+        assert_eq!(tricky.files.get("files").map(String::as_str), Some("abc"));
+    }
+
+    /// `path_under` 的前缀口径（skipped / git 忽略清单共用）。
+    #[test]
+    fn test_path_under_matches_ancestor_entries() {
+        let set: HashSet<String> = ["dist".to_string(), "a/b.txt".to_string()]
+            .into_iter()
+            .collect();
+        assert!(path_under("dist", &set), "自身命中");
+        assert!(path_under("dist/bundle.js", &set), "父目录命中");
+        assert!(path_under("dist/sub/chunk.js", &set), "祖先目录命中");
+        assert!(path_under("a/b.txt", &set));
+        assert!(!path_under("dist2/bundle.js", &set), "同前缀不同目录不命中");
+        assert!(!path_under("src/main.rs", &set));
     }
 }
