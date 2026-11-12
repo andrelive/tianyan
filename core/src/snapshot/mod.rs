@@ -202,18 +202,18 @@ struct CaptureScan<'a> {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RestoreReport {
     /// 写入（恢复）的文件数。
-    pub(crate) written: usize,
+    pub written: usize,
     /// 删除的文件数。
-    pub(crate) deleted: usize,
+    pub deleted: usize,
     /// 被护栏抑制的删除数。
-    pub(crate) deletion_suppressed: usize,
+    pub deletion_suppressed: usize,
     /// 抑制原因（人类可读；`None` = 护栏未触发）。
-    pub(crate) suppression_reason: Option<String>,
+    pub suppression_reason: Option<String>,
 }
 
 impl RestoreReport {
     /// 实际改动的工作区文件数（写入 + 删除）。
-    pub(crate) fn touched(&self) -> usize {
+    pub fn touched(&self) -> usize {
         self.written + self.deleted
     }
 }
