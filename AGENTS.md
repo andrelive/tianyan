@@ -64,7 +64,7 @@ cargo test -p tianyan-core vfs::backend::local -- --nocapture  # 指定测试模
 | `mcp/` | `tianyan-mcp` | MCP 协议客户端 |
 | `service/config/` | `tianyan-service-config` | **服务层**：配置加载 / 持久化（段保全）/ 数据目录迁移 / 校验编排 / 向导 DTO（ADR-049 期 3-T4，753 生产行从 core 搬出）；**不含配置结构**（`TianyanConfig` 留 core——内核与插件的共同构造参数） |
 | `assembly/` | `tianyan-assembly` | **装配清单**：11 个插件工厂 + 两份清单（`full()` = 生产 11 插槽 / `policies()` = 集成测试的 9 插槽前缀）+ 跨插件顺序断言的**单一实现**（ADR-049 期 4）；全仓唯一 `use` 全部插件 crate 之处（改造前同一份清单在 `app` / `gui-native` / `server/tests` / `app/tests` / `app/examples` 共 5 处副本） |
-| `tools-ops/` | `tianyan-tools-ops` | **运维工具**（ADR-049 期 4d）：服务停止后直接修数据的终端脚本（`skill_import` / `rebuild_overviews`），**不被任何 crate 依赖**；插件 crate 因此零 dev 边 |
+| `tools-ops/` | `tianyan-tools-ops` | **运维工具**（ADR-049 期 4d）：服务停止后直接修数据的终端脚本（`skill_import` / `rebuild_overviews` / `rewrite_rule_abstracts` / `rewrite_skill_abstracts` / `consolidate_rules` / `rename_entries` / **`prune_snapshot_trees`**——按通用排除集重写存量快照树，ADR-055），**不被任何 crate 依赖**；插件 crate 因此零 dev 边 |
 | `desktop/` | `tianyan-desktop` | **桌面启动编排（单 server 发现与复用）**：`ensure_server` / `discover_existing`（扫 `3000..=3100` + 校验 `/health` 的 `service` **与** `data_dir`）+ `find_available_port` / `start_axum_server`；`gui-native/` 共用这一份（`tauri/` **已于 2026-10 删除**）。**端口探测只避免端口冲突，不能避免数据目录双写**——实测撞上过「桌面版占 3000、gui-native 顺延 3001，两个 server 同写 `D:\tianyan`」（定时任务各跑一遍 + SQLite 并发写）。只经 `tianyan-assembly::full()` 取插件清单，**不直接认识插件 crate**（不是第二份装配清单） |
 | `plugins/tools-fs/` | `tianyan-tools-fs` | 插件：glob / list_dir / read_file / write_file / apply_edit / apply_patch / **view_image**（定义/门控/审批；实现暂留 core） |
 | `plugins/tools-code/` | `tianyan-tools-code` | 插件：symbol_outline / repo_map / grep（**含实现**，tree-sitter ×6 在此） |

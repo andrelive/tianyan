@@ -135,8 +135,8 @@ pub struct SnapshotManager {
     ignore_cache: IgnoreCache,
 }
 
-/// 单个快照树条目。
-pub(crate) type SnapshotTree = HashMap<String, String>;
+/// 快照树：`{相对路径 → 内容 sha256}`。
+pub type SnapshotTree = HashMap<String, String>;
 
 /// 快照树落盘格式（**v2**）：文件树 + 捕获时归属信息。
 ///
@@ -173,13 +173,15 @@ enum TreeFile {
 }
 
 /// 载入的快照树（统一 v1/v2 差异）。
-pub(crate) struct LoadedTree {
+///
+/// `workdir` 为 `None` 即 v1 旧格式（无归属信息）——回退删除此时只受上限约束。
+pub struct LoadedTree {
     /// 文件树。
-    pub(crate) files: SnapshotTree,
+    pub files: SnapshotTree,
     /// 捕获时的工作目录；`None` = v1 树（无归属信息）。
-    pub(crate) workdir: Option<String>,
+    pub workdir: Option<String>,
     /// 捕获时未纳入快照的路径（v1 树为空）。
-    pub(crate) skipped: HashSet<String>,
+    pub skipped: HashSet<String>,
 }
 
 /// 捕获遍历期的可写上下文：git 忽略清单 + 「存在但未纳入快照」的路径记录。
@@ -744,25 +746,14 @@ impl SnapshotManager {
         self.walk_and_capture(workdir, "", &mut tree, &mut cache, prev_cache, &mut scan)
             .await?;
 
-        if let Some(parent) = tree_path.parent() {
-            fs::create_dir_all(parent)
-                .await
-                .map_err(|e| TianyanError::Custom(format!("snapshot: 创建目录失败: {e}")))?;
-        }
-        // 排序后落盘：同一工作区两次捕获产出逐字相同的 JSON（写幂等，
-        // 也便于人工比对树文件差异）
-        let mut skipped: Vec<String> = skipped.into_iter().collect();
-        skipped.sort_unstable();
         let files_len = tree.len();
         let skipped_len = skipped.len();
-        let file = TreeFileV2 {
-            workdir: Self::normalize_workdir(workdir).await,
+        let loaded = LoadedTree {
             files: tree,
+            workdir: Some(Self::normalize_workdir(workdir).await),
             skipped,
         };
-        let json = serde_json::to_string(&file)
-            .map_err(|e| TianyanError::Custom(format!("snapshot: 序列化快照树失败: {e}")))?;
-        write_atomic(tree_path, &json).await?;
+        Self::write_tree_file(tree_path, &loaded).await?;
 
         // 写入本轮缓存,供下一轮复用
         let cache_json = serde_json::to_string(&cache)
@@ -771,6 +762,47 @@ impl SnapshotManager {
 
         tracing::debug!(files = files_len, skipped = skipped_len, "已捕获工作区快照");
         Ok(())
+    }
+
+    /// 读取任意树文件（`trees/*.json` / `redo/tree-*.json`），v1/v2 兼容。
+    ///
+    /// **运维工具的读取入口**（`tools-ops` 重写存量树）：解析只有
+    /// [`parse_tree_file`] 一处实现，工具不另写一份。
+    pub async fn read_tree_file(path: &Path) -> Result<LoadedTree> {
+        let content = fs::read_to_string(path).await.map_err(|e| {
+            TianyanError::Custom(format!("snapshot: 读取树文件失败 {}: {e}", path.display()))
+        })?;
+        parse_tree_file(&content).map_err(|e| {
+            TianyanError::Custom(format!("snapshot: 解析树文件失败 {}: {e}", path.display()))
+        })
+    }
+
+    /// 写出树文件（原子写；捕获路径与运维工具共用）。
+    ///
+    /// `tree.workdir` 为 `Some` 写 v2（`{workdir, files, skipped}`，`skipped`
+    /// 排序后落盘——同一内容两次写盘逐字相同），为 `None` 写 v1 兼容格式
+    /// （裸 `{path → hash}`）。**不为旧树编造归属信息**：写一个错的 workdir
+    /// 会让回退删除被全量抑制（比「无信息 + 数量上限」更糟）。
+    pub async fn write_tree_file(path: &Path, tree: &LoadedTree) -> Result<()> {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)
+                .await
+                .map_err(|e| TianyanError::Custom(format!("snapshot: 创建目录失败: {e}")))?;
+        }
+        let json = match &tree.workdir {
+            Some(workdir) => {
+                let mut skipped: Vec<String> = tree.skipped.iter().cloned().collect();
+                skipped.sort_unstable();
+                serde_json::to_string(&TreeFileV2 {
+                    workdir: workdir.clone(),
+                    files: tree.files.clone(),
+                    skipped,
+                })
+            }
+            None => serde_json::to_string(&tree.files),
+        }
+        .map_err(|e| TianyanError::Custom(format!("snapshot: 序列化快照树失败: {e}")))?;
+        write_atomic(path, &json).await
     }
 
     /// 将工作区恢复到目标树（核心逻辑,供 restore / load_redo 复用）。
@@ -1462,8 +1494,9 @@ async fn collect_tree_hashes(dir: &Path, prefix: &str, reachable: &mut HashSet<S
 ///
 /// 解析入口只有这一个：树格式的版本差异必须在一处收敛，散落到调用方
 /// （restore / diff / redo / GC 标记）就会各自漂移——GC 曾因直接按
-/// `SnapshotTree` 解析而在 v2 树上永久跳过清扫。
-fn parse_tree_file(content: &str) -> std::result::Result<LoadedTree, serde_json::Error> {
+/// `SnapshotTree` 解析而在 v2 树上永久跳过清扫。运维重写（`tools-ops`）同样
+/// 经它，`read_tree_file` 是文件级封装。
+pub fn parse_tree_file(content: &str) -> std::result::Result<LoadedTree, serde_json::Error> {
     match serde_json::from_str::<TreeFile>(content)? {
         TreeFile::V2(v2) => Ok(LoadedTree {
             files: v2.files,

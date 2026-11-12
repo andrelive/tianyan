@@ -107,6 +107,42 @@ git -C <workdir> ls-files --others --ignored --exclude-standard --directory -z
 只从「本次真正删掉文件的父目录」出发逐级向上 `remove_dir`（非空即失败、忽略）。于是：
 不遍历整棵工作区（复杂度 = 被删文件的父链），**且绝不删工作区原有的空目录**。
 
+### 5. 存量树重写（`tools-ops` 的 `prune_snapshot_trees`）
+
+前四条只对**新**快照生效。存量树仍引用着被排除的对象——GC 不敢回收，磁盘一分不减。
+因此配一个运维工具，按**与项目无关的通用排除集**重写存量树（`trees/*.json` 与
+`redo/tree-*.json`，排除 `*.cache.json` 与 `redo/messages-*.json`——后者是被回退的
+消息本身，不是树），把命中路径从 `files` 里剔除、折叠后并入 `skipped`。
+
+在真实库执行（2026-11-12 `D:\tianyan`）：
+
+| 观测 | 数值 |
+|------|------|
+| 树文件 | 2,427 个（2,008 MB） |
+| 条目 | 14,396,416 → 10,904,827（剔除 3,491,589 = **24.3%**） |
+| 树体积 | 2,007.7 → **1,550.6 MB**（-457 MB，耗时 151 s） |
+| 孤儿对象（GC 待回收） | **24,748 个 / 343.7 MB**（活对象 82,458 个 / 4,165.6 MB） |
+
+规则：目录名 `target` / `node_modules` / `dist` / `dist-old` / `coverage` /
+`test-results` / `playwright-report` / `.playwright-mcp` / `.next` / `.nuxt` /
+`.turbo` / `.cache` / `__pycache__` / `.pytest_cache` / `.venv` / `venv` / `.idea` /
+`.omo` / `.trae` / `.git`；复合路径 `(.vitepress, cache)`；后缀 `.log` / `.msi` /
+`.wixpdb` / `.tsbuildinfo` / `.db*` / `.pyc`。`--aggressive` 额外剔 `build` / `out` /
+`.vscode` 与 `*.map`（这些目录可能被跟踪，默认不动）。
+
+为什么是通用特征集而不是 `.gitignore`：旧树是 v1、**不记录工作目录**，无法按会话
+解析 `.gitignore`。因此覆盖不了项目特有忽略项（例如本仓库 `.gitignore` 单独列的
+`docs/naming-decision.md` 不会被剔）——刻意的保守取舍：宁可少删（留下无害条目），
+不可误删用户内容。
+
+格式沿用原样：v1 树写回仍 v1（**不为旧树编造 workdir**——写错会让回退删除被全量
+抑制，比「无信息 + 数量上限」更糟），原本带 `workdir` 的树写回 v2。语义变化明说：
+被剔除的路径**不再参与回退**（既不恢复也不删除），消息链回退不受影响。
+
+`--gc` 探测 `127.0.0.1:3000`，服务在监听就拒绝执行：标记-清扫与运行中的捕获有竞态
+（对象已写、树未落盘时会被判成孤儿）。重写本身不需要停服务（原子写；最坏情况是
+某棵「最新树」被通用规则版覆盖，下一次捕获写回精确版）。
+
 ---
 
 ## 拒绝的替代
@@ -119,6 +155,8 @@ git -C <workdir> ls-files --others --ignored --exclude-standard --directory -z
 | 引入 `ignore` crate | 能覆盖 `.gitignore` 但不覆盖 `.git/info/exclude` / 全局 excludesfile 与「已跟踪文件不受忽略」的 git 语义；且给 core 增加一条仅此处使用的依赖 |
 | `git check-ignore --stdin` 逐路径判定 | 需要先把所有路径枚举出来，失去目录级剪枝（而剪枝正是空间收益的主要来源） |
 | 继续用「裸 map」树文件 + 只加数量上限 | 无属主证据时上限只能压到保守值（否则正常大回退被挡），等于把边界问题降级为概率问题 |
+| 存量清理改成「按时间删旧快照」 | 收益同量级（30 天前的树占 82%），但会**丢掉那些历史锚点的文件回退能力**；重写保留能力，只是被忽略的路径不再参与 |
+| 重写存量树时读 `session_meta` 拿 workdir 升 v2 | 能让旧树也带上归属证据，但引入数据库依赖与「workdir 已不存在/已改绑」的判定分支；收益只是把 legacy 上限（200）换成精确判定，不值得在这个一次性脚本里扩面 |
 
 ---
 
@@ -145,6 +183,9 @@ git -C <workdir> ls-files --others --ignored --exclude-standard --directory -z
 - 新增单测 9 个：工作目录漂移、空树、`skipped` 命中、上限边界（纯函数）、
   `.gitignore` 不入树 + 记入 `skipped`（依赖真实 git，缺失即跳过）、v1 树兼容、
   v2/v1 解析判定、`path_under` 前缀口径、原有空目录保留。
+- 运维工具单测 6 个：目录命中折叠到最浅一层、`.vitepress/cache` 成对判定（不误删
+  同目录 `config.ts`）、后缀命中、源码路径不受影响、`--aggressive` 只扩展不改变默认、
+  百分比除零。
 - **反向注入验证**（每项改动注入旧行为，测试必须变红）：
   - 删除护栏改回「全放行」→ 4 个护栏测试红；
   - `git_ignored_paths` 改回空集 → `.gitignore` 测试红；

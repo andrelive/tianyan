@@ -9,6 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`prune_snapshot_trees`（运维工具）**：按「通用排除集」重写存量快照树，把
+  `.gitignore` 覆盖的构建产物与缓存（`target` / `node_modules` / `dist` / `.venv` /
+  `test-results` / `playwright-report` / `*.log` / `*.msi` …）从历史树里剔除——
+  这是 ADR-055 的**存量**落地：新捕获早已排除它们，但旧树仍引用那些对象，GC 不敢
+  回收、磁盘不降。在真实库执行：2,427 个树文件、1,440 万条目 → 剔除 3,491,589 条
+  （24.3%），树体积 **2,007.7 → 1,550.6 MB**（-457 MB，耗时 151 s）；孤儿对象由
+  快照 GC（12 小时定时任务）回收。幂等，支持 `--dry-run` / `--data-dir` / `--limit` /
+  `--aggressive`（额外清 `build` / `out` / `.vscode` / `*.map`）/ `--gc`。
+  **重写不需停服务**（树文件原子写）；`--gc` 需停服务，脚本探测到
+  `127.0.0.1:3000` 有监听即拒绝（标记-清扫与运行中的捕获有竞态）。
+  **语义变化**：被剔除的路径不再参与回退（既不恢复也不删除）。
+
 - **`rewrite_rule_abstracts`（运维工具）**：把存量规则的事件记录式摘要
   （`[规则] tool class（累计 N 次，最近 …）`）回填为「场景 → 动作」形态并重算 L0 向量，
   `[演化]` 前缀一并去掉。幂等（已是新形态即跳过），支持 `--dry-run`、`--data-dir`。
