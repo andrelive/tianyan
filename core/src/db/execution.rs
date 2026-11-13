@@ -114,6 +114,24 @@ impl ExecutionRepo {
         Ok(())
     }
 
+    /// 删除早于 `older_than_days` 天的执行记录，返回删除行数（GEPA 数据层的保留窗口）。
+    ///
+    /// 与 `trace_spans` 的 30 天窗口同手法（T1-19）：本表是**派生统计数据**（内容权威
+    /// 在 VFS，可重建），无限保留只会让它单调膨胀——实测 2026-11-13：
+    /// 73,427 行 / 79 MB（`result` 62.2 MB + `task_description` 17.7 MB），横跨 85 天。
+    ///
+    /// `older_than_days` 由调用方给（`<= 0` 按 1 天兜底，防「传 0 就清空全表」）。
+    pub async fn prune(&self, older_than_days: i64) -> Result<usize, TianyanError> {
+        let cutoff =
+            (chrono::Utc::now() - chrono::Duration::days(older_than_days.max(1))).timestamp();
+        let conn = self.db.lock().await;
+        conn.execute(
+            "DELETE FROM executions WHERE ts < ?1",
+            rusqlite::params![cutoff],
+        )
+        .map_err(|e| TianyanError::Custom(format!("observability: executions 清理失败：{e}")))
+    }
+
     /// 按类别统计执行情况。
     ///
     /// since_ts 为 epoch 秒（只统计该时间之后的记录）；category 为类别过滤。

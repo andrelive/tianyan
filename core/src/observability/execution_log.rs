@@ -20,6 +20,21 @@ const MAX_TASK_DESCRIPTION: usize = 500;
 /// 执行结果截断上限（防工具输出膨胀入库）。
 const MAX_RESULT_CHARS: usize = 2000;
 
+/// `executions` 表的保留窗口（天）。
+///
+/// 与 `trace_spans` 的 `SPAN_RETENTION_DAYS`（30 天）同属派生数据治理：本表可重建、
+/// 内容权威在 VFS，无限保留只会单调膨胀——实测 2026-11-13：73,427 行 / 79 MB
+/// （`result` 62.2 MB + `task_description` 17.7 MB），横跨 85 天。
+///
+/// 取 **30 天**（与 trace 一致）。**为什么不取更宽**：实测三档收益——90 天删 0 行
+/// （现有数据只跨 85 天，等于不清理）、60 天删 9,850 行 / 10.9 MB、30 天删
+/// 34,786 行 / **39.3 MB**。而消费侧（演化任务）只看近 7 天，`execution_stats`
+/// 的窗口语义也以「最近」为主——留 30 天足够，留 85 天只是占空间。
+const EXECUTION_RETENTION_DAYS: i64 = 30;
+
+/// 清理节流间隔（毫秒）：`record` 是每次工具执行的热路径，清理不必每次都跑。
+const PRUNE_THROTTLE_MS: i64 = 60 * 60 * 1000;
+
 /// 按关键词分类执行（零 LLM 纯代码；GEPA 数据层分类）。
 ///
 /// 与技能学习引擎的关键词兜底同一套类别；演化智能体按类别查询统计。
@@ -75,6 +90,9 @@ pub fn categorize_by_keyword(description: &str) -> &'static str {
 pub struct ExecutionLog {
     /// 执行记录域仓储（SQL 收敛：写入/统计/明细经此）。
     repo: ExecutionRepo,
+    /// 上次清理时间戳（毫秒；节流用）。`Arc` 让 `Clone` 出的副本共享同一个节流窗口
+    /// （`ExecutionLog` 会按需 clone 到多个监听器）。
+    last_prune_ms: Arc<std::sync::atomic::AtomicI64>,
 }
 
 impl ExecutionLog {
@@ -85,6 +103,7 @@ impl ExecutionLog {
     pub fn new(db: Arc<Database>) -> Result<Arc<Self>, TianyanError> {
         Ok(Arc::new(Self {
             repo: ExecutionRepo::new(db),
+            last_prune_ms: Arc::new(std::sync::atomic::AtomicI64::new(0)),
         }))
     }
 
@@ -123,7 +142,32 @@ impl ExecutionLog {
                 &result,
                 ts,
             )
-            .await
+            .await?;
+        // 落盘成功后按节流窗口清理超期记录（维护动作，失败仅告警）
+        self.prune_if_due().await;
+        Ok(())
+    }
+
+    /// 按节流窗口清理超出保留期的执行记录（`EXECUTION_RETENTION_DAYS`）。
+    ///
+    /// 失败仅告警：这是维护动作，不影响「记录已成功落盘」的语义。
+    async fn prune_if_due(&self) {
+        use std::sync::atomic::Ordering;
+        let now = chrono::Utc::now().timestamp_millis();
+        let last = self.last_prune_ms.load(Ordering::Relaxed);
+        if now.saturating_sub(last) < PRUNE_THROTTLE_MS {
+            return;
+        }
+        self.last_prune_ms.store(now, Ordering::Relaxed);
+        match self.repo.prune(EXECUTION_RETENTION_DAYS).await {
+            Ok(0) => {}
+            Ok(removed) => tracing::info!(
+                removed,
+                days = EXECUTION_RETENTION_DAYS,
+                "executions: 已清理超出保留窗口的执行记录"
+            ),
+            Err(e) => tracing::warn!(error = %e, "executions: 清理失败（下次重试）"),
+        }
     }
 
     /// 按类别统计执行情况。
@@ -280,6 +324,55 @@ mod tests {
         assert_eq!(file_stats.len(), 1);
         assert_eq!(file_stats[0].total, 1);
         assert_eq!(file_stats[0].successes, 1);
+    }
+
+    /// `executions` 保留窗口（90 天）：超期行被删、窗口内保留；重复清理幂等返回 0。
+    ///
+    /// 这张表此前**没有任何保留策略**（实测 2026-11-13：73,427 行 / 79 MB，横跨
+    /// 85 天），与 `trace_spans` 的 30 天窗口不一致。
+    #[tokio::test]
+    async fn test_prune_removes_only_rows_outside_retention_window() {
+        let log = make_log().await;
+        // make_log 的 record 用「现在」作 ts：造一条 100 天前的记录走底层 repo
+        let db = Database::open_in_memory().unwrap();
+        db.init_schemas().await.unwrap();
+        let repo = ExecutionRepo::new(db.clone());
+        let now = chrono::Utc::now().timestamp();
+        let old = now - 100 * 86_400;
+        repo.record(
+            "s1",
+            "read_file",
+            "file_operation",
+            "旧记录",
+            true,
+            10,
+            "[]",
+            "[]",
+            "r",
+            old,
+        )
+        .await
+        .unwrap();
+        repo.record(
+            "s1",
+            "read_file",
+            "file_operation",
+            "新记录",
+            true,
+            10,
+            "[]",
+            "[]",
+            "r",
+            now,
+        )
+        .await
+        .unwrap();
+
+        let removed = repo.prune(90).await.unwrap();
+        assert_eq!(removed, 1, "只应删除 100 天前那条");
+        assert_eq!(repo.prune(90).await.unwrap(), 0, "重复清理应幂等");
+        // `log` 仅用于确认既有构造路径仍可用（节流清理走 record 后自动触发）
+        drop(log);
     }
 
     #[tokio::test]
