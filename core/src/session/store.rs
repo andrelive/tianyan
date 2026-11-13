@@ -507,6 +507,105 @@ impl SessionStore {
         .map_err(|e| sqlite_error("会话最新序号查询失败", e))
     }
 
+    /// 按**消息 ID** 定位其 seq（`None` = 该会话无此消息）。
+    ///
+    /// 走 `idx_session_messages_msgid(session_id, message_id)` 覆盖索引：只读索引
+    /// 页、不回表（`content_parts` 是大字段，回表读整行会把全链读一遍）。
+    ///
+    /// **为什么需要它**：回退/重做的锚点是消息 ID，此前的定位方式是
+    /// `get_session` 读**整条链**再线性找位置——1300+ 条消息的会话每次回退白白
+    /// 多读一遍全链（实测回退 465 ms 里有上百毫秒在这里，且这条路径被调用多次）。
+    ///
+    /// # Errors
+    /// * SQLite 查询失败时返回 TianyanError。
+    pub async fn find_seq(
+        &self,
+        session_id: &str,
+        message_id: &str,
+    ) -> Result<Option<i64>, TianyanError> {
+        let conn = self.db.lock().await;
+        match conn.query_row(
+            "SELECT seq FROM session_messages WHERE session_id = ?1 AND message_id = ?2 LIMIT 1",
+            rusqlite::params![session_id, message_id],
+            |r| r.get::<_, i64>(0),
+        ) {
+            Ok(seq) => Ok(Some(seq)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(sqlite_error("消息 seq 查询失败", e)),
+        }
+    }
+
+    /// 加载 `seq >= from_seq` 的消息（**闭区间**，按 seq 升序）。
+    ///
+    /// 与 [`Self::load_after`]（开区间、损坏行跳过）的区别是**容错口径**：
+    /// 这里与 [`Self::load`] 一致——损坏行用占位 system 消息顶替，保持
+    /// 「位置即 seq」不变式（ADR-027）。回退要用它取「被截断的尾部」并交给
+    /// 重做侧按原样放回，位置不能错位。
+    ///
+    /// # Errors
+    /// * SQLite 查询失败时返回 TianyanError（行级 JSON 损坏不返回错误）。
+    pub async fn load_from(
+        &self,
+        session_id: &str,
+        from_seq: i64,
+    ) -> Result<Vec<(i64, StructuredMessage)>, TianyanError> {
+        let conn = self.db.lock().await;
+        let mut stmt = conn
+            .prepare(
+                "SELECT seq, content_parts FROM session_messages \
+                 WHERE session_id = ?1 AND seq >= ?2 ORDER BY seq",
+            )
+            .map_err(|e| sqlite_error("区间查询准备失败", e))?;
+        let rows = stmt
+            .query_map(rusqlite::params![session_id, from_seq], |r| {
+                Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?))
+            })
+            .map_err(|e| sqlite_error("区间查询执行失败", e))?;
+        let mut out = Vec::new();
+        for row in rows {
+            let (seq, json) = row.map_err(|e| sqlite_error("区间查询行读取失败", e))?;
+            match parse_message_row(&json, session_id, seq) {
+                Some(msg) => out.push((seq, msg)),
+                None => out.push((
+                    seq,
+                    StructuredMessage::system(
+                        session_id,
+                        format!("[会话存储：第 {seq} 条消息损坏，已跳过]"),
+                    ),
+                )),
+            }
+        }
+        Ok(out)
+    }
+
+    /// 会话链上**最后一个压缩点**的 seq（`None` = 从未压缩）。
+    ///
+    /// 工作集段化的起点就是它（段 = `[压缩点, 链尾]`），而 `compression_marker`
+    /// 只存在于 `content_parts` 的 JSON 里、不是独立列，无法一条 SQL 定位。
+    /// 这里**从链尾向前分页**找：压缩点总在「上一次压缩的位置」，常见情形首页
+    /// 即命中（读一页 = 数百条），无须为取一个位置把全链读一遍。找不到则继续
+    /// 前翻，最坏退化为全链（与旧行为等价）。
+    ///
+    /// # Errors
+    /// * SQLite 查询失败时返回 TianyanError。
+    pub async fn last_marker_seq(&self, session_id: &str) -> Result<Option<i64>, TianyanError> {
+        /// 反向分页的页大小：压缩点通常紧邻链尾，一页足够。
+        const PAGE: usize = 200;
+
+        let mut before = self.last_seq(session_id).await? + 1;
+        while before > 0 {
+            let page = self.load_before(session_id, before, PAGE).await?;
+            let Some(first) = page.first().map(|(seq, _)| *seq) else {
+                break;
+            };
+            if let Some((seq, _)) = page.iter().rev().find(|(_, m)| m.compression_marker) {
+                return Ok(Some(*seq));
+            }
+            before = first;
+        }
+        Ok(None)
+    }
+
     /// 加载自 since_seq 之后的消息（含 seq，ADR-028 断点对齐增量）。
     ///
     /// **逐行容错（T1-17）**：损坏行跳过并记 warn（带真实 seq，空洞无害）。
@@ -1207,5 +1306,121 @@ mod tests {
             .unwrap()
         };
         assert_eq!(fts, 3, "FTS 应只剩 3 条：{fts}");
+    }
+
+    /// `find_seq`：按消息 ID 定位 seq（回退 / 重做的锚点定位入口）。
+    ///
+    /// 回归背景：此前靠 `get_session` 读**整条链**再线性找位置——1300+ 条消息的
+    /// 会话每次回退白读一遍全链，而且回退路径上这样的读不止一处（实测 465 ms
+    /// 里有可观比例耗在这里）。
+    #[tokio::test]
+    async fn test_find_seq_by_message_id() {
+        let db = Database::open_in_memory().unwrap();
+        db.init_schemas().await.unwrap();
+        let store = SessionStore::new(db).unwrap();
+        let messages: Vec<StructuredMessage> = (0..5)
+            .map(|i| msg(&format!("m{i}"), MessageRole::User, &format!("第 {i} 条")))
+            .collect();
+        store
+            .rewrite("s1", &SessionHeader::default(), &messages)
+            .await
+            .unwrap();
+
+        assert_eq!(store.find_seq("s1", "m0").await.unwrap(), Some(0));
+        assert_eq!(store.find_seq("s1", "m3").await.unwrap(), Some(3));
+        assert_eq!(store.find_seq("s1", "不存在").await.unwrap(), None);
+        assert_eq!(
+            store.find_seq("s2", "m3").await.unwrap(),
+            None,
+            "不得跨会话串号"
+        );
+    }
+
+    /// `load_from`：**闭区间**尾部读（回退取被截断消息），损坏行留占位不丢位置。
+    #[tokio::test]
+    async fn test_load_from_is_inclusive_and_keeps_positions() {
+        let db = Database::open_in_memory().unwrap();
+        db.init_schemas().await.unwrap();
+        let store = SessionStore::new(db.clone()).unwrap();
+        let messages: Vec<StructuredMessage> = (0..5)
+            .map(|i| msg(&format!("m{i}"), MessageRole::User, &format!("第 {i} 条")))
+            .collect();
+        store
+            .rewrite("s1", &SessionHeader::default(), &messages)
+            .await
+            .unwrap();
+
+        let tail = store.load_from("s1", 3).await.unwrap();
+        assert_eq!(tail.len(), 2, "闭区间：seq 3、4 两条");
+        assert_eq!(tail[0].0, 3);
+        assert_eq!(tail[0].1.id, "m3");
+        assert_eq!(tail[1].0, 4);
+        assert_eq!(tail[1].1.id, "m4");
+        assert_eq!(
+            store.load_from("s1", 0).await.unwrap().len(),
+            5,
+            "from 0 即全链"
+        );
+
+        // 损坏行 → 占位（与 `load` 同口径，保住「位置即 seq」）；`load_after` 则是跳过
+        {
+            let conn = db.lock().await;
+            conn.execute(
+                "UPDATE session_messages SET content_parts = '{坏' \
+                 WHERE session_id = 's1' AND seq = 4",
+                [],
+            )
+            .unwrap();
+        }
+        let tail = store.load_from("s1", 4).await.unwrap();
+        assert_eq!(tail.len(), 1, "损坏行以占位保留，不丢位置");
+        assert_eq!(tail[0].0, 4);
+    }
+
+    /// `last_marker_seq`：从链尾反向分页找**最后一个**压缩点（工作集段化起点）。
+    ///
+    /// 有了它，工作集 rebuild 只需读「压缩点 → 链尾」的段，而不是整条链。
+    #[tokio::test]
+    async fn test_last_marker_seq_finds_newest_marker() {
+        let db = Database::open_in_memory().unwrap();
+        db.init_schemas().await.unwrap();
+        let store = SessionStore::new(db).unwrap();
+
+        // 无压缩点 → None
+        let messages: Vec<StructuredMessage> = (0..5)
+            .map(|i| msg(&format!("m{i}"), MessageRole::User, &format!("第 {i} 条")))
+            .collect();
+        store
+            .rewrite("s1", &SessionHeader::default(), &messages)
+            .await
+            .unwrap();
+        assert_eq!(store.last_marker_seq("s1").await.unwrap(), None);
+
+        // 两个压缩点（seq 2 与 4）→ 取最后一个
+        let mut messages: Vec<StructuredMessage> = (0..6)
+            .map(|i| msg(&format!("n{i}"), MessageRole::User, &format!("第 {i} 条")))
+            .collect();
+        messages[2].compression_marker = true;
+        messages[4].compression_marker = true;
+        store
+            .rewrite("s2", &SessionHeader::default(), &messages)
+            .await
+            .unwrap();
+        assert_eq!(store.last_marker_seq("s2").await.unwrap(), Some(4));
+
+        // 压缩点远在 600 条之前 → 必须跨页找到（页大小 200）
+        let mut messages: Vec<StructuredMessage> = (0..600)
+            .map(|i| msg(&format!("p{i}"), MessageRole::User, &format!("第 {i} 条")))
+            .collect();
+        messages[10].compression_marker = true;
+        store
+            .rewrite("s3", &SessionHeader::default(), &messages)
+            .await
+            .unwrap();
+        assert_eq!(
+            store.last_marker_seq("s3").await.unwrap(),
+            Some(10),
+            "跨页也要找得到最后一个压缩点"
+        );
     }
 }

@@ -97,125 +97,155 @@ impl Agent {
     ) -> Result<RollbackOutcome> {
         // ── 阶段 A（锁外，可等待）：锚点定位 + 取消锚点后任务 ──
         // 这里只做"粗定位"（供 `anchor_seq` 比较）；锁内会以库的最新链重新定位。
-        let anchor_seq = {
-            let session = self
-                .session_manager
-                .get_session(session_id)
-                .await?
-                .ok_or_else(|| {
-                    TianyanError::not_found(format!("会话存储错误：会话未找到：{session_id}"))
-                })?;
-            session
-                .messages
-                .iter()
-                .position(|m| m.id == message_id)
-                .ok_or_else(|| TianyanError::not_found(format!("消息不存在：{message_id}")))?
-                as i64
-        };
+        //
+        // 轻量定位：存在性走 `EXISTS`、seq 走覆盖索引——此前 `get_session` 会把整条
+        // 链读进内存再线性找位置（1300+ 条消息的会话每次回退白读一遍全链，而回退
+        // 路径上这样的全链读**不止一处**）。两种 `not_found` 仍分开报：前端要区分
+        // 「会话没了」与「该会话里没有这条消息」。
+        let t_locate = Instant::now();
+        if !self.session_manager.session_exists(session_id).await? {
+            return Err(TianyanError::not_found(format!(
+                "会话存储错误：会话未找到：{session_id}"
+            )));
+        }
+        let anchor_seq = self
+            .session_manager
+            .find_seq(session_id, message_id)
+            .await?
+            .ok_or_else(|| TianyanError::not_found(format!("消息不存在：{message_id}")))?;
+        let locate_ms = t_locate.elapsed().as_millis() as u64;
         // 先杀不等待：缩短阶段 B 的持锁时长（命令进程的终止与通知入库在锁内收尾）
+        let t_cancel = Instant::now();
         let mut cancelled_tasks = self
             .cancel_tasks_after_anchor(session_id, anchor_seq, false)
             .await?;
+        let cancel_ms = t_cancel.elapsed().as_millis() as u64;
 
         // ── 阶段 B（锁内事务）：保存可逆数据 → 恢复工作区 → 截断链 ──
         let started = Instant::now();
-        let outcome = self
-            .working_sets
-            .with_session_exclusive(session_id, |ws| async move {
-                // 锁内读基准：库的最新**完整链**（段化只物化「最近压缩点 → 现在」，
-                // 而回退需全链）＋ 重新定位锚点（库为权威，不信任锁外读到的索引）
-                let chain = ws.full_chain().await?;
-                let index = chain
-                    .iter()
-                    .position(|m| m.id == message_id)
-                    .ok_or_else(|| TianyanError::not_found(format!("消息不存在：{message_id}")))?;
-                let truncated: Vec<StructuredMessage> = chain[index..].to_vec();
-                // 锁内再取消一次并等终态：覆盖「等待轮退出期间」新起的任务（幂等），
-                // 并保证取消通知先入库（截断时随锚点后消息一并丢弃）
-                cancelled_tasks += self
-                    .cancel_tasks_after_anchor(session_id, index as i64, true)
-                    .await?;
+        let outcome =
+            self.working_sets
+                .with_session_exclusive(session_id, |ws| async move {
+                    // 锁内重新定位锚点（库为权威，不信任锁外读到的索引）：覆盖索引拿 seq，
+                    // 再只读**被截断的尾部**。此前是先 `full_chain()` 把整条链读出来再切片——
+                    // 回退通常只截断几条，前面上千条历史的读取与反序列化全是白费。
+                    let t_chain = Instant::now();
+                    let index = ws.find_seq(message_id).await?.ok_or_else(|| {
+                        TianyanError::not_found(format!("消息不存在：{message_id}"))
+                    })? as usize;
+                    let truncated: Vec<StructuredMessage> = ws.messages_from(index as i64).await?;
+                    let chain_ms = t_chain.elapsed().as_millis() as u64;
+                    // 锁内再取消一次并等终态：覆盖「等待轮退出期间」新起的任务（幂等），
+                    // 并保证取消通知先入库（截断时随锚点后消息一并丢弃）
+                    cancelled_tasks += self
+                        .cancel_tasks_after_anchor(session_id, index as i64, true)
+                        .await?;
 
-                // `.path()`：绑定目录失效时用兜底目录做快照根（与工具侧同一口径）；
-                // 无可用目录 = 没有可回退的文件基准（workdir 回报 None，前端明示）。
-                let workdir = self
-                    .resolve_working_directory(session_id)
-                    .await
-                    .path()
-                    .map(std::path::Path::to_path_buf);
-                let mut restored_files = 0usize;
-                let mut deletion_suppressed = 0usize;
-                let mut suppression_reason: Option<String> = None;
-                let mut redo_available = false;
-                let mut snapshot_missing = false;
+                    // `.path()`：绑定目录失效时用兜底目录做快照根（与工具侧同一口径）；
+                    // 无可用目录 = 没有可回退的文件基准（workdir 回报 None，前端明示）。
+                    let workdir = self
+                        .resolve_working_directory(session_id)
+                        .await
+                        .path()
+                        .map(std::path::Path::to_path_buf);
+                    let mut restored_files = 0usize;
+                    let mut deletion_suppressed = 0usize;
+                    let mut suppression_reason: Option<String> = None;
+                    let mut redo_available = false;
+                    let mut snapshot_missing = false;
+                    // 分段耗时（未进入对应分支时保持 0）：回退是复合操作，总耗时看不出
+                    // 钱花在哪一段——这几项是「还能不能再快」的唯一依据。
+                    let mut redo_ms = 0u64;
+                    let mut restore_ms = 0u64;
 
-                if let Some(sm) = &self.snapshot_manager {
-                    if let Some(wd) = workdir.clone() {
-                        let sm = sm.with_workdir(wd);
-                        // ③ 保存可逆数据（重做基准 = 回退前的工作区树 + 被截断消息）。
-                        //    失败不阻断回退——代价只是该次回退不可撤销（可见 warn）。
-                        //    它的捕获结果同时是 ④ 的「当前状态」：复用可省一次全树扫描。
-                        let mut precomputed_current = None;
-                        match sm.save_redo(session_id, message_id, &truncated).await {
-                            Ok(tree) => {
-                                redo_available = true;
-                                precomputed_current = Some(tree);
-                            }
-                            Err(e) => tracing::warn!(
-                                error = %e,
-                                session = %session_id,
-                                "保存重做状态失败（该次回退不可撤销）"
-                            ),
-                        }
-                        // ④ **先恢复文件**：失败即整体中止（链保持不动）。
-                        //    恢复本身「先校验后动手」（对象缺失即中止，工作区未改动）。
-                        match sm
-                            .restore_with_current(session_id, message_id, precomputed_current)
-                            .await
-                        {
-                            Ok(report) => {
-                                restored_files = report.touched();
-                                deletion_suppressed = report.deletion_suppressed;
-                                suppression_reason = report.suppression_reason;
-                            }
-                            // 该锚点无快照树（未捕获 / 已被 GC）→ 无文件可回退，
-                            // 与「未绑定工作区」同类：仅回退消息，不算失败。
-                            Err(e) if e.is_not_found() => {
-                                snapshot_missing = true;
-                                tracing::warn!(
+                    if let Some(sm) = &self.snapshot_manager {
+                        if let Some(wd) = workdir.clone() {
+                            let sm = sm.with_workdir(wd);
+                            // ③ 保存可逆数据（重做基准 = 回退前的工作区树 + 被截断消息）。
+                            //    失败不阻断回退——代价只是该次回退不可撤销（可见 warn）。
+                            //    它的捕获结果同时是 ④ 的「当前状态」：复用可省一次全树扫描。
+                            let mut precomputed_current = None;
+                            let t_redo = Instant::now();
+                            match sm.save_redo(session_id, message_id, &truncated).await {
+                                Ok(tree) => {
+                                    redo_available = true;
+                                    precomputed_current = Some(tree);
+                                }
+                                Err(e) => tracing::warn!(
                                     error = %e,
                                     session = %session_id,
-                                    anchor = %message_id,
-                                    "该锚点无工作区快照，仅回退消息"
-                                );
+                                    "保存重做状态失败（该次回退不可撤销）"
+                                ),
                             }
-                            Err(e) => return Err(e),
+                            redo_ms = t_redo.elapsed().as_millis() as u64;
+                            // ④ **先恢复文件**：失败即整体中止（链保持不动）。
+                            //    恢复本身「先校验后动手」（对象缺失即中止，工作区未改动）。
+                            let t_restore = Instant::now();
+                            match sm
+                                .restore_with_current(session_id, message_id, precomputed_current)
+                                .await
+                            {
+                                Ok(report) => {
+                                    restored_files = report.touched();
+                                    deletion_suppressed = report.deletion_suppressed;
+                                    suppression_reason = report.suppression_reason;
+                                }
+                                // 该锚点无快照树（未捕获 / 已被 GC）→ 无文件可回退，
+                                // 与「未绑定工作区」同类：仅回退消息，不算失败。
+                                Err(e) if e.is_not_found() => {
+                                    snapshot_missing = true;
+                                    tracing::warn!(
+                                        error = %e,
+                                        session = %session_id,
+                                        anchor = %message_id,
+                                        "该锚点无工作区快照，仅回退消息"
+                                    );
+                                }
+                                Err(e) => return Err(e),
+                            }
+                            restore_ms = t_restore.elapsed().as_millis() as u64;
                         }
                     }
-                }
 
-                // ⑤ **后截断链**（经工作集：库 + 物化段 + seq 同步推进）
-                //
-                // 优先走增量删除（只删尾部 seq >= index）。回退典型只截断几条，而
-                // `rewrite` 是整表重写（全部消息删掉再逐条序列化插入 + FTS 全重建）——
-                // 实测 1300+ 条消息的会话一次回退 1186 ms 主要耗在这里。落在压缩点之前
-                // 的少见情形回退到全量重写保底。
-                if !ws.truncate_to(index).await? {
-                    ws.rewrite(&chain[..index]).await?;
-                }
+                    // ⑤ **后截断链**（经工作集：库 + 物化段 + seq 同步推进）
+                    //
+                    // 优先走增量删除（只删尾部 seq >= index）。回退典型只截断几条，而
+                    // `rewrite` 是整表重写（全部消息删掉再逐条序列化插入 + FTS 全重建）——
+                    // 实测 1300+ 条消息的会话一次回退 1186 ms 主要耗在这里。落在压缩点之前
+                    // 的少见情形回退到全量重写保底。
+                    let t_truncate = Instant::now();
+                    if !ws.truncate_to(index).await? {
+                        // 少见路径（锚点落在段起点之前）：段起点会变负，只能全量重写
+                        let chain = ws.full_chain().await?;
+                        ws.rewrite(&chain[..index]).await?;
+                    }
+                    let truncate_ms = t_truncate.elapsed().as_millis() as u64;
 
-                Ok(RollbackOutcome {
-                    truncated: truncated.len(),
-                    restored_files,
-                    deletion_suppressed,
-                    suppression_reason,
-                    workdir: workdir.map(|p| p.display().to_string()),
-                    snapshot_missing,
-                    redo_available,
-                    cancelled_tasks,
+                    tracing::info!(
+                        session = %session_id,
+                        index,
+                        truncated = truncated.len(),
+                        locate_ms,
+                        cancel_ms,
+                        chain_ms,
+                        redo_ms,
+                        restore_ms,
+                        truncate_ms,
+                        "回退分段耗时"
+                    );
+
+                    Ok(RollbackOutcome {
+                        truncated: truncated.len(),
+                        restored_files,
+                        deletion_suppressed,
+                        suppression_reason,
+                        workdir: workdir.map(|p| p.display().to_string()),
+                        snapshot_missing,
+                        redo_available,
+                        cancelled_tasks,
+                    })
                 })
-            })
-            .await?;
+                .await?;
         // 回退是重操作（重做捕获 + 工作区扫描 + 写文件 + 链截断），此前**一条 info 日志
         // 都没有**——用户反馈「比之前快多了但还不够无感」时，无从定位时间花在哪。
         // 这里记全量结果 + 服务端耗时（含重做捕获那一步）。
@@ -240,12 +270,8 @@ impl Agent {
     /// * 会话不存在 → `not_found`（404）；
     /// * 未装配快照管理器 / 未绑定工作区 / 无重做状态 → `invalid_input`（400）。
     pub(crate) async fn redo_to(&self, session_id: &str, message_id: &str) -> Result<RedoOutcome> {
-        if self
-            .session_manager
-            .get_session(session_id)
-            .await?
-            .is_none()
-        {
+        // 存在性走 `EXISTS`（不全量加载消息——重做只为判断会话在不在）
+        if !self.session_manager.session_exists(session_id).await? {
             return Err(TianyanError::not_found(format!(
                 "会话存储错误：会话未找到：{session_id}"
             )));

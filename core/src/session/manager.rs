@@ -102,6 +102,19 @@ pub trait SessionManager: Send + Sync {
             .unwrap_or(0);
         Ok(count as i64 - 1)
     }
+    /// 按**消息 ID** 定位其 seq（`None` = 该会话无此消息）。
+    ///
+    /// 回退 / 重做的锚点定位入口：锚点是消息 ID（数字位置会因前端合并过滤而
+    /// 错位），此前只能 `get_session` 读整条链再线性找位置。
+    ///
+    /// 默认实现走全量加载（测试桩可用）；持久化实现覆盖为覆盖索引查询。
+    async fn find_seq(&self, session_id: &str, message_id: &str) -> Result<Option<i64>> {
+        Ok(self
+            .get_session(session_id)
+            .await?
+            .and_then(|s| s.messages.iter().position(|m| m.id == message_id))
+            .map(|i| i as i64))
+    }
 
     /// 取 `< before_seq` 的最近一条 `role=user` 消息 seq（`None` = 无更早用户消息）。
     ///
@@ -230,6 +243,10 @@ impl SessionManager for PersistentSessionManager {
     /// `MAX(seq)` 覆盖（O(1)，不全量加载）。
     async fn last_seq(&self, session_id: &str) -> Result<i64> {
         Ok(self.store.last_seq(session_id).await?)
+    }
+    /// 覆盖索引查询（不回表、不读链）。
+    async fn find_seq(&self, session_id: &str, message_id: &str) -> Result<Option<i64>> {
+        Ok(self.store.find_seq(session_id, message_id).await?)
     }
 
     /// `EXISTS` 覆盖（不全量加载消息）。

@@ -368,6 +368,9 @@ const SCHEMA_SQL: &str = "
     );
     CREATE UNIQUE INDEX IF NOT EXISTS idx_session_messages_uniq ON session_messages(session_id, seq);
     CREATE INDEX IF NOT EXISTS idx_session_messages_session_ts ON session_messages(session_id, ts);
+    -- 按消息 ID 定位 seq（回退/重做的锚点定位）：覆盖索引，含 seq 不回表——
+    -- 没有它只能全量加载整条链再线性找位置（实测 1300+ 条会话每次回退多花上百毫秒）
+    CREATE INDEX IF NOT EXISTS idx_session_messages_msgid ON session_messages(session_id, message_id);
 
     -- 会话级状态（ADR-018：替代 JSONL 首行 SessionHeader；
     -- injectable 快照 + title/ended_at/created_at 唯一持久化 home）

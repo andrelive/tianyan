@@ -166,24 +166,69 @@ impl SessionWorkingSet {
     /// 语义：**重建即视为「已读到库尾」**（ADR-035 §4）——重启/卸载后首次组装
     /// 必然读到库尾，历史通知因此不会被当作「未消费」而重放（T1-24 的
     /// 「不重现」在这一层兑现）。
+    ///
+    /// **只读段，不读全链**：段 = 「最近压缩点 → 链尾」（ADR-035 §2），压缩点前的
+    /// 历史本就不驻留内存。此前实现是 `store.load()` 把**全链**读出来再
+    /// `split_off(start_seq)` 丢掉前缀——1300+ 条消息的会话每次 rebuild 白读一遍
+    /// 全链（回退 / 压缩 / 删消息都经过这里，实测回退 465 ms 里占上百毫秒）。
+    /// 现在先取链尾 seq 与最后一个压缩点，再按区间只读段。
+    ///
+    /// 保底：段长度与 `[压缩点, 链尾]` 不符（seq 有洞 / 压缩点定位漂移）时退回
+    /// 全量加载——**正确性由位置即 seq 不变式（ADR-027）承担，这里只是省读**。
     async fn rebuild(&self) -> Result<()> {
-        let loaded = self.store.load(&self.session_id).await?;
-        let (header, mut messages) = match loaded {
-            Some((header, messages)) => (header, messages),
-            None => (crate::session::SessionHeader::default(), Vec::new()),
+        let header = self
+            .store
+            .header(&self.session_id)
+            .await?
+            .unwrap_or_default();
+        let db_last = self.store.last_seq(&self.session_id).await?;
+        let start_seq = self
+            .store
+            .last_marker_seq(&self.session_id)
+            .await?
+            .unwrap_or(0);
+        let expect = if db_last < 0 {
+            0
+        } else {
+            (db_last - start_seq + 1).max(0) as usize
+        };
+        let mut seg: Vec<StructuredMessage> = if expect == 0 {
+            Vec::new()
+        } else {
+            self.store
+                .load_from(&self.session_id, start_seq)
+                .await?
+                .into_iter()
+                .map(|(_seq, m)| m)
+                .collect()
+        };
+        // 保底：段读结果与区间长度不符 → 退回全量加载（慢但正确）
+        let (start_seq, db_last) = if seg.len() == expect {
+            (start_seq, db_last)
+        } else {
+            let full = self
+                .store
+                .load(&self.session_id)
+                .await?
+                .map(|(_h, m)| m)
+                .unwrap_or_default();
+            let start = full.iter().rposition(|m| m.compression_marker).unwrap_or(0) as i64;
+            tracing::warn!(
+                session = %self.session_id,
+                got = seg.len(),
+                expect,
+                "工作集段读与链尾不一致，退回全量加载"
+            );
+            let last = full.len() as i64 - 1;
+            seg = full[start as usize..].to_vec();
+            (start, last)
         };
         let injectable = header.injectable_snapshot.clone().unwrap_or_default();
-        let len = messages.len() as i64;
-        // ADR-035 §2 段化：只物化「最近压缩点 → 现在」（完整链的后缀）——
-        // 压缩点前的历史不驻留内存（需要时经库按需读：回退/导出/前端上滚）。
-        let start_seq = messages
-            .iter()
-            .rposition(|m| m.compression_marker)
-            .unwrap_or(0) as i64;
         {
             let mut st = self.state.write().await;
-            st.structured_messages = messages.split_off(start_seq as usize); // 全链按 seq 升序 → 索引 == seq
-                                                                             // 前缀快照随会话固化（ADR-012/030）：有快照则恢复，无快照留空待首轮填充
+            // 段 = 完整链的后缀（全链按 seq 升序 → 段内索引 == seq - start_seq）
+            st.structured_messages = seg;
+            // 前缀快照随会话固化（ADR-012/030）：有快照则恢复，无快照留空待首轮填充
             if !injectable.soul.is_empty() || !injectable.rules_and_experiences.is_empty() {
                 st.injectable_context = injectable;
             }
@@ -191,8 +236,8 @@ impl SessionWorkingSet {
         }
         *self.header.write().await = header;
         self.start_seq.store(start_seq, Ordering::SeqCst);
-        self.last_seq.store(len - 1, Ordering::SeqCst);
-        self.last_consumed_seq.store(len - 1, Ordering::SeqCst);
+        self.last_seq.store(db_last, Ordering::SeqCst);
+        self.last_consumed_seq.store(db_last, Ordering::SeqCst);
         Ok(())
     }
 
@@ -292,6 +337,34 @@ impl SessionWorkingSet {
             .await?
             .map(|(_header, messages)| messages)
             .unwrap_or_default())
+    }
+
+    /// 按**消息 ID** 定位其在完整链上的 seq（`None` = 该会话无此消息）。
+    ///
+    /// 走覆盖索引的一条查询，**不读全链**——排他事务内的锚点定位用这个，
+    /// 而不是 `full_chain().iter().position(..)`（后者要把整条链读进内存）。
+    ///
+    /// # Errors
+    /// * 库查询失败时透传。
+    pub async fn find_seq(&self, message_id: &str) -> Result<Option<i64>> {
+        self.store.find_seq(&self.session_id, message_id).await
+    }
+
+    /// 读**完整链上 `seq >= from_seq` 的尾部**（占位容错，位置即 seq）。
+    ///
+    /// 回退用它取「被截断的消息」交给重做侧：典型只截断几条，无需为此把
+    /// 前面上千条历史一起读出来。需要全链的路径仍走 [`Self::full_chain`]。
+    ///
+    /// # Errors
+    /// * 库查询失败时透传。
+    pub async fn messages_from(&self, from_seq: i64) -> Result<Vec<StructuredMessage>> {
+        Ok(self
+            .store
+            .load_from(&self.session_id, from_seq)
+            .await?
+            .into_iter()
+            .map(|(_seq, m)| m)
+            .collect())
     }
 
     /// 写入收口 ②（整表重写，ADR-035 §3）：删消息 / 回退 / 重做 / 编辑。
@@ -1190,6 +1263,47 @@ mod tests {
         assert!(
             reg.try_lock("s1").await.is_some(),
             "事务结束后锁应释放（轮可进入）"
+        );
+    }
+
+    /// 段化重建：`rebuild` 只读「最近压缩点 → 链尾」，但**段起点、链尾、全链读**
+    /// 必须与全量重建完全一致（此前做法是全链读出再 `split_off`，现在按区间读段）。
+    ///
+    /// 判据三条一起验：段内容 = 压缩点之后；`start_seq` = 压缩点 seq（截断的增量
+    /// 门槛就靠它）；`full_chain()` 仍是完整链（回退 / 导出 / 上滚要用）。
+    #[tokio::test]
+    async fn test_rebuild_reads_only_segment_but_keeps_full_chain_view() {
+        let store = test_store().await;
+        create_session(&store, "s1").await;
+        // 6 条消息，seq 2 是压缩点 → 段 = seq 2..5（4 条），全链 6 条
+        for i in 0..6 {
+            let mut m = user_msg("s1", &format!("第 {i} 条"));
+            m.compression_marker = i == 2;
+            store.append_message("s1", &m).await.unwrap();
+        }
+        let reg = WorkingSetRegistry::new(Some(store.clone()));
+        let ws = reg.ensure("s1").await.unwrap();
+
+        assert_eq!(ws.start_seq(), 2, "段起点应为最后一个压缩点的 seq");
+        assert_eq!(ws.last_seq(), 5, "链尾应与库一致");
+        assert_eq!(ws.message_count().await, 4, "段只物化压缩点之后");
+        assert_eq!(
+            ws.full_chain().await.unwrap().len(),
+            6,
+            "全链读不受段化影响"
+        );
+
+        // 段内截断：keep=4 落在段内（start_seq=2 < 4）→ 增量删除可用
+        assert!(ws.truncate_to(4).await.unwrap(), "段内截断应走增量");
+        assert_eq!(ws.last_seq(), 3);
+        assert_eq!(ws.message_count().await, 2, "段剩 seq 2、3");
+        let (_h, left) = store.load("s1").await.unwrap().unwrap();
+        assert_eq!(left.len(), 4, "库只剩 seq 0..3");
+
+        // keep 落在段起点之前（<= start_seq）→ 返回 false（调用方退回全量重写）
+        assert!(
+            !ws.truncate_to(2).await.unwrap(),
+            "锚点落在压缩点之前时必须回报「无法增量」"
         );
     }
 }
