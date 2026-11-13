@@ -11,7 +11,7 @@ use tokio::fs;
 use crate::common::error::{Result, TianyanError};
 use crate::common::types::StructuredMessage;
 
-use super::{parse_tree_file, RestoreReport, SnapshotManager};
+use super::{RestoreReport, SnapshotManager};
 
 impl SnapshotManager {
     /// 回退时保存重做状态：捕获当前工作区树 + 被截断的消息。
@@ -88,11 +88,8 @@ impl SnapshotManager {
         let mut report = RestoreReport::default();
         let tree_path = redo_dir.join(format!("tree-{key}.json"));
         if tree_path.exists() {
-            let content = fs::read_to_string(&tree_path)
-                .await
-                .map_err(|e| TianyanError::Custom(format!("snapshot: 读取重做树失败: {e}")))?;
-            let tree = parse_tree_file(&content)
-                .map_err(|e| TianyanError::Custom(format!("snapshot: 解析重做树失败: {e}")))?;
+            // 读取与解析统一走 `read_tree_file`（v1/v2 + gzip/明文兼容）
+            let tree = SnapshotManager::read_tree_file(&tree_path).await?;
             // 增量：复用 latest 缓存短路未变更文件（同 save_redo 的加速路径）
             let prev_cache = self
                 .load_cache(&self.latest_cache_path(session_id))

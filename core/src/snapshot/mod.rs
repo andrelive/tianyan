@@ -768,9 +768,19 @@ impl SnapshotManager {
     ///
     /// **运维工具的读取入口**（`tools-ops` 重写存量树）：解析只有
     /// [`parse_tree_file`] 一处实现，工具不另写一份。
+    ///
+    /// 内容可能是 **gzip 压缩**的（[`Self::write_tree_file`] 对 ≥ 4 KB 的树压缩），
+    /// 也可能是明文（旧树 / 小树）——按 [`GZIP_MAGIC`] 魔数识别，与对象库同一套口径。
     pub async fn read_tree_file(path: &Path) -> Result<LoadedTree> {
-        let content = fs::read_to_string(path).await.map_err(|e| {
+        let raw = fs::read(path).await.map_err(|e| {
             TianyanError::Custom(format!("snapshot: 读取树文件失败 {}: {e}", path.display()))
+        })?;
+        let bytes = read_object_bytes(&raw)?;
+        let content = String::from_utf8(bytes).map_err(|e| {
+            TianyanError::Custom(format!(
+                "snapshot: 树文件不是合法 UTF-8 {}: {e}",
+                path.display()
+            ))
         })?;
         parse_tree_file(&content).map_err(|e| {
             TianyanError::Custom(format!("snapshot: 解析树文件失败 {}: {e}", path.display()))
@@ -783,6 +793,11 @@ impl SnapshotManager {
     /// 排序后落盘——同一内容两次写盘逐字相同），为 `None` 写 v1 兼容格式
     /// （裸 `{path → hash}`）。**不为旧树编造归属信息**：写一个错的 workdir
     /// 会让回退删除被全量抑制（比「无信息 + 数量上限」更糟）。
+    ///
+    /// 序列化结果 ≥ [`TREE_COMPRESS_MIN_BYTES`] 时 **gzip 压缩后落盘**：树是
+    /// `{路径 → 64 位十六进制}` 的 JSON，路径高度重复，实测全库 1,599.7 MB →
+    /// 505.0 MB（31.6%）。读取端按魔数识别，因此明文旧树照读、无须一次性迁移
+    /// （存量由 `tools-ops` 的 `prune_snapshot_trees --recompress` 逐步收紧）。
     pub async fn write_tree_file(path: &Path, tree: &LoadedTree) -> Result<()> {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)
@@ -802,7 +817,12 @@ impl SnapshotManager {
             None => serde_json::to_string(&tree.files),
         }
         .map_err(|e| TianyanError::Custom(format!("snapshot: 序列化快照树失败: {e}")))?;
-        write_atomic(path, &json).await
+        if json.len() >= TREE_COMPRESS_MIN_BYTES {
+            let compressed = gzip_compress(json.as_bytes())?;
+            write_atomic_bytes(path, &compressed).await
+        } else {
+            write_atomic(path, &json).await
+        }
     }
 
     /// 将工作区恢复到目标树（核心逻辑,供 restore / load_redo 复用）。
@@ -913,11 +933,15 @@ impl SnapshotManager {
         let tree_path = self
             .trees_dir(session_id)
             .join(format!("{}.json", sanitize_key(key)));
-        let content = fs::read_to_string(&tree_path).await.map_err(|e| {
-            TianyanError::not_found(format!("快照不存在（会话 {session_id} 键 {key}）: {e}"))
-        })?;
-        parse_tree_file(&content)
-            .map_err(|e| TianyanError::Custom(format!("snapshot: 解析快照树失败: {e}")))
+        // 存在性单独判：`not_found` 是「该锚点无快照 → 只回退消息」的分支信号，
+        // 不能与「解析失败」混为一谈。读取与解析统一走 `read_tree_file`
+        // （gzip / 明文兼容）。
+        if fs::metadata(&tree_path).await.is_err() {
+            return Err(TianyanError::not_found(format!(
+                "快照不存在（会话 {session_id} 键 {key}）"
+            )));
+        }
+        Self::read_tree_file(&tree_path).await
     }
 
     /// 递归遍历工作目录,将纳入快照的文件写入 tree 并复制缺失对象。
@@ -1483,18 +1507,12 @@ async fn collect_tree_hashes(dir: &Path, prefix: &str, reachable: &mut HashSet<S
         if index.is_empty() {
             continue;
         }
-        match fs::read_to_string(entry.path()).await {
-            // 解析必须走 v1/v2 兼容入口：v2 树的 `files` 是嵌套对象，直接按
-            // `SnapshotTree` 解析必然失败 → GC 永久跳过清扫（保守但等于不回收）
-            Ok(content) => match parse_tree_file(&content) {
-                Ok(tree) => reachable.extend(tree.files.into_values()),
-                Err(e) => {
-                    tracing::warn!(path = %name, error = %e, "snapshot: 树文件无法解析（本轮清扫跳过，防误删活对象）");
-                    return false;
-                }
-            },
+        // 读取与解析走 `read_tree_file`（v1/v2 兼容 + gzip/明文兼容）：标记阶段
+        // 必须看到**压缩树**引用的对象，否则会把活对象判成孤儿（ADR-055 §6）。
+        match SnapshotManager::read_tree_file(&entry.path()).await {
+            Ok(tree) => reachable.extend(tree.files.into_values()),
             Err(e) => {
-                tracing::warn!(path = %name, error = %e, "snapshot: 树文件读取失败（本轮清扫跳过）");
+                tracing::warn!(path = %name, error = %e, "snapshot: 树文件无法读取/解析（本轮清扫跳过，防误删活对象）");
                 return false;
             }
         }
@@ -1548,9 +1566,9 @@ fn path_under(rel: &str, set: &HashSet<String>) -> bool {
 ///
 /// 半写的快照树/缓存会被后续读取判为损坏（GC 因此跳过本轮清扫）——
 /// 直接 `fs::write` 在断电/崩溃下会留下截断文件。
-async fn write_atomic(path: &Path, content: &str) -> Result<()> {
+async fn write_atomic_bytes(path: &Path, bytes: &[u8]) -> Result<()> {
     let tmp = path.with_extension("tmp");
-    fs::write(&tmp, content)
+    fs::write(&tmp, bytes)
         .await
         .map_err(|e| TianyanError::Custom(format!("snapshot: 写入临时文件失败: {e}")))?;
     fs::rename(&tmp, path)
@@ -1558,9 +1576,20 @@ async fn write_atomic(path: &Path, content: &str) -> Result<()> {
         .map_err(|e| TianyanError::Custom(format!("snapshot: 原子替换失败: {e}")))?;
     Ok(())
 }
+/// 文本原子写（缓存文件等明文内容；树文件走 [`write_atomic_bytes`]——它可能是 gzip）。
+async fn write_atomic(path: &Path, content: &str) -> Result<()> {
+    write_atomic_bytes(path, content.as_bytes()).await
+}
 
 /// gzip 魔数（前 2 字节）,用于区分压缩对象与 legacy 未压缩对象。
 const GZIP_MAGIC: [u8; 2] = [0x1f, 0x8b];
+
+/// 树文件压缩阈值：**小于该字节数的树不压缩**。
+///
+/// 小文件 gzip 反而膨胀（实测 303 棵 < 4 KB 的树压缩后 121%），且逐文件多一次
+/// 解压判断毫无收益。全库实测：≥ 4 KB 的树 1,599.7 MB → 505.0 MB（31.6%）。
+const TREE_COMPRESS_MIN_BYTES: usize = 4096;
+
 /// 快照缓存指针文件名（每会话一份，供下一次捕获复用 mtime/size 缓存）。
 const LATEST_CACHE_FILE: &str = "latest.cache.json";
 
@@ -2648,5 +2677,71 @@ mod tests {
             mgr.object_path(&h1).exists(),
             "对象必须被重新写回（否则新树引用悬空对象）"
         );
+    }
+
+    /// 树文件压缩：≥ 4 KB 的树以 **gzip** 落盘（实测全库 1,599.7 MB → 505.0 MB），
+    /// 且读取 / 恢复 / GC 标记全链路透明——GC 看不到压缩树的引用就会把活对象判孤儿。
+    #[tokio::test]
+    async fn test_tree_file_gzip_roundtrip_and_gc() {
+        let (_dir, mgr) = setup().await;
+        for i in 0..120 {
+            write(
+                &mgr.workdir,
+                &format!("src/file_{i}.rs"),
+                &format!("// content {i}"),
+            );
+        }
+        mgr.capture("s1", "0").await.unwrap();
+
+        let tree_path = mgr.trees_dir("s1").join("0.json");
+        let raw = std::fs::read(&tree_path).unwrap();
+        assert_eq!(
+            &raw[..2],
+            &GZIP_MAGIC,
+            "≥ 4 KB 的树应以 gzip 落盘（{} 字节）",
+            raw.len()
+        );
+
+        // 读取链路
+        let tree = mgr.load_tree("s1", "0").await.unwrap();
+        assert_eq!(tree.files.len(), 120, "压缩后条目数不变");
+
+        // 恢复链路
+        write(&mgr.workdir, "src/file_0.rs", "// changed");
+        let report = mgr.restore("s1", "0").await.unwrap();
+        assert_eq!(report.written, 1);
+        assert_eq!(read(&mgr.workdir, "src/file_0.rs"), "// content 0");
+
+        // GC 标记链路：压缩树引用的对象必须全部存活
+        let before = count_files(&mgr.root.join("objects"));
+        let stats = mgr.gc().await.unwrap();
+        assert_eq!(stats.objects_removed, 0, "压缩树引用的对象不得被判孤儿");
+        assert_eq!(count_files(&mgr.root.join("objects")), before);
+    }
+
+    /// 明文（未压缩）树仍可读：迁移期是混合存储，旧树不迁移也必须能工作。
+    #[tokio::test]
+    async fn test_plaintext_tree_still_readable() {
+        let (_dir, mgr) = setup().await;
+        for i in 0..120 {
+            write(&mgr.workdir, &format!("f{i}.txt"), &format!("v{i}"));
+        }
+        mgr.capture("s1", "0").await.unwrap();
+
+        // 解压后明文写回（模拟旧版本落盘的树）
+        let tree_path = mgr.trees_dir("s1").join("0.json");
+        let raw = std::fs::read(&tree_path).unwrap();
+        let plain = read_object_bytes(&raw).unwrap();
+        std::fs::write(&tree_path, &plain).unwrap();
+        assert_ne!(
+            &std::fs::read(&tree_path).unwrap()[..2],
+            &GZIP_MAGIC,
+            "应已替换为明文"
+        );
+
+        let tree = mgr.load_tree("s1", "0").await.unwrap();
+        assert_eq!(tree.files.len(), 120, "明文树照读");
+        let stats = mgr.gc().await.unwrap();
+        assert_eq!(stats.objects_removed, 0, "明文树引用的对象同样不得被判孤儿");
     }
 }

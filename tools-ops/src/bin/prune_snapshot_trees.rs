@@ -32,6 +32,11 @@
 //! 其它参数：`--data-dir <path>`（隔离环境）、`--aggressive`（额外剔除
 //! `build` / `out` 目录与 `*.map`）、`--limit <n>`（只处理前 n 棵树，试跑）。
 //!
+//! `--recompress`：把**明文大树**重写成 gzip 形态（ADR-055 §6 的存量迁移）。树是
+//! `{路径 → 64 位十六进制}` 的 JSON，路径高度重复——实测全库 2,817 棵、1,599.7 MB
+//! → 505.0 MB（31.6%）。只改编码不改内容，因此**不清缓存**（hash 未变）；小于
+//! 4 KB 的树不压（压缩反而膨胀）。
+//!
 //! **重写不需要停服务**：树文件是原子写，与运行中的捕获互不损坏（最坏情况是某棵
 //! 「最新树」被本脚本的通用规则版覆盖，下一次捕获会写回精确版）。**`--gc` 必须
 //! 停服务**：标记-清扫与运行中的捕获有竞态（对象已写、树未落盘时会被判成孤儿），
@@ -145,6 +150,7 @@ fn is_pruned_dir(seg: &str, aggressive: bool) -> bool {
 struct Stats {
     trees_scanned: usize,
     trees_rewritten: usize,
+    trees_recompressed: usize,
     trees_unchanged: usize,
     trees_failed: usize,
     entries_before: usize,
@@ -167,6 +173,7 @@ async fn run() -> Result<()> {
     let args: Vec<String> = std::env::args().collect();
     let dry_run = args.iter().any(|a| a == "--dry-run");
     let aggressive = args.iter().any(|a| a == "--aggressive");
+    let recompress = args.iter().any(|a| a == "--recompress");
     let gc = args.iter().any(|a| a == "--gc");
     let data_dir_override: Option<PathBuf> = args
         .iter()
@@ -184,13 +191,14 @@ async fn run() -> Result<()> {
     println!("数据目录：{}", config.storage.data_dir.display());
     println!("快照根：{}", snap_root.display());
     println!(
-        "模式：{}  排除集：{}{}",
+        "模式：{}  排除集：{}{}{}",
         if dry_run {
             "dry-run（只读预览）"
         } else {
             "执行"
         },
         if aggressive { "aggressive" } else { "默认" },
+        if recompress { "  +压缩迁移" } else { "" },
         match limit {
             Some(n) => format!("  限 {n} 棵树"),
             None => String::new(),
@@ -218,7 +226,8 @@ async fn run() -> Result<()> {
     let mut stats = Stats::default();
     let started = Instant::now();
     for (idx, path) in trees.iter().enumerate() {
-        if let Err(e) = process_tree(&mgr, path, aggressive, dry_run, &mut stats).await {
+        if let Err(e) = process_tree(&mgr, path, aggressive, recompress, dry_run, &mut stats).await
+        {
             stats.trees_failed += 1;
             eprintln!("  [跳过] {}：{e}", path.display());
         }
@@ -236,6 +245,7 @@ async fn run() -> Result<()> {
     println!("\n=== 汇总 ===");
     println!("  扫描树文件：{}", stats.trees_scanned);
     println!("  重写：{}", stats.trees_rewritten);
+    println!("  压缩迁移（仅改编码）：{}", stats.trees_recompressed);
     println!("  无需改动：{}", stats.trees_unchanged);
     println!("  失败/跳过：{}", stats.trees_failed);
     println!(
@@ -292,11 +302,15 @@ async fn process_tree(
     mgr: &SnapshotManager,
     path: &Path,
     aggressive: bool,
+    recompress: bool,
     dry_run: bool,
     stats: &mut Stats,
 ) -> Result<()> {
     let _ = mgr;
     let bytes_before = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+    // 只改编码的迁移：明文 + 够大（≥ 4 KB 才值得压，小了反而膨胀）
+    let needs_recompress =
+        recompress && !is_gzip_file(path) && bytes_before >= RECOMPRESS_MIN_BYTES;
     let mut tree = SnapshotManager::read_tree_file(path).await?;
     stats.trees_scanned += 1;
     stats.bytes_before += bytes_before;
@@ -324,7 +338,7 @@ async fn process_tree(
     }
     tree.files = keep;
 
-    if pruned == 0 {
+    if pruned == 0 && !needs_recompress {
         stats.trees_unchanged += 1;
         stats.entries_after += tree.files.len();
         stats.bytes_after += bytes_before;
@@ -337,11 +351,29 @@ async fn process_tree(
     } else {
         stats.bytes_after += bytes_before;
     }
-    stats.trees_rewritten += 1;
     stats.entries_pruned += pruned;
     stats.skipped_folded += folded;
     stats.entries_after += tree.files.len();
+    if pruned > 0 {
+        stats.trees_rewritten += 1;
+    } else {
+        stats.trees_recompressed += 1;
+    }
     Ok(())
+}
+
+/// 只有**仅改编码**（`--recompress`）时才重写的最小体积：与 `SnapshotManager`
+/// 侧 `TREE_COMPRESS_MIN_BYTES` 同值——小于 4 KB 的树压缩反而膨胀。
+const RECOMPRESS_MIN_BYTES: u64 = 4096;
+
+/// 文件是否已是 gzip（看前 2 字节魔数 `0x1f 0x8b`）。
+fn is_gzip_file(path: &Path) -> bool {
+    use std::io::Read;
+    let Ok(mut f) = std::fs::File::open(path) else {
+        return false;
+    };
+    let mut magic = [0u8; 2];
+    f.read_exact(&mut magic).is_ok() && magic == [0x1f, 0x8b]
 }
 
 /// 收集所有树文件（`*/trees/*.json` 与 `*/redo/tree-*.json`，排除缓存文件）。
@@ -456,6 +488,8 @@ fn percent(part: usize, total: usize) -> f64 {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+
     use super::*;
 
     #[test]
@@ -533,5 +567,22 @@ mod tests {
     fn test_percent_guards_zero() {
         assert!((percent(0, 0) - 0.0).abs() < f64::EPSILON);
         assert!((percent(44, 100) - 44.0).abs() < f64::EPSILON);
+    }
+
+    /// `--recompress` 的判定前提：能认出「已压缩」的树（否则每轮重复压缩）。
+    #[test]
+    fn test_is_gzip_file_detects_magic() {
+        let dir = std::env::temp_dir().join(format!("tianyan-gzip-probe-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("t.json");
+        std::fs::write(&p, b"{\"a\":\"b\"}").unwrap();
+        assert!(!is_gzip_file(&p), "明文不应识别为 gzip");
+        std::fs::write(&p, [0x1f, 0x8b, 0x08, 0x00]).unwrap();
+        assert!(is_gzip_file(&p), "魔数应识别为 gzip");
+        assert!(
+            !is_gzip_file(&dir.join("missing.json")),
+            "缺失文件不应 panic"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
