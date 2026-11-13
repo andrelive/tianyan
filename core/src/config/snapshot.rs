@@ -37,6 +37,20 @@ pub struct SnapshotConfig {
     /// （回退结果会报 `snapshot_missing`）。
     #[serde(default = "default_max_trees_per_session")]
     pub max_trees_per_session: usize,
+
+    /// 是否**对每个文件重算哈希**（默认 `false` = 用 racy timestamp 判据）。
+    ///
+    /// 默认判据（`false`）：文件 `mtime` 早于上次快照的 cache 写入时刻、且 `size`
+    /// 未变 → 信任缓存哈希，不读内容；只有「mtime 落在上次快照前后 1 秒内」的
+    /// 文件才重算。这是 Git `index` 的同一套判据（racy timestamp），实测把大工作区
+    /// 的热捕获从 445 ms 降到几十毫秒。
+    ///
+    /// 置 `true` = 放弃该判据、每轮读全文重算（最保守）：适用于工作区在**网络盘 /
+    /// 虚拟化共享目录**上（那里 mtime 语义不可靠）、或显式回填旧 mtime 的工具
+    /// （`rsync -t`、部分解压器）参与编辑的场景。代价是每次捕获都要读全部纳入
+    /// 快照的文件内容。
+    #[serde(default)]
+    pub strict_hash: bool,
 }
 
 /// `max_file_bytes` 的 serde 默认值。
@@ -61,6 +75,7 @@ impl Default for SnapshotConfig {
             max_file_bytes: DEFAULT_MAX_FILE_BYTES,
             excludes: Vec::new(),
             max_trees_per_session: DEFAULT_MAX_TREES_PER_SESSION,
+            strict_hash: false,
         }
     }
 }
@@ -98,8 +113,16 @@ mod tests {
         // 旧配置文件没有 `[snapshot]` 节 / 只写了一个字段都要能加载
         let empty: SnapshotConfig = toml::from_str("").unwrap();
         assert_eq!(empty.max_file_bytes, DEFAULT_MAX_FILE_BYTES);
+        assert!(
+            !empty.strict_hash,
+            "缺省必须用 racy 判据（`strict_hash = true` 是给不可靠 mtime 的工作区准备的退路）"
+        );
         let partial: SnapshotConfig = toml::from_str("excludes = [\"fixtures\"]").unwrap();
         assert_eq!(partial.max_file_bytes, DEFAULT_MAX_FILE_BYTES);
         assert_eq!(partial.excludes, vec!["fixtures".to_string()]);
+
+        // 显式打开保守模式
+        let strict: SnapshotConfig = toml::from_str("strict_hash = true").unwrap();
+        assert!(strict.strict_hash);
     }
 }

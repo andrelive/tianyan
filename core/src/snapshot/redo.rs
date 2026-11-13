@@ -52,8 +52,17 @@ impl SnapshotManager {
                 .load_cache(&self.latest_cache_path(session_id))
                 .await
                 .unwrap_or(None);
+            // racy 判据的 T 取自 **prev_cache 的来源**（`latest.cache.json`），
+            // 而不是本次要写的 `cache_path`（redo 目录下按 key 一份，可能是旧残渣）
+            let prev_cache_at_ns = self.snapshot_at_for(session_id).await;
             captured = self
-                .capture_tree_to(&self.workdir, &tree_path, &cache_path, prev_cache.as_ref())
+                .capture_tree_to(
+                    &self.workdir,
+                    &tree_path,
+                    &cache_path,
+                    prev_cache.as_ref(),
+                    prev_cache_at_ns,
+                )
                 .await?;
         }
 
@@ -101,8 +110,9 @@ impl SnapshotManager {
                 .load_cache(&self.latest_cache_path(session_id))
                 .await
                 .unwrap_or(None);
+            let snapshot_at_ns = self.snapshot_at_for(session_id).await;
             report = self
-                .restore_tree(&tree, &self.workdir, prev_cache.as_ref())
+                .restore_tree(&tree, &self.workdir, prev_cache.as_ref(), snapshot_at_ns)
                 .await?;
         }
 

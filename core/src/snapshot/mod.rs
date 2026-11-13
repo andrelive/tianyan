@@ -66,16 +66,21 @@ use crate::common::error::{Result, TianyanError};
 use crate::common::hash::hex_sha256;
 use crate::config::{SnapshotConfig, DEFAULT_MAX_FILE_BYTES, DEFAULT_MAX_TREES_PER_SESSION};
 
-/// "小文件"阈值：**小于等于**该值的文件不参与 mtime/size 短路（直接重算哈希）。
+/// racy 判据的安全边际（纳秒）：文件 `mtime` 必须比「上次快照写下 cache 的时刻」
+/// **早至少这么多**，才敢信任缓存哈希。
 ///
-/// 短路前提"mtime 纳秒 + size 未变 ⇒ 内容未变"是**启发式**——同一文件被
-/// **等长改写**且 mtime 撞车（同纳秒，或 `modified()` 失败退化为 0）时会**漏检**：
-/// 回退/重做时误判"文件未变更" → 跳过恢复（`restored_files=0`），并连带跳过
-/// "快照对象缺失"的预校验（应报错却返回 Ok）。实机复现：WSL/CI 上
-/// `test_rollback_restores_files_then_truncates_chain` 偶发失败（Windows 不复现）。
-/// 小文件哈希成本可忽略（μs 级），不值得为省这点开销冒漏检风险；
-/// 大文件保留短路，以维持"大工作区增量恢复"的加速收益。
-const SMALL_FILE_BYTES: u64 = 64 * 1024;
+/// 为什么需要边际：`mtime` 的语义是「最后一次写入的时刻」，但「写入完成 → metadata
+/// 可见」之间可能有延迟（缓存刷盘、网络盘），且不同文件系统的时钟精度不同。取 1 秒，
+/// 对齐 Git `index` 的 racy 判据粒度（Git 用秒级 mtime，窗口即「与 index 同秒」）。
+/// 偏保守的代价只是「最近 1 秒内改过的文件重算哈希」——快照按轮触发，这个集合通常是空的。
+///
+/// **历史（为什么替换掉「按文件大小一刀切」）**：此前规则是 `size > 64 KiB` 才信
+/// mtime/size，理由是「等长改写 + mtime 撞车会漏检」（WSL/CI 上
+/// `test_rollback_restores_files_then_truncates_chain` 曾偶发失败）。但源码仓库里
+/// 绝大多数文件都小于 64 KiB，等于**每轮捕获都重读全文重算哈希**：实测 951 文件的热
+/// 捕获 445 ms，其中光「对象存在性 stat」就占 109 ms。racy 判据覆盖同一个撞车场景
+/// （撞车的文件正好落在边际窗口内，照样重算），且不再把无关的小文件当可疑对象。
+const RACY_MARGIN_NS: u128 = 1_000_000_000;
 
 /// 默认排除的目录名（不区分大小写）。
 const DEFAULT_EXCLUDED_DIRS: [&str; 4] = [".git", "node_modules", "target", "snapshots"];
@@ -148,6 +153,8 @@ pub struct SnapshotManager {
     max_file_bytes: u64,
     /// 每个会话保留的快照树数量上限（`[snapshot] max_trees_per_session`；0 = 不限）。
     max_trees_per_session: usize,
+    /// 是否对**每个文件**重算哈希（`[snapshot] strict_hash`；`false` = racy 判据）。
+    strict_hash: bool,
 }
 
 /// 快照树：`{相对路径 → 内容 sha256}`。
@@ -209,7 +216,57 @@ struct CaptureScan<'a> {
     ignored: &'a HashSet<String>,
     /// 捕获时存在但未纳入快照的路径（内置排除 / git 忽略 / 超大 / 读取失败）。
     skipped: &'a mut HashSet<String>,
+    /// 上次快照写下 cache 的时刻（epoch 纳秒）——racy 判据的 T。
+    /// `None` = 取不到（或 `strict_hash` 生效）→ 所有文件都重算哈希。
+    snapshot_at_ns: Option<u128>,
 }
+/// 上次快照写下 cache 的时刻（epoch 纳秒）——racy 判据的 T。
+///
+/// 用 **cache 文件自身的 mtime**，而不是在 cache JSON 里加字段：
+/// - 零格式变更：老 cache 文件也有 mtime，升级后立刻可用（不必一次性迁移）；
+/// - 语义正好对齐：cache 是原子写落盘的，它的 mtime 就是「这一轮快照写下缓存」的时刻。
+///
+/// 取不到（文件不存在 / 时钟异常）→ `None` → 调用方全量重算（保守）。
+async fn cache_write_time_ns(cache_path: &Path) -> Option<u128> {
+    let modified = fs::metadata(cache_path).await.ok()?.modified().ok()?;
+    modified
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .map(|d| d.as_nanos())
+}
+
+/// 能否信任缓存里的哈希（racy timestamp 判据）。
+///
+/// 前提：「任何写入都会把 mtime 推到写入时刻」。于是：
+/// - `mtime` **早于**上次快照写下 cache 的时刻 T（留 [`RACY_MARGIN_NS`] 边际）且
+///   size 未变 → 内容自那以后不可能变 → 信任缓存哈希，不读内容；
+/// - `mtime` 不早于 T（racy：可能与 cache 写入落在同一时钟刻度内，先后不可分辨）→ 重算；
+/// - `mtime == 0`（`modified()` 失败退化）或取不到 T → 重算（保守）。
+///
+/// 这是 Git `index` 用了二十年的同一套判据，替换历史的「按文件大小一刀切」
+/// （见 [`RACY_MARGIN_NS`] 的历史说明）。
+fn can_trust_cached(
+    prev: &CachedFile,
+    size: u64,
+    mtime_ns: u128,
+    snapshot_at_ns: Option<u128>,
+) -> bool {
+    // stat 必须完全一致（size 或 mtime 变了就是明确的「脏」）
+    if prev.size != size || prev.mtime_ns != mtime_ns {
+        return false;
+    }
+    // 取不到 mtime（`modified()` 失败退化为 0）→ 无法判断，重算
+    if mtime_ns == 0 {
+        return false;
+    }
+    // 取不到「上次快照时刻」→ 保守重算
+    let Some(snapshot_at_ns) = snapshot_at_ns else {
+        return false;
+    };
+    // 必须**严格早于**快照时刻并留出安全边际；落在边际内 = racy（先后不可分辨）
+    mtime_ns + RACY_MARGIN_NS < snapshot_at_ns
+}
+
 /// 一个目录条目的静态信息（**一次同步 stat 拿全**）。
 ///
 /// 存在的理由：`tokio::fs` 的每个操作都是一次 `spawn_blocking`（派发到阻塞
@@ -415,6 +472,7 @@ impl SnapshotManager {
             ignore_cache: Arc::new(Mutex::new(HashMap::new())),
             max_file_bytes: DEFAULT_MAX_FILE_BYTES,
             max_trees_per_session: DEFAULT_MAX_TREES_PER_SESSION,
+            strict_hash: false,
         }
     }
 
@@ -440,6 +498,7 @@ impl SnapshotManager {
             ignore_cache: Arc::clone(&self.ignore_cache),
             max_file_bytes: self.max_file_bytes,
             max_trees_per_session: self.max_trees_per_session,
+            strict_hash: self.strict_hash,
         }
     }
 
@@ -452,7 +511,20 @@ impl SnapshotManager {
         self.max_file_bytes = config.effective_max_file_bytes();
         self.excludes = config.excludes.clone();
         self.max_trees_per_session = config.max_trees_per_session;
+        self.strict_hash = config.strict_hash;
         self
+    }
+
+    /// racy 判据的 T：上次快照写下 `latest.cache.json` 的时刻。
+    ///
+    /// `strict_hash` 生效时返回 `None`（调用方据此全量重算）。
+    ///
+    /// **必须在本次写入 cache 之前调用**——之后读到的是本轮的时刻（判据会自我失效）。
+    async fn snapshot_at_for(&self, session_id: &str) -> Option<u128> {
+        if self.strict_hash {
+            return None;
+        }
+        cache_write_time_ns(&self.latest_cache_path(session_id)).await
     }
 
     /// 捕获工作区状态为快照（消息处理前调用）。
@@ -479,11 +551,19 @@ impl SnapshotManager {
         // 缓存）。放在 trees/ 之外，避免 GC 的树收集把它当作快照树解析。
         let cache_path = self.latest_cache_path(session_id);
         let prev_cache = self.load_cache(&cache_path).await?;
+        // racy 判据的 T：**必须在写本轮 cache 之前**取（见 `snapshot_at_for`）
+        let prev_cache_at_ns = self.snapshot_at_for(session_id).await;
 
         // 捕获只要落盘结果（树本体由路径侧按需读取），这里忽略返回值
-        self.capture_tree_to(&self.workdir, &tree_path, &cache_path, prev_cache.as_ref())
-            .await
-            .map(|_| ())
+        self.capture_tree_to(
+            &self.workdir,
+            &tree_path,
+            &cache_path,
+            prev_cache.as_ref(),
+            prev_cache_at_ns,
+        )
+        .await
+        .map(|_| ())
     }
 
     /// 恢复到指定消息 ID 的快照（回退调用）。
@@ -518,8 +598,15 @@ impl SnapshotManager {
             .load_cache(&self.latest_cache_path(session_id))
             .await
             .unwrap_or(None);
-        self.restore_tree_with_current(&tree, &self.workdir, prev_cache.as_ref(), current)
-            .await
+        let snapshot_at_ns = self.snapshot_at_for(session_id).await;
+        self.restore_tree_with_current(
+            &tree,
+            &self.workdir,
+            prev_cache.as_ref(),
+            current,
+            snapshot_at_ns,
+        )
+        .await
     }
 
     /// 对比当前工作区与 `(session_id, key)` 快照，返回结构化差异（前端展示 / 模型理解用）。
@@ -542,12 +629,14 @@ impl SnapshotManager {
                 .load_cache(&self.latest_cache_path(session_id))
                 .await
                 .unwrap_or(None);
+            let snapshot_at_ns = self.snapshot_at_for(session_id).await;
             self.walk_current(
                 &self.workdir,
                 "",
                 &mut current,
                 prev_cache.as_ref(),
                 &ignored,
+                snapshot_at_ns,
             )
             .await?;
         }
@@ -899,6 +988,7 @@ impl SnapshotManager {
         tree_path: &Path,
         cache_path: &Path,
         prev_cache: Option<&FileCache>,
+        prev_cache_at_ns: Option<u128>,
     ) -> Result<SnapshotTree> {
         let mut tree: SnapshotTree = HashMap::new();
         let mut cache: FileCache = HashMap::new();
@@ -907,6 +997,7 @@ impl SnapshotManager {
         let mut scan = CaptureScan {
             ignored: &ignored,
             skipped: &mut skipped,
+            snapshot_at_ns: prev_cache_at_ns,
         };
         self.walk_and_capture(workdir, "", &mut tree, &mut cache, prev_cache, &mut scan)
             .await?;
@@ -1004,8 +1095,9 @@ impl SnapshotManager {
         tree: &LoadedTree,
         workdir: &Path,
         prev_cache: Option<&FileCache>,
+        snapshot_at_ns: Option<u128>,
     ) -> Result<RestoreReport> {
-        self.restore_tree_with_current(tree, workdir, prev_cache, None)
+        self.restore_tree_with_current(tree, workdir, prev_cache, None, snapshot_at_ns)
             .await
     }
 
@@ -1019,6 +1111,7 @@ impl SnapshotManager {
         workdir: &Path,
         prev_cache: Option<&FileCache>,
         current: Option<SnapshotTree>,
+        snapshot_at_ns: Option<u128>,
     ) -> Result<RestoreReport> {
         if !workdir.exists() {
             return Ok(RestoreReport::default());
@@ -1030,8 +1123,15 @@ impl SnapshotManager {
             None => {
                 let mut scanned: SnapshotTree = HashMap::new();
                 let ignored = self.git_ignored_paths(workdir).await;
-                self.walk_current(workdir, "", &mut scanned, prev_cache, &ignored)
-                    .await?;
+                self.walk_current(
+                    workdir,
+                    "",
+                    &mut scanned,
+                    prev_cache,
+                    &ignored,
+                    snapshot_at_ns,
+                )
+                .await?;
                 scanned
             }
         };
@@ -1182,16 +1282,13 @@ impl SnapshotManager {
 
                 // 命中缓存:同 mtime(纳秒) + 同 size → 复用 hash,不读内容
                 if let Some(prev) = prev_cache.and_then(|c| c.get(&rel)) {
-                    // 小文件不走短路：等长改写 + mtime 撞车会漏检（见 SMALL_FILE_BYTES）
-                    //
                     // **对象必须还在**才敢复用：树条目可能被外部清理（运维重写存量树
                     // 后 GC 回收其对象；实测 `D:\tianyan` 一次清理后 44,233 条缓存记录
                     // 指向已删对象）。复用失效 hash 会让新树引用不存在的对象——该锚点
                     // 的回退在预校验阶段中止（`快照对象缺失`）。缓存是纯优化，一次
                     // stat 换掉一类悬空引用。
-                    if prev.mtime_ns == mtime_ns
-                        && prev.size == entry.len
-                        && entry.len > SMALL_FILE_BYTES
+                    // 是否信任缓存由 racy 判据决定（见 `can_trust_cached`）。
+                    if can_trust_cached(prev, entry.len, mtime_ns, scan.snapshot_at_ns)
                         && self.object_path(&prev.hash).exists()
                     {
                         tree.insert(rel.clone(), prev.hash.clone());
@@ -1285,6 +1382,7 @@ impl SnapshotManager {
         tree: &mut SnapshotTree,
         prev_cache: Option<&FileCache>,
         ignored: &HashSet<String>,
+        snapshot_at_ns: Option<u128>,
     ) -> Result<()> {
         // 一个目录**一次调度**（与 `walk_and_capture` 同一手法，见 `read_dir_stat`）
         let entries = read_dir_stat(dir).await?;
@@ -1299,7 +1397,15 @@ impl SnapshotManager {
             }
 
             if entry.is_dir {
-                Box::pin(self.walk_current(&entry.path, &rel, tree, prev_cache, ignored)).await?;
+                Box::pin(self.walk_current(
+                    &entry.path,
+                    &rel,
+                    tree,
+                    prev_cache,
+                    ignored,
+                    snapshot_at_ns,
+                ))
+                .await?;
             } else if entry.is_file {
                 if entry.len > self.max_file_bytes {
                     continue;
@@ -1307,14 +1413,11 @@ impl SnapshotManager {
                 let mtime_ns = entry.mtime_ns;
                 // 命中缓存：同 mtime(纳秒) + 同 size → 复用哈希，不读内容
                 if let Some(prev) = prev_cache.and_then(|c| c.get(&rel)) {
-                    // 小文件不走短路（与 walk_and_capture 同判据，见 SMALL_FILE_BYTES）
-                    //
                     // 对象缺失时**不能**复用（同 `walk_and_capture` 的判据）：否则
                     // 「当前工作区内容 == 目标树」的判定会用两个都失效的 hash 成立，
                     // 掩盖「对象其实已被回收」的事实（diff 随后读对象失败）。
-                    if prev.mtime_ns == mtime_ns
-                        && prev.size == entry.len
-                        && entry.len > SMALL_FILE_BYTES
+                    // 是否信任缓存由 racy 判据决定（见 `can_trust_cached`）。
+                    if can_trust_cached(prev, entry.len, mtime_ns, snapshot_at_ns)
                         && self.object_path(&prev.hash).exists()
                     {
                         tree.insert(rel, prev.hash.clone());
@@ -2085,6 +2188,97 @@ mod tests {
         std::fs::read_to_string(workdir.join(rel)).unwrap()
     }
 
+    /// 把文件 mtime 拨回 `ago_secs` 秒前。
+    ///
+    /// 用来构造「非 racy」场景：racy 判据（[`can_trust_cached`]）要求文件 mtime
+    /// **早于**上次快照的 cache 写入时刻才信任缓存哈希。测试里刚写出的文件 mtime
+    /// 就是「现在」，必然落在 [`RACY_MARGIN_NS`] 窗口内 → 会走重算，测不到短路分支。
+    fn backdate_mtime(path: &Path, ago_secs: u64) {
+        use std::time::{Duration, SystemTime};
+        let file = std::fs::OpenOptions::new()
+            .write(true)
+            .open(path)
+            .expect("以写权限打开文件（设置 mtime 用）");
+        let when = SystemTime::now() - Duration::from_secs(ago_secs);
+        file.set_times(std::fs::FileTimes::new().set_modified(when))
+            .expect("设置 mtime 失败");
+    }
+
+    /// racy 判据的**边界真值表**（纯函数，覆盖每条分支）。
+    ///
+    /// 这是「敢不敢信任缓存」的唯一判定点，四个输入维度都必须钉住：
+    /// stat 是否一致 / mtime 是否为 0（取不到）/ T 是否存在 / 是否落在边际窗口内。
+    #[test]
+    fn test_can_trust_cached_boundaries() {
+        let prev = CachedFile {
+            mtime_ns: 1_000_000_000,
+            size: 10,
+            hash: "h".to_string(),
+        };
+        // T = 10 秒：mtime(1s) 远早于它 → 信任
+        let late_t = 10_000_000_000u128;
+        assert!(
+            can_trust_cached(&prev, 10, 1_000_000_000, Some(late_t)),
+            "非 racy（mtime 远早于快照时刻）应信任缓存"
+        );
+        // size 变了 → 明确脏
+        assert!(!can_trust_cached(&prev, 11, 1_000_000_000, Some(late_t)));
+        // mtime 变了 → 明确脏
+        assert!(!can_trust_cached(&prev, 10, 1_000_000_001, Some(late_t)));
+        // racy：T 只比 mtime 晚半个边际 → 先后不可分辨，必须重算
+        let racy_t = 1_000_000_000 + RACY_MARGIN_NS / 2;
+        assert!(
+            !can_trust_cached(&prev, 10, 1_000_000_000, Some(racy_t)),
+            "落在边际窗口内 = racy，不得信任"
+        );
+        // 取不到 T（cache 文件缺失 / 时钟异常）→ 保守重算
+        assert!(!can_trust_cached(&prev, 10, 1_000_000_000, None));
+        // mtime 取不到（`modified()` 失败退化为 0）→ 无法判断，重算
+        let zero_mtime = CachedFile {
+            mtime_ns: 0,
+            size: 10,
+            hash: "h".to_string(),
+        };
+        assert!(!can_trust_cached(&zero_mtime, 10, 0, Some(late_t)));
+    }
+
+    /// **stat 完全一致、内容却变了**时必须被检测到——这正是 racy 判据存在的理由，
+    /// 也是它敢替代「小文件一律重算」的前提。
+    ///
+    /// 构造：等长改写（size 不变）+ 把 mtime 回填成原值 ⇒ `(mtime, size)` 与缓存
+    /// 记录逐字段相同。此时唯一能拦住漏检的就是「mtime 是否早于上次快照时刻 T」：
+    /// 文件刚被写过、mtime 距 T 不到边际窗口 ⇒ racy ⇒ 必须重算。
+    ///
+    /// 反向注入「无条件信任 stat」（去掉与 T 的比较）→ 这里会复用旧哈希，断言变红。
+    /// **已知边界**：若工具把 mtime 回填到快照时刻**之前**，此判据无法察觉
+    /// （Git 同样不防）；`[snapshot] strict_hash` 就是给这类工作区准备的退路。
+    #[tokio::test]
+    async fn test_racy_judgement_detects_rewrite_whose_mtime_was_restored() {
+        let (_dir, mgr) = setup().await;
+        let path = mgr.workdir.join("a.txt");
+        write(&mgr.workdir, "a.txt", "AAAAAAAAAA");
+        let m0 = std::fs::metadata(&path).unwrap().modified().unwrap();
+        mgr.capture("s1", "0").await.unwrap();
+
+        // 等长改写 + mtime 拨回原值 → stat 与缓存记录完全一致
+        write(&mgr.workdir, "a.txt", "BBBBBBBBBB");
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_times(std::fs::FileTimes::new().set_modified(m0))
+            .unwrap();
+
+        mgr.capture("s1", "1").await.unwrap();
+        let h0 = mgr.load_tree("s1", "0").await.unwrap().files;
+        let h1 = mgr.load_tree("s1", "1").await.unwrap().files;
+        assert_ne!(
+            h0.get("a.txt"),
+            h1.get("a.txt"),
+            "stat 一致但内容变了 → racy 判据必须靠「mtime 是否早于快照时刻」兜住"
+        );
+    }
+
     /// A/B 实测：真实工作区上「旧方式（每文件两次 `tokio::fs` 调用）」vs
     /// 「新方式（每目录一次同步遍历）」的耗时对比。
     ///
@@ -2204,12 +2398,15 @@ mod tests {
         let load_cache_ms = t.elapsed().as_millis();
 
         let t = std::time::Instant::now();
+        // 与生产路径同口径：T = latest cache 的写入时刻（racy 判据的基准）
+        let snapshot_at_ns = cache_write_time_ns(&mgr.latest_cache_path("bench")).await;
         let mut tree = HashMap::new();
         let mut cache = HashMap::new();
         let mut skipped = HashSet::new();
         let mut scan = CaptureScan {
             ignored: &ignored,
             skipped: &mut skipped,
+            snapshot_at_ns,
         };
         mgr.walk_and_capture(
             &workdir,
@@ -2657,6 +2854,7 @@ mod tests {
                 },
                 &mgr.workdir,
                 None,
+                None,
             )
             .await
             .expect_err("对象缺失应中止恢复");
@@ -3068,7 +3266,7 @@ mod tests {
         std::fs::write(other.join("b.txt"), "B 的文件").unwrap();
 
         let tree = mgr.load_tree("s1", "0").await.unwrap();
-        let report = mgr.restore_tree(&tree, &other, None).await.unwrap();
+        let report = mgr.restore_tree(&tree, &other, None, None).await.unwrap();
         assert_eq!(report.deletion_suppressed, 1, "归属不符 → 一个都不删");
         assert!(other.join("b.txt").exists(), "B 的文件必须保留");
         assert!(
@@ -3094,7 +3292,10 @@ mod tests {
             workdir: None,
             skipped: HashSet::new(),
         };
-        let report = mgr.restore_tree(&tree, &mgr.workdir, None).await.unwrap();
+        let report = mgr
+            .restore_tree(&tree, &mgr.workdir, None, None)
+            .await
+            .unwrap();
         assert_eq!(report.deletion_suppressed, 2, "空树 → 两个文件都保留");
         assert_eq!(report.deleted, 0);
         assert!(mgr.workdir.join("a.txt").exists());
@@ -3116,7 +3317,10 @@ mod tests {
 
         let mut tree = mgr.load_tree("s1", "0").await.unwrap();
         tree.skipped.insert("dist".to_string());
-        let report = mgr.restore_tree(&tree, &mgr.workdir, None).await.unwrap();
+        let report = mgr
+            .restore_tree(&tree, &mgr.workdir, None, None)
+            .await
+            .unwrap();
         assert_eq!(
             report.deletion_suppressed, 2,
             "dist/ 下两个文件属主不明 → 保留"
@@ -3347,9 +3551,9 @@ mod tests {
     #[tokio::test]
     async fn test_capture_does_not_reuse_cache_hash_whose_object_vanished() {
         let (_dir, mgr) = setup().await;
-        // 必须大于 SMALL_FILE_BYTES 才走 mtime/size 短路
-        let big = "x".repeat(SMALL_FILE_BYTES as usize + 512);
-        write(&mgr.workdir, "big.txt", &big);
+        write(&mgr.workdir, "big.txt", &"x".repeat(4096));
+        // racy 判据要求「mtime 早于上次快照时刻」才会走短路，所以先把 mtime 拨回 10 秒
+        backdate_mtime(&mgr.workdir.join("big.txt"), 10);
         mgr.capture("s1", "0").await.unwrap();
         let h0 = mgr
             .load_tree("s1", "0")
@@ -3565,6 +3769,7 @@ mod tests {
             max_file_bytes: DEFAULT_MAX_FILE_BYTES,
             max_trees_per_session: DEFAULT_MAX_TREES_PER_SESSION,
             excludes: vec!["fixtures".to_string()],
+            strict_hash: false,
         });
         write(&mgr.workdir, "src/main.rs", "fn main() {}");
         write(&mgr.workdir, "fixtures/case1.json", "{}");
