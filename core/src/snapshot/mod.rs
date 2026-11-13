@@ -113,6 +113,14 @@ const GIT_IGNORE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3
 /// 多存几个文件无害，漏存的由 `skipped` 属主兜底。
 const GIT_IGNORE_TTL: std::time::Duration = std::time::Duration::from_secs(60);
 
+/// 重做数据（`redo/tree-*.json` + `messages-*.json` + 对应缓存）的保留时长。
+///
+/// 重做（撤销回退）只对**近期**回退有意义——实测（2026-11-12）119 份重做数据里最老
+/// 的已 3 个月，全是「回退后没点撤销」的残留：既永久占用空间（53.8 MB），其
+/// `redo/tree-*.json` 还让引用对象无法被 GC 回收。7 天足够覆盖「回退 → 想撤销」的
+/// 真实间隔，超期后清理是安全的（超期再点撤销本来也不是用户预期）。
+const REDO_TTL: std::time::Duration = std::time::Duration::from_secs(7 * 24 * 3600);
+
 /// git 忽略清单缓存条目：`(取回时刻, 清单)`。
 type IgnoreCacheEntry = (std::time::Instant, HashSet<String>);
 
@@ -263,6 +271,11 @@ pub struct GcStats {
     pub total_objects: usize,
     /// 删除的空会话目录数（既无树文件也无重做数据的残留目录，T1-12）。
     pub session_dirs_removed: usize,
+    /// 删除的**过期重做数据**文件数（`tree-*.json` / `messages-*.json` / 对应缓存）。
+    ///
+    /// 重做数据只在回退后的短期内有意义；用户回退后没点「撤销」就一直留着——
+    /// 实测 119 份里最老的已 3 个月（53.8 MB，且其树引用的对象无法回收）。
+    pub redo_files_removed: usize,
 }
 
 /// 工作区与快照的差异结果（前端展示 / 模型理解用）。
@@ -541,14 +554,22 @@ impl SnapshotManager {
         Ok(())
     }
 
-    /// 垃圾回收：删除所有会话不再引用的对象与孤儿重做缓存文件。
+    /// 垃圾回收：删除所有会话不再引用的对象、孤儿重做缓存与**过期重做数据**。
     ///
     /// 标记阶段收集所有会话 `trees/{index}.json` 与 `redo/tree-{index}.json`
     /// 引用的对象哈希（对象库为内容寻址、跨会话全局共享，任一引用即保留）；
     /// 清扫阶段删除 `objects/` 中未被引用的对象并清理空子目录；
     /// 另删除 `redo/` 下缺少对应 `tree-{index}.json` 的孤儿缓存文件
     /// （`load_redo` 遗留的历史泄漏）。`trees/` 下的缓存文件不受影响。
+    ///
+    /// 过期重做数据按 [`REDO_TTL`] 清理（在标记**之前**做，这样它们引用的对象
+    /// 本轮就不可达、同轮即回收）。
     pub async fn gc(&self) -> Result<GcStats> {
+        self.gc_with_redo_ttl(REDO_TTL).await
+    }
+
+    /// 同上，但显式指定重做数据的保留时长（单测用；生产入口固定 [`REDO_TTL`]）。
+    pub(crate) async fn gc_with_redo_ttl(&self, redo_ttl: std::time::Duration) -> Result<GcStats> {
         // 全新数据目录（尚无任何快照）时 root 不存在：无垃圾可清，空操作成功。
         // 否则 scheduler 的 snapshot_gc 任务在首次快照前持续报错（os error 3）。
         if !self.root.is_dir() {
@@ -558,6 +579,7 @@ impl SnapshotManager {
                 cache_files_removed: 0,
                 total_objects: 0,
                 session_dirs_removed: 0,
+                redo_files_removed: 0,
             });
         }
 
@@ -578,6 +600,11 @@ impl SnapshotManager {
                 session_dirs.push(entry.path());
             }
         }
+
+        // ── 过期重做数据清理（TTL）────────────────────────────────
+        // 必须在**标记之前**：删掉超期的 `redo/tree-*.json` 后，它们引用的对象
+        // 本轮就不再可达 → 同轮清扫即回收（否则要等下一轮、且要先算成"活对象"）。
+        let redo_files_removed = purge_expired_redo(&session_dirs, redo_ttl).await;
 
         let mut scan_ok = true;
         for session_dir in &session_dirs {
@@ -600,6 +627,8 @@ impl SnapshotManager {
                 cache_files_removed: 0,
                 total_objects: 0,
                 session_dirs_removed: 0,
+                // 过期重做数据的清理发生在标记之前，已真实删掉的文件照实报
+                redo_files_removed,
             });
         }
 
@@ -716,6 +745,7 @@ impl SnapshotManager {
             cache_files_removed,
             total_objects,
             session_dirs_removed,
+            redo_files_removed,
         })
     }
 
@@ -1462,6 +1492,85 @@ impl SnapshotManager {
         }
         Ok(())
     }
+}
+
+/// 清理超过 `ttl` 未动过的重做数据，返回删除的文件数。
+///
+/// 一组重做数据由 `tree-{key}.json`（回退前的完整工作区树）+ `messages-{key}.json`
+/// （被回退的消息）+ `tree-{key}.cache.json`（mtime/size 缓存）组成，按 key 成对
+/// 存放。判定用 mtime：**任一同组文件还在 ttl 内就整体保留**（不拆散一对，否则
+/// 重做会读到半套数据）；mtime 取不到时保守保留。
+///
+/// 只处理 `redo/`，不碰 `trees/`——后者是正常的历史快照，生命周期跟着会话走。
+async fn purge_expired_redo(session_dirs: &[PathBuf], ttl: std::time::Duration) -> usize {
+    let now = std::time::SystemTime::now();
+    let mut removed = 0usize;
+    for session_dir in session_dirs {
+        let redo_dir = session_dir.join("redo");
+        if !redo_dir.is_dir() {
+            continue;
+        }
+        let Ok(mut entries) = fs::read_dir(&redo_dir).await else {
+            continue;
+        };
+        // 先收集 key 集合（同组文件一起判、一起删）
+        let mut keys: HashSet<String> = HashSet::new();
+        while let Ok(Some(entry)) = entries.next_entry().await {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if name.ends_with(".cache.json") {
+                continue;
+            }
+            if let Some(key) = name
+                .strip_prefix("tree-")
+                .and_then(|s| s.strip_suffix(".json"))
+            {
+                keys.insert(key.to_string());
+            } else if let Some(key) = name
+                .strip_prefix("messages-")
+                .and_then(|s| s.strip_suffix(".json"))
+            {
+                keys.insert(key.to_string());
+            }
+        }
+        for key in keys {
+            let group = [
+                redo_dir.join(format!("tree-{key}.json")),
+                redo_dir.join(format!("messages-{key}.json")),
+                redo_dir.join(format!("tree-{key}.cache.json")),
+            ];
+            let mut any = false;
+            let mut fresh = false;
+            for path in &group {
+                let Ok(meta) = fs::metadata(path).await else {
+                    continue;
+                };
+                any = true;
+                match meta
+                    .modified()
+                    .ok()
+                    .and_then(|m| now.duration_since(m).ok())
+                {
+                    Some(age) => {
+                        if age < ttl {
+                            fresh = true;
+                        }
+                    }
+                    // 取不到 mtime（时钟异常等）→ 保守保留，不冒险删
+                    None => fresh = true,
+                }
+            }
+            if !any || fresh {
+                continue;
+            }
+            for path in &group {
+                if fs::remove_file(path).await.is_ok() {
+                    removed += 1;
+                }
+            }
+            tracing::debug!(key = %key, session = %session_dir.display(), "snapshot: 清理过期重做数据");
+        }
+    }
+    removed
 }
 
 /// 目录下是否存在任何 `*.json` 文件（GC 判定会话目录是否仍持有数据）。
@@ -2743,5 +2852,47 @@ mod tests {
         assert_eq!(tree.files.len(), 120, "明文树照读");
         let stats = mgr.gc().await.unwrap();
         assert_eq!(stats.objects_removed, 0, "明文树引用的对象同样不得被判孤儿");
+    }
+
+    /// 过期重做数据由 GC 清理：回退后一直没点「撤销」的数据会永久占空间，且其
+    /// `redo/tree-*.json` 让引用对象无法回收（实测最老的残留已 3 个月）。
+    #[tokio::test]
+    async fn test_gc_purges_expired_redo_data() {
+        let (_dir, mgr) = setup().await;
+        write(&mgr.workdir, "a.txt", "v1");
+        mgr.capture("s1", "0").await.unwrap();
+        mgr.save_redo("s1", "msg_1", &[]).await.unwrap();
+        assert!(mgr.has_redo("s1", "msg_1").await);
+        let redo_dir = mgr.redo_dir("s1");
+        assert!(redo_dir.join("tree-msg_1.json").exists());
+
+        // TTL = 0 → 刚写的也算过期
+        let stats = mgr
+            .gc_with_redo_ttl(std::time::Duration::ZERO)
+            .await
+            .unwrap();
+        assert!(
+            stats.redo_files_removed >= 2,
+            "应删除 tree + messages（实际 {}）",
+            stats.redo_files_removed
+        );
+        assert!(!mgr.has_redo("s1", "msg_1").await, "重做数据应已清理");
+        assert!(!redo_dir.join("tree-msg_1.json").exists(), "重做树应已清理");
+    }
+
+    /// TTL 内的重做数据不得被清：回退后还能点「撤销」。
+    #[tokio::test]
+    async fn test_gc_keeps_fresh_redo_data() {
+        let (_dir, mgr) = setup().await;
+        write(&mgr.workdir, "a.txt", "v1");
+        mgr.capture("s1", "0").await.unwrap();
+        mgr.save_redo("s1", "msg_1", &[]).await.unwrap();
+
+        let stats = mgr
+            .gc_with_redo_ttl(std::time::Duration::from_secs(3600))
+            .await
+            .unwrap();
+        assert_eq!(stats.redo_files_removed, 0, "1 小时内的数据不该动");
+        assert!(mgr.has_redo("s1", "msg_1").await, "撤销回退仍可用");
     }
 }

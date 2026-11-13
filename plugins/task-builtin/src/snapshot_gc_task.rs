@@ -35,11 +35,13 @@ impl TaskHandler for SnapshotGcTask {
 
         match self.snapshot_manager.gc().await {
             Ok(stats) => {
-                let removed = stats.objects_removed + stats.cache_files_removed;
+                let removed =
+                    stats.objects_removed + stats.cache_files_removed + stats.redo_files_removed;
                 tracing::info!(
                     objects_removed = stats.objects_removed,
                     objects_retained = stats.objects_retained,
                     cache_files_removed = stats.cache_files_removed,
+                    redo_files_removed = stats.redo_files_removed,
                     total_objects = stats.total_objects,
                     "快照垃圾回收完成"
                 );
