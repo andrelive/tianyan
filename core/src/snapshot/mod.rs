@@ -64,7 +64,7 @@ use tokio::fs;
 use crate::common::binary::sniff_binary;
 use crate::common::error::{Result, TianyanError};
 use crate::common::hash::hex_sha256;
-use crate::config::{SnapshotConfig, DEFAULT_MAX_FILE_BYTES};
+use crate::config::{SnapshotConfig, DEFAULT_MAX_FILE_BYTES, DEFAULT_MAX_TREES_PER_SESSION};
 
 /// "小文件"阈值：**小于等于**该值的文件不参与 mtime/size 短路（直接重算哈希）。
 ///
@@ -143,6 +143,8 @@ pub struct SnapshotManager {
     ///
     /// 超过它的文件不参与回退（捕获跳过 + 记入 `skipped` 属主，因此回退也不会误删）。
     max_file_bytes: u64,
+    /// 每个会话保留的快照树数量上限（`[snapshot] max_trees_per_session`；0 = 不限）。
+    max_trees_per_session: usize,
 }
 
 /// 快照树：`{相对路径 → 内容 sha256}`。
@@ -278,6 +280,8 @@ pub struct GcStats {
     /// 重做数据只在回退后的短期内有意义；用户回退后没点「撤销」就一直留着——
     /// 实测 119 份里最老的已 3 个月（53.8 MB，且其树引用的对象无法回收）。
     pub redo_files_removed: usize,
+    /// 删除的**超龄快照树**文件数（每会话只保留最近 `max_trees_per_session` 棵 + 最老一棵）。
+    pub tree_files_removed: usize,
 }
 
 /// 工作区与快照的差异结果（前端展示 / 模型理解用）。
@@ -334,6 +338,7 @@ impl SnapshotManager {
             excludes: Vec::new(),
             ignore_cache: Arc::new(Mutex::new(HashMap::new())),
             max_file_bytes: DEFAULT_MAX_FILE_BYTES,
+            max_trees_per_session: DEFAULT_MAX_TREES_PER_SESSION,
         }
     }
 
@@ -358,6 +363,7 @@ impl SnapshotManager {
             excludes: self.excludes.clone(),
             ignore_cache: Arc::clone(&self.ignore_cache),
             max_file_bytes: self.max_file_bytes,
+            max_trees_per_session: self.max_trees_per_session,
         }
     }
 
@@ -369,6 +375,7 @@ impl SnapshotManager {
     pub fn with_snapshot_config(mut self, config: &SnapshotConfig) -> Self {
         self.max_file_bytes = config.effective_max_file_bytes();
         self.excludes = config.excludes.clone();
+        self.max_trees_per_session = config.max_trees_per_session;
         self
     }
 
@@ -608,6 +615,7 @@ impl SnapshotManager {
                 total_objects: 0,
                 session_dirs_removed: 0,
                 redo_files_removed: 0,
+                tree_files_removed: 0,
             });
         }
 
@@ -634,6 +642,10 @@ impl SnapshotManager {
         // 本轮就不再可达 → 同轮清扫即回收（否则要等下一轮、且要先算成"活对象"）。
         let redo_files_removed = purge_expired_redo(&session_dirs, redo_ttl).await;
 
+        // ── 超龄快照树清理（每会话保留上限）──────────────────────
+        // 同样放在标记之前：删掉的树引用的对象本轮即可回收。
+        let tree_files_removed = prune_old_trees(&session_dirs, self.max_trees_per_session).await;
+
         let mut scan_ok = true;
         for session_dir in &session_dirs {
             let trees_dir = session_dir.join("trees");
@@ -655,8 +667,9 @@ impl SnapshotManager {
                 cache_files_removed: 0,
                 total_objects: 0,
                 session_dirs_removed: 0,
-                // 过期重做数据的清理发生在标记之前，已真实删掉的文件照实报
+                // 过期重做数据与超龄树的清理发生在标记之前，已真实删掉的文件照实报
                 redo_files_removed,
+                tree_files_removed,
             });
         }
 
@@ -774,6 +787,7 @@ impl SnapshotManager {
             total_objects,
             session_dirs_removed,
             redo_files_removed,
+            tree_files_removed,
         })
     }
 
@@ -1626,6 +1640,66 @@ async fn purge_expired_redo(session_dirs: &[PathBuf], ttl: std::time::Duration) 
             }
             tracing::debug!(key = %key, session = %session_dir.display(), "snapshot: 清理过期重做数据");
         }
+    }
+    removed
+}
+
+/// 每会话只保留最近 `keep` 棵快照树（外加**最老的一棵**），返回删除的文件数。
+///
+/// 为什么需要：树是「每轮用户消息一棵」，长期使用单调增长（压缩后单棵约 200 KB，
+/// 但数量无上限）。保留最近 N 棵覆盖「回退到最近几十轮」的真实用法；**最老一棵
+/// 永远保留**——那是会话起点的文件状态，回退到「刚开始那会儿」最有用。
+///
+/// 删掉的老锚点仍能回退**消息链**（链在 SQLite），只是没有文件快照——回退结果会
+/// 报 `snapshot_missing`（前端明示「该锚点无工作区快照，文件未回退」）。
+///
+/// `keep == 0` 表示不限制（配置里显式关闭）。
+async fn prune_old_trees(session_dirs: &[PathBuf], keep: usize) -> usize {
+    if keep == 0 {
+        return 0;
+    }
+    let mut removed = 0usize;
+    for session_dir in session_dirs {
+        let trees_dir = session_dir.join("trees");
+        if !trees_dir.is_dir() {
+            continue;
+        }
+        let Ok(mut entries) = fs::read_dir(&trees_dir).await else {
+            continue;
+        };
+        let mut files: Vec<(PathBuf, std::time::SystemTime)> = Vec::new();
+        while let Ok(Some(entry)) = entries.next_entry().await {
+            let name = entry.file_name().to_string_lossy().to_string();
+            // 缓存指针（`{index}.cache.json`）不是树
+            if !name.ends_with(".json") || name.ends_with(".cache.json") {
+                continue;
+            }
+            let Ok(meta) = entry.metadata().await else {
+                continue;
+            };
+            files.push((
+                entry.path(),
+                meta.modified().unwrap_or(std::time::SystemTime::UNIX_EPOCH),
+            ));
+        }
+        // 除最老 1 棵外还有余量才需要裁剪
+        if files.len() <= keep + 1 {
+            continue;
+        }
+        files.sort_by_key(|f| f.1);
+        // 保留：第 0 棵（会话起点）+ 最后 keep 棵；删除中间那段
+        let drop_count = files.len() - keep - 1;
+        for (path, _) in files.iter().skip(1).take(drop_count) {
+            if fs::remove_file(path).await.is_ok() {
+                removed += 1;
+            }
+        }
+        tracing::debug!(
+            session = %session_dir.display(),
+            kept = keep + 1,
+            dropped = drop_count,
+            "snapshot: 清理超龄快照树"
+        );
     }
     removed
 }
@@ -3068,7 +3142,7 @@ mod tests {
         let (_dir, mgr) = setup().await;
         let mgr = mgr.with_snapshot_config(&SnapshotConfig {
             max_file_bytes: 64,
-            excludes: Vec::new(),
+            ..Default::default()
         });
         write(&mgr.workdir, "small.txt", "tiny");
         write(&mgr.workdir, "big.txt", &"x".repeat(200));
@@ -3093,6 +3167,7 @@ mod tests {
         let (_dir, mgr) = setup().await;
         let mgr = mgr.with_snapshot_config(&SnapshotConfig {
             max_file_bytes: DEFAULT_MAX_FILE_BYTES,
+            max_trees_per_session: DEFAULT_MAX_TREES_PER_SESSION,
             excludes: vec!["fixtures".to_string()],
         });
         write(&mgr.workdir, "src/main.rs", "fn main() {}");
@@ -3107,5 +3182,42 @@ mod tests {
             tree.files.keys().collect::<Vec<_>>()
         );
         assert!(tree.skipped.contains("fixtures"), "应记入 skipped 属主");
+    }
+
+    /// 每会话树留存上限：超过上限的**中间老树**被清理，最老一棵（会话起点）与最近
+    /// keep 棵保留；更早的锚点仍能回退消息链（回退结果报 `snapshot_missing`）。
+    #[tokio::test]
+    async fn test_gc_prunes_old_trees_but_keeps_oldest_and_newest() {
+        let (_dir, mgr) = setup().await;
+        for i in 0..8 {
+            write(&mgr.workdir, "a.txt", &format!("v{i}"));
+            // mtime 决定裁剪顺序：间隔几毫秒，避免同一时间戳导致顺序不稳
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            mgr.capture("s1", &format!("m{i}")).await.unwrap();
+        }
+        let dir = mgr.trees_dir("s1");
+        let count_trees = || {
+            std::fs::read_dir(&dir)
+                .unwrap()
+                .flatten()
+                .filter(|e| {
+                    let n = e.file_name().to_string_lossy().into_owned();
+                    n.ends_with(".json") && !n.ends_with(".cache.json")
+                })
+                .count()
+        };
+        assert_eq!(count_trees(), 8, "前置：应捕获 8 棵树");
+
+        // keep = 3 → 保留 m0（最老）+ m5/m6/m7（最新 3 棵），删 m1..m4
+        let mgr = mgr.with_snapshot_config(&SnapshotConfig {
+            max_trees_per_session: 3,
+            ..Default::default()
+        });
+        let stats = mgr.gc().await.unwrap();
+        assert_eq!(stats.tree_files_removed, 4, "应清理 4 棵中间老树");
+        assert_eq!(count_trees(), 4, "剩余 4 棵");
+        assert!(dir.join("m0.json").exists(), "最老一棵（会话起点）必须保留");
+        assert!(dir.join("m7.json").exists(), "最新一棵必须保留");
+        assert!(!dir.join("m2.json").exists(), "中间老树应被清理");
     }
 }

@@ -60,7 +60,7 @@ pub use reminder::ReminderConfig;
 pub use retrieval::RetrievalConfig;
 pub use roles::AgentRolesConfig;
 pub use security::{ApprovalMode, SafetyMode, SecurityConfig};
-pub use snapshot::{SnapshotConfig, DEFAULT_MAX_FILE_BYTES};
+pub use snapshot::{SnapshotConfig, DEFAULT_MAX_FILE_BYTES, DEFAULT_MAX_TREES_PER_SESSION};
 pub use storage::{StorageBackendType, StorageConfig, VectorStorageConfig};
 pub use tool_output::ToolOutputConfig;
 pub use web::WebConfig;
