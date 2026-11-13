@@ -1417,10 +1417,11 @@ impl SnapshotManager {
 
     /// 真正采集一次 git 忽略清单（不含缓存；见 [`Self::git_ignored_paths`]）。
     async fn collect_git_ignored(workdir: &Path) -> HashSet<String> {
-        // 前置：没有 `.git`（目录，或 worktree 的 gitfile）就不 spawn 子进程。
-        // 子目录形式的仓库（workdir 在仓库内、非根）会因此漏掉忽略规则——天演
-        // 工作目录通常是仓库根，此处以「不 spawn 的确定性」优先。
-        if !workdir.join(".git").exists() {
+        // 前置：不在任何 git 仓库内就不 spawn 子进程（廉价文件系统探测）。
+        // 必须往上看祖先目录：会话可以绑到仓库的**子目录**（`repo/crates/foo`），
+        // 那时 `workdir/.git` 不存在、但忽略规则照旧有效——此前只看 `workdir/.git`
+        // 会把这类工作区的 `.gitignore` 整份丢掉（快照照样收 `target/`、`dist/`）。
+        if !likely_in_git_repo(workdir) {
             return HashSet::new();
         }
         let started = std::time::Instant::now();
@@ -1511,6 +1512,28 @@ impl SnapshotManager {
         }
         Ok(())
     }
+}
+
+/// 工作目录是否**可能**在某个 git 仓库内（自身或某个祖先目录含 `.git`）。
+///
+/// 只做文件系统探测、不 spawn 子进程——它是「值不值得调 git」的廉价前置判断。
+/// `.git` 是文件也算（worktree / submodule 用的是 gitfile）。
+fn likely_in_git_repo(workdir: &Path) -> bool {
+    /// 向上查找的层数上限：避免一路查到盘符根（那里若有 `.git` 会误判所有目录）。
+    const MAX_ANCESTOR_DEPTH: usize = 8;
+    let mut cur = Some(workdir);
+    let mut depth = 0usize;
+    while let Some(dir) = cur {
+        if dir.join(".git").exists() {
+            return true;
+        }
+        if depth >= MAX_ANCESTOR_DEPTH {
+            break;
+        }
+        cur = dir.parent();
+        depth += 1;
+    }
+    false
 }
 
 /// 清理超过 `ttl` 未动过的重做数据，返回删除的文件数。
@@ -2765,6 +2788,72 @@ mod tests {
         assert!(path_under("a/b.txt", &set));
         assert!(!path_under("dist2/bundle.js", &set), "同前缀不同目录不命中");
         assert!(!path_under("src/main.rs", &set));
+    }
+
+    /// 仓库探测要往上看祖先：会话可绑到仓库子目录，那时 `workdir/.git` 不存在但
+    /// 忽略规则照旧有效（修复前会把这类工作区的 `.gitignore` 整份丢掉）。
+    #[test]
+    fn test_likely_in_git_repo_walks_ancestors() {
+        let root = std::env::temp_dir().join(format!("tianyan-gitprobe-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let sub = root.join("repo").join("crates").join("foo");
+        std::fs::create_dir_all(&sub).unwrap();
+        assert!(!likely_in_git_repo(&sub), "无 .git 时不应判定为仓库");
+
+        // 祖先目录放一个 .git **目录** → 子目录也算在仓库内
+        std::fs::create_dir_all(root.join("repo").join(".git")).unwrap();
+        assert!(likely_in_git_repo(&sub), "祖先有 .git 目录应判定为仓库");
+        assert!(likely_in_git_repo(&root.join("repo")), "仓库根本身也应判定");
+
+        // `.git` 是**文件**（worktree / submodule 的 gitfile）同样算
+        std::fs::remove_dir_all(root.join("repo").join(".git")).unwrap();
+        std::fs::write(
+            root.join("repo").join(".git"),
+            "gitdir: ../.git/worktrees/x",
+        )
+        .unwrap();
+        assert!(likely_in_git_repo(&sub), "gitfile 形式也应判定");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// 端到端（需真实 git，缺失即跳过）：会话绑到**仓库子目录**时 `.gitignore`
+    /// 仍然生效——`dist/` 下的文件不进快照。
+    #[tokio::test]
+    async fn test_gitignore_applies_when_workdir_is_repo_subdir() {
+        let (_dir, mgr) = setup().await;
+        if !git_available(&mgr.workdir).await {
+            eprintln!("跳过 test_gitignore_applies_when_workdir_is_repo_subdir：环境无 git");
+            return;
+        }
+        // 仓库根 = 工作目录的父级；工作目录只绑定 repo/crates/foo
+        let repo = mgr.workdir.parent().unwrap().join("repo");
+        let sub = repo.join("crates").join("foo");
+        std::fs::create_dir_all(&sub).unwrap();
+        std::fs::write(repo.join(".gitignore"), "dist/\n").unwrap();
+        std::fs::write(sub.join("main.rs"), "fn main() {}").unwrap();
+        std::fs::create_dir_all(sub.join("dist")).unwrap();
+        std::fs::write(sub.join("dist").join("bundle.js"), "built").unwrap();
+        let ok = crate::executor::command::hide_console_window(tokio::process::Command::new("git"))
+            .arg("init")
+            .arg("-q")
+            .arg(&repo)
+            .stdin(std::process::Stdio::null())
+            .status()
+            .await
+            .map(|s| s.success())
+            .unwrap_or(false);
+        assert!(ok, "git init 应成功");
+
+        // 把同一个管理器指向仓库**子目录**
+        let sub_mgr = mgr.with_workdir(sub.clone());
+        sub_mgr.capture("s1", "0").await.unwrap();
+        let tree = sub_mgr.load_tree("s1", "0").await.unwrap();
+        assert!(tree.files.contains_key("main.rs"), "源码应入树");
+        assert!(
+            !tree.files.contains_key("dist/bundle.js"),
+            "仓库根的 .gitignore 必须对子目录生效：{:?}",
+            tree.files.keys().collect::<Vec<_>>()
+        );
     }
 
     /// 缓存短路必须确认对象还在：树条目被外部清理（运维重写存量树 + GC 回收对象）
