@@ -52,6 +52,13 @@ pub struct RollbackOutcome {
     pub suppression_reason: Option<String>,
     /// 会话生效的工作目录；`None` = 未绑定工作区（**文件未回退**）。
     pub workdir: Option<String>,
+    /// 该锚点**没有工作区快照树**——文件未回退，且原因不是「未绑定工作区」。
+    ///
+    /// 三种来源：该消息是会话首条（处理前尚无快照）、捕获当时失败（只记了 warn）、
+    /// 或树已被清理。前端必须与「未绑定工作区」分开明示，否则用户只会看到
+    /// 「恢复了 0 个文件」而不知道该怪谁。
+    #[serde(default)]
+    pub snapshot_missing: bool,
     /// 可撤销回退（重做数据已保存）。
     pub redo_available: bool,
     /// 被取消的时序锚点后任务数（委托 + 命令）。
@@ -138,6 +145,7 @@ impl Agent {
                 let mut deletion_suppressed = 0usize;
                 let mut suppression_reason: Option<String> = None;
                 let mut redo_available = false;
+                let mut snapshot_missing = false;
 
                 if let Some(sm) = &self.snapshot_manager {
                     if let Some(wd) = workdir.clone() {
@@ -162,12 +170,15 @@ impl Agent {
                             }
                             // 该锚点无快照树（未捕获 / 已被 GC）→ 无文件可回退，
                             // 与「未绑定工作区」同类：仅回退消息，不算失败。
-                            Err(e) if e.is_not_found() => tracing::warn!(
-                                error = %e,
-                                session = %session_id,
-                                anchor = %message_id,
-                                "该锚点无工作区快照，仅回退消息"
-                            ),
+                            Err(e) if e.is_not_found() => {
+                                snapshot_missing = true;
+                                tracing::warn!(
+                                    error = %e,
+                                    session = %session_id,
+                                    anchor = %message_id,
+                                    "该锚点无工作区快照，仅回退消息"
+                                );
+                            }
                             Err(e) => return Err(e),
                         }
                     }
@@ -182,6 +193,7 @@ impl Agent {
                     deletion_suppressed,
                     suppression_reason,
                     workdir: workdir.map(|p| p.display().to_string()),
+                    snapshot_missing,
                     redo_available,
                     cancelled_tasks,
                 })

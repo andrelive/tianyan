@@ -1049,10 +1049,18 @@ impl ClientApp {
                             .pointer("/rollback/workdir")
                             .map(serde_json::Value::is_null)
                             .unwrap_or(false);
+                        let snapshot_missing = v
+                            .pointer("/rollback/snapshot_missing")
+                            .and_then(serde_json::Value::as_bool)
+                            .unwrap_or(false);
 
                         let mut status = format!("已回退 {truncated} 条消息");
                         if no_workdir {
                             status.push_str("（该会话未绑定工作区，文件未回退）");
+                        } else if snapshot_missing {
+                            // 与「未绑定工作区」分开说：这里绑了工作区、只是该锚点没有
+                            // 快照树（首条消息前 / 捕获失败过 / 树已被清理）。
+                            status.push_str("（该锚点无工作区快照，文件未回退）");
                         } else {
                             status.push_str(&format!("，恢复 {restored} 个文件"));
                             if redo {
