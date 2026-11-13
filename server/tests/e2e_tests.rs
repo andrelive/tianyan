@@ -593,3 +593,75 @@ async fn test_e2e_unknown_api_returns_404_json_not_html() {
 
     server.shutdown();
 }
+
+/// 回退 / 重做的响应只带**分页口径**的一页消息（默认 50 条 + 游标），不是全链。
+///
+/// 回归背景：此前这两个 handler 用 `SessionService::get_messages`（全量）——
+/// 大会话一次回退要序列化并传输几十 MB（实测 1650 条消息 25 MB），而前端只用
+/// 其中的 `rollback` 字段、消息列表另发一次 `GET /messages` 去拿。既白付两遍，
+/// 又造成「状态先回填、对话晚一步才消失」的时序割裂（用户实测反馈）。
+#[tokio::test]
+async fn test_e2e_rollback_response_is_paged_not_full_chain() {
+    /// 前端 `MESSAGE_BASE` 与服务端 `DEFAULT_MESSAGE_BASE` 的口径（均为 50）。
+    const PAGE: usize = 50;
+
+    let dir = tempdir().expect("创建临时目录失败");
+    let config = test_tianyan_config_with_data_dir(dir.path().to_path_buf());
+    let (router, state) = tianyan_server::create_app_with_assembly(config, test_assembly())
+        .await
+        .expect("create_app 失败");
+    let server = TestServer::start(router).await.expect("启动测试服务器失败");
+
+    let session_id = "session-rollback-paged";
+    state
+        .session_manager()
+        .create_session(session_id, tianyan::common::types::Message::user("起点"))
+        .await
+        .expect("创建会话失败");
+    let ws = state
+        .working_sets()
+        .ensure(session_id)
+        .await
+        .expect("工作集加载失败");
+    // 造 80 条（超过一页）：最后一条当回退锚点
+    let mut anchor = String::new();
+    for i in 0..80 {
+        let msg = tianyan::common::types::StructuredMessage::user(session_id, format!("第 {i} 条"));
+        anchor = msg.id.clone();
+        ws.append(&msg, false).await.expect("追加消息失败");
+    }
+
+    let resp = server
+        .post(
+            &format!("/api/v1/sessions/{session_id}/messages/delete"),
+            &serde_json::json!({ "message_id": anchor }),
+        )
+        .await;
+    assert_eq!(resp.status(), 200, "回退应成功");
+    let body: serde_json::Value = resp.json().await.expect("响应应为 JSON");
+
+    let msgs = body["messages"].as_array().expect("messages 应为数组");
+    assert!(
+        msgs.len() < 80,
+        "回退响应不得回全链（截断后共 80 条），实际 {} 条——全链响应会让大会话每次回退传输几十 MB",
+        msgs.len()
+    );
+    // 页边界对齐用户消息（ADR-035 §8）允许比 base 多出几条，故按「一页量级」判
+    assert!(
+        msgs.len() <= PAGE + 10,
+        "应是一页量级（≤{} 条），实际 {} 条",
+        PAGE + 10,
+        msgs.len()
+    );
+    assert_eq!(body["rollback"]["truncated"], 1, "只截断锚点这一条");
+    assert!(
+        body.get("next_before_seq").is_some() && body.get("has_more").is_some(),
+        "应带分页元数据（前端据此继续上滚）: {body}"
+    );
+    assert_eq!(
+        body["has_more"], true,
+        "剩 80 条 > 一页 → 应告诉前端「还有更早」"
+    );
+
+    server.shutdown();
+}

@@ -79,9 +79,14 @@ pub async fn get_session_messages(
 
     // 分段加载（ADR-035 §8）：默认（无参）= 最近一页（服务端默认 50 条、
     // 上限 200）+ 上滚游标/元数据；更早历史由前端上滚经 `before_seq` 补齐。
-    // HTTP 端点不再返回全量（大会话全量可达数十 MB，实测 1650 条消息
-    // 25 MB，是会话切换卡顿的根源）；全量读取仅保留在服务内部
-    //（回退/重做响应等，`SessionService::get_messages`）。
+    // HTTP 端点不返回全量（大会话全量可达数十 MB，实测 1650 条消息 25 MB，
+    // 是会话切换卡顿的根源）。
+    //
+    // 回退 / 重做响应同样走这个分页口径：它们此前用 `SessionService::get_messages`
+    // （全量），每次回退都要序列化并传输几十 MB——而前端只用其中的 `rollback`
+    // 字段，消息列表另发一次分页请求去拿。白付两遍，还导致「状态先回填、
+    // 对话晚一步才消失」的时序割裂（前端没法用那份全量数据落地列表，只能等
+    // 第二次往返）。
     let result = service
         .get_messages_page(&session_id, query.before_seq, query.base)
         .await;
@@ -212,7 +217,7 @@ pub async fn delete_message(
                 state.snapshot_manager(),
                 Some(state.working_sets()),
             );
-            let messages = service.get_messages(&session_id).await?;
+            let messages = service.get_messages_page(&session_id, None, None).await?;
             return Ok(Json(DeleteMessageResponse { messages, rollback }));
         }
         OpGate::Execute { token } => token,
@@ -239,7 +244,7 @@ pub async fn delete_message(
         state.snapshot_manager(),
         Some(state.working_sets()),
     );
-    let messages = service.get_messages(&session_id).await?;
+    let messages = service.get_messages_page(&session_id, None, None).await?;
     Ok(Json(DeleteMessageResponse { messages, rollback }))
 }
 
@@ -268,7 +273,7 @@ pub async fn redo_message(
                 state.snapshot_manager(),
                 Some(state.working_sets()),
             );
-            let messages = service.get_messages(&session_id).await?;
+            let messages = service.get_messages_page(&session_id, None, None).await?;
             return Ok(Json(RedoResponse { messages, redo }));
         }
         OpGate::Execute { token } => token,
@@ -293,7 +298,7 @@ pub async fn redo_message(
         state.snapshot_manager(),
         Some(state.working_sets()),
     );
-    let messages = service.get_messages(&session_id).await?;
+    let messages = service.get_messages_page(&session_id, None, None).await?;
     Ok(Json(RedoResponse { messages, redo }))
 }
 

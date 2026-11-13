@@ -191,7 +191,11 @@ impl SessionService {
         })
     }
 
-    /// 获取会话消息
+    /// 获取会话**全量**消息（`next_before_seq = None` / `has_more = false`）。
+    ///
+    /// ⚠️ **不要用在 HTTP 响应里**：大会话全量可达数十 MB（实测 1650 条 25 MB），
+    /// 序列化 + 传输 + 客户端解析都是净成本。HTTP 端点（含回退 / 重做响应）一律走
+    /// [`Self::get_messages_page`]；全量语义只留给内部需要整条链的场景与测试。
     pub async fn get_messages(
         &self,
         session_id: &str,

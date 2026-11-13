@@ -1082,7 +1082,13 @@ impl ClientApp {
                         if !text.trim().is_empty() {
                             this.pending_composer_text = Some(text);
                         }
-                        this.load_messages(session_id.clone(), cx);
+                        // 消息列表**同帧落地**：响应里自带回退后的这一页（服务端已按
+                        // 分页口径带回），没有理由再发一次 `GET /messages`——那样状态
+                        // 与列表分两批落地，用户看到「信息很快回填、对话过一会儿才
+                        // 消失」两个时间点（实测反馈）。
+                        if !this.is_stale_for(&session_id) {
+                            this.apply_message_page(&session_id, &v, None, px(0.), cx);
+                        }
                         this.load_session_usage(cx);
                         this.load_sessions(cx);
                     }

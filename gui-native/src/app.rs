@@ -1956,6 +1956,71 @@ impl ClientApp {
         self.needs_setup = !self.setup_dismissed && !self.models.iter().any(|m| m.is_chat);
     }
 
+    /// 用**服务端下发的一页消息**整页替换本地列表（唯一的列表落地入口）。
+    ///
+    /// 两个调用者：`load_messages_with`（自己发 `GET /messages` 拉一页）与
+    /// `confirm_rollback`（回退响应里**自带**同一口径的一页）。
+    ///
+    /// 为什么必须共用：早先回退走的是「响应到手只更新状态行 → 再发一次请求拿
+    /// 消息」，同一个操作的两个结果分两批落地 —— 于是状态栏先回填、对话列表
+    /// 晚一步才消失，用户看到的就是两个时间点（实测反馈「信息很快就回填，但
+    /// 对话过了一会儿才消失，感受不好」）。既然服务端已经把回退后的这一页
+    /// 一起带回来了，就没有第二次往返的理由。
+    ///
+    /// `body` = 服务端整包 JSON（`messages` / `next_before_seq` / `has_more`）。
+    pub(crate) fn apply_message_page(
+        &mut self,
+        session_id: &str,
+        body: &serde_json::Value,
+        anchor_seq: Option<i64>,
+        anchor_offset: gpui_kit::Pixels,
+        cx: &mut Context<Self>,
+    ) {
+        let arr = body
+            .get("messages")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        // 上滚游标与「还有更早」都由服务端随页下发（ADR-035 §8）。
+        let cursor = body.get("next_before_seq").and_then(|v| v.as_i64());
+        let more = body
+            .get("has_more")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let rows: Vec<MsgRow> = arr.iter().map(parse_msg_row).collect();
+        let n = rows.len();
+        self.messages = Rc::new(rows);
+        // 条数变了必须重建 list state（item_count 在构造时固定）
+        self.msg_list_state =
+            new_msg_list_state(n, self.msg_scrolled_up.clone(), self.last_viewport_h);
+        // 整页替换后把滚动锚点找回来（只按服务端下发的 seq 查表）
+        match anchor_seq.and_then(|seq| self.messages.iter().position(|m| m.seq == seq)) {
+            Some(ix) => {
+                self.msg_list_state.scroll_to(gpui_kit::ListOffset {
+                    item_ix: ix,
+                    offset_in_item: anchor_offset,
+                });
+            }
+            // 无锚点（首屏 / 回退后）→ 停在最新一条
+            None => self.msg_list_state.scroll_to_end(),
+        }
+        self.message_total = n;
+        self.oldest_seq = cursor;
+        self.has_more_history = more;
+        self.loading_older = false;
+        // 这一页成为新的基线：之后的整页加载都要以它为基准比对
+        self.messages_epoch = self.messages_epoch.wrapping_add(1);
+        // 标题要如实说明「只是已加载的一段」：分页后 total 是当前窗口条数，
+        // 不是会话总条数
+        self.current_title = if more {
+            format!("会话消息（已加载 {n} 条 · 还有更早）")
+        } else {
+            format!("会话消息（{n} 条）")
+        };
+        println!("[消息] 落地 {n} 条（session={session_id} 锚点={anchor_seq:?}）");
+        cx.notify();
+    }
+
     pub(crate) fn load_messages(&mut self, session_id: String, cx: &mut Context<Self>) {
         self.load_messages_with(session_id, MESSAGE_BASE, None, px(0.), cx);
     }
@@ -1997,21 +2062,16 @@ impl ClientApp {
             );
             match fetch_json(url).await {
                 Ok(body) => {
-                    let arr = body
+                    let n = body
                         .get("messages")
                         .and_then(|v| v.as_array())
-                        .cloned()
-                        .unwrap_or_default();
-                    // 上滚游标与「还有更早」都由服务端随页下发（ADR-035 §8）。
-                    let cursor = body.get("next_before_seq").and_then(|v| v.as_i64());
+                        .map(Vec::len)
+                        .unwrap_or(0);
                     let more = body
                         .get("has_more")
                         .and_then(|v| v.as_bool())
                         .unwrap_or(false);
-                    let rows: Vec<MsgRow> = arr.iter().map(parse_msg_row).collect();
-                    let n = rows.len();
                     println!("[消息] 首屏 {n} 条（has_more={more}）");
-                    let total = n;
                     cx.update(|app| {
                         let _ = this.update(app, |this, cx| {
                             // 请求期间切走了 → 丢弃（否则上一个会话的消息会顶掉当前会话的）
@@ -2032,51 +2092,14 @@ impl ClientApp {
                                 println!("[消息] 首屏 {n} 条作废（该会话正在流式）");
                                 return;
                             }
-                            this.messages = Rc::new(rows);
-                            // 条数变了必须重建 list state（item_count 在构造时固定）
-                            this.msg_list_state = new_msg_list_state(
-                                this.messages.len(),
-                                this.msg_scrolled_up.clone(),
-                                this.last_viewport_h,
+                            // 落地交给唯一入口（与回退响应的落地是同一段代码）
+                            this.apply_message_page(
+                                &session_id,
+                                &body,
+                                anchor_seq,
+                                anchor_offset,
+                                cx,
                             );
-                            // 整页替换后把滚动锚点找回来（只按服务端下发的 seq 查表）
-                            if let Some(seq) = anchor_seq {
-                                if let Some(ix) = this.messages.iter().position(|m| m.seq == seq) {
-                                    let target = gpui_kit::ListOffset {
-                                        item_ix: ix,
-                                        offset_in_item: anchor_offset,
-                                    };
-                                    this.msg_list_state.scroll_to(target);
-                                    // 不再补第二帧的 `scroll_to`：以前补是因为担心首帧
-                                    // `measure_all` 没量完高方差项、按估值定位。现在
-                                    // `measure_all` 由 `measure_all_requested` 保证在
-                                    // `prepaint_items` 里真正跑过、且被 `seed_viewport_height`
-                                    // 给了真实视口高 —— 首帧定位就是终值。补那一次反而会在
-                                    // 下一帧把位置重置一遍（视觉上就是「先显示一下再滚」）。
-                                } else {
-                                    this.msg_list_state.scroll_to_end();
-                                }
-                            } else {
-                                // 首屏（无锚点）：进会话就该停在最新一条。
-                                // `Top` 对齐不会自动贴底（那是 `Bottom` 对齐用 `None` 表达的
-                                // 语义），漏了这句会话会停在顶部/中间。
-                                this.msg_list_state.scroll_to_end();
-                            }
-                            this.message_total = total;
-                            this.oldest_seq = cursor;
-                            this.has_more_history = more;
-                            this.loading_older = false;
-                            // 这一页成为新的基线：之后的整页加载都要以它为基准比对
-                            this.messages_epoch = this.messages_epoch.wrapping_add(1);
-                            // 标题要如实说明「只是已加载的一段」：分页后 total 是当前
-                            // 窗口条数，不是会话总条数（早先写「会话消息（50 条）」会
-                            // 让人以为整个会话只有 50 条）
-                            this.current_title = if more {
-                                format!("会话消息（已加载 {total} 条 · 还有更早）")
-                            } else {
-                                format!("会话消息（{total} 条）")
-                            };
-                            cx.notify();
                         });
                     });
                 }
