@@ -35,13 +35,19 @@ impl TaskHandler for SnapshotGcTask {
 
         match self.snapshot_manager.gc().await {
             Ok(stats) => {
-                let removed =
-                    stats.objects_removed + stats.cache_files_removed + stats.redo_files_removed;
+                // 计数的三项都是「真的删掉了文件」的动作：对象、孤儿缓存、过期重做数据、
+                // 超龄快照树。漏掉 tree_files_removed 会让 `processed` 少报一截
+                // （实测 2026-11-13 一次 GC 删了 523 棵树却没计入）。
+                let removed = stats.objects_removed
+                    + stats.cache_files_removed
+                    + stats.redo_files_removed
+                    + stats.tree_files_removed;
                 tracing::info!(
                     objects_removed = stats.objects_removed,
                     objects_retained = stats.objects_retained,
                     cache_files_removed = stats.cache_files_removed,
                     redo_files_removed = stats.redo_files_removed,
+                    tree_files_removed = stats.tree_files_removed,
                     total_objects = stats.total_objects,
                     "快照垃圾回收完成"
                 );
