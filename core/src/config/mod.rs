@@ -37,6 +37,7 @@ mod reminder;
 mod retrieval;
 mod roles;
 mod security;
+mod snapshot;
 mod storage;
 mod tool_output;
 pub mod web;
@@ -59,6 +60,7 @@ pub use reminder::ReminderConfig;
 pub use retrieval::RetrievalConfig;
 pub use roles::AgentRolesConfig;
 pub use security::{ApprovalMode, SafetyMode, SecurityConfig};
+pub use snapshot::{SnapshotConfig, DEFAULT_MAX_FILE_BYTES};
 pub use storage::{StorageBackendType, StorageConfig, VectorStorageConfig};
 pub use tool_output::ToolOutputConfig;
 pub use web::WebConfig;
@@ -115,6 +117,9 @@ pub struct TianyanConfig {
     /// 工具输出落盘配置（超预算结果落盘，会话只保留预览 + 路径；ADR-047）。
     #[serde(default)]
     pub tool_output: ToolOutputConfig,
+    /// 工作区快照配置（单文件上限 + 额外排除；ADR-055）。
+    #[serde(default)]
+    pub snapshot: SnapshotConfig,
 }
 
 /// 全局配置槽位（进程级单例，**只由装配层注入**）。

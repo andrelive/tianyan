@@ -20,7 +20,7 @@
 //! # 排除规则（两道）
 //!
 //! 1. **内置**：目录名命中 [`DEFAULT_EXCLUDED_DIRS`]（`.git` / `node_modules` /
-//!    `target` / `snapshots`）与超过 [`MAX_FILE_BYTES`] 的单文件；
+//!    `target` / `snapshots`）与超过 `[snapshot] max_file_bytes` 的单文件；
 //! 2. **git 忽略**：调 `git ls-files --others --ignored --exclude-standard
 //!    --directory` 取工作区被忽略清单（见 [`SnapshotManager::git_ignored_paths`]），
 //!    由 git 自己解释 `.gitignore` / `.git/info/exclude` / 全局 excludesfile。
@@ -64,9 +64,7 @@ use tokio::fs;
 use crate::common::binary::sniff_binary;
 use crate::common::error::{Result, TianyanError};
 use crate::common::hash::hex_sha256;
-
-/// 单文件最大纳入快照的字节数（2MB，与 opencode 一致）。
-const MAX_FILE_BYTES: u64 = 2 * 1024 * 1024;
+use crate::config::{SnapshotConfig, DEFAULT_MAX_FILE_BYTES};
 
 /// "小文件"阈值：**小于等于**该值的文件不参与 mtime/size 短路（直接重算哈希）。
 ///
@@ -141,6 +139,10 @@ pub struct SnapshotManager {
     /// git 忽略清单缓存（`workdir → (取回时刻, 清单)`），`Arc` 让同一管理器的
     /// 所有 `with_workdir` 克隆共享（会话级工作区不重复 spawn git）。
     ignore_cache: IgnoreCache,
+    /// 纳入快照的单文件上限（`[snapshot] max_file_bytes`；默认 2 MiB）。
+    ///
+    /// 超过它的文件不参与回退（捕获跳过 + 记入 `skipped` 属主，因此回退也不会误删）。
+    max_file_bytes: u64,
 }
 
 /// 快照树：`{相对路径 → 内容 sha256}`。
@@ -331,6 +333,7 @@ impl SnapshotManager {
             workdir,
             excludes: Vec::new(),
             ignore_cache: Arc::new(Mutex::new(HashMap::new())),
+            max_file_bytes: DEFAULT_MAX_FILE_BYTES,
         }
     }
 
@@ -354,7 +357,19 @@ impl SnapshotManager {
             workdir,
             excludes: self.excludes.clone(),
             ignore_cache: Arc::clone(&self.ignore_cache),
+            max_file_bytes: self.max_file_bytes,
         }
+    }
+
+    /// 应用 `[snapshot]` 配置（单文件上限 + 额外排除）。
+    ///
+    /// 由装配处（`server::state::build_snapshot_manager`）调用；**不调用时**用
+    /// [`DEFAULT_MAX_FILE_BYTES`] 与空排除集，与改造前的硬编码行为逐字一致
+    /// （测试与独立构建因此不受影响）。
+    pub fn with_snapshot_config(mut self, config: &SnapshotConfig) -> Self {
+        self.max_file_bytes = config.effective_max_file_bytes();
+        self.excludes = config.excludes.clone();
+        self
     }
 
     /// 捕获工作区状态为快照（消息处理前调用）。
@@ -461,7 +476,7 @@ impl SnapshotManager {
                             continue;
                         }
                     };
-                    if meta.len() > MAX_FILE_BYTES {
+                    if meta.len() > self.max_file_bytes {
                         files.push(binary_diff(path));
                         continue;
                     }
@@ -1041,7 +1056,7 @@ impl SnapshotManager {
                     .metadata()
                     .await
                     .map_err(|e| TianyanError::Custom(format!("snapshot: 读取元数据失败: {e}")))?;
-                if meta.len() > MAX_FILE_BYTES {
+                if meta.len() > self.max_file_bytes {
                     scan.skipped.insert(rel);
                     continue;
                 }
@@ -1187,7 +1202,7 @@ impl SnapshotManager {
                     .metadata()
                     .await
                     .map_err(|e| TianyanError::Custom(format!("snapshot: 读取元数据失败: {e}")))?;
-                if meta.len() > MAX_FILE_BYTES {
+                if meta.len() > self.max_file_bytes {
                     continue;
                 }
                 let mtime_ns = meta
@@ -1939,7 +1954,7 @@ mod tests {
     async fn test_large_files_skipped() {
         let (_dir, mgr) = setup().await;
         write(&mgr.workdir, "small.txt", "small");
-        let big = vec![b'x'; (MAX_FILE_BYTES + 1) as usize];
+        let big = vec![b'x'; (DEFAULT_MAX_FILE_BYTES + 1) as usize];
         std::fs::write(mgr.workdir.join("big.bin"), big).unwrap();
 
         mgr.capture("s1", "0").await.unwrap();
@@ -3044,5 +3059,53 @@ mod tests {
         assert_eq!(result.files.len(), 1, "应报一个文件差异");
         assert_eq!(result.files[0].status, "modified");
         assert_eq!(result.files[0].path, "a.txt");
+    }
+
+    /// `[snapshot] max_file_bytes` 生效：超上限的文件不进快照，且记入 `skipped`
+    /// 属主（回退时因此也不会被误删）。
+    #[tokio::test]
+    async fn test_custom_max_file_bytes_skips_and_records_owner() {
+        let (_dir, mgr) = setup().await;
+        let mgr = mgr.with_snapshot_config(&SnapshotConfig {
+            max_file_bytes: 64,
+            excludes: Vec::new(),
+        });
+        write(&mgr.workdir, "small.txt", "tiny");
+        write(&mgr.workdir, "big.txt", &"x".repeat(200));
+
+        mgr.capture("s1", "0").await.unwrap();
+        let tree = mgr.load_tree("s1", "0").await.unwrap();
+        assert!(tree.files.contains_key("small.txt"), "小文件应入树");
+        assert!(
+            !tree.files.contains_key("big.txt"),
+            "超自定义上限的文件不应入树"
+        );
+        assert!(
+            tree.skipped.contains("big.txt"),
+            "未纳入的文件应记入 skipped 属主：{:?}",
+            tree.skipped
+        );
+    }
+
+    /// `[snapshot] excludes` 生效：按名字排除的目录既不进树、也记属主。
+    #[tokio::test]
+    async fn test_custom_excludes_skip_named_dir() {
+        let (_dir, mgr) = setup().await;
+        let mgr = mgr.with_snapshot_config(&SnapshotConfig {
+            max_file_bytes: DEFAULT_MAX_FILE_BYTES,
+            excludes: vec!["fixtures".to_string()],
+        });
+        write(&mgr.workdir, "src/main.rs", "fn main() {}");
+        write(&mgr.workdir, "fixtures/case1.json", "{}");
+
+        mgr.capture("s1", "0").await.unwrap();
+        let tree = mgr.load_tree("s1", "0").await.unwrap();
+        assert!(tree.files.contains_key("src/main.rs"));
+        assert!(
+            !tree.files.contains_key("fixtures/case1.json"),
+            "配置排除的目录不应入树：{:?}",
+            tree.files.keys().collect::<Vec<_>>()
+        );
+        assert!(tree.skipped.contains("fixtures"), "应记入 skipped 属主");
     }
 }

@@ -78,7 +78,9 @@ fn build_snapshot_manager(config: &TianyanConfig) -> Option<Arc<SnapshotManager>
             workdir.display(),
             root.display()
         );
-        Arc::new(SnapshotManager::new(root, workdir))
+        // `[snapshot]` 配置在装配处应用（单文件上限 + 额外排除）；缺节时用默认值，
+        // 与改造前的硬编码行为逐字一致。
+        Arc::new(SnapshotManager::new(root, workdir).with_snapshot_config(&config.snapshot))
     })
 }
 
