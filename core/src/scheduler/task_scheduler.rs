@@ -303,6 +303,12 @@ pub struct TaskScheduler {
     task_timeout_secs: u64,
     /// 当前正在执行的任务 ID（顺序执行，至多一个；None = 空闲）。
     executing: RwLock<Option<String>>,
+    /// 启动时注入的任务上下文（`run_now` 复用；未启动时 None）。
+    ///
+    /// 为什么存下来：`run_now` 是运维入口（服务内立即跑一次 `snapshot_gc` 之类），
+    /// 而 `TaskContext` 由装配层构造（vfs / summary / recall / config / task_state），
+    /// 让 HTTP handler 再拼一份既重复又容易漂移。
+    ctx: RwLock<Option<Arc<TaskContext>>>,
 }
 
 /// 计算下次到期时刻（epoch 秒）：last_run + interval；从未执行 = 立即到期。
@@ -397,6 +403,7 @@ impl TaskScheduler {
             tick_secs: DEFAULT_TICK_SECS,
             task_timeout_secs: TASK_TIMEOUT_SECS,
             executing: RwLock::new(None),
+            ctx: RwLock::new(None),
         }
     }
 
@@ -677,6 +684,8 @@ impl TaskScheduler {
 
         tracing::info!(tick_secs = scheduler.tick_secs, "任务调度器启动中...");
         scheduler.load_state().await;
+        // 存一份 ctx 供 `run_now` 复用（运维入口不必自己拼 TaskContext）
+        *scheduler.ctx.write().await = Some(Arc::clone(&ctx));
 
         let handle = tokio::spawn(Self::run_scanner(scheduler.clone(), ctx));
         *scheduler.handle.write().await = Some(handle);
@@ -917,6 +926,34 @@ impl TaskScheduler {
     ///
     /// # 返回
     /// 任务执行结果
+    /// 立即执行指定任务一次（运维入口：不必等调度到期）。
+    ///
+    /// 语义与定时触发**完全一致**：复用 [`Self::execute_task`]（超时、`run_count`、
+    /// `last_run`、`last_error`、`last_skipped` 走同一条路径），并在执行后持久化
+    /// `last_run`——否则重启后会按旧基准再补跑一次。
+    ///
+    /// 为什么需要（实测卡点，2026-11-13）：`snapshot_gc` 是 12 小时制，想立刻回收
+    /// 孤儿对象只能干等；跨进程跑运维工具又会与运行中的捕获有竞态（标记-清扫期间
+    /// 新写入的对象会被判孤儿）。**由服务自己跑**既即时又没有跨进程竞态。
+    ///
+    /// 返回 `Ok(None)` = 没有该 id 的任务，或调度器尚未启动（没有 ctx）。
+    pub async fn run_now(&self, task_id: &str) -> crate::common::error::Result<Option<TaskResult>> {
+        let ctx = { self.ctx.read().await.clone() };
+        let Some(ctx) = ctx else {
+            return Ok(None);
+        };
+        let result = self.execute_task(task_id, &ctx).await;
+        if result.is_some() {
+            self.persist_state().await;
+        }
+        Ok(result)
+    }
+
+    /// 执行一次指定任务（扫描循环的正常执行路径；`run_now` 复用同一实现）。
+    ///
+    /// 先取 handler 再释放写锁（长任务执行期间不阻塞 `snapshot()` 等读路径），
+    /// 执行后更新 `last_run` / `run_count` / `last_error` / `last_skipped`。
+    /// 任务级超时见 [`TASK_TIMEOUT_SECS`]（串行扫描下防单个任务 hang 拖死全部任务）。
     pub async fn execute_task(&self, task_id: &str, ctx: &TaskContext) -> Option<TaskResult> {
         // 先取 handler 即释放写锁：长任务（如演化综述的 LLM 调用）执行期间
         // 不得阻塞 snapshot()/get_task_ids() 等读路径。
@@ -1521,5 +1558,23 @@ mod tests {
         assert!(scheduler.unregister_task("gone").await);
         assert!(!scheduler.unregister_task("gone").await);
         assert!(scheduler.get_task_ids().await.is_empty());
+    }
+
+    /// `run_now` 是运维入口（服务内立即跑一次 `snapshot_gc` 等）：调度器**未启动**
+    /// 时没有 ctx，应返回 `None` 而不是 panic 或误报任务不存在之外的东西。
+    #[tokio::test]
+    async fn test_run_now_without_started_scheduler_is_none() {
+        let scheduler = TaskScheduler::new();
+        scheduler
+            .register_task(TaskDefinition::new("gc", "垃圾回收", 3600, make_handler()))
+            .await
+            .unwrap();
+        let result = scheduler.run_now("gc").await.unwrap();
+        assert!(
+            result.is_none(),
+            "调度器未启动（无 ctx）时应返回 None，不得 panic"
+        );
+        // 未知任务同样返回 None（而不是 Err）
+        assert!(scheduler.run_now("no-such-task").await.unwrap().is_none());
     }
 }

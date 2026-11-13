@@ -24,6 +24,34 @@ use crate::state::AppState;
 /// SSE 流式通道缓冲区大小（与 chat 流一致）。
 const SSE_CHANNEL_BUFFER: usize = 100;
 
+/// 立即执行一个**内置定时任务**（`snapshot_gc` / `summary_generation` …）。
+///
+/// 为什么需要这个入口（实测卡点，2026-11-13）：`snapshot_gc` 是 12 小时制，想立刻
+/// 回收孤儿对象只能干等；而跨进程跑运维工具（`prune_snapshot_trees --gc`）会与
+/// 运行中的捕获竞态（标记-清扫期间新写入的对象被判孤儿）。**让服务自己跑**既即时
+/// 又没有跨进程竞态——语义与定时触发完全一致（走同一个 `execute_task`）。
+pub async fn run_scheduled_task(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let Some(scheduler) = state.scheduler().await else {
+        return Err(ApiError::BadRequest("任务调度器未启动".to_string()));
+    };
+    match scheduler.run_now(&id).await {
+        Ok(Some(r)) => Ok(Json(serde_json::json!({
+            "task": id,
+            "success": r.success,
+            "processed": r.processed_count,
+            "skipped": r.skipped,
+            "error": r.error.as_ref().map(|e| e.to_string()),
+        }))),
+        Ok(None) => Err(ApiError::NotFound(format!(
+            "任务不存在或调度器尚未启动：{id}"
+        ))),
+        Err(e) => Err(e.into()),
+    }
+}
+
 /// SSE 心跳间隔。
 ///
 /// **两端都依赖它**（此前服务端 `Sse::new(...)` 没挂 keep-alive，全仓搜不到一处）：

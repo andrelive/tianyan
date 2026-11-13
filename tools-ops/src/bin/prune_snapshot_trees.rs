@@ -461,7 +461,9 @@ async fn run_gc(snap_root: &Path) -> Result<()> {
         return Err(TianyanError::invalid_input(
             "检测到 127.0.0.1:3000 有服务在监听：--gc 必须在**停止服务**后执行\
              （标记-清扫与运行中的捕获有竞态：对象已写、树未落盘时会被判成孤儿）。\
-             也可以不跑 --gc，交给 12 小时一次的 snapshot_gc 定时任务回收。",
+             也可以让**服务自己跑**：`POST /api/v1/scheduler/tasks/snapshot_gc/run`\
+             （语义与定时触发一致——同一个 execute_task 路径，且没有跨进程竞态），\
+             或交给 12 小时一次的 snapshot_gc 定时任务。",
         ));
     }
     println!("\n=== 快照 GC ===");

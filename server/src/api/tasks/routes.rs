@@ -7,7 +7,9 @@ use axum::Router;
 
 use crate::state::AppState;
 
-use super::handlers::{cancel_task, get_task_log, list_tasks, stream_tasks, subscribe_events};
+use super::handlers::{
+    cancel_task, get_task_log, list_tasks, run_scheduled_task, stream_tasks, subscribe_events,
+};
 
 /// 后台任务相关路由。
 ///
@@ -22,5 +24,7 @@ pub fn routes() -> Router<Arc<AppState>> {
         .route("/events", get(stream_tasks))
         .route("/events/subscribe", post(subscribe_events))
         .route("/tasks/{id}/cancel", post(cancel_task))
+        // 内置定时任务的运维入口：立即执行一次（不必等 12 小时调度）
+        .route("/scheduler/tasks/{id}/run", post(run_scheduled_task))
         .route("/tasks/{id}/log", get(get_task_log))
 }
