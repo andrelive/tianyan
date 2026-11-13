@@ -1018,6 +1018,8 @@ impl ClientApp {
     ) {
         self.dialog = None;
         let port = self.port;
+        // 本地截断要按同一个稳定键定位（`message_id` 随后会被移进请求体）
+        let anchor_id = message_id.clone();
         cx.spawn(async move |this, cx| {
             let url =
                 format!("http://{SERVER_HOST}:{port}/api/v1/sessions/{session_id}/messages/delete");
@@ -1082,12 +1084,14 @@ impl ClientApp {
                         if !text.trim().is_empty() {
                             this.pending_composer_text = Some(text);
                         }
-                        // 消息列表**同帧落地**：响应里自带回退后的这一页（服务端已按
-                        // 分页口径带回），没有理由再发一次 `GET /messages`——那样状态
-                        // 与列表分两批落地，用户看到「信息很快回填、对话过一会儿才
-                        // 消失」两个时间点（实测反馈）。
-                        if !this.is_stale_for(&session_id) {
-                            this.apply_message_page(&session_id, &v, None, px(0.), cx);
+                        // 消息列表**本地截断**（零往返）：回退语义 = 这条消息及其后
+                        // 全部删除，而锚点就在当前列表里——服务端已经删完，本地按同一
+                        // 稳定键截掉即可，与重拉结果一致。早先「响应后重拉」是三个代价
+                        // 叠在一起：多一次往返（「过一会儿」）/ 整页替换丢掉已上滚加载
+                        // 的更早历史 / 滚动位置重置。
+                        // 锚点不在列表里（理论上不会）才回退到拉一页兜底。
+                        if !this.truncate_messages_from(&session_id, &anchor_id, cx) {
+                            this.load_messages(session_id.clone(), cx);
                         }
                         this.load_session_usage(cx);
                         this.load_sessions(cx);

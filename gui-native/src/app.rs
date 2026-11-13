@@ -1956,16 +1956,12 @@ impl ClientApp {
         self.needs_setup = !self.setup_dismissed && !self.models.iter().any(|m| m.is_chat);
     }
 
-    /// 用**服务端下发的一页消息**整页替换本地列表（唯一的列表落地入口）。
+    /// 用**服务端下发的一页消息**整页替换本地列表（`GET /messages` 的落地入口）。
     ///
-    /// 两个调用者：`load_messages_with`（自己发 `GET /messages` 拉一页）与
-    /// `confirm_rollback`（回退响应里**自带**同一口径的一页）。
-    ///
-    /// 为什么必须共用：早先回退走的是「响应到手只更新状态行 → 再发一次请求拿
-    /// 消息」，同一个操作的两个结果分两批落地 —— 于是状态栏先回填、对话列表
-    /// 晚一步才消失，用户看到的就是两个时间点（实测反馈「信息很快就回填，但
-    /// 对话过了一会儿才消失，感受不好」）。既然服务端已经把回退后的这一页
-    /// 一起带回来了，就没有第二次往返的理由。
+    /// 只服务 [`Self::load_messages_with`]——即「整页重载」语义（进会话 / 切会话 /
+    /// 恢复滚动锚点）。**回退不走这里**：回退只删末尾，走
+    /// [`Self::truncate_messages_from`] 本地截断，既不需要往返，也不会把用户已经
+    /// 上滚加载的更早历史整页丢掉。
     ///
     /// `body` = 服务端整包 JSON（`messages` / `next_before_seq` / `has_more`）。
     pub(crate) fn apply_message_page(
@@ -2019,6 +2015,54 @@ impl ClientApp {
         };
         println!("[消息] 落地 {n} 条（session={session_id} 锚点={anchor_seq:?}）");
         cx.notify();
+    }
+
+    /// 回退：**本地截断**列表（把锚点消息及其后全部移除），不发任何请求。
+    ///
+    /// 回退的语义就是「这条消息及其后全部删除」，而锚点就在当前列表里（用户点的
+    /// 就是它）——服务端已经删完了，本地按同一个稳定键截断即可，结果与重拉一致，
+    /// 但零往返、零延迟。
+    ///
+    /// 为什么不再拉一次（早先的实现）：响应到手只改状态行 → 再发 `GET /messages`
+    /// 整页替换。代价三层：① 多一次往返，就是那个「过一会儿」；② 整页替换会把
+    /// 用户**上滚加载的更早页全部丢掉**（只剩最近一页）；③ 滚动位置被重置。
+    /// 本地截断不动前面已加载的历史，`oldest_seq` / `has_more_history` 照旧有效。
+    ///
+    /// 返回 `false` = 锚点不在当前列表（理论上不会；调用方回退到拉一页兜底）。
+    pub(crate) fn truncate_messages_from(
+        &mut self,
+        session_id: &str,
+        anchor_message_id: &str,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        // 请求期间切走了 → 什么都不用做（当前列表属于另一个会话）
+        if self.is_stale_for(session_id) {
+            return true;
+        }
+        let Some(ix) = self.messages.iter().position(|m| m.id == anchor_message_id) else {
+            return false;
+        };
+        let old_items = self.messages.len();
+        Rc::make_mut(&mut self.messages).truncate(ix);
+        let n = self.messages.len();
+        // 条数变了必须同步列表状态（item_count 在构造时固定）
+        self.msg_list_state.splice(n..old_items, 0);
+        self.message_total = n;
+        // 新基线：让在飞的整页加载作废（否则它会把刚截掉的尾部又贴回来）
+        self.messages_epoch = self.messages_epoch.wrapping_add(1);
+        // 上滚游标与 has_more 不动：回退只删末尾，更早的历史仍然有效
+        self.current_title = if self.has_more_history {
+            format!("会话消息（已加载 {n} 条 · 还有更早）")
+        } else {
+            format!("会话消息（{n} 条）")
+        };
+        // 原本贴在底部（跟随最新）→ 截断后继续贴底；在历史中段的阅读位置不动
+        if !self.msg_scrolled_up.get() {
+            self.msg_list_state.scroll_to_end();
+        }
+        println!("[消息] 本地截断 {old_items} → {n} 条（锚点 {anchor_message_id}）");
+        cx.notify();
+        true
     }
 
     pub(crate) fn load_messages(&mut self, session_id: String, cx: &mut Context<Self>) {
