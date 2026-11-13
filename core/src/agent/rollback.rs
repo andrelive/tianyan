@@ -118,7 +118,9 @@ impl Agent {
             .await?;
 
         // ── 阶段 B（锁内事务）：保存可逆数据 → 恢复工作区 → 截断链 ──
-        self.working_sets
+        let started = Instant::now();
+        let outcome = self
+            .working_sets
             .with_session_exclusive(session_id, |ws| async move {
                 // 锁内读基准：库的最新**完整链**（段化只物化「最近压缩点 → 现在」，
                 // 而回退需全链）＋ 重新定位锚点（库为权威，不信任锁外读到的索引）
@@ -152,8 +154,13 @@ impl Agent {
                         let sm = sm.with_workdir(wd);
                         // ③ 保存可逆数据（重做基准 = 回退前的工作区树 + 被截断消息）。
                         //    失败不阻断回退——代价只是该次回退不可撤销（可见 warn）。
+                        //    它的捕获结果同时是 ④ 的「当前状态」：复用可省一次全树扫描。
+                        let mut precomputed_current = None;
                         match sm.save_redo(session_id, message_id, &truncated).await {
-                            Ok(()) => redo_available = true,
+                            Ok(tree) => {
+                                redo_available = true;
+                                precomputed_current = Some(tree);
+                            }
                             Err(e) => tracing::warn!(
                                 error = %e,
                                 session = %session_id,
@@ -162,7 +169,10 @@ impl Agent {
                         }
                         // ④ **先恢复文件**：失败即整体中止（链保持不动）。
                         //    恢复本身「先校验后动手」（对象缺失即中止，工作区未改动）。
-                        match sm.restore(session_id, message_id).await {
+                        match sm
+                            .restore_with_current(session_id, message_id, precomputed_current)
+                            .await
+                        {
                             Ok(report) => {
                                 restored_files = report.touched();
                                 deletion_suppressed = report.deletion_suppressed;
@@ -198,7 +208,21 @@ impl Agent {
                     cancelled_tasks,
                 })
             })
-            .await
+            .await?;
+        // 回退是重操作（重做捕获 + 工作区扫描 + 写文件 + 链截断），此前**一条 info 日志
+        // 都没有**——用户反馈「比之前快多了但还不够无感」时，无从定位时间花在哪。
+        // 这里记全量结果 + 服务端耗时（含重做捕获那一步）。
+        tracing::info!(
+            session = %session_id,
+            truncated = outcome.truncated,
+            restored_files = outcome.restored_files,
+            deletion_suppressed = outcome.deletion_suppressed,
+            redo_available = outcome.redo_available,
+            cancelled_tasks = outcome.cancelled_tasks,
+            elapsed_ms = started.elapsed().as_millis() as u64,
+            "回退完成"
+        );
+        Ok(outcome)
     }
 
     /// 重做：恢复被回退的消息与工作区文件（与回退同一排他事务入口）。

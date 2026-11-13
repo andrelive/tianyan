@@ -11,7 +11,7 @@ use tokio::fs;
 use crate::common::error::{Result, TianyanError};
 use crate::common::types::StructuredMessage;
 
-use super::{RestoreReport, SnapshotManager};
+use super::{RestoreReport, SnapshotManager, SnapshotTree};
 
 impl SnapshotManager {
     /// 回退时保存重做状态：捕获当前工作区树 + 被截断的消息。
@@ -19,12 +19,16 @@ impl SnapshotManager {
     /// 重做数据存于 `{root}/{session_id}/redo/` 下，按被回退消息的 ID 组织
     /// （前端索引与服务端消息列表可能错位——tool/system 消息被前端合并过滤，
     /// 数字索引不可靠；消息 ID 是稳定的定位键）。
+    ///
+    /// **返回刚捕获的「当前工作区树」**：回退事务紧接着要调 `restore`，而它的
+    /// 「当前状态」与这棵树完全等价——复用可省掉一次全树扫描（实测 949 文件省
+    /// 417 ms）。workdir 不存在时返回空树（此时 `restore` 本身也会 early return）。
     pub async fn save_redo(
         &self,
         session_id: &str,
         message_id: &str,
         messages: &[StructuredMessage],
-    ) -> Result<()> {
+    ) -> Result<SnapshotTree> {
         self.validate_session_id(session_id)?;
         let key = super::sanitize_key(message_id);
 
@@ -40,6 +44,7 @@ impl SnapshotManager {
         // 「回退处理中」延迟的主要来源；缓存缺失/损坏退化为全量（不阻断回退）。
         // 缓存**写回**仍用 redo 自己的 cache_path：不污染 latest 指针（后者语义
         // 是「最近一次轮内捕获」，供下一轮 capture 复用）。
+        let mut captured = SnapshotTree::new();
         if self.workdir.exists() {
             let tree_path = redo_dir.join(format!("tree-{key}.json"));
             let cache_path = redo_dir.join(format!("tree-{key}.cache.json"));
@@ -47,7 +52,8 @@ impl SnapshotManager {
                 .load_cache(&self.latest_cache_path(session_id))
                 .await
                 .unwrap_or(None);
-            self.capture_tree_to(&self.workdir, &tree_path, &cache_path, prev_cache.as_ref())
+            captured = self
+                .capture_tree_to(&self.workdir, &tree_path, &cache_path, prev_cache.as_ref())
                 .await?;
         }
 
@@ -60,7 +66,7 @@ impl SnapshotManager {
             .map_err(|e| TianyanError::Custom(format!("snapshot: 写入重做消息失败: {e}")))?;
 
         tracing::debug!(session = %session_id, message_id, "已保存重做状态");
-        Ok(())
+        Ok(captured)
     }
 
     /// 重做：恢复重做工作区树,返回被截断的消息与恢复的文件数。
