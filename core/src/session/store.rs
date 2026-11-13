@@ -333,6 +333,40 @@ impl SessionStore {
         Ok(())
     }
 
+    /// 截断会话尾部（**只删** `seq >= from_seq` 的行，不重编号、不碰前面的消息）。
+    ///
+    /// 为什么不用 [`Self::rewrite`]：回退典型只截断尾部几条，而整表重写会把前面
+    /// **全部消息删掉、逐条 `serde_json::to_string` 再插入**（连带 FTS 全删全插）——
+    /// 实测 1300+ 条消息的会话一次回退 1186 ms，绝大部分耗在这里。`seq` 本就是
+    /// 0..n-1 的顺序号，删尾部不影响前面的 seq，所以增量删除是安全的。
+    ///
+    /// # Errors
+    /// * SQLite 删除或事务失败时返回 TianyanError。
+    pub(crate) async fn truncate_from(
+        &self,
+        session_id: &str,
+        from_seq: i64,
+    ) -> Result<(), TianyanError> {
+        let conn = self.db.lock().await;
+        let tx = conn
+            .unchecked_transaction()
+            .map_err(|e| sqlite_error("截断事务开启失败", e))?;
+        tx.execute(
+            "DELETE FROM session_messages_fts WHERE rowid IN \
+             (SELECT id FROM session_messages WHERE session_id = ?1 AND seq >= ?2)",
+            rusqlite::params![session_id, from_seq],
+        )
+        .map_err(|e| sqlite_error("截断 FTS 清理失败", e))?;
+        tx.execute(
+            "DELETE FROM session_messages WHERE session_id = ?1 AND seq >= ?2",
+            rusqlite::params![session_id, from_seq],
+        )
+        .map_err(|e| sqlite_error("截断消息清理失败", e))?;
+        tx.commit()
+            .map_err(|e| sqlite_error("截断事务提交失败", e))?;
+        Ok(())
+    }
+
     /// 读取会话头部（injectable 快照等会话级状态）。
     ///
     /// # Errors
@@ -1129,5 +1163,49 @@ mod tests {
             )
             .unwrap();
         assert_eq!(orphans, 0, "清理不得留下孤儿会话（T0-13）");
+    }
+
+    /// 回退走**增量截断**（`truncate_from`）：只删尾部、前段 seq 不变、FTS 同步收缩。
+    ///
+    /// 回归背景：此前回退一律走 `rewrite`（整表重写＝全部消息删掉再逐条序列化插入
+    /// + FTS 全重建），实测 1300+ 条消息的会话一次回退 1186 ms 主要耗在这里。
+    #[tokio::test]
+    async fn test_truncate_from_keeps_prefix_and_shrinks_fts() {
+        let db = Database::open_in_memory().unwrap();
+        db.init_schemas().await.unwrap();
+        let store = SessionStore::new(db.clone()).unwrap();
+        let header = SessionHeader::default();
+        let messages: Vec<StructuredMessage> = (0..5)
+            .map(|i| msg(&format!("m{i}"), MessageRole::User, &format!("第 {i} 条")))
+            .collect();
+        store.rewrite("s1", &header, &messages).await.unwrap();
+
+        store.truncate_from("s1", 3).await.unwrap();
+
+        let (_h, loaded) = store.load("s1").await.unwrap().unwrap();
+        assert_eq!(loaded.len(), 3, "只保留前 3 条");
+        assert_eq!(loaded[0].id, "m0");
+        assert_eq!(loaded[2].id, "m2");
+
+        // seq 未被重编号：前段仍是 0..2 连续
+        let seqs: Vec<i64> = {
+            let conn = db.lock().await;
+            let mut stmt = conn
+                .prepare("SELECT seq FROM session_messages WHERE session_id = 's1' ORDER BY seq")
+                .unwrap();
+            let rows = stmt.query_map([], |r| r.get(0)).unwrap();
+            rows.map(|r| r.unwrap()).collect()
+        };
+        assert_eq!(seqs, vec![0, 1, 2], "前段 seq 不得被重编号");
+
+        // FTS 同步收缩（否则回忆会命中已删除的消息）
+        let fts: i64 = {
+            let conn = db.lock().await;
+            conn.query_row("SELECT COUNT(*) FROM session_messages_fts", [], |r| {
+                r.get(0)
+            })
+            .unwrap()
+        };
+        assert_eq!(fts, 3, "FTS 应只剩 3 条：{fts}");
     }
 }

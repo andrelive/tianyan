@@ -323,6 +323,37 @@ impl SessionWorkingSet {
         Ok(())
     }
 
+    /// 截断到 `keep` 条（保留 `seq < keep`），**只删尾部、不重写整表**。
+    ///
+    /// 回退的典型形态是「截断尾部几条」，而 [`Self::rewrite`] 会把前面所有消息
+    /// 删掉、逐条重新序列化并插入（实测 1300+ 条消息的会话回退 1186 ms，绝大部分
+    /// 在这里）。`seq` 是 0..n-1 的顺序号，删尾部不影响前段。
+    ///
+    /// 返回 `false` 表示**无法增量**（`keep` 落在压缩点之前，段起点会变负）——
+    /// 调用方应 fallback 到 [`Self::rewrite`] 全量重写（保底正确）。
+    ///
+    /// # Errors
+    /// * 库删除失败时透传（缓存不动，保持一致）。
+    pub async fn truncate_to(&self, keep: usize) -> Result<bool> {
+        let start_seq = self.start_seq();
+        if (keep as i64) <= start_seq {
+            return Ok(false);
+        }
+        self.store
+            .truncate_from(&self.session_id, keep as i64)
+            .await?;
+        {
+            let mut st = self.state.write().await;
+            let keep_in_seg = (keep as i64 - start_seq) as usize;
+            st.structured_messages.truncate(keep_in_seg);
+            st.last_activity = Instant::now();
+        }
+        let last = keep.saturating_sub(1) as i64;
+        self.last_seq.store(last, Ordering::SeqCst);
+        self.last_consumed_seq.store(last, Ordering::SeqCst);
+        Ok(true)
+    }
+
     /// 压缩后**收缩段**（ADR-035 §2）：段起点前移到最后一个压缩点，
     /// 丢弃其前的历史（压缩已把历史折叠为摘要消息，段内保留摘要及其后）。
     ///

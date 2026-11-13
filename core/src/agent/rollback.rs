@@ -195,7 +195,14 @@ impl Agent {
                 }
 
                 // ⑤ **后截断链**（经工作集：库 + 物化段 + seq 同步推进）
-                ws.rewrite(&chain[..index]).await?;
+                //
+                // 优先走增量删除（只删尾部 seq >= index）。回退典型只截断几条，而
+                // `rewrite` 是整表重写（全部消息删掉再逐条序列化插入 + FTS 全重建）——
+                // 实测 1300+ 条消息的会话一次回退 1186 ms 主要耗在这里。落在压缩点之前
+                // 的少见情形回退到全量重写保底。
+                if !ws.truncate_to(index).await? {
+                    ws.rewrite(&chain[..index]).await?;
+                }
 
                 Ok(RollbackOutcome {
                     truncated: truncated.len(),
