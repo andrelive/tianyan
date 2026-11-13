@@ -290,12 +290,14 @@ impl RotatingWriter {
         let path = dir.join(format!("{stem}.log"));
         let file = open_append(&path)?;
         let written = file.metadata().map(|m| m.len()).unwrap_or(0);
+        // 从已有历史的最大编号续（重启后不覆盖旧历史文件）
+        let seq = max_existing_seq(&dir, &stem);
         let writer = Self {
             inner: Arc::new(Mutex::new(RotatingInner {
                 dir,
                 stem,
                 family_prefix,
-                seq: 0,
+                seq,
                 file,
                 written,
                 rotation,
@@ -331,27 +333,36 @@ impl RotatingWriter {
 }
 
 impl RotatingInner {
-    /// 当前打开的文件路径。
+    /// 当前打开的文件路径（**恒为** `{stem}.log`；历史文件是 `{stem}.{n}.log`）。
     fn current_path(&self) -> PathBuf {
-        if self.seq == 0 {
-            self.dir.join(format!("{}.log", self.stem))
-        } else {
-            self.dir.join(format!("{}.{}.log", self.stem, self.seq))
-        }
+        self.dir.join(format!("{}.log", self.stem))
     }
 
-    /// 关旧开新（`seq` 递增）；同名文件已存在时继续追加（不覆盖）。
+    /// 轮转：把当前文件**改名**成历史文件 `{stem}.{n}.log`，再新建空的当前文件。
+    ///
+    /// 「当前文件恒为 `{stem}.log`」是刻意的：排障时打开它永远是最新内容。此前的实现
+    /// 是把日志写到 `{stem}.{seq}.log`、`.log` 留成**最老**那一个——与本模块文档
+    /// （「当前文件 `{stem}.log`；第 n 次轮转的文件 `{stem}.{n}.log`」）不符，实测
+    /// 2026-11-13 排障时按名字打开 `.log` 看到三周前的内容，误判「日志停在三周前」。
+    ///
+    /// 序号取「已有历史的最大值 + 1」（重启后不覆盖旧历史）；rename 失败（当前文件
+    /// 不存在）时忽略，仍然新建空文件继续写。
     fn rotate(&mut self) -> io::Result<()> {
         let _ = self.file.flush();
-        self.seq = self.seq.saturating_add(1);
-        let path = self.current_path();
-        self.file = open_append(&path)?;
-        self.written = self.file.metadata().map(|m| m.len()).unwrap_or(0);
+        let cur = self.current_path();
+        self.seq = self
+            .seq
+            .max(max_existing_seq(&self.dir, &self.stem))
+            .saturating_add(1);
+        let hist = self.dir.join(format!("{}.{}.log", self.stem, self.seq));
+        let _ = fs::rename(&cur, &hist);
+        self.file = File::create(&cur)?;
+        self.written = 0;
         let _ = prune_family(
             &self.dir,
             &self.family_prefix,
             self.rotation.max_files,
-            Some(&path),
+            Some(&cur),
         );
         Ok(())
     }
@@ -380,6 +391,31 @@ impl<'a> fmt::writer::MakeWriter<'a> for RotatingWriter {
     fn make_writer(&'a self) -> Self::Writer {
         self.clone()
     }
+}
+
+/// 扫描文件族里 `{stem}.{n}.log` 的最大编号（`{stem}.log` 本身不算；解析失败跳过）。
+///
+/// 用途有二：`new()` 时初始化 `seq`（重启后从历史最大编号续、不覆盖旧历史），
+/// `rotate()` 时兜底（`seq` 落后于磁盘现状时也能取到正确的下一个编号）。
+fn max_existing_seq(dir: &Path, stem: &str) -> u32 {
+    let prefix = format!("{stem}.");
+    let mut max = 0u32;
+    let Ok(entries) = fs::read_dir(dir) else {
+        return max;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let Some(rest) = name.strip_prefix(&prefix) else {
+            continue;
+        };
+        let Some(num) = rest.strip_suffix(".log") else {
+            continue;
+        };
+        if let Ok(n) = num.parse::<u32>() {
+            max = max.max(n);
+        }
+    }
+    max
 }
 
 /// 以追加模式打开（不存在则创建）。
@@ -669,5 +705,94 @@ mod tests {
             .filter(|n| n.starts_with("tianyan_") && n.ends_with(".log"))
             .collect();
         assert_eq!(family.len(), 2, "族内应保留 2 个：{family:?}");
+    }
+
+    /// **当前文件恒为 `{stem}.log`**（2026-11-13 修正）：修复前的实现把日志写到
+    /// `{stem}.{seq}.log`、把 `.log` 留成**最老**那一个——排障时按名字打开 `.log`
+    /// 看到三周前的内容，误判「日志停在三周前」。现在轮转是「改名 → 新建空当前」。
+    #[test]
+    fn test_active_log_file_stays_at_stem_log_after_rotation() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut w = RotatingWriter::new(
+            dir.path().to_path_buf(),
+            "app".to_string(),
+            "app".to_string(),
+            LogRotation {
+                max_bytes: 200,
+                max_files: 10,
+            },
+        )
+        .unwrap();
+        for i in 0..40 {
+            w.write_all(format!("line-{i:03}\n").as_bytes()).unwrap();
+        }
+        w.flush().unwrap();
+
+        let cur = dir.path().join("app.log");
+        assert!(cur.exists(), "当前文件应恒为 app.log");
+        let cur_text = fs::read_to_string(&cur).unwrap();
+        assert!(
+            cur_text.contains("line-039"),
+            "app.log 必须是**最新**内容（最后一行在其中）：{cur_text}"
+        );
+
+        let mut hist: Vec<String> = fs::read_dir(dir.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|n| n.starts_with("app.") && n.ends_with(".log") && n != "app.log")
+            .collect();
+        hist.sort();
+        assert!(!hist.is_empty(), "写满上限应产出历史文件：{hist:?}");
+        assert!(
+            hist.iter().any(|n| n == "app.1.log"),
+            "首个历史文件应为 app.1.log：{hist:?}"
+        );
+        for h in &hist {
+            let text = fs::read_to_string(dir.path().join(h)).unwrap();
+            assert!(!text.contains("line-039"), "{h} 不应含最后一行");
+        }
+    }
+
+    /// 重启后序号从**已有历史的最大值**续：不得覆盖旧历史文件。
+    #[test]
+    fn test_restart_continues_sequence_without_overwriting_history() {
+        let dir = tempfile::tempdir().unwrap();
+        let rotation = LogRotation {
+            max_bytes: 120,
+            max_files: 20,
+        };
+        {
+            let mut w = RotatingWriter::new(
+                dir.path().to_path_buf(),
+                "app".to_string(),
+                "app".to_string(),
+                rotation,
+            )
+            .unwrap();
+            for i in 0..40 {
+                w.write_all(format!("a-{i:03}\n").as_bytes()).unwrap();
+            }
+            w.flush().unwrap();
+        }
+        let first_history = dir.path().join("app.1.log");
+        let before = fs::read_to_string(&first_history).unwrap();
+        assert!(before.contains("a-000"), "首轮历史应含 a-000：{before}");
+
+        // 模拟重启：新开一个 writer（同一目录）
+        {
+            let mut w = RotatingWriter::new(
+                dir.path().to_path_buf(),
+                "app".to_string(),
+                "app".to_string(),
+                rotation,
+            )
+            .unwrap();
+            for i in 0..40 {
+                w.write_all(format!("b-{i:03}\n").as_bytes()).unwrap();
+            }
+            w.flush().unwrap();
+        }
+        let after = fs::read_to_string(&first_history).unwrap();
+        assert_eq!(after, before, "重启后不得覆盖 app.1.log");
     }
 }
