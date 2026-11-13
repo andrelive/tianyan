@@ -5,9 +5,23 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [1.2.6] - 2026-11-13
 
 ### Added
+
+- **树文件 gzip 压缩**：快照树是 `{相对路径 → 64 位十六进制}` 的 JSON，路径高度重复。
+  序列化结果 ≥ 4 KB 时 gzip 落盘（小树压缩反而膨胀），读端按 gzip 魔数识别——明文旧树
+  照读、混合存储透明。全库实测（2,817 棵逐棵量）：**1,599.7 MB → 505.0 MB（31.6%）**，
+  存量由 `prune_snapshot_trees --recompress` 迁移，实测省 **1,069.5 MB**。
+- **`[snapshot]` 配置节**：`max_file_bytes`（替代硬编码 2 MiB 上限）+ `excludes`
+  （自定义排除，与内置排除和 `.gitignore` 叠加）+ `max_trees_per_session`（每会话树
+  留存上限）。此前这三条边界都不可调。
+- **内置定时任务可立即执行**：`POST /api/v1/scheduler/tasks/{id}/run` +
+  `TaskScheduler::run_now`——语义与定时触发一致（同一个 `execute_task` 路径、同样更新
+  `last_run` 并持久化），但没有「跨进程跑运维工具」的标记-清扫竞态。
+- **`vacuum_db`（运维工具）**：SQLite 删行不缩文件，批量清理后需显式 `VACUUM`。工具先报
+  `freelist_count`（决定值不值得跑），探测到 `127.0.0.1:3000` 有监听即拒绝（持排他锁
+  重建整库，与运行中的写入并发会损坏库）。
 
 - **`prune_snapshot_trees`（运维工具）**：按「通用排除集」重写存量快照树，把
   `.gitignore` 覆盖的构建产物与缓存（`target` / `node_modules` / `dist` / `.venv` /
@@ -28,6 +42,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   46 条演化语义规则不动，无法解析 0 条。**须停服务后执行**（脚本直接打开生产库）。
 
 ### Changed
+
+- **`executions` 加 30 天保留窗口**：这张 GEPA 数据表此前**没有任何清理**——实测
+  73,427 行 / 79 MB（`result` 62.2 MB + `task_description` 17.7 MB），横跨 85 天。
+  窗口取 30 天有实测依据：90 天删 0 行（等于不清理）、60 天删 10.9 MB、30 天删
+  **39.3 MB**（34,786 行）；消费侧（演化任务）只看近 7 天。照 `trace_spans` 的
+  T1-19 模式：落盘成功后按 1 小时节流清理。
+- **redo 数据加 7 天 TTL**：`save_redo` 每组数据（`tree-*.json` + `messages-*.json` +
+  缓存）只有两条出路——被「撤销回退」消费，或永久留着。实测 119 组 / 53.8 MB、最老
+  一组已 3 个月，GC 此前只清 `redo/*.cache.json`。现在 GC 按 mtime 整组清理，且放在
+  **标记阶段之前**（删掉后其引用对象同轮即回收）；任一同组文件在窗口内则整组保留。
+- **每会话快照树留存上限（默认 150 棵 + 会话起点）**：树是「每轮用户消息一棵」，
+  长期使用单调增长。GC 按 mtime 裁剪中间段，**最老一棵永远保留**；更早的锚点仍能回退
+  消息链（链在 SQLite），回退结果报 `snapshot_missing` 由前端明示。
+- **`diff` 复用 mtime 缓存**：此前 `walk_current` 传 `None`，每次 diff 全量读文件算
+  哈希；现在复用 `latest.cache.json`（大工作区从「全量哈希」降到「只 stat」）。
+- **日志轮转的活动文件恒为 `{stem}.log`**：此前实现把日志写到 `{stem}.{seq}.log`、
+  把 `.log` 留成**最老**那一个（与模块文档相反）——排障时按名字打开 `.log` 看到三周前
+  的内容，误判「日志停在三周前」。现在轮转走「rename → 新建空当前」，重启从历史最大
+  编号续，不覆盖旧历史。
+- **`.gitignore` 采集支持「工作目录是仓库子目录」**：此前只认 `workdir/.git`，会话绑到
+  `repo/crates/foo` 时忽略规则整份丢掉（快照照样收 `target/`、`dist/`）。现在向祖先
+  探测 `.git`（上限 8 层，gitfile 也算）。
 
 - **自演化删除改为跨期确认**：综述提议的删除不再当期满执行——首次提议只登记到
   `memory/events/task_states/evolution_pending_deletions`，下一期仍提议才真正归档；
@@ -51,6 +87,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   「abstract 必须是触发场景 → 动作」的硬要求并附上零命中事实。
 
 ### Fixed
+
+- **回退结果区分「未绑定工作区」与「该锚点无快照」**：两者此前都表现为「恢复了 0 个
+  文件」。新增 `snapshot_missing`，桌面端分开明示「该锚点无工作区快照，文件未回退」。
+- **恢复中途失败报出已恢复进度**：恢复不是原子的（先校验对象、后逐个写），此前中途
+  失败只报「失败」——调用方会以为工作区没动过。现在错误消息带「此前已恢复 N 个文件，
+  工作区处于半恢复状态」。
+- **缓存命中前确认对象仍在**：`latest.cache.json` 的 mtime/size 短路会直接复用旧 hash，
+  却不检查对象是否还在——实测一次树清理后有 **44,233 条**缓存记录指向已删对象，复用会
+  让新树引用悬空对象（该锚点回退在预校验阶段中止）。现在短路前先确认
+  `object_path(hash)` 存在；`prune_snapshot_trees` 重写后也自动清陈旧缓存。
 
 - **回退不再删除「归属不明」的工作区文件**（数据安全，ADR-055）。旧实现判断「目标树
   里没有 = 回退点之后新增」并直接删除，无任何校验；该前提在四种情况下不成立，最坏
