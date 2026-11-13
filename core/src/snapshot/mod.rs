@@ -420,8 +420,21 @@ impl SnapshotManager {
         let mut current: SnapshotTree = HashMap::new();
         if self.workdir.exists() {
             let ignored = self.git_ignored_paths(&self.workdir).await;
-            self.walk_current(&self.workdir, "", &mut current, None, &ignored)
-                .await?;
+            // 复用 latest 缓存（mtime/size 短路）：大工作区的 diff 从「全量读 + 哈希」
+            // 降到「只 stat」。两种失效情形都已兜住——对象被回收时 `walk_current`
+            // 不复用（见其缓存分支）；缓存陈旧最多多算几次哈希。
+            let prev_cache = self
+                .load_cache(&self.latest_cache_path(session_id))
+                .await
+                .unwrap_or(None);
+            self.walk_current(
+                &self.workdir,
+                "",
+                &mut current,
+                prev_cache.as_ref(),
+                &ignored,
+            )
+            .await?;
         }
 
         let mut files: Vec<FileDiff> = Vec::new();
@@ -911,7 +924,13 @@ impl SnapshotManager {
                         })?;
                     }
                     fs::write(&target, bytes).await.map_err(|e| {
-                        TianyanError::Custom(format!("snapshot: 恢复文件失败 {rel_path}: {e}"))
+                        // 报出**已恢复进度**：恢复不是原子的（先校验对象、后逐个写），
+                        // 中途失败时工作区已处于半恢复状态——只说「失败」会让调用方
+                        // 以为工作区没动过（ADR-040 的"全或无"只覆盖消息链截断）。
+                        TianyanError::Custom(format!(
+                            "snapshot: 恢复文件失败 {rel_path}: {e}\
+                             （此前已恢复 {written} 个文件，工作区处于半恢复状态）"
+                        ))
                     })?;
                     written += 1;
                 }
@@ -2894,5 +2913,47 @@ mod tests {
             .unwrap();
         assert_eq!(stats.redo_files_removed, 0, "1 小时内的数据不该动");
         assert!(mgr.has_redo("s1", "msg_1").await, "撤销回退仍可用");
+    }
+
+    /// 恢复中途失败必须报出**已恢复进度**：恢复不是原子的，只说「失败」会让调用方
+    /// 以为工作区没动过（实际已写了一半）。
+    #[tokio::test]
+    async fn test_restore_reports_partial_progress_on_write_failure() {
+        let (_dir, mgr) = setup().await;
+        write(&mgr.workdir, "a.txt", "v1");
+        write(&mgr.workdir, "b.txt", "v1");
+        mgr.capture("s1", "0").await.unwrap();
+
+        // 把 b.txt 换成目录：向它写文件必然失败
+        std::fs::remove_file(mgr.workdir.join("b.txt")).unwrap();
+        std::fs::create_dir_all(mgr.workdir.join("b.txt").join("inner")).unwrap();
+        // a.txt 也变了 → 恢复必须真的写文件（可能先于 b.txt 成功）
+        write(&mgr.workdir, "a.txt", "v2-changed");
+
+        let err = mgr
+            .restore("s1", "0")
+            .await
+            .expect_err("向目录写文件应失败");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("已恢复") && msg.contains("半恢复"),
+            "错误应报告已恢复进度与半恢复状态：{msg}"
+        );
+    }
+
+    /// `diff` 复用 latest 缓存（mtime/size 短路）后仍必须检测内容变化：
+    /// 缓存只是加速，不是权威——等长改写 + mtime 撞车的漏检由 `SMALL_FILE_BYTES`
+    /// 兜住，大文件靠 mtime 纳秒判据。
+    #[tokio::test]
+    async fn test_diff_with_cache_detects_change() {
+        let (_dir, mgr) = setup().await;
+        write(&mgr.workdir, "a.txt", "v1");
+        mgr.capture("s1", "0").await.unwrap(); // 建立 latest 缓存（diff 会复用）
+
+        write(&mgr.workdir, "a.txt", "v2-longer");
+        let result = mgr.diff("s1", "0").await.unwrap();
+        assert_eq!(result.files.len(), 1, "应报一个文件差异");
+        assert_eq!(result.files[0].status, "modified");
+        assert_eq!(result.files[0].path, "a.txt");
     }
 }

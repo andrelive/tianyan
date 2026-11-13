@@ -1025,26 +1025,48 @@ impl ClientApp {
             let _ = this.update(cx, |this, cx| {
                 match res {
                     Ok(v) => {
-                        // 安全护栏（回退删除收窄）：有文件按护栏保留时**必须**明示——
-                        // 否则用户以为工作区文件也整体退回到了该点（实际上多留了文件，
-                        // 但绝无删除，因为归属不明时宁可保留）。
-                        let suppressed = v
-                            .pointer("/rollback/deletion_suppressed")
-                            .and_then(serde_json::Value::as_u64)
-                            .unwrap_or(0);
+                        // 回退结果**全量**展示（字段都在 `RollbackOutcome` 里，此前只写
+                        // 「已回退」）：截断几条消息、恢复几个文件、有没有按护栏保留、
+                        // 能不能撤销——以及「未绑定工作区 → 文件根本没回退」这个必须
+                        // 明说的情形（否则用户以为文件也退回去了）。
+                        let num = |path: &str| {
+                            v.pointer(path)
+                                .and_then(serde_json::Value::as_u64)
+                                .unwrap_or(0)
+                        };
+                        let truncated = num("/rollback/truncated");
+                        let restored = num("/rollback/restored_files");
+                        let suppressed = num("/rollback/deletion_suppressed");
                         let reason = v
                             .pointer("/rollback/suppression_reason")
                             .and_then(serde_json::Value::as_str)
                             .unwrap_or("归属不明");
+                        let redo = v
+                            .pointer("/rollback/redo_available")
+                            .and_then(serde_json::Value::as_bool)
+                            .unwrap_or(false);
+                        let no_workdir = v
+                            .pointer("/rollback/workdir")
+                            .map(serde_json::Value::is_null)
+                            .unwrap_or(false);
+
+                        let mut status = format!("已回退 {truncated} 条消息");
+                        if no_workdir {
+                            status.push_str("（该会话未绑定工作区，文件未回退）");
+                        } else {
+                            status.push_str(&format!("，恢复 {restored} 个文件"));
+                            if redo {
+                                status.push_str("，可撤销");
+                            }
+                        }
                         if suppressed > 0 {
-                            this.set_status(format!("已回退（{suppressed} 个文件按护栏保留）"));
+                            status.push_str(&format!("，{suppressed} 个按护栏保留"));
                             this.push_notice(
                                 format!("回退完成，但 {suppressed} 个文件未删除：{reason}"),
                                 true,
                             );
-                        } else {
-                            this.set_status("已回退".to_string());
                         }
+                        this.set_status(status);
                         // 把被回退的那条用户输入**放回输入框**（用户实测指出
                         // 「回退后没有回到输入框中，导致要重新输入」）。
                         // 异步回调拿不到 `&mut Window`，所以写进待回填槽位，
