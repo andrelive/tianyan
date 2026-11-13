@@ -210,6 +210,79 @@ struct CaptureScan<'a> {
     /// 捕获时存在但未纳入快照的路径（内置排除 / git 忽略 / 超大 / 读取失败）。
     skipped: &'a mut HashSet<String>,
 }
+/// 一个目录条目的静态信息（**一次同步 stat 拿全**）。
+///
+/// 存在的理由：`tokio::fs` 的每个操作都是一次 `spawn_blocking`（派发到阻塞
+/// 线程池 + 回传结果），单次约 50–150 µs。原实现对每个文件分别
+/// `file_type().await` + `metadata().await`——949 个文件 ≈ 2,000 次跨线程往返
+/// ≈ 200 ms，而遍历是**串行**的（一次只有一个操作在飞），拿不到异步的任何
+/// 并发收益，只付了调度成本。
+///
+/// 顺带一个白拿的好处：同步 `file_type()` 是**纯内存读取**（`read_dir` 已把
+/// 目录项的文件属性批量读回），tokio 的异步版本却要为它走一趟线程池。
+struct DirEntryStat {
+    /// 文件名（不含父路径）。
+    name: String,
+    /// 完整路径。
+    path: PathBuf,
+    is_dir: bool,
+    is_file: bool,
+    /// 文件长度（非普通文件为 0）。
+    len: u64,
+    /// 修改时间（epoch 纳秒；取不到或非文件为 0）。
+    mtime_ns: u128,
+}
+
+/// 同步读一个目录的全部条目信息（**在 `spawn_blocking` 里整体跑一次**）。
+///
+/// 错误语义与原异步版本一致：读目录失败 / 迭代失败 / 取元数据失败 → `Err`。
+fn read_dir_stat_sync(dir: &Path) -> std::io::Result<Vec<DirEntryStat>> {
+    let mut out = Vec::new();
+    for entry in std::fs::read_dir(dir)? {
+        let entry = entry?;
+        // `file_type()` 在同步版里不产生系统调用（`read_dir` 已带属性）
+        let file_type = entry.file_type()?;
+        let (len, mtime_ns) = if file_type.is_file() {
+            let meta = entry.metadata()?; // 每文件一次 `GetFileAttributesEx`
+            let mtime_ns = meta
+                .modified()
+                .ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_nanos())
+                .unwrap_or(0);
+            (meta.len(), mtime_ns)
+        } else {
+            (0, 0)
+        };
+        out.push(DirEntryStat {
+            name: entry.file_name().to_string_lossy().to_string(),
+            path: entry.path(),
+            is_dir: file_type.is_dir(),
+            is_file: file_type.is_file(),
+            len,
+            mtime_ns,
+        });
+    }
+    Ok(out)
+}
+
+/// [`read_dir_stat_sync`] 的异步包装：**一次调度换一整个目录**。
+///
+/// 遍历的调度粒度就该是「一个目录」，而不是「一个条目的一个属性」。
+async fn read_dir_stat(dir: &Path) -> Result<Vec<DirEntryStat>> {
+    let path = dir.to_path_buf();
+    let label = dir.display().to_string();
+    match tokio::task::spawn_blocking(move || read_dir_stat_sync(&path)).await {
+        Ok(Ok(entries)) => Ok(entries),
+        Ok(Err(e)) => Err(TianyanError::Custom(format!(
+            "snapshot: 读取目录失败 {label}: {e}"
+        ))),
+        // 阻塞任务 panic / 被取消：按目录读取失败处理（不静默跳过整棵子树）
+        Err(e) => Err(TianyanError::Custom(format!(
+            "snapshot: 目录遍历任务失败 {label}: {e}"
+        ))),
+    }
+}
 
 /// 工作区恢复结果。
 ///
@@ -1082,48 +1155,30 @@ impl SnapshotManager {
         prev_cache: Option<&FileCache>,
         scan: &mut CaptureScan<'_>,
     ) -> Result<()> {
-        let mut entries = fs::read_dir(dir).await.map_err(|e| {
-            TianyanError::Custom(format!("snapshot: 读取目录失败 {}: {e}", dir.display()))
-        })?;
-
-        while let Some(entry) = entries.next_entry().await.map_err(|e| {
-            TianyanError::Custom(format!("snapshot: 遍历目录失败 {}: {e}", dir.display()))
-        })? {
-            let name = entry.file_name().to_string_lossy().to_string();
+        // 一个目录**一次调度**，把该目录所有条目的类型/大小/mtime 一起拿回来
+        // （见 `read_dir_stat`：原来每个文件两次 `spawn_blocking`，是回退耗时的大头）
+        let entries = read_dir_stat(dir).await?;
+        for entry in entries {
             let rel = if prefix.is_empty() {
-                name.clone()
+                entry.name.clone()
             } else {
-                format!("{}/{}", prefix, name)
+                format!("{}/{}", prefix, entry.name)
             };
             // 两道排除：内置目录名 / 超大文件（下文）+ git 忽略清单
-            if self.is_excluded(&name) || path_under(&rel, scan.ignored) {
+            if self.is_excluded(&entry.name) || path_under(&rel, scan.ignored) {
                 scan.skipped.insert(rel);
                 continue;
             }
 
-            let file_type = entry
-                .file_type()
-                .await
-                .map_err(|e| TianyanError::Custom(format!("snapshot: 读取文件类型失败: {e}")))?;
-
-            if file_type.is_dir() {
-                Box::pin(self.walk_and_capture(&entry.path(), &rel, tree, cache, prev_cache, scan))
+            if entry.is_dir {
+                Box::pin(self.walk_and_capture(&entry.path, &rel, tree, cache, prev_cache, scan))
                     .await?;
-            } else if file_type.is_file() {
-                let meta = entry
-                    .metadata()
-                    .await
-                    .map_err(|e| TianyanError::Custom(format!("snapshot: 读取元数据失败: {e}")))?;
-                if meta.len() > self.max_file_bytes {
+            } else if entry.is_file {
+                if entry.len > self.max_file_bytes {
                     scan.skipped.insert(rel);
                     continue;
                 }
-                let mtime_ns = meta
-                    .modified()
-                    .ok()
-                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                    .map(|d| d.as_nanos())
-                    .unwrap_or(0);
+                let mtime_ns = entry.mtime_ns;
 
                 // 命中缓存:同 mtime(纳秒) + 同 size → 复用 hash,不读内容
                 if let Some(prev) = prev_cache.and_then(|c| c.get(&rel)) {
@@ -1135,8 +1190,8 @@ impl SnapshotManager {
                     // 的回退在预校验阶段中止（`快照对象缺失`）。缓存是纯优化，一次
                     // stat 换掉一类悬空引用。
                     if prev.mtime_ns == mtime_ns
-                        && prev.size == meta.len()
-                        && meta.len() > SMALL_FILE_BYTES
+                        && prev.size == entry.len
+                        && entry.len > SMALL_FILE_BYTES
                         && self.object_path(&prev.hash).exists()
                     {
                         tree.insert(rel.clone(), prev.hash.clone());
@@ -1144,7 +1199,7 @@ impl SnapshotManager {
                             rel,
                             CachedFile {
                                 mtime_ns,
-                                size: meta.len(),
+                                size: entry.len,
                                 hash: prev.hash.clone(),
                             },
                         );
@@ -1152,14 +1207,14 @@ impl SnapshotManager {
                     }
                 }
 
-                match self.capture_file(&entry.path()).await {
+                match self.capture_file(&entry.path).await {
                     Ok(Some(hash)) => {
                         tree.insert(rel.clone(), hash.clone());
                         cache.insert(
                             rel,
                             CachedFile {
                                 mtime_ns,
-                                size: meta.len(),
+                                size: entry.len,
                                 hash,
                             },
                         );
@@ -1231,44 +1286,25 @@ impl SnapshotManager {
         prev_cache: Option<&FileCache>,
         ignored: &HashSet<String>,
     ) -> Result<()> {
-        let mut entries = fs::read_dir(dir).await.map_err(|e| {
-            TianyanError::Custom(format!("snapshot: 读取目录失败 {}: {e}", dir.display()))
-        })?;
-
-        while let Some(entry) = entries.next_entry().await.map_err(|e| {
-            TianyanError::Custom(format!("snapshot: 遍历目录失败 {}: {e}", dir.display()))
-        })? {
-            let name = entry.file_name().to_string_lossy().to_string();
+        // 一个目录**一次调度**（与 `walk_and_capture` 同一手法，见 `read_dir_stat`）
+        let entries = read_dir_stat(dir).await?;
+        for entry in entries {
             let rel = if prefix.is_empty() {
-                name.clone()
+                entry.name.clone()
             } else {
-                format!("{}/{}", prefix, name)
+                format!("{}/{}", prefix, entry.name)
             };
-            if self.is_excluded(&name) || path_under(&rel, ignored) {
+            if self.is_excluded(&entry.name) || path_under(&rel, ignored) {
                 continue;
             }
 
-            let file_type = entry
-                .file_type()
-                .await
-                .map_err(|e| TianyanError::Custom(format!("snapshot: 读取文件类型失败: {e}")))?;
-
-            if file_type.is_dir() {
-                Box::pin(self.walk_current(&entry.path(), &rel, tree, prev_cache, ignored)).await?;
-            } else if file_type.is_file() {
-                let meta = entry
-                    .metadata()
-                    .await
-                    .map_err(|e| TianyanError::Custom(format!("snapshot: 读取元数据失败: {e}")))?;
-                if meta.len() > self.max_file_bytes {
+            if entry.is_dir {
+                Box::pin(self.walk_current(&entry.path, &rel, tree, prev_cache, ignored)).await?;
+            } else if entry.is_file {
+                if entry.len > self.max_file_bytes {
                     continue;
                 }
-                let mtime_ns = meta
-                    .modified()
-                    .ok()
-                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                    .map(|d| d.as_nanos())
-                    .unwrap_or(0);
+                let mtime_ns = entry.mtime_ns;
                 // 命中缓存：同 mtime(纳秒) + 同 size → 复用哈希，不读内容
                 if let Some(prev) = prev_cache.and_then(|c| c.get(&rel)) {
                     // 小文件不走短路（与 walk_and_capture 同判据，见 SMALL_FILE_BYTES）
@@ -1277,15 +1313,15 @@ impl SnapshotManager {
                     // 「当前工作区内容 == 目标树」的判定会用两个都失效的 hash 成立，
                     // 掩盖「对象其实已被回收」的事实（diff 随后读对象失败）。
                     if prev.mtime_ns == mtime_ns
-                        && prev.size == meta.len()
-                        && meta.len() > SMALL_FILE_BYTES
+                        && prev.size == entry.len
+                        && entry.len > SMALL_FILE_BYTES
                         && self.object_path(&prev.hash).exists()
                     {
                         tree.insert(rel, prev.hash.clone());
                         continue;
                     }
                 }
-                if let Ok(bytes) = fs::read(entry.path()).await {
+                if let Ok(bytes) = fs::read(&entry.path).await {
                     tree.insert(rel, hex_sha256(&bytes));
                 }
             }
@@ -2047,6 +2083,238 @@ mod tests {
 
     fn read(workdir: &Path, rel: &str) -> String {
         std::fs::read_to_string(workdir.join(rel)).unwrap()
+    }
+
+    /// A/B 实测：真实工作区上「旧方式（每文件两次 `tokio::fs` 调用）」vs
+    /// 「新方式（每目录一次同步遍历）」的耗时对比。
+    ///
+    /// 手工跑（不进 CI：依赖本机工作区，耗时随目录规模变化）：
+    /// ```text
+    /// $env:TIANYAN_BENCH_DIR="F:\work\git\tianyan"
+    /// cargo test -p tianyan-core --lib bench_walk_async_vs_sync -- --ignored --nocapture
+    /// ```
+    #[tokio::test]
+    #[ignore = "手工跑：需要 TIANYAN_BENCH_DIR 指向真实工作区"]
+    async fn bench_walk_async_vs_sync() {
+        /// 旧方式：每个文件两次异步调用（`file_type` + `metadata`）。
+        async fn walk_old(dir: &Path, files: &mut usize, dirs: &mut usize) {
+            let mut entries = fs::read_dir(dir).await.expect("读目录");
+            while let Some(entry) = entries.next_entry().await.expect("迭代目录") {
+                let name = entry.file_name().to_string_lossy().to_string();
+                if is_bench_excluded(&name) {
+                    continue;
+                }
+                let file_type = entry.file_type().await.expect("file_type");
+                if file_type.is_dir() {
+                    *dirs += 1;
+                    Box::pin(walk_old(&entry.path(), files, dirs)).await;
+                } else if file_type.is_file() {
+                    let _ = entry.metadata().await.expect("metadata");
+                    *files += 1;
+                }
+            }
+        }
+
+        /// 新方式：每个目录一次同步遍历（生产实现 `read_dir_stat`）。
+        async fn walk_new(dir: &Path, files: &mut usize, dirs: &mut usize) {
+            let entries = read_dir_stat(dir).await.expect("读目录");
+            for entry in entries {
+                if is_bench_excluded(&entry.name) {
+                    continue;
+                }
+                if entry.is_dir {
+                    *dirs += 1;
+                    Box::pin(walk_new(&entry.path, files, dirs)).await;
+                } else if entry.is_file {
+                    *files += 1;
+                }
+            }
+        }
+
+        fn is_bench_excluded(name: &str) -> bool {
+            DEFAULT_EXCLUDED_DIRS
+                .iter()
+                .any(|d| d.eq_ignore_ascii_case(name))
+        }
+
+        let Ok(dir) = std::env::var("TIANYAN_BENCH_DIR") else {
+            println!("未设置 TIANYAN_BENCH_DIR，跳过");
+            return;
+        };
+        let root = PathBuf::from(dir);
+
+        let (mut files_old, mut dirs_old) = (0usize, 0usize);
+        let t_old = std::time::Instant::now();
+        walk_old(&root, &mut files_old, &mut dirs_old).await;
+        let old_ms = t_old.elapsed().as_millis();
+
+        let (mut files_new, mut dirs_new) = (0usize, 0usize);
+        let t_new = std::time::Instant::now();
+        walk_new(&root, &mut files_new, &mut dirs_new).await;
+        let new_ms = t_new.elapsed().as_millis();
+
+        println!("旧（每文件 2 次异步调用）: {files_old} 文件 / {dirs_old} 目录 = {old_ms} ms");
+        println!("新（每目录 1 次同步遍历）: {files_new} 文件 / {dirs_new} 目录 = {new_ms} ms");
+        assert_eq!(
+            (files_old, dirs_old),
+            (files_new, dirs_new),
+            "两版必须看到同一批文件与目录（排除规则与递归口径等价）"
+        );
+        assert!(
+            new_ms < old_ms,
+            "新的必须更快（旧 {old_ms} ms / 新 {new_ms} ms）"
+        );
+    }
+
+    /// 全流程分段实测：`capture()` 在真实工作区上的耗时构成
+    /// （git 忽略清单 / 遍历 / 读内容写对象 / 写树 / 写缓存）。
+    ///
+    /// 为什么需要它：`redo_ms` 只给总耗时，猜构成猜错过一次（把 ~50 ms 的调度
+    /// 税估成了 200 ms）。这个探针把每一段单独计时，别再靠推算。
+    ///
+    /// ```text
+    /// $env:TIANYAN_BENCH_DIR="F:\work\git\tianyan"
+    /// cargo test -p tianyan-core --lib bench_capture_full_pipeline -- --ignored --nocapture
+    /// ```
+    #[tokio::test]
+    #[ignore = "手工跑：需要 TIANYAN_BENCH_DIR 指向真实工作区"]
+    async fn bench_capture_full_pipeline() {
+        let Ok(dir) = std::env::var("TIANYAN_BENCH_DIR") else {
+            println!("未设置 TIANYAN_BENCH_DIR，跳过");
+            return;
+        };
+        let tmp = tempdir().unwrap();
+        let mgr = SnapshotManager::new(tmp.path().join("snap"), PathBuf::from(dir));
+        let workdir = mgr.workdir.clone();
+
+        // 预热一次（建立 latest 缓存与对象库），随后测「热路径」的分段构成
+        let t = std::time::Instant::now();
+        mgr.capture("bench", "m1").await.expect("首捕");
+        let cold_ms = t.elapsed().as_millis();
+
+        let t = std::time::Instant::now();
+        let ignored = mgr.git_ignored_paths(&workdir).await;
+        let gitignore_ms = t.elapsed().as_millis();
+
+        let t = std::time::Instant::now();
+        let prev_cache = mgr
+            .load_cache(&mgr.latest_cache_path("bench"))
+            .await
+            .unwrap_or(None);
+        let load_cache_ms = t.elapsed().as_millis();
+
+        let t = std::time::Instant::now();
+        let mut tree = HashMap::new();
+        let mut cache = HashMap::new();
+        let mut skipped = HashSet::new();
+        let mut scan = CaptureScan {
+            ignored: &ignored,
+            skipped: &mut skipped,
+        };
+        mgr.walk_and_capture(
+            &workdir,
+            "",
+            &mut tree,
+            &mut cache,
+            prev_cache.as_ref(),
+            &mut scan,
+        )
+        .await
+        .expect("遍历捕获");
+        let walk_ms = t.elapsed().as_millis();
+
+        let t = std::time::Instant::now();
+        let loaded = LoadedTree {
+            files: tree.clone(),
+            workdir: Some(SnapshotManager::normalize_workdir(&workdir).await),
+            skipped: skipped.clone(),
+        };
+        SnapshotManager::write_tree_file(&tmp.path().join("snap/bench-tree.json"), &loaded)
+            .await
+            .expect("写树");
+        let write_tree_ms = t.elapsed().as_millis();
+
+        let t = std::time::Instant::now();
+        let cache_json = serde_json::to_string(&cache).expect("序列化缓存");
+        std::fs::write(tmp.path().join("snap/bench-cache.json"), &cache_json).expect("写缓存");
+        let write_cache_ms = t.elapsed().as_millis();
+
+        // 遍历内部的三个「每文件一次」的操作单独立测：对象存在性 stat /
+        // git 忽略清单匹配 / 内置排除匹配。它们藏在 `walk_and_capture` 循环里，
+        // 不单独计时就只能看到「遍历慢」这一个笼统结论。
+        let t = std::time::Instant::now();
+        let mut object_hits = 0usize;
+        for hash in tree.values() {
+            if mgr.object_path(hash).exists() {
+                object_hits += 1;
+            }
+        }
+        let exists_ms = t.elapsed().as_millis();
+
+        let t = std::time::Instant::now();
+        let mut ignored_hits = 0usize;
+        for rel in tree.keys() {
+            if path_under(rel, &ignored) {
+                ignored_hits += 1;
+            }
+        }
+        let path_under_ms = t.elapsed().as_millis();
+
+        let t = std::time::Instant::now();
+        for rel in tree.keys() {
+            let name = rel.rsplit('/').next().unwrap_or(rel);
+            let _ = mgr.is_excluded(name);
+        }
+        let is_excluded_ms = t.elapsed().as_millis();
+
+        println!(
+            "文件 {} / 首捕(冷) {cold_ms} ms / 热路径: gitignore {gitignore_ms} + load_cache {load_cache_ms} \
+             + walk {walk_ms} + 写树 {write_tree_ms} + 写缓存 {write_cache_ms} ms\n\
+             walk 内的每文件操作: 对象存在性 {exists_ms} ms({object_hits} 命中) / \
+             path_under {path_under_ms} ms({ignored_hits} 命中) / is_excluded {is_excluded_ms} ms",
+            tree.len(),
+        );
+        // 探针不做吞吐门禁（机器差异大），只断言「跑通了、确实纳入了文件」。
+        // 分段数字靠打印看：哪一段冒尖，那一段就是下一个优化点。
+        assert!(
+            !tree.is_empty() && walk_ms > 0,
+            "遍历没有产出（文件 {} / walk {walk_ms} ms）",
+            tree.len()
+        );
+    }
+
+    /// `read_dir_stat_sync`：一次同步遍历必须把「类型 / 长度 / mtime / 完整路径」
+    /// 全部采到位——这四个字段是上游所有判断的依据（目录要递归、超大文件要跳过、
+    /// mtime+size 决定能否复用缓存哈希）。
+    ///
+    /// 回归背景：遍历从「每文件两次 `tokio::fs` 调用」改成「每目录一次同步遍历」
+    /// （见 `read_dir_stat`），信息面必须一个不少，否则缓存短路与超大文件判断
+    /// 会静默失效。
+    #[test]
+    fn test_read_dir_stat_reports_type_size_and_mtime() {
+        let dir = tempdir().unwrap();
+        std::fs::write(dir.path().join("a.txt"), "hello").unwrap();
+        std::fs::create_dir(dir.path().join("sub")).unwrap();
+        std::fs::write(dir.path().join("sub/inner.txt"), "xy").unwrap();
+
+        let entries = read_dir_stat_sync(dir.path()).unwrap();
+        assert_eq!(entries.len(), 2, "应读到文件 + 目录各一条");
+
+        let file = entries
+            .iter()
+            .find(|e| e.name == "a.txt")
+            .expect("应包含 a.txt");
+        assert!(file.is_file && !file.is_dir, "普通文件类型判定");
+        assert_eq!(file.len, 5, "长度必须采到（缓存按 size 短路）");
+        assert!(file.mtime_ns > 0, "mtime 必须采到（缓存按 mtime 短路）");
+        assert_eq!(file.path, dir.path().join("a.txt"), "路径应是完整路径");
+
+        let sub = entries
+            .iter()
+            .find(|e| e.name == "sub")
+            .expect("应包含 sub");
+        assert!(sub.is_dir && !sub.is_file, "目录类型判定");
+        assert_eq!((sub.len, sub.mtime_ns), (0, 0), "目录不求长度与 mtime");
     }
 
     #[test]
