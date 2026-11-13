@@ -106,10 +106,13 @@ const GIT_IGNORE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3
 ///
 /// 一次回退里有三次遍历（`save_redo` 捕获 + `restore_tree` 扫描 + `diff` 可选）
 /// 都要同一份清单，每条用户消息前还要再取一次——每次都 spawn git 是纯浪费
-/// （实测 tianyan 仓库单次 100–200 ms）。TTL 内复用；`.gitignore` 的改动最多
-/// 延迟一个 TTL 生效，且**不影响正确性**：清单只决定「哪些路径不进快照」，
-/// 多存几个文件无害，漏存的由 `skipped` 属主兜底。
-const GIT_IGNORE_TTL: std::time::Duration = std::time::Duration::from_secs(60);
+/// （实测 tianyan 仓库单次 100–200 ms）。
+///
+/// 失效**主要靠 [`SnapshotManager::gitignore_stamp`]**（`.gitignore` 未变即复用，
+/// 与时间无关）；这里的 TTL 只是兜「git 环境本身变了」的兜底（仓库从无到有、
+/// `.git` 被移走、git 升级改写索引）。即便缓存滞后也**不影响正确性**：清单只
+/// 决定「哪些路径不进快照」，多存几个文件无害，漏存的由 `skipped` 属主兜底。
+const GIT_IGNORE_TTL: std::time::Duration = std::time::Duration::from_secs(600);
 
 /// 重做数据（`redo/tree-*.json` + `messages-*.json` + 对应缓存）的保留时长。
 ///
@@ -119,8 +122,8 @@ const GIT_IGNORE_TTL: std::time::Duration = std::time::Duration::from_secs(60);
 /// 真实间隔，超期后清理是安全的（超期再点撤销本来也不是用户预期）。
 const REDO_TTL: std::time::Duration = std::time::Duration::from_secs(7 * 24 * 3600);
 
-/// git 忽略清单缓存条目：`(取回时刻, 清单)`。
-type IgnoreCacheEntry = (std::time::Instant, HashSet<String>);
+/// git 忽略清单缓存条目：`(取回时刻, 清单, .gitignore 指纹)`。
+type IgnoreCacheEntry = (std::time::Instant, HashSet<String>, u64);
 
 /// git 忽略清单缓存（`workdir → 条目`），经 `Arc<Mutex<…>>` 在克隆间共享。
 type IgnoreCache = Arc<Mutex<HashMap<PathBuf, IgnoreCacheEntry>>>;
@@ -1463,13 +1466,14 @@ impl SnapshotManager {
     /// 只有内置排除生效，绝不阻断快照。
     async fn git_ignored_paths(&self, workdir: &Path) -> HashSet<String> {
         let key = workdir.to_path_buf();
+        let stamp = Self::gitignore_stamp(workdir).await;
         {
             let cache = match self.ignore_cache.lock() {
                 Ok(g) => g,
                 Err(poisoned) => poisoned.into_inner(),
             };
-            if let Some((at, set)) = cache.get(&key) {
-                if at.elapsed() < GIT_IGNORE_TTL {
+            if let Some((at, set, cached_stamp)) = cache.get(&key) {
+                if *cached_stamp == stamp && at.elapsed() < GIT_IGNORE_TTL {
                     return set.clone();
                 }
             }
@@ -1480,9 +1484,56 @@ impl SnapshotManager {
                 Ok(g) => g,
                 Err(poisoned) => poisoned.into_inner(),
             };
-            cache.insert(key, (std::time::Instant::now(), set.clone()));
+            cache.insert(key, (std::time::Instant::now(), set.clone(), stamp));
         }
         set
+    }
+
+    /// `.gitignore` 规则文件指纹（沿祖先链，最多 8 层）。
+    ///
+    /// 把每个 `.gitignore`（含仓库根的 `.git/info/exclude`）的「路径 + mtime 纳秒 +
+    /// 长度」混成一个 u64。规则文件没动过 → 指纹不变 → 忽略清单直接复用，
+    /// **不再受时间窗口约束**。
+    ///
+    /// 为什么需要它：此前只有 60 秒 TTL，用户回退距上一轮捕获超过一分钟就要
+    /// 重新 spawn 一次 `git ls-files`（实测该仓库单次 100–200 ms，在几百毫秒的
+    /// 回退总耗时里占相当一块），而 `.gitignore` 实际上几乎从不改。一次几十微秒的
+    /// 文件探测换掉一个子进程。
+    async fn gitignore_stamp(workdir: &Path) -> u64 {
+        use std::hash::{Hash, Hasher};
+        /// 向上查找层数上限（与 `likely_in_git_repo` 一致）。
+        const MAX_ANCESTOR_DEPTH: usize = 8;
+
+        let mut candidates: Vec<PathBuf> = Vec::new();
+        let mut cur = workdir.to_path_buf();
+        for depth in 0..=MAX_ANCESTOR_DEPTH {
+            candidates.push(cur.join(".gitignore"));
+            let git = cur.join(".git");
+            if git.exists() {
+                // 仓库根：局部排除规则还可能写在 `.git/info/exclude`
+                // （gitfile 形态——worktree / submodule——没有该文件，探测不到即可）
+                candidates.push(git.join("info").join("exclude"));
+                break;
+            }
+            match cur.parent() {
+                Some(parent) if depth < MAX_ANCESTOR_DEPTH => cur = parent.to_path_buf(),
+                _ => break,
+            }
+        }
+
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        for path in candidates {
+            if let Ok(meta) = fs::metadata(&path).await {
+                let mtime = meta
+                    .modified()
+                    .ok()
+                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                    .map(|d| d.as_nanos())
+                    .unwrap_or(0);
+                (path.to_string_lossy().to_string(), mtime, meta.len()).hash(&mut hasher);
+            }
+        }
+        hasher.finish()
     }
 
     /// 真正采集一次 git 忽略清单（不含缓存；见 [`Self::git_ignored_paths`]）。
@@ -2006,6 +2057,42 @@ mod tests {
         assert_eq!(other.root(), Path::new("root-a"), "root 应共享");
         assert_eq!(other.workdir(), Path::new("ws-b"), "workdir 应替换");
         assert_eq!(mgr.workdir(), Path::new("ws-a"), "原实例不受影响");
+    }
+
+    /// `.gitignore` 指纹：规则文件变了才变、没变就稳定（忽略清单缓存的失效依据）。
+    ///
+    /// 回归背景：此前只有 60 秒 TTL——用户回退距上一轮捕获超过一分钟就要重新
+    /// spawn 一次 `git ls-files`（实测该仓库单次 100–200 ms，在几百毫秒的回退
+    /// 总耗时里占相当一块），而 `.gitignore` 实际上几乎从不改。
+    #[tokio::test]
+    async fn test_gitignore_stamp_tracks_rule_files() {
+        let (_dir, mgr) = setup().await;
+
+        let none = SnapshotManager::gitignore_stamp(&mgr.workdir).await;
+        assert_eq!(
+            none,
+            SnapshotManager::gitignore_stamp(&mgr.workdir).await,
+            "同一状态指纹必须稳定（否则缓存永远不命中）"
+        );
+
+        write(&mgr.workdir, ".gitignore", "target/\n");
+        let created = SnapshotManager::gitignore_stamp(&mgr.workdir).await;
+        assert_ne!(created, none, "新增 .gitignore 应改变指纹");
+
+        // 改动内容（长度与 mtime 都变）→ 指纹必须变，否则忽略清单不会失效
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        write(
+            &mgr.workdir,
+            ".gitignore",
+            "target/\ndist/\nnode_modules/\n",
+        );
+        let changed = SnapshotManager::gitignore_stamp(&mgr.workdir).await;
+        assert_ne!(changed, created, "规则文件改动应改变指纹");
+        assert_eq!(
+            changed,
+            SnapshotManager::gitignore_stamp(&mgr.workdir).await,
+            "未改动时指纹应稳定"
+        );
     }
 
     #[tokio::test]
