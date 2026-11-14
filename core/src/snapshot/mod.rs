@@ -300,7 +300,12 @@ fn read_dir_stat_sync(dir: &Path) -> std::io::Result<Vec<DirEntryStat>> {
         // `file_type()` 在同步版里不产生系统调用（`read_dir` 已带属性）
         let file_type = entry.file_type()?;
         let (len, mtime_ns) = if file_type.is_file() {
-            let meta = entry.metadata()?; // 每文件一次 `GetFileAttributesEx`
+            // Windows：`DirEntry::metadata()` 直接用 readdir 缓存的 find data
+            // （**不产生额外系统调用**）；只有 Unix / 符号链接才需要 symlink_metadata。
+            // 这正是「遍历一次就把 len + mtime 全拿到」的依据——若换成
+            // `fs::metadata(path)` 则每文件一次 stat（实测约 130 µs/次，被安全软件的
+            // 文件过滤驱动放大），全树捕获会慢一个数量级。
+            let meta = entry.metadata()?;
             let mtime_ns = meta
                 .modified()
                 .ok()
