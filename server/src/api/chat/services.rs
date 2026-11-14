@@ -371,7 +371,8 @@ async fn resolve_or_create_session(
 ) -> Result<(String, bool), ApiError> {
     // 如果传了 session_id 且服务端已存在，直接复用
     if let Some(sid) = session_id.filter(|s| !s.is_empty()) {
-        if session_manager.get_session(sid).await?.is_some() {
+        // 只判存在（`EXISTS` 查询）——这里不需要消息链
+        if session_manager.session_exists(sid).await? {
             return Ok((sid.to_string(), false));
         }
     }

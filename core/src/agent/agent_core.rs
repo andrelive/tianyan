@@ -621,9 +621,11 @@ impl Agent {
     ///
     /// 判定本身是纯函数 [`WorkingDirectory::resolve`]（可单测），这里只负责取数。
     pub(crate) async fn resolve_working_directory(&self, session_id: &str) -> WorkingDirectory {
-        let bound = match self.session_manager.get_session(session_id).await {
-            Ok(Some(session)) => session
-                .header
+        // 只取 header 的一列（`session_header` 走 `SELECT header_json`）：此前用
+        // `get_session`，长会话（实测 5571 条 / 15.3 MB）会为了这一个字段把整条链
+        // 读出来反序列化——回退与「每轮捕获快照」两条热路径都要走，一次约 190 ms。
+        let bound = match self.session_manager.session_header(session_id).await {
+            Ok(Some(header)) => header
                 .working_directory
                 .filter(|d| !d.trim().is_empty())
                 .map(PathBuf::from),

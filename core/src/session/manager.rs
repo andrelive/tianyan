@@ -115,6 +115,18 @@ pub trait SessionManager: Send + Sync {
             .and_then(|s| s.messages.iter().position(|m| m.id == message_id))
             .map(|i| i as i64))
     }
+    /// 取会话**头部**（title / `working_directory` / injectable 快照等会话级状态）。
+    ///
+    /// 只读 `session_meta.header_json` 一列，**不加载消息链**。
+    /// 默认实现委托 [`Self::get_session`]（测试桩可用）；持久化实现覆盖为单列查询。
+    ///
+    /// 为什么必须有它：调用方往往只要 header 里的**一个字段**（典型是
+    /// `working_directory`）。用 `get_session` 会把整条链读出来逐条反序列化——
+    /// 长会话实测 5571 条 / 15.3 MB，一次就多付约 190 ms，而这条路径在
+    /// 「每轮捕获快照」与「回退」上都要走。
+    async fn session_header(&self, id: &str) -> Result<Option<SessionHeader>> {
+        Ok(self.get_session(id).await?.map(|s| s.header))
+    }
 
     /// 取 `< before_seq` 的最近一条 `role=user` 消息 seq（`None` = 无更早用户消息）。
     ///
@@ -247,6 +259,10 @@ impl SessionManager for PersistentSessionManager {
     /// 覆盖索引查询（不回表、不读链）。
     async fn find_seq(&self, session_id: &str, message_id: &str) -> Result<Option<i64>> {
         Ok(self.store.find_seq(session_id, message_id).await?)
+    }
+    /// `SELECT header_json` 覆盖（只读一列，不加载消息）。
+    async fn session_header(&self, id: &str) -> Result<Option<SessionHeader>> {
+        Ok(self.store.header(id).await?)
     }
 
     /// `EXISTS` 覆盖（不全量加载消息）。
@@ -702,6 +718,69 @@ mod tests {
         assert!(
             loaded.messages[1].parts.is_empty(),
             "空正文消息的 parts 应为空"
+        );
+    }
+
+    /// `session_header` 必须**只读 header 一列**，不加载消息链。
+    ///
+    /// 判据用「**消息条数**」放大差异：全链读的成本主体是逐条的结构化反序列化
+    /// （实测 5571 条 15.3 MB 需 ~190 ms），而 header 查询只是一次单行 `SELECT`。
+    /// 单个超大字符串反而不行——8 MB 纯文本的解析快到测不出差别（踩过）。
+    ///
+    /// 反向注入：删掉 `session_header` 的覆盖实现（退回默认的 `get_session` 全量
+    /// 实现）→ 耗时立刻跳到全链量级，断言变红。
+    #[tokio::test]
+    async fn test_session_header_does_not_load_message_chain() {
+        let mgr = make_manager().await;
+        let id = "test-header-only";
+        let header = SessionHeader {
+            working_directory: Some("F:\\digital-brain".to_string()),
+            ..Default::default()
+        };
+        mgr.create_session_with_header(id, Message::user("start"), header)
+            .await
+            .unwrap();
+        // 3000 条普通消息：全链读要逐条反序列化
+        let messages: Vec<StructuredMessage> = (0..3000)
+            .map(|i| {
+                make_msg(
+                    &format!("m{i}"),
+                    id,
+                    MessageRole::User,
+                    "一条普通长度的消息内容，用来放大逐条解析的固定开销",
+                    false,
+                )
+            })
+            .collect();
+        mgr.test_rewrite(id, &messages).await.unwrap();
+
+        let t = std::time::Instant::now();
+        let got = mgr
+            .session_header(id)
+            .await
+            .unwrap()
+            .expect("header 应可读");
+        let fast = t.elapsed();
+
+        let t = std::time::Instant::now();
+        let full = mgr.get_session(id).await.unwrap().expect("会话应可读");
+        let slow = t.elapsed();
+
+        assert_eq!(
+            got.working_directory,
+            Some("F:\\digital-brain".to_string()),
+            "header 取值必须与全量读一致"
+        );
+        assert_eq!(
+            got.working_directory, full.header.working_directory,
+            "两条路径的 header 必须一致（覆盖实现不得漂移）"
+        );
+        println!("session_header={fast:?}  get_session={slow:?}");
+        // 用**比例**判据：正常情况差 150 倍以上；一旦退回全量读，两者就同量级。
+        // 绝对值阈值不可靠（内存库 + 热页缓存下全链读也只要几毫秒）。
+        assert!(
+            fast.as_micros().saturating_mul(20) < slow.as_micros(),
+            "session_header({fast:?}) 应比全链读({slow:?}) 快一个量级以上——差这么少说明它退回了全量读"
         );
     }
 }

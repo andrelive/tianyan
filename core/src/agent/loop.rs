@@ -1156,25 +1156,33 @@ impl AgentLoop {
         session_id: &str,
         model: &str,
     ) -> Option<(String, usize)> {
-        match self.session_manager.get_session(session_id).await {
-            Ok(Some(session)) => {
-                let start_idx = session
-                    .messages
-                    .iter()
-                    .rposition(|m| m.compression_marker)
-                    .unwrap_or(0);
-                session.messages[start_idx..]
-                    .iter()
-                    .rev()
-                    .find(|m| {
-                        !m.compression_marker
-                            && (m.tokens.input > 0 || m.tokens.cache.read > 0)
-                            && m.model_id.as_deref() == Some(model)
-                    })
-                    .map(|m| (model.to_string(), m.prompt_side_tokens()))
-            }
-            _ => None,
+        /// 回看窗口：够覆盖「压缩点之后、最近一次带 usage 的请求」。
+        const USAGE_SCAN_ROWS: usize = 300;
+
+        // 只看**最近一段**（压缩点之后）就够，不必读整条链——此前用 `get_session`
+        // 读全链，5571 条 / 15.3 MB 的会话每轮对话都要多付约 200 ms。
+        let last = self.session_manager.last_seq(session_id).await.ok()?;
+        if last < 0 {
+            return None;
         }
+        let mut rows = self
+            .session_manager
+            .load_before(session_id, last + 1, USAGE_SCAN_ROWS)
+            .await
+            .ok()?;
+        // 窗口内含压缩点 → 从最后一个压缩点之后算起（压缩点前的实测对应旧上下文，
+        // 与组装 / 压缩判定同口径）
+        if let Some(pos) = rows.iter().rposition(|(_seq, m)| m.compression_marker) {
+            rows.drain(..=pos);
+        }
+        rows.iter()
+            .rev()
+            .find(|(_seq, m)| {
+                !m.compression_marker
+                    && (m.tokens.input > 0 || m.tokens.cache.read > 0)
+                    && m.model_id.as_deref() == Some(model)
+            })
+            .map(|(_seq, m)| (model.to_string(), m.prompt_side_tokens()))
     }
 
     /// 执行单轮 step 获取模型响应（含空响应重试一次）。
