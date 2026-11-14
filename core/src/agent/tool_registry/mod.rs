@@ -1037,7 +1037,7 @@ impl ToolRegistry {
                         call.function.name
                     ))),
                 }
-            },
+            }
         };
 
         // A1 管线阶段 4：post-execute 监听器（观察/改写结果，按注册顺序）。
