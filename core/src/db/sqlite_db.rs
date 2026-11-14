@@ -144,6 +144,22 @@ impl SqliteDb {
                     [],
                 )?;
             }
+            // 幂等迁移：补 `first_request_tokens` 缓存列（列表查询不再解析 JSON）。
+            // 老数据的值由运维工具 `backfill_first_request_tokens` 一次性回填；
+            // 未回填时该列保持 NULL（列表侧按「基线未知」降级，不影响正确性）。
+            let has_first_tokens_col: bool = {
+                let mut stmt = conn.prepare("PRAGMA table_info(session_meta)")?;
+                let cols = stmt
+                    .query_map([], |r| r.get::<_, String>(1))?
+                    .collect::<Result<Vec<_>, _>>()?;
+                cols.iter().any(|c| c == "first_request_tokens")
+            };
+            if !has_first_tokens_col {
+                conn.execute(
+                    "ALTER TABLE session_meta ADD COLUMN first_request_tokens INTEGER",
+                    [],
+                )?;
+            }
         }
         // 幂等迁移：旧 background_tasks 表补 kind 列（8817eb7 加列时未迁移，
         // 旧库 SELECT/INSERT 含 kind 报 no such column——后台任务持久化失效）。
@@ -380,7 +396,14 @@ const SCHEMA_SQL: &str = "
         created_at  INTEGER,
         updated_at  TEXT DEFAULT (datetime('now')),
         -- ADR-026：子智能体会话关联主会话（NULL = 主会话；查询/级联/过滤直接走 SQL）
-        parent_session_id TEXT
+        parent_session_id TEXT,
+        -- 会话**首条带输入用量的 assistant** 的 `tokens.input`（缓存列；NULL = 未知）。
+        -- 会话列表直接读它：此前是用子查询「找 seq 最小且 tokens.input > 0 的
+        -- assistant」，其 `json_extract` 条件要求逐条解析 JSON —— 实测 52 个会话 /
+        -- 13.6 万条消息时该查询 1802 ms（每次列表刷新都付）。列在首条落库时固化一次
+        -- （`rewrite` 时按内存里的完整链重算），老数据由 `backfill_first_request_tokens`
+        -- 一次性回填；未回填期间列表返回 NULL，前端按「基线缺失」回退原行为。
+        first_request_tokens INTEGER
     );
     CREATE INDEX IF NOT EXISTS idx_session_meta_parent ON session_meta(parent_session_id);
 

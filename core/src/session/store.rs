@@ -7,7 +7,7 @@
 use std::sync::Arc;
 
 use crate::common::error::TianyanError;
-use crate::common::types::{Part, StructuredMessage};
+use crate::common::types::{MessageRole, Part, StructuredMessage};
 use crate::db::Database;
 use crate::session::types::{SessionHeader, SessionMeta};
 use rusqlite::OptionalExtension;
@@ -204,6 +204,16 @@ impl SessionStore {
             )
             .map_err(|e| sqlite_error("FTS 索引写入失败", e))?;
         }
+        // `first_request_tokens` 缓存列：**首条**带输入用量的 assistant 落库时固化一次
+        // （`IS NULL` 命中后不再写，幂等）。列表查询因此不必逐条解析 JSON 找它。
+        if msg.role == MessageRole::Assistant && msg.tokens.input > 0 {
+            tx.execute(
+                "UPDATE session_meta SET first_request_tokens = ?2 \
+                 WHERE session_id = ?1 AND first_request_tokens IS NULL",
+                rusqlite::params![session_id, msg.tokens.input as i64],
+            )
+            .map_err(|e| sqlite_error("会话首条请求用量固化失败", e))?;
+        }
         // ADR-026：刷新会话活跃时间（清理策略 B 的"最不活跃"判定依据）
         tx.execute(
             "UPDATE session_meta SET updated_at = datetime('now') WHERE session_id = ?1",
@@ -328,6 +338,19 @@ impl SessionStore {
                 .map_err(|e| sqlite_error("重写 FTS 写入失败", e))?;
             }
         }
+        // 重写后「首条带用量的 assistant」可能变了：`rewrite` 是**整表替换**，调用方
+        // 给的新链可能已不含原来那条（回退 fallback 截到压缩点之前 / 清空会话
+        // `rewrite(&[])`）→ 缓存列必须跟着重算。不重算的话空会话会残留旧基线。
+        // 用入参的完整链在内存里扫一遍即可（零额外查询）。
+        let first_input = messages
+            .iter()
+            .find(|m| m.role == MessageRole::Assistant && m.tokens.input > 0)
+            .map(|m| m.tokens.input as i64);
+        tx.execute(
+            "UPDATE session_meta SET first_request_tokens = ?2 WHERE session_id = ?1",
+            rusqlite::params![session_id, first_input],
+        )
+        .map_err(|e| sqlite_error("重写首条请求用量失败", e))?;
         tx.commit()
             .map_err(|e| sqlite_error("重写事务提交失败", e))?;
         Ok(())
@@ -421,20 +444,21 @@ impl SessionStore {
     /// * SQLite 查询失败时返回 TianyanError。
     pub async fn list_meta(&self) -> Result<Vec<SessionMeta>, TianyanError> {
         let conn = self.db.lock().await;
-        // 第 6 列：会话首条请求的输入 token（`first_request_tokens`）——取 seq 最小的
-        // 「带用量 assistant 消息」的 `tokens.input`（与 DTO 的 prompt_tokens 同口径）；
-        // `json_valid` 守卫损坏行（json_extract 对畸形 JSON 会报错，不能炸掉整个列表）；
-        // 无带用量消息 → NULL。走 (session_id, seq) 索引前缀早退，代价 O(首条 assistant)。
+        // 第 6 列：会话首条请求的输入 token（`first_request_tokens`）——**缓存列**，
+        // 由 `append_message`（首条带用量的 assistant 落库时固化一次）与 `rewrite`
+        // （按内存里的完整链重算）维护。
+        //
+        // 此前是子查询「取 seq 最小且 `tokens.input > 0` 的 assistant」，而那个
+        // `json_extract(...) > 0` 条件要求**逐条解析 JSON** 才能判断是否命中：
+        // 实测 52 个会话 / 13.6 万条消息时该查询 **1802 ms**，且每次会话列表刷新都付
+        // （切会话、每轮对话、回退后都会刷新）。改直读列后代价 O(1)。
+        // NULL = 未知（老数据未回填 / 空会话），前端按「基线缺失」回退原行为。
         let mut stmt = conn
             .prepare(
                 "SELECT sm.session_id, sm.header_json, sm.created_at, \
                  (SELECT COUNT(*) FROM session_messages m WHERE m.session_id = sm.session_id), \
                  (SELECT MAX(m.ts) FROM session_messages m WHERE m.session_id = sm.session_id), \
-                 (SELECT CASE WHEN json_valid(m.content_parts) THEN json_extract(m.content_parts, '$.tokens.input') END \
-                    FROM session_messages m \
-                   WHERE m.session_id = sm.session_id AND m.role = 'assistant' \
-                     AND (CASE WHEN json_valid(m.content_parts) THEN json_extract(m.content_parts, '$.tokens.input') END) > 0 \
-                   ORDER BY m.seq ASC LIMIT 1) \
+                 sm.first_request_tokens \
                  FROM session_meta sm WHERE sm.parent_session_id IS NULL \
                  AND sm.session_id NOT LIKE 'evolution-%' \
                  ORDER BY COALESCE((SELECT MAX(m.ts) FROM session_messages m WHERE m.session_id = sm.session_id), sm.created_at) DESC",
@@ -1117,6 +1141,81 @@ mod tests {
         let by_id = |id: &str| metas.iter().find(|m| m.session_id == id).unwrap();
         assert_eq!(by_id("s1").first_request_tokens, Some(1234));
         assert_eq!(by_id("s2").first_request_tokens, None);
+    }
+
+    /// `first_request_tokens` 在 `rewrite` 时**按内存链重算**：`rewrite` 是整表替换，
+    /// 调用方给的新链可能已不含原来那条带用量的 assistant（回退 fallback 截到压缩点
+    /// 之前 / 清空会话 `rewrite(&[])`）。不重算的话，空会话会残留旧基线——前端把它
+    /// 当压缩后占用基线，显示的就是错值。
+    ///
+    /// 反向注入「rewrite 不动该列」→ 第三个断言（回落 NULL）会失败。
+    #[tokio::test]
+    async fn test_first_request_tokens_recomputed_on_rewrite() {
+        let store = make_store().await;
+        store.create("s1", &SessionHeader::default()).await.unwrap();
+        let mut first = StructuredMessage::assistant("s1", "回复一");
+        first.tokens.input = 1234;
+        first.tokens.total = 1290;
+        store.append_message("s1", &first).await.unwrap();
+        let mut later = StructuredMessage::assistant("s1", "回复二");
+        later.tokens.input = 8888;
+        later.tokens.total = 9000;
+        store.append_message("s1", &later).await.unwrap();
+
+        let baseline = |metas: &[SessionMeta]| {
+            metas
+                .iter()
+                .find(|m| m.session_id == "s1")
+                .unwrap()
+                .first_request_tokens
+        };
+        assert_eq!(
+            baseline(&store.list_meta().await.unwrap()),
+            Some(1234),
+            "首条带用量的 assistant 应固化"
+        );
+
+        // 压缩后只保留「回复二」（早期消息折叠成摘要）→ 基线重算为 8888
+        store
+            .rewrite(
+                "s1",
+                &SessionHeader::default(),
+                std::slice::from_ref(&later),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            baseline(&store.list_meta().await.unwrap()),
+            Some(8888),
+            "rewrite 后应按内存链重算基线"
+        );
+
+        // 重写成「没有任何带用量消息的链」→ 基线回落 NULL
+        store
+            .rewrite(
+                "s1",
+                &SessionHeader::default(),
+                &[msg("u1", MessageRole::User, "只有用户消息")],
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            baseline(&store.list_meta().await.unwrap()),
+            None,
+            "链上无用量的 assistant → 基线应为 NULL"
+        );
+
+        // 清空会话（`rewrite(&[])`）→ 基线必须回落 NULL：空会话报旧基线会让前端
+        // 的压缩后占用显示成错值。
+        store
+            .rewrite("s1", &SessionHeader::default(), &[])
+            .await
+            .unwrap();
+        assert_eq!(
+            baseline(&store.list_meta().await.unwrap()),
+            None,
+            "清空会话后基线应为 NULL"
+        );
     }
 
     #[tokio::test]
