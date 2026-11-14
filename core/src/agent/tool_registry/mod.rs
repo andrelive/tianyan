@@ -1013,23 +1013,30 @@ impl ToolRegistry {
         // 分支；这正是「插件可注册」的机制前提（旧形态是 `match` + 28 个分支）。
         let mut result = match builtin_tools::find_dispatch(&call.function.name) {
             Some(execute) => execute(self, session_id, arguments, subagent).await,
-            None => match self
-                .dynamic_tools
-                .lock()
-                .await
-                .iter()
-                .find(|(n, _)| n == &call.function.name)
-                .map(|(_, e)| e.clone())
-            {
-                Some(executor) => {
-                    executor
-                        .execute_with_scope(session_id, arguments, subagent)
-                        .await
+            None => {
+                // 查表 + clone Arc 收进**独立块**：`MutexGuard` 在这里 drop，锁不再跨
+                // `execute_with_scope().await` 持有。否则 `execute_parallel` 名义上
+                // 用 `JoinSet` 并行、实际所有动态工具调用排队（4 个 50 ms 的 read_file
+                // 串成 200 ms）；且动态工具若在内部调 `definitions()`（同一把锁）或
+                // `register_dynamic_tool`，就是自死锁。
+                let executor = {
+                    let tools = self.dynamic_tools.lock().await;
+                    tools
+                        .iter()
+                        .find(|(n, _)| n == &call.function.name)
+                        .map(|(_, e)| e.clone())
+                };
+                match executor {
+                    Some(executor) => {
+                        executor
+                            .execute_with_scope(session_id, arguments, subagent)
+                            .await
+                    }
+                    None => Err(TianyanError::Custom(format!(
+                        "tool: 未知工具：{}",
+                        call.function.name
+                    ))),
                 }
-                None => Err(TianyanError::Custom(format!(
-                    "tool: 未知工具：{}",
-                    call.function.name
-                ))),
             },
         };
 
