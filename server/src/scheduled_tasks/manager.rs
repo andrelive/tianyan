@@ -268,7 +268,7 @@ impl ScheduledAgentTaskHandler {
             // ADR-039 收口 ②：清空预写消息经工作集（唯一写入口；
             // 缓存同步推进 → 不再需要手动 remove 兜缓存分叉）
             if let Ok(ws) = self.working_sets.ensure(&sid).await {
-                let _ = ws.rewrite(&[]).await;
+                let _ = ws.clear_messages().await;
             }
         }
         sid

@@ -442,8 +442,8 @@ async fn resolve_or_create_session(
     }
 
     // 清空 create_session 预写的消息：会话历史统一由 agent.process_message 追加，
-    // 避免同一条用户消息在历史中重复
-    ws.rewrite(&[]).await?;
+    // 避免同一条用户消息在历史中重复（物理删除——预写消息不该留成「可撤销」）
+    ws.clear_messages().await?;
 
     Ok((new_id, true))
 }

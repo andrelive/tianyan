@@ -175,7 +175,7 @@ impl SessionWorkingSet {
     ///
     /// 保底：段长度与 `[压缩点, 链尾]` 不符（seq 有洞 / 压缩点定位漂移）时退回
     /// 全量加载——**正确性由位置即 seq 不变式（ADR-027）承担，这里只是省读**。
-    async fn rebuild(&self) -> Result<()> {
+    pub(crate) async fn rebuild(&self) -> Result<()> {
         let header = self
             .store
             .header(&self.session_id)
@@ -350,81 +350,89 @@ impl SessionWorkingSet {
         self.store.find_seq(&self.session_id, message_id).await
     }
 
-    /// 读**完整链上 `seq >= from_seq` 的尾部**（占位容错，位置即 seq）。
-    ///
-    /// 回退用它取「被截断的消息」交给重做侧：典型只截断几条，无需为此把
-    /// 前面上千条历史一起读出来。需要全链的路径仍走 [`Self::full_chain`]。
-    ///
-    /// # Errors
-    /// * 库查询失败时透传。
-    pub async fn messages_from(&self, from_seq: i64) -> Result<Vec<StructuredMessage>> {
-        Ok(self
-            .store
-            .load_from(&self.session_id, from_seq)
-            .await?
-            .into_iter()
-            .map(|(_seq, m)| m)
-            .collect())
-    }
+    // 写入收口 ②（整表重写）随 ADR-056 退役：回退/重做改「移可见水位」（行不动），
+    // 清空会话走 [`Self::clear_messages`]（物理删除）。整表替换会重排 seq 并重建
+    // FTS——正是水位方案要消除的成本，保留它只会诱导未来误用。
 
-    /// 写入收口 ②（整表重写，ADR-035 §3）：删消息 / 回退 / 重做 / 编辑。
+    /// 回退到 `keep` 条之前（保留 `seq < keep`）：**移可见水位，不删行**（ADR-056）。
     ///
-    /// 语义：落库全量重写（header 保持不变）→ 段全量替换 → 消费水位重置到
-    /// 新库尾（下一次组装必读全量，视为已消费）。
+    /// 行留在表里（`seq >= keep` 成为待重做段），所以重做是零成本的——把水位移回
+    /// `NULL` 即可（[`Self::redo_visible`]）；只有「新消息落库」时才物理清理那段
+    /// （[`SessionStore::append_message`] 在插入事务内完成）。
     ///
-    /// # Errors
-    /// * 库重写失败时返回错误（缓存不动，保持一致）。
-    pub async fn rewrite(&self, messages: &[StructuredMessage]) -> Result<()> {
-        let header = self.header.read().await.clone();
-        self.store
-            .rewrite(&self.session_id, &header, messages)
-            .await?;
-        let len = messages.len() as i64;
-        // 段化：与 rebuild 同规则（只保留最后一个压缩点之后；调用方传完整链）
-        let start_seq = messages
-            .iter()
-            .rposition(|m| m.compression_marker)
-            .unwrap_or(0) as i64;
-        {
-            let mut st = self.state.write().await;
-            st.structured_messages = messages[start_seq as usize..].to_vec();
-            st.last_activity = Instant::now();
-        }
-        self.start_seq.store(start_seq, Ordering::SeqCst);
-        self.last_seq.store(len - 1, Ordering::SeqCst);
-        self.last_consumed_seq.store(len - 1, Ordering::SeqCst);
-        Ok(())
-    }
-
-    /// 截断到 `keep` 条（保留 `seq < keep`），**只删尾部、不重写整表**。
-    ///
-    /// 回退的典型形态是「截断尾部几条」，而 [`Self::rewrite`] 会把前面所有消息
-    /// 删掉、逐条重新序列化并插入（实测 1300+ 条消息的会话回退 1186 ms，绝大部分
-    /// 在这里）。`seq` 是 0..n-1 的顺序号，删尾部不影响前段。
-    ///
-    /// 返回 `false` 表示**无法增量**（`keep` 落在压缩点之前，段起点会变负）——
-    /// 调用方应 fallback 到 [`Self::rewrite`] 全量重写（保底正确）。
+    /// 返回 `false` = 段整体作废（`keep` 落在段起点之前，段内索引会变负）——
+    /// 调用方须 [`rebuild`](Self::rebuild) 重读段。**不再是整表重写**：库里只删了
+    /// 上一次回退留下的那一层待重做段，当前链一行都没动。
     ///
     /// # Errors
-    /// * 库删除失败时透传（缓存不动，保持一致）。
-    pub async fn truncate_to(&self, keep: usize) -> Result<bool> {
+    /// * 库写入失败时透传（缓存不动，保持一致）。
+    pub async fn rewind_to(&self, keep: usize) -> Result<bool> {
         let start_seq = self.start_seq();
+        self.store
+            .set_visible_from(&self.session_id, keep as i64)
+            .await?;
+        let last = keep.saturating_sub(1) as i64;
         if (keep as i64) <= start_seq {
+            // 段整体作废：清空内存段，交给调用方 rebuild 重读（压缩点可能已被遮掉）
+            let mut st = self.state.write().await;
+            st.structured_messages.clear();
+            st.last_activity = Instant::now();
+            drop(st);
+            self.last_seq.store(last, Ordering::SeqCst);
+            self.last_consumed_seq.store(last, Ordering::SeqCst);
             return Ok(false);
         }
-        self.store
-            .truncate_from(&self.session_id, keep as i64)
-            .await?;
         {
             let mut st = self.state.write().await;
-            let keep_in_seg = (keep as i64 - start_seq) as usize;
-            st.structured_messages.truncate(keep_in_seg);
+            st.structured_messages
+                .truncate((keep as i64 - start_seq) as usize);
             st.last_activity = Instant::now();
         }
-        let last = keep.saturating_sub(1) as i64;
         self.last_seq.store(last, Ordering::SeqCst);
         self.last_consumed_seq.store(last, Ordering::SeqCst);
         Ok(true)
+    }
+
+    /// 重做：可见水位移回 `NULL`，段整体重建（行一直在库里，不需要「放回」）。
+    ///
+    /// 返回恢复的消息数（`0` = 没有可重做的状态）。
+    ///
+    /// # Errors
+    /// * 库写入失败、重建读库失败时透传。
+    pub async fn redo_visible(&self) -> Result<usize> {
+        let restored = self.store.clear_visible_from(&self.session_id).await?;
+        if restored > 0 {
+            // 段 = 完整链后缀：水位回来后段延伸到新可见尾，重建最省心也最不易错
+            self.rebuild().await?;
+        }
+        Ok(restored)
+    }
+
+    /// 是否有可重做数据（`Some(水位)` = 上次回退留下了待重做段）。
+    ///
+    /// # Errors
+    /// * 库查询失败时透传。
+    pub async fn visible_from(&self) -> Result<Option<i64>> {
+        self.store.visible_from_seq(&self.session_id).await
+    }
+
+    /// 清空会话消息（**物理删除**，含待重做段）——不可撤销。
+    ///
+    /// 与 [`Self::rewind_to`] 的分工：那是「退回去但留着撤销」，这是「真删」。
+    /// 产品语义上「清空会话」必须真删——否则数据还躺在磁盘上，名不副实。
+    ///
+    /// # Errors
+    /// * 库删除失败时透传。
+    pub async fn clear_messages(&self) -> Result<()> {
+        self.store.truncate_from(&self.session_id, 0).await?;
+        let mut st = self.state.write().await;
+        st.structured_messages.clear();
+        st.last_activity = Instant::now();
+        drop(st);
+        self.start_seq.store(0, Ordering::SeqCst);
+        self.last_seq.store(-1, Ordering::SeqCst);
+        self.last_consumed_seq.store(-1, Ordering::SeqCst);
+        Ok(())
     }
 
     /// 压缩后**收缩段**（ADR-035 §2）：段起点前移到最后一个压缩点，
@@ -895,9 +903,10 @@ mod tests {
         drop(guard);
     }
 
-    /// 写入收口 ②：rewrite 后缓存与库一致（缓存不残留旧消息）。
+    /// ADR-056 写入收口 ②（新形态）：`rewind_to` 移水位后缓存与库**同时**只暴露
+    /// 可见区，且水位之后的行仍在库里（可重做）；`clear_messages` 才是真删。
     #[tokio::test]
-    async fn test_rewrite_keeps_cache_consistent() {
+    async fn test_rewind_moves_watermark_and_keeps_rows() {
         let store = test_store().await;
         create_session(&store, "s1").await;
         for i in 0..5 {
@@ -910,19 +919,29 @@ mod tests {
         let ws = reg.ensure("s1").await.unwrap();
         assert_eq!(ws.last_seq(), 4);
 
-        // 截断到 2 条（删消息 / 回退语义）
-        let kept: Vec<StructuredMessage> = vec![user_msg("s1", "m0"), user_msg("s1", "m1")];
-        ws.rewrite(&kept).await.unwrap();
-        assert_eq!(ws.last_seq(), 1, "重写后库尾 seq 前移");
-        assert_eq!(ws.message_count().await, 2, "缓存与库一致（无残留）");
-        assert!(
-            !ws.has_unconsumed(),
-            "重写后消费水位重置到新库尾（下一次组装必读全量）"
+        // 回退到 2 条之前：段内截断（段内索引 = seq - start_seq）
+        assert!(ws.rewind_to(2).await.unwrap(), "段内回退不该要求重建");
+        assert_eq!(ws.last_seq(), 1, "可见尾前移");
+        assert_eq!(ws.message_count().await, 2, "缓存只剩可见区");
+        assert_eq!(store.load("s1").await.unwrap().unwrap().1.len(), 2);
+        assert_eq!(
+            ws.visible_from().await.unwrap(),
+            Some(2),
+            "水位已前移（行仍在库里，可重做）"
         );
 
-        // 库侧核对（不是只看缓存）
-        let (_, stored) = store.load("s1").await.unwrap().unwrap();
-        assert_eq!(stored.len(), 2);
+        // 重做：段重建回可见尾，行一行都没搬
+        assert_eq!(ws.redo_visible().await.unwrap(), 3);
+        assert_eq!(ws.last_seq(), 4);
+        assert_eq!(ws.message_count().await, 5);
+        assert_eq!(ws.visible_from().await.unwrap(), None);
+
+        // 清空 = 真删（不可撤销）
+        ws.clear_messages().await.unwrap();
+        assert_eq!(ws.last_seq(), -1);
+        assert_eq!(ws.message_count().await, 0);
+        assert_eq!(ws.visible_from().await.unwrap(), None);
+        assert!(store.load("s1").await.unwrap().unwrap().1.is_empty());
     }
 
     /// 写入收口 ③：仅当快照实际变化时才同步内存前缀（无关字段更新不白失效）。
@@ -1294,7 +1313,7 @@ mod tests {
         );
 
         // 段内截断：keep=4 落在段内（start_seq=2 < 4）→ 增量删除可用
-        assert!(ws.truncate_to(4).await.unwrap(), "段内截断应走增量");
+        assert!(ws.rewind_to(4).await.unwrap(), "段内截断应走增量");
         assert_eq!(ws.last_seq(), 3);
         assert_eq!(ws.message_count().await, 2, "段剩 seq 2、3");
         let (_h, left) = store.load("s1").await.unwrap().unwrap();
@@ -1302,7 +1321,7 @@ mod tests {
 
         // keep 落在段起点之前（<= start_seq）→ 返回 false（调用方退回全量重写）
         assert!(
-            !ws.truncate_to(2).await.unwrap(),
+            !ws.rewind_to(2).await.unwrap(),
             "锚点落在压缩点之前时必须回报「无法增量」"
         );
     }

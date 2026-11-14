@@ -2,6 +2,12 @@
 //!
 //! **SQL 收敛于本模块**（会话检索专属，读 session_messages/session_messages_fts）：
 //! 经共享的 Database 单连接直接实现全文检索/窗口/增量查询；不依赖 db 层通用仓储。
+//!
+//! ⚠️ **可见性不变式（ADR-056）**：本模块每个查询都必须带
+//! `seq < COALESCE(session_meta.visible_from_seq, i64::MAX)` —— 回退水位之后的行是
+//! 「待重做数据」，对一切读不可见。漏掉一处，`session_recall` 与演化材料就能搜到
+//! 用户已经回退掉的内容（静默错误，且是隐私问题）。
+//! 口径与 `SessionStore::visible_cond` 完全相同，改一处须同步另一处。
 
 use std::sync::Arc;
 
@@ -38,7 +44,7 @@ impl SessionRecall {
             (chrono::Utc::now() - chrono::Duration::days(i64::from(d))).timestamp_millis()
         });
         let conn = self.db.lock().await;
-        let sql = "SELECT m.session_id, m.seq, m.message_id, m.role, m.text,                    bm25(session_messages_fts) AS score                    FROM session_messages_fts                    JOIN session_messages m ON m.id = session_messages_fts.rowid                    WHERE session_messages_fts MATCH ?1                    AND (?3 IS NULL OR m.ts > ?3)                    ORDER BY score LIMIT ?2";
+        let sql = "SELECT m.session_id, m.seq, m.message_id, m.role, m.text,                    bm25(session_messages_fts) AS score                    FROM session_messages_fts                    JOIN session_messages m ON m.id = session_messages_fts.rowid                    WHERE session_messages_fts MATCH ?1 AND m.seq < COALESCE((SELECT visible_from_seq FROM session_meta WHERE session_id = m.session_id), 9223372036854775807)                    AND (?3 IS NULL OR m.ts > ?3)                    ORDER BY score LIMIT ?2";
         let mut stmt = conn
             .prepare(sql)
             .map_err(|e| sqlite_error("回忆查询准备失败", e))?;
@@ -73,7 +79,7 @@ impl SessionRecall {
         radius: i64,
     ) -> Result<Vec<RecallMessage>, TianyanError> {
         let conn = self.db.lock().await;
-        let sql = "SELECT session_id, seq, message_id, role, text, tool_text, ts                    FROM session_messages                    WHERE session_id = ?1 AND seq BETWEEN ?2 AND ?3                      AND (text != '' OR tool_text != '')                    ORDER BY seq";
+        let sql = "SELECT session_id, seq, message_id, role, text, tool_text, ts                    FROM session_messages                    WHERE session_id = ?1 AND seq BETWEEN ?2 AND ?3 AND seq < COALESCE((SELECT visible_from_seq FROM session_meta WHERE session_id = ?1), 9223372036854775807)                      AND (text != '' OR tool_text != '')                    ORDER BY seq";
         let mut stmt = conn
             .prepare(sql)
             .map_err(|e| sqlite_error("窗口查询准备失败", e))?;
@@ -97,7 +103,7 @@ impl SessionRecall {
         limit: usize,
     ) -> Result<Vec<RecallMessage>, TianyanError> {
         let conn = self.db.lock().await;
-        let sql = "SELECT session_id, seq, message_id, role, text, tool_text, ts                    FROM session_messages                    WHERE session_id = ?1 AND seq > ?2                      AND (text != '' OR tool_text != '')                    ORDER BY seq LIMIT ?3";
+        let sql = "SELECT session_id, seq, message_id, role, text, tool_text, ts                    FROM session_messages                    WHERE session_id = ?1 AND seq > ?2 AND seq < COALESCE((SELECT visible_from_seq FROM session_meta WHERE session_id = ?1), 9223372036854775807)                      AND (text != '' OR tool_text != '')                    ORDER BY seq LIMIT ?3";
         let mut stmt = conn
             .prepare(sql)
             .map_err(|e| sqlite_error("增量查询准备失败", e))?;
@@ -129,7 +135,7 @@ impl SessionRecall {
         limit: usize,
     ) -> Result<Vec<RecallMessage>, TianyanError> {
         let conn = self.db.lock().await;
-        let sql = "SELECT m.session_id, m.seq, m.message_id, m.role, m.text, m.tool_text, m.ts                    FROM session_messages m                    JOIN session_meta meta ON meta.session_id = m.session_id                    WHERE m.ts > ?1 AND m.text != '' AND m.role = 'user'                      AND meta.parent_session_id IS NULL                    ORDER BY m.ts DESC LIMIT ?2";
+        let sql = "SELECT m.session_id, m.seq, m.message_id, m.role, m.text, m.tool_text, m.ts                    FROM session_messages m                    JOIN session_meta meta ON meta.session_id = m.session_id                    WHERE m.ts > ?1 AND m.text != '' AND m.role = 'user' AND m.seq < COALESCE((SELECT visible_from_seq FROM session_meta WHERE session_id = m.session_id), 9223372036854775807)                      AND meta.parent_session_id IS NULL                    ORDER BY m.ts DESC LIMIT ?2";
         let mut stmt = conn
             .prepare(sql)
             .map_err(|e| sqlite_error("增量查询准备失败", e))?;

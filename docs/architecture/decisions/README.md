@@ -66,3 +66,4 @@
 | 053 | 上下文自治：模型主动压缩 + 按目标自动续跑 | [053-context-autonomy.md](053-context-autonomy.md) |
 | 054 | Web 端（`gui-vite`）退役 | [054-retire-web-frontend.md](054-retire-web-frontend.md) |
 | 055 | 快照排除边界与回退删除护栏（树格式 v2 + `.gitignore` + 父链清理） | [055-snapshot-exclusion-and-deletion-guard.md](055-snapshot-exclusion-and-deletion-guard.md) |
+| 056 | 回退改「可见水位」：重做零成本，`rewrite` 退役 | [056-rollback-visible-watermark.md](056-rollback-visible-watermark.md) |

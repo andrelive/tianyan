@@ -5,6 +5,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+
+- **回退改为「移可见水位」**（ADR-056）：回退不再删除任何消息——把
+  `session_meta.visible_from_seq` 前移到锚点，之后的行成为「待重做数据」（仍在表里、
+  对一切读不可见）；重做只是把水位移回，FTS 索引与派生列原样恢复。此前重做是「读全链
+  + 整表删光重插 + FTS 全重建」，还要另存一份 `messages-{key}.json`。实测跨压缩点回退
+  （5,500 条链、压缩点 5,000、回退到 10）：**30 ms → < 1 ms**（内存库 debug，看相对
+  量级）。新消息落库时在同一事务内物理清理待重做段；清空会话仍走物理删除（「清空」必须
+  真删）。`SessionStore::rewrite` 生产路径退役（降级为测试构造原语）。
+  **语义变化**：① 回退只叠一层——第二次回退丢弃第一次的待重做段；② 回退后产生新消息
+  即不可重做（此前允许「新消息在前、被回退消息接在后」）；③ `redo_available` 现在恒为
+  「消息层可撤销」（与是否绑定工作区无关，缺快照只意味着文件不回来）。
+
 ## [1.2.6] - 2026-11-13
 
 ### Added

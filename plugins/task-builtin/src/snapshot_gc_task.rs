@@ -132,9 +132,10 @@ mod tests {
         write(mgr.workdir(), "a.txt", "原始");
         mgr.capture("s1", "0").await.unwrap();
 
-        // 模拟泄漏：save_redo 写入后 load_redo 消费，遗留孤儿 cache 文件
-        mgr.save_redo("s1", "msg_0", &[]).await.unwrap();
-        mgr.load_redo("s1", "msg_0").await.unwrap();
+        // 模拟泄漏：save_redo 写入后重做消费 tree，遗留孤儿 cache 文件
+        // （cache 是下次捕获的加速副产物，不随重做删除 → 由 GC 兜底）
+        mgr.save_redo("s1", "msg_0").await.unwrap();
+        mgr.restore_redo_tree("s1", "msg_0").await.unwrap();
         assert!(
             mgr.root().join("s1/redo/tree-msg_0.cache.json").exists(),
             "孤儿重做缓存必须存在"

@@ -1798,10 +1798,12 @@ fn likely_in_git_repo(workdir: &Path) -> bool {
 
 /// 清理超过 `ttl` 未动过的重做数据，返回删除的文件数。
 ///
-/// 一组重做数据由 `tree-{key}.json`（回退前的完整工作区树）+ `messages-{key}.json`
-/// （被回退的消息）+ `tree-{key}.cache.json`（mtime/size 缓存）组成，按 key 成对
-/// 存放。判定用 mtime：**任一同组文件还在 ttl 内就整体保留**（不拆散一对，否则
-/// 重做会读到半套数据）；mtime 取不到时保守保留。
+/// 一组重做数据由 `tree-{key}.json`（回退前的完整工作区树）+ `tree-{key}.cache.json`
+/// （mtime/size 缓存）组成，按 key 成组存放。判定用 mtime：**任一同组文件还在 ttl
+/// 内就整体保留**（不拆散一组）；mtime 取不到时保守保留。
+///
+/// `messages-{key}.json` 是**旧版**残留（被回退消息的副本随可见水位方案退役，
+/// ADR-056），一并按同组口径清理。
 ///
 /// 只处理 `redo/`，不碰 `trees/`——后者是正常的历史快照，生命周期跟着会话走。
 async fn purge_expired_redo(session_dirs: &[PathBuf], ttl: std::time::Duration) -> usize {
@@ -2654,20 +2656,27 @@ mod tests {
         mgr.capture("s1", "1").await.unwrap();
 
         // 回退:保存 redo(当前=v1) + 恢复快照0(原始)
-        mgr.save_redo("s1", "msg_1", &[]).await.unwrap();
+        mgr.save_redo("s1", "msg_1").await.unwrap();
         assert!(mgr.has_redo("s1", "msg_1").await);
         mgr.restore("s1", "0").await.unwrap().touched();
         assert_eq!(read(&mgr.workdir, "a.txt"), "原始");
 
-        // 重做:恢复 v1 + 取回消息
-        let (msgs, report) = mgr.load_redo("s1", "msg_1").await.unwrap().unwrap();
-        assert!(msgs.is_empty());
+        // 重做:恢复 v1。**只验证文件那一半**——被回退的消息不再另存副本，
+        // 消息层由会话可见水位承担（ADR-056，见 session::store 的水位测试）
+        let report = mgr.restore_redo_tree("s1", "msg_1").await.unwrap();
         assert_eq!(report.touched(), 1);
         assert_eq!(read(&mgr.workdir, "a.txt"), "v1");
 
-        // 重做数据一次性:再次加载返回 None
+        // 重做树一次性:消费即删；再次恢复是**空报告**而非错误
+        // （消息层可能仍可重做，缺树不该把整个重做判失败）
         assert!(!mgr.has_redo("s1", "msg_1").await);
-        assert!(mgr.load_redo("s1", "msg_1").await.unwrap().is_none());
+        assert_eq!(
+            mgr.restore_redo_tree("s1", "msg_1")
+                .await
+                .unwrap()
+                .touched(),
+            0
+        );
     }
 
     /// 读取对象库中指定哈希的原始字节（不做解压）。
@@ -2995,23 +3004,19 @@ mod tests {
         write(&mgr.workdir, "a.txt", "原始");
         mgr.capture("s1", "0").await.unwrap();
 
-        // 模拟泄漏:save_redo 写入 tree/cache/messages,load_redo 消费后遗留孤儿 cache
-        mgr.save_redo("s1", "msg_0", &[]).await.unwrap();
-        mgr.load_redo("s1", "msg_0").await.unwrap();
-        // 对照组:tree-msg_1.json 与其 cache 同时存在（不应被 GC 删除）
-        mgr.save_redo("s1", "msg_1", &[]).await.unwrap();
-
+        // 成对存在（对照组）：tree + cache 都有 → GC 不该删
+        mgr.save_redo("s1", "msg_1").await.unwrap();
         let redo_dir = mgr.redo_dir("s1");
-        assert!(
-            redo_dir.join("tree-msg_0.cache.json").exists(),
-            "孤儿重做缓存必须存在"
-        );
-        assert!(redo_dir.join("tree-msg_1.cache.json").exists());
         assert!(redo_dir.join("tree-msg_1.json").exists());
+        assert!(redo_dir.join("tree-msg_1.cache.json").exists());
+        // 孤儿 cache：tree 已不在（重做消费后 / 旧版本残留 / 崩在清理中途）。
+        // 重做只删 tree、不删 cache（cache 是下次捕获的加速副产物），所以孤儿
+        // cache 是**常态**，必须由 GC 兜底。
+        std::fs::write(redo_dir.join("tree-orphan.cache.json"), "{}").unwrap();
 
         let stats = mgr.gc().await.unwrap();
         assert_eq!(stats.cache_files_removed, 1);
-        assert!(!redo_dir.join("tree-msg_0.cache.json").exists());
+        assert!(!redo_dir.join("tree-orphan.cache.json").exists());
         assert!(
             redo_dir.join("tree-msg_1.cache.json").exists(),
             "匹配的重做缓存不应被删除"
@@ -3044,7 +3049,7 @@ mod tests {
         mgr.capture("s1", "1").await.unwrap();
         write(&mgr.workdir, "a.txt", "v2-再长一点的内容");
         mgr.capture("s1", "2").await.unwrap();
-        mgr.save_redo("s1", "msg_0", &[]).await.unwrap();
+        mgr.save_redo("s1", "msg_0").await.unwrap();
 
         let stats = mgr.gc().await.unwrap();
         assert_eq!(stats.objects_removed, 0);
@@ -3658,7 +3663,7 @@ mod tests {
         let (_dir, mgr) = setup().await;
         write(&mgr.workdir, "a.txt", "v1");
         mgr.capture("s1", "0").await.unwrap();
-        mgr.save_redo("s1", "msg_1", &[]).await.unwrap();
+        mgr.save_redo("s1", "msg_1").await.unwrap();
         assert!(mgr.has_redo("s1", "msg_1").await);
         let redo_dir = mgr.redo_dir("s1");
         assert!(redo_dir.join("tree-msg_1.json").exists());
@@ -3683,7 +3688,7 @@ mod tests {
         let (_dir, mgr) = setup().await;
         write(&mgr.workdir, "a.txt", "v1");
         mgr.capture("s1", "0").await.unwrap();
-        mgr.save_redo("s1", "msg_1", &[]).await.unwrap();
+        mgr.save_redo("s1", "msg_1").await.unwrap();
 
         let stats = mgr
             .gc_with_redo_ttl(std::time::Duration::from_secs(3600))
@@ -3836,7 +3841,7 @@ mod tests {
         std::fs::remove_file(mgr.workdir.join("b.txt")).unwrap();
         write(&mgr.workdir, "c.txt", "new");
 
-        let captured = mgr.save_redo("s1", "m0", &[]).await.unwrap();
+        let captured = mgr.save_redo("s1", "m0").await.unwrap();
         assert!(!captured.is_empty(), "save_redo 应返回当前工作区树");
 
         let report = mgr

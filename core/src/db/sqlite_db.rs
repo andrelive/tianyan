@@ -403,7 +403,14 @@ const SCHEMA_SQL: &str = "
         -- 13.6 万条消息时该查询 1802 ms（每次列表刷新都付）。列在首条落库时固化一次
         -- （`rewrite` 时按内存里的完整链重算），老数据由 `backfill_first_request_tokens`
         -- 一次性回填；未回填期间列表返回 NULL，前端按「基线缺失」回退原行为。
-        first_request_tokens INTEGER
+        first_request_tokens INTEGER,
+        -- 回退水位（ADR-056）：`seq >= visible_from_seq` 的行是「已回退但尚未清理」
+        -- 的重做数据——它们**仍在表里**（重做 = 把水位移回 NULL，一行都不用搬），
+        -- 但**对一切读不可见**。NULL = 全部可见。
+        -- ⚠️ 不变式：所有读 `session_messages` 的 SQL 必须带可见性条件
+        -- （`SessionStore::visible_cond`），漏一处就会读到已回退的内容
+        -- （FTS 能搜到、列表 count 虚高）——这类错误是静默的。
+        visible_from_seq INTEGER
     );
     CREATE INDEX IF NOT EXISTS idx_session_meta_parent ON session_meta(parent_session_id);
 

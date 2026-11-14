@@ -23,6 +23,51 @@ const MAX_TEXT_CHARS: usize = 4000;
 /// 工具文本截断上限（回忆/窗口展示保留要点）。
 const MAX_TOOL_TEXT_CHARS: usize = 500;
 
+/// 「可见」条件片段（回退水位，ADR-056）：`seq < <可见上界>`。
+///
+/// 回退不再物理删除消息——把 `visible_from_seq` 前移到锚点，锚点之后的行成为
+/// 「待重做数据」：它们仍在表里（重做只是把水位移回 `NULL`，一行都不用搬回来），
+/// 但**对一切读不可见**。
+///
+/// ⚠️ **所有读 `session_messages` 的 SQL 必须包含本条件**，且入参是 `session_id`
+/// 的占位符（上界从同会话的 `session_meta` 取）。漏一处就会读到已回退的内容
+/// （FTS 能搜到、会话列表 count 虚高），且这类错误是**静默**的。
+/// `visible_from_seq IS NULL` = 全部可见（`COALESCE` 取 `i64::MAX` 作无穷上界）。
+pub(crate) fn visible_cond(alias: &str) -> String {
+    format!(
+        "{alias}.seq < COALESCE((SELECT visible_from_seq FROM session_meta \
+         WHERE session_id = {alias}.session_id), {})",
+        i64::MAX
+    )
+}
+
+/// 重算 `first_request_tokens` 的 SQL（可见区内**首条**带输入用量的 assistant）。
+///
+/// 基线是缓存列，`append` 首条固化、`rewrite` 按链重算——而回退 / 重做改变的是
+/// 「可见区」：回退可能把基线所在行遮到水位之后（此时应降级为「未知」或更靠前的
+/// 一条），重做又把它放回来。所以两个操作都在**同一事务**内跑本语句重算。
+///
+/// `ORDER BY seq LIMIT 1` 在 `(session_id, seq)` 唯一索引上**早期终止**：首条
+/// assistant 通常即命中（只有「首条 assistant 没有用量」才多扫几条）；`json_valid`
+/// 保护损坏行（与 `last_user_seq_before` 同一口径，避免 malformed JSON 让回退整体失败）。
+fn recompute_first_request_tokens_sql() -> String {
+    format!(
+        "UPDATE session_meta SET first_request_tokens = ( \
+           SELECT CASE WHEN json_valid(m.content_parts) \
+                       THEN json_extract(m.content_parts, '$.tokens.input') END \
+           FROM session_messages m \
+           WHERE m.session_id = ?1 AND m.role = 'assistant' \
+             AND m.seq < COALESCE((SELECT visible_from_seq FROM session_meta \
+                                   WHERE session_id = ?1), {}) \
+             AND CASE WHEN json_valid(m.content_parts) \
+                      THEN json_extract(m.content_parts, '$.tokens.input') \
+                      ELSE 0 END > 0 \
+           ORDER BY m.seq LIMIT 1 \
+         ) WHERE session_id = ?1",
+        i64::MAX
+    )
+}
+
 /// 从消息 parts 提取纯文本与工具文本：文本进正文与 FTS；工具调用/结果
 /// 截断进 tool_text（回忆窗口/记忆提取保留要点）。空消息（纯图片等）双空。
 fn extract_parts(msg: &StructuredMessage) -> (String, String) {
@@ -159,19 +204,48 @@ impl SessionStore {
         // 向**已删除**会话的写入（级联删除后仍在跑的子代理 / 流式收尾 / 唤醒轮）
         // 会静默重建幽灵根会话（丢 parent、进主列表，且消息进 FTS 可被回忆）。
         // 拒绝写入并返回 not_found（调用方按"会话已消失"处理）。
-        let exists = tx
+        // 存在性 + 回退水位一次查询取回（`None` = 会话不存在，`Some(None)` = 全部可见）。
+        let visible_from: Option<Option<i64>> = tx
             .query_row(
-                "SELECT 1 FROM session_meta WHERE session_id = ?1",
+                "SELECT visible_from_seq FROM session_meta WHERE session_id = ?1",
                 rusqlite::params![session_id],
-                |_| Ok(()),
+                |r| r.get::<_, Option<i64>>(0),
             )
             .optional()
-            .map_err(|e| sqlite_error("会话元数据查询失败", e))?
-            .is_some();
-        if !exists {
+            .map_err(|e| sqlite_error("会话元数据查询失败", e))?;
+        let Some(visible_from) = visible_from else {
             return Err(TianyanError::not_found(format!(
                 "session: session_store: 会话不存在（拒绝向已删除会话写入）：{session_id}"
             )));
+        };
+        // 有水位 = 上一次回退留下了待重做段：**一旦新消息落库，重做就不可能了**
+        // （新消息要占的正是那段 seq），先物理清理再取号。
+        //
+        // 必须与取号/插入同一事务：崩在中途整体回滚 → 待重做段仍完整（不能出现
+        // 「删了一半」的重做数据，那样重做会恢复出残缺会话）。
+        if let Some(from) = visible_from {
+            tx.execute(
+                "DELETE FROM session_messages_fts WHERE rowid IN \
+                 (SELECT id FROM session_messages WHERE session_id = ?1 AND seq >= ?2)",
+                rusqlite::params![session_id, from],
+            )
+            .map_err(|e| sqlite_error("回退段 FTS 清理失败", e))?;
+            tx.execute(
+                "DELETE FROM session_messages WHERE session_id = ?1 AND seq >= ?2",
+                rusqlite::params![session_id, from],
+            )
+            .map_err(|e| sqlite_error("回退段清理失败", e))?;
+            tx.execute(
+                "UPDATE session_meta SET visible_from_seq = NULL WHERE session_id = ?1",
+                rusqlite::params![session_id],
+            )
+            .map_err(|e| sqlite_error("回退水位清理失败", e))?;
+            // 基线行可能刚被删掉（回退遮到首条带用量的 assistant 之前）→ 重算
+            tx.execute(
+                &recompute_first_request_tokens_sql(),
+                rusqlite::params![session_id],
+            )
+            .map_err(|e| sqlite_error("首条请求用量重算失败", e))?;
         }
         // 原子取号：同一事务/同一连接内串行，并发追加不会撞号
         let seq: i64 = tx
@@ -250,10 +324,13 @@ impl SessionStore {
             return Ok(None);
         };
         let header: SessionHeader = serde_json::from_str(&header_json).unwrap_or_default();
+        let sql = format!(
+            "SELECT seq, content_parts FROM session_messages \
+             WHERE session_id = ?1 AND {} ORDER BY seq",
+            visible_cond("session_messages")
+        );
         let mut stmt = conn
-            .prepare(
-                "SELECT seq, content_parts FROM session_messages WHERE session_id = ?1 ORDER BY seq",
-            )
+            .prepare(&sql)
             .map_err(|e| sqlite_error("消息查询准备失败", e))?;
         let rows = stmt
             .query_map(rusqlite::params![session_id], |r| {
@@ -275,11 +352,17 @@ impl SessionStore {
         Ok(Some((header, messages)))
     }
 
-    /// 全量重写会话（压缩/截断/编辑后调用）：单事务内清 FTS + 清消息 +
-    /// 重写 meta + 逐条写入（seq = 行号）。
+    /// 全量重写会话（**仅测试构造用**）：单事务内清 FTS + 清消息 + 重写 meta +
+    /// 逐条写入（seq = 行号）。
+    ///
+    /// 生产路径已无调用者（ADR-056）：回退/重做走「移可见水位」（行不动，见
+    /// [`Self::set_visible_from`] / [`Self::clear_visible_from`]），清空会话走
+    /// [`Self::truncate_from`]。整表替换会重排 seq 并重建 FTS——正是水位方案要
+    /// 消除的成本，因此降级为测试专用（构造任意链布局，含压缩点）。
     ///
     /// # Errors
     /// * SQLite 写入失败时返回 TianyanError。
+    #[cfg(test)]
     pub(crate) async fn rewrite(
         &self,
         session_id: &str,
@@ -385,9 +468,153 @@ impl SessionStore {
             rusqlite::params![session_id, from_seq],
         )
         .map_err(|e| sqlite_error("截断消息清理失败", e))?;
+        // 物理删除覆盖了待重做段（清空会话 / 彻底删）→ 水位失去意义，一并清空；
+        // `visible_from < from_seq` 时删的是可见区尾部，水位保持（待重做段还在）。
+        tx.execute(
+            "UPDATE session_meta SET visible_from_seq = NULL \
+             WHERE session_id = ?1 AND visible_from_seq IS NOT NULL AND visible_from_seq >= ?2",
+            rusqlite::params![session_id, from_seq],
+        )
+        .map_err(|e| sqlite_error("回退水位清理失败", e))?;
+        // 基线行可能刚被删掉（清空会话 → NULL）→ 重算
+        tx.execute(
+            &recompute_first_request_tokens_sql(),
+            rusqlite::params![session_id],
+        )
+        .map_err(|e| sqlite_error("首条请求用量重算失败", e))?;
         tx.commit()
             .map_err(|e| sqlite_error("截断事务提交失败", e))?;
         Ok(())
+    }
+
+    /// 会话回退水位（`None` = 全部可见）。
+    ///
+    /// 非 `None` 表示「上一次回退留下了待重做段」：`seq >= 水位` 的行仍在表里，
+    /// 但对一切读不可见；重做 = 把水位移回 `None`（[`Self::clear_visible_from`]），
+    /// 新消息落库前先物理清理（[`Self::append_message`]）。
+    ///
+    /// # Errors
+    /// * SQLite 查询失败时返回 TianyanError（会话不存在也返回 `None`）。
+    pub async fn visible_from_seq(&self, session_id: &str) -> Result<Option<i64>, TianyanError> {
+        let conn = self.db.lock().await;
+        let value: Option<Option<i64>> = conn
+            .query_row(
+                "SELECT visible_from_seq FROM session_meta WHERE session_id = ?1",
+                rusqlite::params![session_id],
+                |r| r.get::<_, Option<i64>>(0),
+            )
+            .optional()
+            .map_err(|e| sqlite_error("回退水位查询失败", e))?;
+        Ok(value.flatten())
+    }
+
+    /// 回退：把可见水位前移到 `from_seq`——`seq >= from_seq` 的行从此**不可见**，
+    /// 成为待重做段（行本身不删，重做只需把水位移回）。
+    ///
+    /// **单事务**完成三件事（这是数据销毁点，必须原子）：
+    /// 1. 删掉**上一次**回退留下的待重做段——回退只叠一层：本次回退之后的可重做段
+    ///    是「本次锚点 → 原可见尾」，旧的那层已没有回到路径（重做永远恢复到全可见，
+    ///    见 [`Self::clear_visible_from`]）。崩在此处会整体回滚，旧段仍完整；
+    /// 2. 前移水位；
+    /// 3. 重算 `first_request_tokens`（基线行可能被遮到水位之后）。
+    ///
+    /// 调用方须先经 [`Self::find_seq`] 确认锚点可见（水位之后的锚点定位不到）。
+    ///
+    /// # Errors
+    /// * 会话不存在 → `not_found`；SQLite 失败时透传。
+    pub(crate) async fn set_visible_from(
+        &self,
+        session_id: &str,
+        from_seq: i64,
+    ) -> Result<(), TianyanError> {
+        let conn = self.db.lock().await;
+        let tx = conn
+            .unchecked_transaction()
+            .map_err(|e| sqlite_error("回退水位事务开启失败", e))?;
+        // 旧待重做段 = 旧水位之后的行；无水位时 `COALESCE` 取 i64::MAX → 删不到东西
+        let stale: String = format!(
+            "seq >= COALESCE((SELECT visible_from_seq FROM session_meta \
+             WHERE session_id = ?1), {})",
+            i64::MAX
+        );
+        tx.execute(
+            &format!(
+                "DELETE FROM session_messages_fts WHERE rowid IN \
+                 (SELECT id FROM session_messages WHERE session_id = ?1 AND {stale})"
+            ),
+            rusqlite::params![session_id],
+        )
+        .map_err(|e| sqlite_error("旧回退段 FTS 清理失败", e))?;
+        tx.execute(
+            &format!("DELETE FROM session_messages WHERE session_id = ?1 AND {stale}"),
+            rusqlite::params![session_id],
+        )
+        .map_err(|e| sqlite_error("旧回退段清理失败", e))?;
+        let changed = tx
+            .execute(
+                "UPDATE session_meta SET visible_from_seq = ?2 WHERE session_id = ?1",
+                rusqlite::params![session_id, from_seq],
+            )
+            .map_err(|e| sqlite_error("回退水位写入失败", e))?;
+        if changed == 0 {
+            return Err(TianyanError::not_found(format!(
+                "session: session_store: 会话未找到：{session_id}"
+            )));
+        }
+        tx.execute(
+            &recompute_first_request_tokens_sql(),
+            rusqlite::params![session_id],
+        )
+        .map_err(|e| sqlite_error("首条请求用量重算失败", e))?;
+        tx.commit()
+            .map_err(|e| sqlite_error("回退水位事务提交失败", e))?;
+        Ok(())
+    }
+
+    /// 重做：可见水位移回「全可见」，返回恢复的消息数（0 = 无可重做数据）。
+    ///
+    /// 行从未离开表，所以这里**一行都不用搬**——索引、派生列、正文原样回来，
+    /// 这正是「撤销回退」应有的成本（对比旧实现：全链读 + 整表重写 + FTS 全重建）。
+    ///
+    /// # Errors
+    /// * SQLite 失败时透传。
+    pub(crate) async fn clear_visible_from(&self, session_id: &str) -> Result<usize, TianyanError> {
+        let conn = self.db.lock().await;
+        let tx = conn
+            .unchecked_transaction()
+            .map_err(|e| sqlite_error("重做事务开启失败", e))?;
+        let from: Option<i64> = tx
+            .query_row(
+                "SELECT visible_from_seq FROM session_meta WHERE session_id = ?1",
+                rusqlite::params![session_id],
+                |r| r.get::<_, Option<i64>>(0),
+            )
+            .optional()
+            .map_err(|e| sqlite_error("回退水位查询失败", e))?
+            .flatten();
+        let Some(from) = from else {
+            return Ok(0);
+        };
+        let last: i64 = tx
+            .query_row(
+                "SELECT COALESCE(MAX(seq), -1) FROM session_messages WHERE session_id = ?1",
+                rusqlite::params![session_id],
+                |r| r.get(0),
+            )
+            .map_err(|e| sqlite_error("链尾查询失败", e))?;
+        tx.execute(
+            "UPDATE session_meta SET visible_from_seq = NULL WHERE session_id = ?1",
+            rusqlite::params![session_id],
+        )
+        .map_err(|e| sqlite_error("回退水位清空失败", e))?;
+        tx.execute(
+            &recompute_first_request_tokens_sql(),
+            rusqlite::params![session_id],
+        )
+        .map_err(|e| sqlite_error("首条请求用量重算失败", e))?;
+        tx.commit()
+            .map_err(|e| sqlite_error("重做事务提交失败", e))?;
+        Ok((last - from + 1).max(0) as usize)
     }
 
     /// 读取会话头部（injectable 快照等会话级状态）。
@@ -453,16 +680,20 @@ impl SessionStore {
         // 实测 52 个会话 / 13.6 万条消息时该查询 **1802 ms**，且每次会话列表刷新都付
         // （切会话、每轮对话、回退后都会刷新）。改直读列后代价 O(1)。
         // NULL = 未知（老数据未回填 / 空会话），前端按「基线缺失」回退原行为。
+        // 可见性（ADR-056）：水位之后的行是待重做数据，**不计入条数、不参与最后
+        // 时间**——否则回退后会话列表的条数虚高，排序时间还会漂到被回退的消息上。
+        const VISIBLE: &str = "AND m.seq < COALESCE(sm.visible_from_seq, 9223372036854775807)";
+        let sql = format!(
+            "SELECT sm.session_id, sm.header_json, sm.created_at, \
+             (SELECT COUNT(*) FROM session_messages m WHERE m.session_id = sm.session_id {VISIBLE}), \
+             (SELECT MAX(m.ts) FROM session_messages m WHERE m.session_id = sm.session_id {VISIBLE}), \
+             sm.first_request_tokens \
+             FROM session_meta sm WHERE sm.parent_session_id IS NULL \
+             AND sm.session_id NOT LIKE 'evolution-%' \
+             ORDER BY COALESCE((SELECT MAX(m.ts) FROM session_messages m WHERE m.session_id = sm.session_id {VISIBLE}), sm.created_at) DESC"
+        );
         let mut stmt = conn
-            .prepare(
-                "SELECT sm.session_id, sm.header_json, sm.created_at, \
-                 (SELECT COUNT(*) FROM session_messages m WHERE m.session_id = sm.session_id), \
-                 (SELECT MAX(m.ts) FROM session_messages m WHERE m.session_id = sm.session_id), \
-                 sm.first_request_tokens \
-                 FROM session_meta sm WHERE sm.parent_session_id IS NULL \
-                 AND sm.session_id NOT LIKE 'evolution-%' \
-                 ORDER BY COALESCE((SELECT MAX(m.ts) FROM session_messages m WHERE m.session_id = sm.session_id), sm.created_at) DESC",
-            )
+            .prepare(&sql)
             .map_err(|e| sqlite_error("会话列表查询准备失败", e))?;
         let rows = stmt
             .query_map([], |r| {
@@ -523,12 +754,15 @@ impl SessionStore {
     /// * SQLite 查询失败时返回 TianyanError。
     pub async fn last_seq(&self, session_id: &str) -> Result<i64, TianyanError> {
         let conn = self.db.lock().await;
-        conn.query_row(
-            "SELECT COALESCE(MAX(seq), -1) FROM session_messages WHERE session_id = ?1",
-            rusqlite::params![session_id],
-            |r| r.get(0),
-        )
-        .map_err(|e| sqlite_error("会话最新序号查询失败", e))
+        // 可见尾（不是表里的 MAX(seq)）：水位之后的行是待重做数据，对读不存在。
+        // 漏改这里是**必错**而非静默——追加取号会从孤儿之后开始，与新水位语义打架。
+        let sql = format!(
+            "SELECT COALESCE(MAX(seq), -1) FROM session_messages \
+             WHERE session_id = ?1 AND {}",
+            visible_cond("session_messages")
+        );
+        conn.query_row(&sql, rusqlite::params![session_id], |r| r.get(0))
+            .map_err(|e| sqlite_error("会话最新序号查询失败", e))
     }
 
     /// 按**消息 ID** 定位其 seq（`None` = 该会话无此消息）。
@@ -548,11 +782,16 @@ impl SessionStore {
         message_id: &str,
     ) -> Result<Option<i64>, TianyanError> {
         let conn = self.db.lock().await;
-        match conn.query_row(
-            "SELECT seq FROM session_messages WHERE session_id = ?1 AND message_id = ?2 LIMIT 1",
-            rusqlite::params![session_id, message_id],
-            |r| r.get::<_, i64>(0),
-        ) {
+        // 只认可见行：水位之后的锚点「不存在」——否则回退可以退到已回退的位置
+        // （两次回退的锚点必须沿链向前，不能落在待重做段里）。
+        let sql = format!(
+            "SELECT seq FROM session_messages \
+             WHERE session_id = ?1 AND message_id = ?2 AND {} LIMIT 1",
+            visible_cond("session_messages")
+        );
+        match conn.query_row(&sql, rusqlite::params![session_id, message_id], |r| {
+            r.get::<_, i64>(0)
+        }) {
             Ok(seq) => Ok(Some(seq)),
             Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
             Err(e) => Err(sqlite_error("消息 seq 查询失败", e)),
@@ -574,11 +813,13 @@ impl SessionStore {
         from_seq: i64,
     ) -> Result<Vec<(i64, StructuredMessage)>, TianyanError> {
         let conn = self.db.lock().await;
+        let sql = format!(
+            "SELECT seq, content_parts FROM session_messages \
+             WHERE session_id = ?1 AND seq >= ?2 AND {} ORDER BY seq",
+            visible_cond("session_messages")
+        );
         let mut stmt = conn
-            .prepare(
-                "SELECT seq, content_parts FROM session_messages \
-                 WHERE session_id = ?1 AND seq >= ?2 ORDER BY seq",
-            )
+            .prepare(&sql)
             .map_err(|e| sqlite_error("区间查询准备失败", e))?;
         let rows = stmt
             .query_map(rusqlite::params![session_id, from_seq], |r| {
@@ -642,10 +883,13 @@ impl SessionStore {
         since_seq: i64,
     ) -> Result<Vec<(i64, StructuredMessage)>, TianyanError> {
         let conn = self.db.lock().await;
+        let sql = format!(
+            "SELECT seq, content_parts FROM session_messages \
+             WHERE session_id = ?1 AND seq > ?2 AND {} ORDER BY seq",
+            visible_cond("session_messages")
+        );
         let mut stmt = conn
-            .prepare(
-                "SELECT seq, content_parts FROM session_messages WHERE session_id = ?1 AND seq > ?2 ORDER BY seq",
-            )
+            .prepare(&sql)
             .map_err(|e| sqlite_error("增量查询准备失败", e))?;
         let rows = stmt
             .query_map(rusqlite::params![session_id, since_seq], |r| {
@@ -679,10 +923,13 @@ impl SessionStore {
         limit: usize,
     ) -> Result<Vec<(i64, StructuredMessage)>, TianyanError> {
         let conn = self.db.lock().await;
+        let sql = format!(
+            "SELECT seq, content_parts FROM session_messages \
+             WHERE session_id = ?1 AND seq < ?2 AND {} ORDER BY seq DESC LIMIT ?3",
+            visible_cond("session_messages")
+        );
         let mut stmt = conn
-            .prepare(
-                "SELECT seq, content_parts FROM session_messages WHERE session_id = ?1 AND seq < ?2 ORDER BY seq DESC LIMIT ?3",
-            )
+            .prepare(&sql)
             .map_err(|e| sqlite_error("分页查询准备失败", e))?;
         let rows = stmt
             .query_map(
@@ -715,7 +962,7 @@ impl SessionStore {
         before_seq: i64,
     ) -> Result<Option<i64>, TianyanError> {
         let conn = self.db.lock().await;
-        conn.query_row(
+        let sql = format!(
             // 压缩点也要排除：它是 user 锚定的（ADR-053，全 system 请求会被上游
             // 拒绝），但不是「用户发言」。不排除时「页首对齐 user」会落在压缩点上，
             // 压缩点之前的历史被整段切掉（用户实测：切回会话只剩一条压缩点）。
@@ -728,10 +975,12 @@ impl SessionStore {
              AND (CASE WHEN json_valid(content_parts) \
                        THEN json_extract(content_parts, '$.compression_marker') \
                        ELSE 0 END) = 0 \
-             AND seq < ?2",
-            rusqlite::params![session_id, before_seq],
-            |r| r.get::<_, Option<i64>>(0),
-        )
+             AND seq < ?2 AND {}",
+            visible_cond("session_messages")
+        );
+        conn.query_row(&sql, rusqlite::params![session_id, before_seq], |r| {
+            r.get::<_, Option<i64>>(0)
+        })
         .map_err(|e| sqlite_error("最近用户消息序号查询失败", e))
     }
 
@@ -882,6 +1131,7 @@ impl SessionStore {
 mod tests {
     use super::*;
     use crate::common::types::{DetailedTokenUsage, MessageRole, MessageTime, Part, PartTime};
+    use crate::session::search::SessionRecall;
 
     fn msg(id: &str, role: MessageRole, text: &str) -> StructuredMessage {
         let mut parts = Vec::new();
@@ -916,6 +1166,14 @@ mod tests {
         let db = Database::open_in_memory().unwrap();
         db.init_schemas().await.unwrap();
         SessionStore::new(db).unwrap()
+    }
+
+    /// 同时拿到存储与检索门面（检索侧也有可见性不变式要验证）。
+    async fn make_store_and_recall() -> (Arc<SessionStore>, Arc<SessionRecall>) {
+        let db = Database::open_in_memory().unwrap();
+        db.init_schemas().await.unwrap();
+        let recall = SessionRecall::new(db.clone()).unwrap();
+        (SessionStore::new(db).unwrap(), recall)
     }
 
     #[tokio::test]
@@ -1059,7 +1317,7 @@ mod tests {
         let (_, messages) = store.load("s1").await.unwrap().unwrap();
         assert_eq!(messages.len(), 2);
         assert_eq!(messages[1].id, "m2");
-        let recall = crate::session::search::SessionRecall::new(store.db.clone()).unwrap();
+        let recall = SessionRecall::new(store.db.clone()).unwrap();
         let hits = recall.search("正文内容", 10, None).await.unwrap();
         assert_eq!(hits.len(), 1);
         let hits = recall.search("不存在的词", 10, None).await.unwrap();
@@ -1107,7 +1365,7 @@ mod tests {
         assert!(!store.exists("s1").await.unwrap());
         assert_eq!(store.list_meta().await.unwrap().len(), 1);
         // 删除后回忆也查不到
-        let recall = crate::session::search::SessionRecall::new(store.db.clone()).unwrap();
+        let recall = SessionRecall::new(store.db.clone()).unwrap();
         assert!(recall.search("x", 10, None).await.unwrap().is_empty());
     }
 
@@ -1521,5 +1779,287 @@ mod tests {
             Some(10),
             "跨页也要找得到最后一个压缩点"
         );
+    }
+
+    /// ADR-056 契约：回退水位之后的行**对一切读不可见**。
+    ///
+    /// 「回退只移水位、不删行」的判别力基座：水位之后的行仍在表里（重做因此零成本），
+    /// 任何读路径漏掉可见性条件都会让它们露出来。本测试**穷举公开读面**——
+    /// **新增读 API 必须在此补一条断言**，否则漏条件不会被任何测试抓到。
+    #[tokio::test]
+    async fn test_rollback_watermark_hides_tail_from_all_reads() {
+        let (store, recall) = make_store_and_recall().await;
+        store.create("s1", &SessionHeader::default()).await.unwrap();
+        for i in 0..5 {
+            store
+                .append_message(
+                    "s1",
+                    &msg(&format!("m{i}"), MessageRole::User, &format!("独特词{i}")),
+                )
+                .await
+                .unwrap();
+        }
+        // 回退到 seq=3 之前：m3 / m4 成为待重做段
+        assert_eq!(store.visible_from_seq("s1").await.unwrap(), None);
+        store.set_visible_from("s1", 3).await.unwrap();
+        assert_eq!(store.visible_from_seq("s1").await.unwrap(), Some(3));
+
+        // ── 存储读面 ──
+        let (_, chain) = store.load("s1").await.unwrap().unwrap();
+        assert_eq!(chain.len(), 3, "load 只返回可见区");
+        assert_eq!(
+            store.load_from("s1", 0).await.unwrap().len(),
+            3,
+            "load_from 不越过水位"
+        );
+        assert_eq!(
+            store.load_after("s1", -1).await.unwrap().len(),
+            3,
+            "load_after 不越过水位"
+        );
+        assert_eq!(
+            store.load_before("s1", 999, 99).await.unwrap().len(),
+            3,
+            "load_before（上滚分页）不越过水位"
+        );
+        assert_eq!(store.last_seq("s1").await.unwrap(), 2, "last_seq = 可见尾");
+        assert_eq!(store.find_seq("s1", "m2").await.unwrap(), Some(2));
+        assert_eq!(
+            store.find_seq("s1", "m3").await.unwrap(),
+            None,
+            "水位之后的锚点必须定位不到（否则能回退到已回退的位置）"
+        );
+        assert_eq!(
+            store.last_user_seq_before("s1", 999).await.unwrap(),
+            Some(2),
+            "页边界对齐不越过水位"
+        );
+        let meta = store.list_meta().await.unwrap();
+        assert_eq!(meta.len(), 1);
+        assert_eq!(meta[0].message_count, 3, "列表条数按可见区计");
+
+        // ── 检索读面（SessionRecall）──
+        assert!(
+            recall.search("独特词3", 10, None).await.unwrap().is_empty(),
+            "FTS 不得搜到已回退内容"
+        );
+        assert_eq!(recall.search("独特词2", 10, None).await.unwrap().len(), 1);
+        let window = recall.window("s1", 4, 2).await.unwrap();
+        assert!(
+            window.iter().all(|m| m.seq < 3),
+            "回忆窗口不得露出水位之后的内容: {:?}",
+            window.iter().map(|m| m.seq).collect::<Vec<_>>()
+        );
+        assert_eq!(
+            recall.messages_since("s1", -1, 99).await.unwrap().len(),
+            3,
+            "会话内增量不越过水位"
+        );
+        assert!(
+            recall
+                .recent_since(0, 99)
+                .await
+                .unwrap()
+                .iter()
+                .all(|m| m.seq < 3),
+            "跨会话增量（演化材料）不得含已回退内容"
+        );
+    }
+
+    /// 重做 = 水位移回 `NULL`：行从未离开表，所以**一切原样恢复**——正文、FTS 命中、
+    /// 派生列（`first_request_tokens` 基线）都不需要重建。
+    #[tokio::test]
+    async fn test_redo_restores_chain_fts_and_baseline() {
+        let (store, recall) = make_store_and_recall().await;
+        store.create("s1", &SessionHeader::default()).await.unwrap();
+        store
+            .append_message("s1", &msg("u0", MessageRole::User, "问题"))
+            .await
+            .unwrap();
+        let mut a1 = msg("a1", MessageRole::Assistant, "回答一");
+        a1.tokens.input = 100;
+        store.append_message("s1", &a1).await.unwrap();
+        store
+            .append_message("s1", &msg("u2", MessageRole::User, "独特词二"))
+            .await
+            .unwrap();
+
+        // 回退到 seq=1（把基线行遮到水位之后）
+        store.set_visible_from("s1", 1).await.unwrap();
+        assert_eq!(store.load("s1").await.unwrap().unwrap().1.len(), 1);
+        assert_eq!(
+            store.list_meta().await.unwrap()[0].first_request_tokens,
+            None,
+            "基线行被遮 → 基线降级为未知（不是残留旧值）"
+        );
+        assert!(recall
+            .search("独特词二", 10, None)
+            .await
+            .unwrap()
+            .is_empty());
+
+        // 重做
+        let restored = store.clear_visible_from("s1").await.unwrap();
+        assert_eq!(restored, 2, "恢复条数 = 链尾 - 水位 + 1");
+        assert_eq!(store.load("s1").await.unwrap().unwrap().1.len(), 3);
+        assert_eq!(
+            store.list_meta().await.unwrap()[0].first_request_tokens,
+            Some(100),
+            "重做把基线也带回来（行从未离开表——这是水位的核心收益）"
+        );
+        assert_eq!(recall.search("独特词二", 10, None).await.unwrap().len(), 1);
+        // 一次性：再次重做无可恢复数据
+        assert_eq!(store.clear_visible_from("s1").await.unwrap(), 0);
+    }
+
+    /// 回退后落新消息：待重做段被**物理清理**（新消息要占那段 seq），水位清空 →
+    /// 重做不再可用。清理与插入同事务（崩在中途整体回滚，重做段仍完整）。
+    #[tokio::test]
+    async fn test_append_after_rollback_drops_redo_segment() {
+        let (store, _recall) = make_store_and_recall().await;
+        store.create("s1", &SessionHeader::default()).await.unwrap();
+        for i in 0..4 {
+            store
+                .append_message("s1", &msg(&format!("m{i}"), MessageRole::User, "x"))
+                .await
+                .unwrap();
+        }
+        store.set_visible_from("s1", 2).await.unwrap();
+
+        let seq = store
+            .append_message("s1", &msg("new", MessageRole::User, "新问题"))
+            .await
+            .unwrap();
+        assert_eq!(seq, 2, "新消息复用待重做段的起点");
+        assert_eq!(store.visible_from_seq("s1").await.unwrap(), None);
+        let (_, chain) = store.load("s1").await.unwrap().unwrap();
+        assert_eq!(chain.len(), 3);
+        assert_eq!(chain[2].id, "new");
+        assert_eq!(
+            store.find_seq("s1", "m3").await.unwrap(),
+            None,
+            "待重做段已物理删除"
+        );
+        assert_eq!(
+            store.clear_visible_from("s1").await.unwrap(),
+            0,
+            "重做不再可用"
+        );
+    }
+
+    /// 回退只叠一层：第二次回退**丢弃**第一次的待重做段（旧的那层已没有回到路径——
+    /// 重做永远恢复到全可见），新待重做段 =「本次锚点 → 原可见尾」。
+    #[tokio::test]
+    async fn test_second_rollback_discards_previous_redo_segment() {
+        let (store, _recall) = make_store_and_recall().await;
+        store.create("s1", &SessionHeader::default()).await.unwrap();
+        for i in 0..8 {
+            store
+                .append_message("s1", &msg(&format!("m{i}"), MessageRole::User, "x"))
+                .await
+                .unwrap();
+        }
+        store.set_visible_from("s1", 5).await.unwrap(); // 待重做 5..7
+        store.set_visible_from("s1", 3).await.unwrap(); // 丢弃 5..7，待重做 3..4
+        assert_eq!(store.visible_from_seq("s1").await.unwrap(), Some(3));
+
+        assert_eq!(
+            store.clear_visible_from("s1").await.unwrap(),
+            2,
+            "只恢复 3..4（第一次的 5..7 已在第二次回退时丢弃）"
+        );
+        let (_, chain) = store.load("s1").await.unwrap().unwrap();
+        assert_eq!(
+            chain.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(),
+            vec!["m0", "m1", "m2", "m3", "m4"]
+        );
+    }
+
+    /// 物理删除（清空会话 / 彻底删）与水位的关系：覆盖待重做段 → 水位失效；
+    /// 只删可见区尾部 → 水位保持。
+    #[tokio::test]
+    async fn test_truncate_clears_watermark_when_overlapping() {
+        let (store, _recall) = make_store_and_recall().await;
+        store.create("s1", &SessionHeader::default()).await.unwrap();
+        for i in 0..5 {
+            store
+                .append_message("s1", &msg(&format!("m{i}"), MessageRole::User, "x"))
+                .await
+                .unwrap();
+        }
+        store.set_visible_from("s1", 3).await.unwrap(); // 待重做 3..4
+
+        // 删可见区尾部（seq>=4）→ 水位（3）未被覆盖，保持
+        store.truncate_from("s1", 4).await.unwrap();
+        assert_eq!(
+            store.visible_from_seq("s1").await.unwrap(),
+            Some(3),
+            "只删可见区尾部，待重做段仍在"
+        );
+
+        // 删到水位之前（seq>=2）→ 待重做段一起消失，水位必须清空
+        store.truncate_from("s1", 2).await.unwrap();
+        assert_eq!(store.visible_from_seq("s1").await.unwrap(), None);
+        assert_eq!(store.load("s1").await.unwrap().unwrap().1.len(), 2);
+    }
+
+    /// **量化**（不进 CI）：5500 条链上「跨压缩点回退」两种实现的开销差。
+    ///
+    /// 旧路径（回退 fallback）= 读全链 + 整表重写（删 5500 行 + 逐条序列化重插 +
+    /// FTS 全重建）；新路径 = 移可见水位 + 重建段（压缩点被遮后就只剩可见区那几行）。
+    ///
+    /// ```text
+    /// cargo test -p tianyan-core --lib benchmark_cross_compression_rollback -- --ignored --nocapture
+    /// ```
+    ///
+    /// 内存库 + debug 构建：绝对值比生产库乐观，看**相对量级**。
+    #[tokio::test]
+    #[ignore = "性能量化：手动跑"]
+    async fn benchmark_cross_compression_rollback() {
+        let store = make_store().await;
+        store.create("s1", &SessionHeader::default()).await.unwrap();
+        let mut msgs: Vec<StructuredMessage> = (0..5500)
+            .map(|i| {
+                msg(
+                    &format!("m{i}"),
+                    MessageRole::User,
+                    &format!("第 {i} 条消息，用于量化跨压缩点回退的开销"),
+                )
+            })
+            .collect();
+        msgs[5000].compression_marker = true;
+        store
+            .rewrite("s1", &SessionHeader::default(), &msgs)
+            .await
+            .unwrap();
+
+        // 旧：回退到 seq=10 之前（落点在压缩点之前）→ 读全链 + 整表重写
+        let t = std::time::Instant::now();
+        let chain = store.load("s1").await.unwrap().unwrap().1;
+        store
+            .rewrite("s1", &SessionHeader::default(), &chain[..10])
+            .await
+            .unwrap();
+        let old_ms = t.elapsed().as_millis();
+
+        store
+            .rewrite("s1", &SessionHeader::default(), &msgs)
+            .await
+            .unwrap();
+
+        // 新：移水位 + 重建段（= rebuild 干的三步：可见尾 / 最后压缩点 / 读段）
+        let t = std::time::Instant::now();
+        store.set_visible_from("s1", 10).await.unwrap();
+        let last = store.last_seq("s1").await.unwrap();
+        let start = store.last_marker_seq("s1").await.unwrap().unwrap_or(0);
+        let seg = store.load_from("s1", start).await.unwrap();
+        let new_ms = t.elapsed().as_millis();
+
+        println!(
+            "跨压缩点回退（5500 条，压缩点 5000 → 回退到 10）: 旧 {old_ms} ms / 新 {new_ms} ms；\
+             新路径段长 {} 条（可见尾 {last}，段起点 {start}）",
+            seg.len()
+        );
+        assert_eq!(seg.len(), 10, "段 = [压缩点(无) .. 可见尾] = 可见区");
     }
 }

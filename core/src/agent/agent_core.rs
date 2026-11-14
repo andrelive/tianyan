@@ -3492,8 +3492,17 @@ mod tests {
         assert_eq!(outcome.truncated, 2);
         assert_eq!(outcome.workdir, None, "未绑定工作区：文件未回退（须明示）");
         assert_eq!(outcome.restored_files, 0);
-        assert!(!outcome.redo_available, "无快照根 → 无重做数据");
+        assert!(
+            outcome.redo_available,
+            "消息层一定能撤销（可见水位已前移）——无工作区只影响「文件」那一半"
+        );
         assert_eq!(store.load("s1").await.unwrap().unwrap().1.len(), 2);
+
+        // 重做只恢复消息（没有文件那一半，不因此失败）
+        let redo = agent.redo_to("s1", &ids[2]).await.unwrap();
+        assert_eq!(redo.restored_messages, 2);
+        assert_eq!(redo.restored_files, 0);
+        assert_eq!(store.load("s1").await.unwrap().unwrap().1.len(), 4);
     }
 
     /// ADR-040：重做走同一排他事务入口——恢复被回退的消息与工作区文件，

@@ -23,7 +23,6 @@ use std::time::{Duration, Instant};
 
 use crate::agent::agent_core::Agent;
 use crate::common::error::{Result, TianyanError};
-use crate::common::types::StructuredMessage;
 
 /// 等待被 kill 的命令任务进入终态的时限（watcher 收尾异步：杀进程后
 /// `child.wait()` 返回 → 取消通知入库）。
@@ -133,7 +132,9 @@ impl Agent {
                     let index = ws.find_seq(message_id).await?.ok_or_else(|| {
                         TianyanError::not_found(format!("消息不存在：{message_id}"))
                     })? as usize;
-                    let truncated: Vec<StructuredMessage> = ws.messages_from(index as i64).await?;
+                    // 被回退的消息**不读出来**（水位方案下它们一行都没动）：条数由
+                    // 可见尾推出；重做也不需要副本——把水位移回就全回来了。
+                    let truncated = (ws.last_seq() + 1 - index as i64).max(0) as usize;
                     let chain_ms = t_chain.elapsed().as_millis() as u64;
                     // 锁内再取消一次并等终态：覆盖「等待轮退出期间」新起的任务（幂等），
                     // 并保证取消通知先入库（截断时随锚点后消息一并丢弃）
@@ -151,7 +152,6 @@ impl Agent {
                     let mut restored_files = 0usize;
                     let mut deletion_suppressed = 0usize;
                     let mut suppression_reason: Option<String> = None;
-                    let mut redo_available = false;
                     let mut snapshot_missing = false;
                     // 分段耗时（未进入对应分支时保持 0）：回退是复合操作，总耗时看不出
                     // 钱花在哪一段——这几项是「还能不能再快」的唯一依据。
@@ -166,11 +166,8 @@ impl Agent {
                             //    它的捕获结果同时是 ④ 的「当前状态」：复用可省一次全树扫描。
                             let mut precomputed_current = None;
                             let t_redo = Instant::now();
-                            match sm.save_redo(session_id, message_id, &truncated).await {
-                                Ok(tree) => {
-                                    redo_available = true;
-                                    precomputed_current = Some(tree);
-                                }
+                            match sm.save_redo(session_id, message_id).await {
+                                Ok(tree) => precomputed_current = Some(tree),
                                 Err(e) => tracing::warn!(
                                     error = %e,
                                     session = %session_id,
@@ -207,24 +204,21 @@ impl Agent {
                         }
                     }
 
-                    // ⑤ **后截断链**（经工作集：库 + 物化段 + seq 同步推进）
+                    // ⑤ **后移可见水位**（经工作集：库水位 + 物化段 + seq 同步推进）
                     //
-                    // 优先走增量删除（只删尾部 seq >= index）。回退典型只截断几条，而
-                    // `rewrite` 是整表重写（全部消息删掉再逐条序列化插入 + FTS 全重建）——
-                    // 实测 1300+ 条消息的会话一次回退 1186 ms 主要耗在这里。落在压缩点之前
-                    // 的少见情形回退到全量重写保底。
+                    // 行留在库里（`seq >= index` 成为待重做段）→ 重做只是把水位移回，
+                    // 一行都不用搬。落点在段起点之前时段整体作废，重读一次段即可
+                    // （此前是整表重写：全部消息删掉再逐条序列化插入 + FTS 全重建）。
                     let t_truncate = Instant::now();
-                    if !ws.truncate_to(index).await? {
-                        // 少见路径（锚点落在段起点之前）：段起点会变负，只能全量重写
-                        let chain = ws.full_chain().await?;
-                        ws.rewrite(&chain[..index]).await?;
+                    if !ws.rewind_to(index).await? {
+                        ws.rebuild().await?;
                     }
                     let truncate_ms = t_truncate.elapsed().as_millis() as u64;
 
                     tracing::info!(
                         session = %session_id,
                         index,
-                        truncated = truncated.len(),
+                        truncated,
                         locate_ms,
                         cancel_ms,
                         chain_ms,
@@ -235,13 +229,15 @@ impl Agent {
                     );
 
                     Ok(RollbackOutcome {
-                        truncated: truncated.len(),
+                        truncated,
                         restored_files,
                         deletion_suppressed,
                         suppression_reason,
                         workdir: workdir.map(|p| p.display().to_string()),
                         snapshot_missing,
-                        redo_available,
+                        // 回退成功 = 水位已前移 = 消息层一定可撤销（与工作区树无关：
+                        // 缺树只是「文件不回来」，消息仍能撤销）
+                        redo_available: true,
                         cancelled_tasks,
                     })
                 })
@@ -264,11 +260,13 @@ impl Agent {
 
     /// 重做：恢复被回退的消息与工作区文件（与回退同一排他事务入口）。
     ///
-    /// 重做数据按被回退消息的 ID 组织（一次性语义：读取即消费）。
+    /// 消息层 = 「把可见水位移回」——行从未离开表，所以正文 / FTS 索引 / 派生列
+    /// 全部原样回来（不需要重新插入、更不需要重建索引）；文件层按锚点的重做树
+    /// 回放，缺树时只恢复消息（不算失败）。
     ///
     /// # Errors
     /// * 会话不存在 → `not_found`（404）；
-    /// * 未装配快照管理器 / 未绑定工作区 / 无重做状态 → `invalid_input`（400）。
+    /// * 无待重做段（水位未被前移 / 已被新消息清理）→ `invalid_input`（400）。
     pub(crate) async fn redo_to(&self, session_id: &str, message_id: &str) -> Result<RedoOutcome> {
         // 存在性走 `EXISTS`（不全量加载消息——重做只为判断会话在不在）
         if !self.session_manager.session_exists(session_id).await? {
@@ -278,37 +276,29 @@ impl Agent {
         }
         self.working_sets
             .with_session_exclusive(session_id, |ws| async move {
-                let sm = self
-                    .snapshot_manager
-                    .clone()
-                    .ok_or_else(|| TianyanError::invalid_input("未启用工作区快照，无法重做"))?;
-                let workdir = self
-                    .resolve_working_directory(session_id)
-                    .await
-                    .path()
-                    .map(std::path::Path::to_path_buf)
-                    .ok_or_else(|| {
-                        // 快照管理器已装配，这里只可能是「没有可用工作目录」
-                        // （会话未绑定/绑定失效 且 无全局默认）——文案要指对原因，
-                        // 否则用户会去查快照配置而不是绑定工作区。
-                        TianyanError::invalid_input(
-                            "没有可用工作目录，无法重做（重做需按工作区快照回放文件）。\
-                             请为该会话绑定工作区。",
-                        )
-                    })?;
-                let Some((messages, report)) = sm
-                    .with_workdir(workdir)
-                    .load_redo(session_id, message_id)
-                    .await?
-                else {
+                // 可重做性只看**消息层**（可见水位被前移过）。文件是附加项：
+                // 未装配快照 / 未绑定工作区时仍可撤销消息（那次回退本就只回退了消息）。
+                if ws.visible_from().await?.is_none() {
                     return Err(TianyanError::invalid_input("没有可重做的状态"));
-                };
+                }
 
-                // 锁内读基准 → 追加到当前链尾（不覆盖锁外已落库的写入）
-                let mut chain = ws.full_chain().await?;
-                let restored_messages = messages.len();
-                chain.extend(messages);
-                ws.rewrite(&chain).await?;
+                // ① 先恢复工作区文件（可能失败的一步在前：失败即整体中止，链不动）
+                let mut report = crate::snapshot::RestoreReport::default();
+                if let (Some(sm), Some(wd)) = (
+                    self.snapshot_manager.clone(),
+                    self.resolve_working_directory(session_id)
+                        .await
+                        .path()
+                        .map(std::path::Path::to_path_buf),
+                ) {
+                    report = sm
+                        .with_workdir(wd)
+                        .restore_redo_tree(session_id, message_id)
+                        .await?;
+                }
+
+                // ② 后移回水位（行一直在库里，段整体重建）
+                let restored_messages = ws.redo_visible().await?;
 
                 Ok(RedoOutcome {
                     restored_messages,
