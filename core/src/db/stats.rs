@@ -70,9 +70,9 @@ impl StatsRepo {
         skill_batch: &[(String, u64, u64, u64)],
         doc_batch: &[(String, u64, u64, f64)],
     ) -> Result<(), TianyanError> {
-        let conn = self.db.lock().await;
+        let mut conn = self.db.lock().await;
         let tx = conn
-            .unchecked_transaction()
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
             .map_err(|e| Self::sqlite_error("统计落盘", e))?;
         let now = chrono::Utc::now().to_rfc3339();
         {

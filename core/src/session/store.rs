@@ -196,9 +196,9 @@ impl SessionStore {
         let content_parts = serde_json::to_string(msg).map_err(|e| {
             TianyanError::Custom(format!("session: session_store: 序列化错误：{e}"))
         })?;
-        let conn = self.db.lock().await;
+        let mut conn = self.db.lock().await;
         let tx = conn
-            .unchecked_transaction()
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
             .map_err(|e| sqlite_error("追加事务开启失败", e))?;
         // 会话必须已存在（显式 create）：此前 append 隐式重建 session_meta——
         // 向**已删除**会话的写入（级联删除后仍在跑的子代理 / 流式收尾 / 唤醒轮）
@@ -373,9 +373,9 @@ impl SessionStore {
             TianyanError::Custom(format!("session: session_store: 序列化错误：{e}"))
         })?;
         let created_at = header.created_at.map(|t| t.timestamp_millis()).unwrap_or(0);
-        let conn = self.db.lock().await;
+        let mut conn = self.db.lock().await;
         let tx = conn
-            .unchecked_transaction()
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
             .map_err(|e| sqlite_error("重写事务开启失败", e))?;
         tx.execute(
             "DELETE FROM session_messages_fts WHERE rowid IN              (SELECT id FROM session_messages WHERE session_id = ?1)",
@@ -453,9 +453,9 @@ impl SessionStore {
         session_id: &str,
         from_seq: i64,
     ) -> Result<(), TianyanError> {
-        let conn = self.db.lock().await;
+        let mut conn = self.db.lock().await;
         let tx = conn
-            .unchecked_transaction()
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
             .map_err(|e| sqlite_error("截断事务开启失败", e))?;
         tx.execute(
             "DELETE FROM session_messages_fts WHERE rowid IN \
@@ -527,9 +527,9 @@ impl SessionStore {
         session_id: &str,
         from_seq: i64,
     ) -> Result<(), TianyanError> {
-        let conn = self.db.lock().await;
+        let mut conn = self.db.lock().await;
         let tx = conn
-            .unchecked_transaction()
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
             .map_err(|e| sqlite_error("回退水位事务开启失败", e))?;
         // 旧待重做段 = 旧水位之后的行；无水位时 `COALESCE` 取 i64::MAX → 删不到东西
         let stale: String = format!(
@@ -579,9 +579,9 @@ impl SessionStore {
     /// # Errors
     /// * SQLite 失败时透传。
     pub(crate) async fn clear_visible_from(&self, session_id: &str) -> Result<usize, TianyanError> {
-        let conn = self.db.lock().await;
+        let mut conn = self.db.lock().await;
         let tx = conn
-            .unchecked_transaction()
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
             .map_err(|e| sqlite_error("重做事务开启失败", e))?;
         let from: Option<i64> = tx
             .query_row(
@@ -992,9 +992,9 @@ impl SessionStore {
     /// # Errors
     /// * SQLite 写入失败时返回 TianyanError。
     pub(crate) async fn delete(&self, session_id: &str) -> Result<(), TianyanError> {
-        let conn = self.db.lock().await;
+        let mut conn = self.db.lock().await;
         let tx = conn
-            .unchecked_transaction()
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
             .map_err(|e| sqlite_error("删除事务开启失败", e))?;
         // 级联：**递归**删除全部后代会话（子/孙/…）三表清理——嵌套委托会
         // 产生多层子会话，旧实现只删一层（parent = 本会话），孙会话成为孤儿：
@@ -1046,7 +1046,7 @@ impl SessionStore {
         &self,
         max_children: usize,
     ) -> Result<(), TianyanError> {
-        let conn = self.db.lock().await;
+        let mut conn = self.db.lock().await;
         loop {
             let count: i64 = conn
                 .query_row(
@@ -1081,7 +1081,7 @@ impl SessionStore {
             // 失败会留下"消息已删、元数据还在"的半删状态，T0-13）。
             let cte = DESCENDANT_CTE;
             let tx = conn
-                .unchecked_transaction()
+                .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
                 .map_err(|e| sqlite_error("上限清理事务开启失败", e))?;
             tx.execute(
                 &format!("{cte} DELETE FROM session_messages_fts WHERE rowid IN (SELECT id FROM session_messages WHERE session_id IN (SELECT session_id FROM descendants))"),
@@ -2061,5 +2061,95 @@ mod tests {
             seg.len()
         );
         assert_eq!(seg.len(), 10, "段 = [压缩点(无) .. 可见尾] = 可见区");
+    }
+
+    /// **量化**（不进 CI）：`append_message` 的开销构成——取号（`MAX(seq)+1`
+    /// 索引查找）只占多少。用来回答「seq 的原子 +1 值不值得换 UUID/ULID」。
+    ///
+    /// ```text
+    /// cargo test -p tianyan-core --lib benchmark_append_seq_allocation_cost -- --ignored --nocapture
+    /// ```
+    #[tokio::test]
+    #[ignore = "性能量化：手动跑"]
+    async fn benchmark_append_seq_allocation_cost() {
+        let store = make_store().await;
+        store.create("s1", &SessionHeader::default()).await.unwrap();
+        // 预置 2000 条（让 `MAX(seq)` 的索引深度真实一点，而不是空表）
+        let msgs: Vec<StructuredMessage> = (0..2000)
+            .map(|i| {
+                msg(
+                    &format!("m{i}"),
+                    MessageRole::User,
+                    &format!("第 {i} 条消息，用于量化取号开销"),
+                )
+            })
+            .collect();
+        store
+            .rewrite("s1", &SessionHeader::default(), &msgs)
+            .await
+            .unwrap();
+
+        const N: usize = 1000;
+        // ① 单独跑「取号」这一条 SQL（与 append 内部完全同形）
+        let t = std::time::Instant::now();
+        for _ in 0..N {
+            let conn = store.db.lock().await;
+            let _seq: i64 = conn
+                .query_row(
+                    "SELECT COALESCE(MAX(seq), -1) + 1 FROM session_messages WHERE session_id = ?1",
+                    rusqlite::params!["s1"],
+                    |r| r.get(0),
+                )
+                .unwrap();
+        }
+        let alloc_us = t.elapsed().as_micros() / N as u128;
+
+        // ② 整条 append（取号 + 序列化 + INSERT + FTS + 基线 + 活跃时间，单事务）
+        let t = std::time::Instant::now();
+        for i in 0..N {
+            store
+                .append_message("s1", &msg(&format!("new{i}"), MessageRole::User, "新消息"))
+                .await
+                .unwrap();
+        }
+        let append_us = t.elapsed().as_micros() / N as u128;
+
+        println!(
+            "2000 条链 / {N} 次：取号 {alloc_us} µs，整条 append {append_us} µs\
+             （取号占比 {}%）",
+            (alloc_us * 100).checked_div(append_us).unwrap_or(0)
+        );
+    }
+
+    /// `message_id` 唯一性（兜底加固）：同会话重复 ID 必须**写入失败**。
+    ///
+    /// `find_seq` 用 `LIMIT 1` 取一条来定位回退锚点——ID 重复时它会「取到哪条
+    /// 算哪条」，回退就静默错位。唯一索引把这个问题挡在写入侧。
+    /// 唯一性是**会话内**的（跨会话同名 ID 仍允许）。
+    #[tokio::test]
+    async fn test_duplicate_message_id_is_rejected() {
+        let store = make_store().await;
+        store.create("s1", &SessionHeader::default()).await.unwrap();
+        store
+            .append_message("s1", &msg("dup", MessageRole::User, "第一次"))
+            .await
+            .unwrap();
+        let err = store
+            .append_message("s1", &msg("dup", MessageRole::User, "重复 ID"))
+            .await
+            .expect_err("重复 message_id 应被唯一索引拒绝");
+        assert!(err.to_string().contains("消息写入失败"), "{err}");
+        assert_eq!(
+            store.load("s1").await.unwrap().unwrap().1.len(),
+            1,
+            "失败的写入不得留下半条消息"
+        );
+
+        // 跨会话同名 ID 允许（唯一性只在会话内成立）
+        store.create("s2", &SessionHeader::default()).await.unwrap();
+        store
+            .append_message("s2", &msg("dup", MessageRole::User, "另一会话"))
+            .await
+            .unwrap();
     }
 }

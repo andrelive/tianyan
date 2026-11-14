@@ -254,7 +254,62 @@ impl SqliteDb {
             }
         }
         conn.execute_batch(SCHEMA_SQL)?;
+        // 幂等迁移：`idx_session_messages_msgid` 升级为 UNIQUE（见函数文档）。
+        // 必须在 SCHEMA_SQL 之后：它要读 `sqlite_master` 里实际建成的索引定义
+        // （`CREATE UNIQUE INDEX IF NOT EXISTS` 对**已存在的同名普通索引**会短路）。
+        ensure_msgid_unique_index(&conn)?;
         Ok(())
+    }
+}
+
+/// 把 `idx_session_messages_msgid` 升级为 UNIQUE（幂等；失败降级 + 告警）。
+///
+/// **为什么要显式比对**：老库上同名索引是**非唯一**的，而 `SCHEMA_SQL` 里的
+/// `CREATE UNIQUE INDEX IF NOT EXISTS` 会因为「索引已存在」直接短路——拿不到
+/// 唯一性，必须先 DROP 再建。
+///
+/// **为什么值得 UNIQUE**：`find_seq` 用 `LIMIT 1` 取一条来定位回退锚点。消息 ID
+/// 的唯一性只由进程内的 `AtomicU64` 计数器保证（`msg_{ms}_{seq}`），跨进程双写、或
+/// 同一毫秒内重启（计数器归零）都可能重复 → `find_seq` 返回**不确定的那条** →
+/// 回退静默错位、前端列表 key 冲突。唯一索引把「静默错位」变成「写入时明确失败」。
+///
+/// **失败降级**：存量若有重复行（历史脏数据），建唯一索引会失败——此时重建普通
+/// 索引并告警，**不让服务起不来**（重复行需人工处理；数据安全优先于索引完备）。
+fn ensure_msgid_unique_index(conn: &Connection) -> Result<(), rusqlite::Error> {
+    const NAME: &str = "idx_session_messages_msgid";
+    let existing: Option<String> = match conn.query_row(
+        "SELECT sql FROM sqlite_master WHERE type = 'index' AND name = ?1",
+        [NAME],
+        |r| r.get::<_, Option<String>>(0),
+    ) {
+        Ok(sql) => sql,
+        // 索引不存在（表还没建 / 首次迁移）→ 交给 SCHEMA_SQL 建
+        Err(rusqlite::Error::QueryReturnedNoRows) => return Ok(()),
+        Err(e) => return Err(e),
+    };
+    if existing
+        .as_deref()
+        .is_some_and(|sql| sql.to_ascii_uppercase().contains("UNIQUE"))
+    {
+        return Ok(());
+    }
+    conn.execute(&format!("DROP INDEX IF EXISTS {NAME}"), [])?;
+    let ddl = |unique: bool| {
+        format!(
+            "CREATE {}INDEX IF NOT EXISTS {NAME} ON session_messages(session_id, message_id)",
+            if unique { "UNIQUE " } else { "" }
+        )
+    };
+    match conn.execute_batch(&ddl(true)) {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                "会话消息 ID 索引升级为 UNIQUE 失败（存量存在重复 message_id？）——\
+                 降级保留普通索引；重复 ID 上的 `find_seq` 定位可能不确定"
+            );
+            conn.execute_batch(&ddl(false))
+        }
     }
 }
 
@@ -386,7 +441,9 @@ const SCHEMA_SQL: &str = "
     CREATE INDEX IF NOT EXISTS idx_session_messages_session_ts ON session_messages(session_id, ts);
     -- 按消息 ID 定位 seq（回退/重做的锚点定位）：覆盖索引，含 seq 不回表——
     -- 没有它只能全量加载整条链再线性找位置（实测 1300+ 条会话每次回退多花上百毫秒）
-    CREATE INDEX IF NOT EXISTS idx_session_messages_msgid ON session_messages(session_id, message_id);
+    -- UNIQUE：`find_seq` 以 `LIMIT 1` 定位回退锚点，ID 必须唯一（见
+    -- `ensure_msgid_unique_index` 的文档——升级老库的非唯一同名索引走那里）。
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_session_messages_msgid ON session_messages(session_id, message_id);
 
     -- 会话级状态（ADR-018：替代 JSONL 首行 SessionHeader；
     -- injectable 快照 + title/ended_at/created_at 唯一持久化 home）
@@ -632,5 +689,103 @@ mod lock_tests {
                 .unwrap();
             assert_eq!(count, 1);
         }
+    }
+
+    /// 老库上的 `idx_session_messages_msgid` 是**非唯一**的；`CREATE UNIQUE INDEX
+    /// IF NOT EXISTS` 会因「索引已存在」短路 → 必须在 `init_all_schemas` 里显式
+    /// 比对并重建，否则存量库永远拿不到唯一性（`find_seq` 的 `LIMIT 1` 仍可能
+    /// 取到不确定的一条）。
+    #[tokio::test]
+    async fn test_msgid_index_upgraded_to_unique() {
+        let db = SqliteDb::open_in_memory().unwrap();
+        {
+            let conn = db.lock().await;
+            conn.execute_batch(
+                "CREATE TABLE session_messages (
+                    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                    session_id    TEXT    NOT NULL,
+                    seq           INTEGER NOT NULL,
+                    message_id    TEXT    NOT NULL,
+                    role          TEXT    NOT NULL,
+                    text          TEXT    NOT NULL DEFAULT '',
+                    tool_text     TEXT    NOT NULL DEFAULT '',
+                    tokens        INTEGER NOT NULL DEFAULT 0,
+                    ts            INTEGER NOT NULL,
+                    content_parts TEXT    NOT NULL DEFAULT '',
+                    recorded_at   TEXT    NOT NULL DEFAULT (datetime('now'))
+                );
+                CREATE INDEX idx_session_messages_msgid
+                    ON session_messages(session_id, message_id);",
+            )
+            .unwrap();
+        }
+        db.init_all_schemas().await.expect("旧库迁移应成功");
+        let conn = db.lock().await;
+        let sql: String = conn
+            .query_row(
+                "SELECT sql FROM sqlite_master WHERE type = 'index' \
+                 AND name = 'idx_session_messages_msgid'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(
+            sql.to_ascii_uppercase().contains("UNIQUE"),
+            "非唯一索引应被升级为 UNIQUE：{sql}"
+        );
+    }
+
+    /// 存量若有重复 `message_id`（跨进程双写 / 同一毫秒内重启的历史脏数据），
+    /// 建唯一索引必然失败——**降级保留普通索引 + 告警，不让服务起不来**
+    /// （数据安全优先于索引完备；重复行需人工处理）。
+    #[tokio::test]
+    async fn test_msgid_index_downgrades_on_existing_duplicates() {
+        let db = SqliteDb::open_in_memory().unwrap();
+        {
+            let conn = db.lock().await;
+            conn.execute_batch(
+                "CREATE TABLE session_messages (
+                    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                    session_id    TEXT    NOT NULL,
+                    seq           INTEGER NOT NULL,
+                    message_id    TEXT    NOT NULL,
+                    role          TEXT    NOT NULL,
+                    text          TEXT    NOT NULL DEFAULT '',
+                    tool_text     TEXT    NOT NULL DEFAULT '',
+                    tokens        INTEGER NOT NULL DEFAULT 0,
+                    ts            INTEGER NOT NULL,
+                    content_parts TEXT    NOT NULL DEFAULT '',
+                    recorded_at   TEXT    NOT NULL DEFAULT (datetime('now'))
+                );
+                CREATE INDEX idx_session_messages_msgid
+                    ON session_messages(session_id, message_id);
+                INSERT INTO session_messages (session_id, seq, message_id, role, ts)
+                    VALUES ('s1', 0, 'dup', 'user', 1);
+                INSERT INTO session_messages (session_id, seq, message_id, role, ts)
+                    VALUES ('s1', 1, 'dup', 'user', 2);",
+            )
+            .unwrap();
+        }
+        db.init_all_schemas()
+            .await
+            .expect("存量重复不应让 schema 初始化失败（降级而非报错）");
+        let conn = db.lock().await;
+        let sql: String = conn
+            .query_row(
+                "SELECT sql FROM sqlite_master WHERE type = 'index' \
+                 AND name = 'idx_session_messages_msgid'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(
+            !sql.to_ascii_uppercase().contains("UNIQUE"),
+            "有重复行时应降级为普通索引：{sql}"
+        );
+        // 数据仍在（降级不删数据）
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM session_messages", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count, 2, "降级不得触碰存量行");
     }
 }
