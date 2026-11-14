@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [1.2.7] - 2026-11-14
 
 ### Changed
 
@@ -19,6 +19,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   **语义变化**：① 回退只叠一层——第二次回退丢弃第一次的待重做段；② 回退后产生新消息
   即不可重做（此前允许「新消息在前、被回退消息接在后」）；③ `redo_available` 现在恒为
   「消息层可撤销」（与是否绑定工作区无关，缺快照只意味着文件不回来）。
+
+### Performance
+
+- **`glob` 提速约 27 倍**：取修改时间不再逐条 `stat`——目录遍历时顺带取（Windows 上
+  `DirEntry::metadata` 直接用 readdir 缓存的 find data，不产生额外系统调用）。3,000 个
+  命中的实测：**302–365 ms → 11–27 ms**，端到端 **343–573 ms → 12–14 ms**。排序同时
+  改为「mtime 倒序 + 路径升序」，同一 mtime 的顺序不再取决于文件系统返回顺序。
+- **tool 结果图片解析不再逐条解 JSON**：没有 `session_images` 引用的结果直接跳过
+  （此前每条 tool 结果都要把整段内容解析成语法树，几十 KB~几 MB 的分配；实际绝大多数
+  结果里没有图片引用）。
+
+### Fixed
+
+- **消息 ID 唯一性**：`(session_id, message_id)` 索引升级为 UNIQUE（存量库自动迁移；
+  若历史数据已有重复则降级保留普通索引并告警，不让服务起不来）。重复 ID 会让回退锚点
+  `find_seq` 定位到不确定的一条。
+- **数据库写冲突改为等待而非立刻失败**：`PRAGMA busy_timeout=5s` + 写事务
+  `BEGIN IMMEDIATE`（此前 DEFERRED，`read-then-write` 遇到另一个进程持写锁会立刻
+  `database is locked`；IMMEDIATE 一开始就拿写锁，避开快照失效这一类不可重试的冲突）。
 
 ## [1.2.6] - 2026-11-13
 
