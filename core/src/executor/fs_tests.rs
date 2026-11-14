@@ -24,6 +24,75 @@ fn age_file(path: &Path, age: Duration) {
     f.set_modified(SystemTime::now() - age).unwrap();
 }
 
+/// **量化**（不进 CI）：glob 的 mtime 排序开销——命中数越大越明显
+/// （每条 `metadata` 都是一次 `spawn_blocking` 往返，串行时是主要成本）。
+///
+/// ```text
+/// cargo test -p tianyan-core --lib benchmark_glob_mtime_sort -- --ignored --nocapture
+/// ```
+#[tokio::test]
+#[ignore = "性能量化：手动跑"]
+async fn benchmark_glob_mtime_sort() {
+    let dir = tempfile::tempdir().unwrap();
+    const N: usize = 3000;
+    for i in 0..N {
+        std::fs::write(dir.path().join(format!("f{i}.rs")), "x").unwrap();
+    }
+    let base = dir.path().to_path_buf();
+
+    // 新版：收集时顺带拿 mtime（手工遍历路径零额外 stat）
+    let t = std::time::Instant::now();
+    let mut with_mtime = match collect_rg_files(&base, "**/*.rs").await.unwrap() {
+        Some(paths) => stat_mtimes(&base, paths).await.unwrap(),
+        None => collect_walk_files(&base, "**/*.rs").await.unwrap(),
+    };
+    let collect_ms = t.elapsed().as_millis();
+    let n = with_mtime.len();
+
+    let t = std::time::Instant::now();
+    with_mtime.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    let sort_ms = t.elapsed().as_millis();
+
+    // 旧版对照：逐条 await 遍历（不带 mtime）+ 逐条 stat
+    let t = std::time::Instant::now();
+    let mut old_paths = Vec::new();
+    let mut stack = vec![base.clone()];
+    while let Some(d) = stack.pop() {
+        let Ok(mut rd) = tokio::fs::read_dir(&d).await else {
+            continue;
+        };
+        while let Ok(Some(e)) = rd.next_entry().await {
+            let Ok(ft) = e.file_type().await else {
+                continue;
+            };
+            if ft.is_dir() {
+                stack.push(e.path());
+            } else {
+                old_paths.push(e.path());
+            }
+        }
+    }
+    let old_walk_ms = t.elapsed().as_millis();
+    let t = std::time::Instant::now();
+    for p in &old_paths {
+        let _ = std::fs::metadata(p);
+    }
+    let old_stat_ms = t.elapsed().as_millis();
+
+    let t = std::time::Instant::now();
+    let out = execute_glob("**/*.rs", Some(dir.path())).await.unwrap();
+    let ms = t.elapsed().as_millis();
+    println!(
+        "glob {n} 个命中：新版 收集+mtime {collect_ms} ms（排序 {sort_ms} ms）；\
+         旧版 遍历 {old_walk_ms} ms + stat {old_stat_ms} ms = {} ms；\
+         端到端 {ms} ms（返回 {} 条）",
+        old_walk_ms + old_stat_ms,
+        out.count
+    );
+    assert_eq!(out.count, MAX_GLOB_RESULTS, "应截断到硬上限");
+    assert!(out.truncated);
+}
+
 /// 创建文件（自动创建父目录）。
 fn create_file(path: &Path, content: &str) {
     if let Some(parent) = path.parent() {

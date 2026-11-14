@@ -20,6 +20,40 @@ pub const MAX_GLOB_RESULTS: usize = 200;
 /// 回退遍历时跳过的目录（rg 由 .gitignore/隐藏规则处理，回退路径需手工排除）。
 pub const EXCLUDED_DIRS: &[&str] = &[".git", "node_modules", "target"];
 
+/// 一次同步遍历目录，返回 `(绝对路径, is_dir, mtime)`；单条目失败跳过。
+///
+/// **为什么顺带取 mtime**：`std::fs::DirEntry::metadata()` 在 Windows 上**不需要
+/// 额外系统调用**（直接用 readdir 缓存的 find data，`file_type` 同理），而
+/// `fs::metadata(path)` 是一次真实 stat——本机实测约 130 µs/次（安全软件的文件
+/// 过滤驱动放大：同一文件重复 stat 1000 次也要 97 ms），3000 个命中的 glob 光
+/// stat 就 ~390 ms。遍历时顺手取 mtime 把这笔开销整个消掉。
+///
+/// **为什么还要同步版**：`tokio::fs::read_dir` 的每个 `next_entry().await` /
+/// `file_type().await` 都是一次 `spawn_blocking` 往返；同步版在一个闭包里做完，
+/// 调用方只需**一次**往返。
+///
+/// 调用方须经 `spawn_blocking` 使用。形态与 `snapshot::read_dir_stat_sync` 同源
+/// （后者还要 mtime/size 供 racy 判据）——两处职责不同，暂不合并；若将来需要
+/// 统一的遍历原语，再抽到 `common`。
+fn read_dir_sync(dir: &Path) -> std::io::Result<Vec<(PathBuf, bool, Option<SystemTime>)>> {
+    let mut out = Vec::new();
+    for entry in std::fs::read_dir(dir)? {
+        let Ok(entry) = entry else {
+            continue; // 单条目读取失败跳过，不中断整体列举
+        };
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
+        if !file_type.is_dir() && !file_type.is_file() {
+            continue; // 符号链接等特殊条目跳过
+        }
+        // Windows：零系统调用（readdir 的 find data）；其他平台会 stat 一次
+        let mtime = entry.metadata().ok().and_then(|m| m.modified().ok());
+        out.push((entry.path(), file_type.is_dir(), mtime));
+    }
+    Ok(out)
+}
+
 /// glob 工具输出。
 #[derive(Debug, Clone, Serialize)]
 pub struct GlobOutput {
@@ -77,24 +111,17 @@ pub async fn execute_glob(pattern: &str, path: Option<&Path>) -> Result<GlobOutp
         )));
     }
 
-    let rel_paths = match collect_rg_files(&base, pattern).await {
-        Ok(Some(paths)) => paths,
+    // 两种来源统一成 `(绝对路径, mtime)`：
+    // - 手工遍历**顺带**拿到 mtime（Windows 上零额外系统调用，见 [`read_dir_sync`]）；
+    // - rg 只给路径，仍需逐条 stat（见 [`stat_mtimes`]）。
+    let mut with_mtime: Vec<(PathBuf, SystemTime)> = match collect_rg_files(&base, pattern).await {
+        Ok(Some(paths)) => stat_mtimes(&base, paths).await?,
         Ok(None) => collect_walk_files(&base, pattern).await?,
         Err(e) => return Err(e),
     };
-
-    // 按修改时间倒序（新的在前），硬上限截断
-    let mut with_mtime: Vec<(PathBuf, SystemTime)> = Vec::with_capacity(rel_paths.len());
-    for rel in rel_paths {
-        let abs = base.join(&rel);
-        let mtime = tokio::fs::metadata(&abs)
-            .await
-            .ok()
-            .and_then(|m| m.modified().ok())
-            .unwrap_or(SystemTime::UNIX_EPOCH);
-        with_mtime.push((abs, mtime));
-    }
-    with_mtime.sort_by_key(|(_, mtime)| std::cmp::Reverse(*mtime));
+    // 并发完成顺序不定 → 用「mtime 倒序 + 路径升序」做**确定性**排序
+    // （同一 mtime 的条目顺序不再取决于文件系统返回顺序）
+    with_mtime.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
     let truncated = with_mtime.len() > MAX_GLOB_RESULTS;
     let results: Vec<String> = with_mtime
         .iter()
@@ -122,28 +149,30 @@ pub async fn execute_list_dir(
             path.display()
         )));
     }
-    let mut rd = tokio::fs::read_dir(path).await.map_err(|e| {
-        TianyanError::Custom(format!("executor: 读取目录失败 {}：{e}", path.display()))
-    })?;
-    let mut entries: Vec<DirEntry> = Vec::new();
-    while let Some(entry) = rd.next_entry().await.map_err(|e| {
-        TianyanError::Custom(format!("executor: 读取目录失败 {}：{e}", path.display()))
-    })? {
-        let file_type = match entry.file_type().await {
-            Ok(t) => t,
-            Err(_) => continue, // 单个条目读取失败跳过，不中断整体列举
-        };
-        let is_dir = file_type.is_dir();
-        if !is_dir && !file_type.is_file() {
-            continue; // 符号链接等特殊条目跳过
-        }
-        let name = entry.file_name().to_string_lossy().into_owned();
-        entries.push(DirEntry {
-            entry_type: if is_dir { "dir" } else { "file" }.to_string(),
-            name: if is_dir { format!("{name}/") } else { name },
-            path: entry.path().to_string_lossy().into_owned(),
-        });
-    }
+    // 一次线程池往返完成整目录遍历（此前每条目一次 `file_type().await` 往返）
+    let dir = path.to_path_buf();
+    let raw = tokio::task::spawn_blocking(move || read_dir_sync(&dir))
+        .await
+        .map_err(|e| {
+            TianyanError::Custom(format!("executor: 读取目录失败 {}：{e}", path.display()))
+        })?
+        .map_err(|e| {
+            TianyanError::Custom(format!("executor: 读取目录失败 {}：{e}", path.display()))
+        })?;
+    let mut entries: Vec<DirEntry> = raw
+        .into_iter()
+        .map(|(entry_path, is_dir, _mtime)| {
+            let name = entry_path
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            DirEntry {
+                entry_type: if is_dir { "dir" } else { "file" }.to_string(),
+                name: if is_dir { format!("{name}/") } else { name },
+                path: entry_path.to_string_lossy().into_owned(),
+            }
+        })
+        .collect();
     // 目录在前（"dir" < "file" 字节序），组内按字节序（locale 无关）
     entries.sort_by(|a, b| {
         a.entry_type
@@ -237,43 +266,88 @@ fn expand_braces(pattern: &str) -> Vec<String> {
 /// 手工递归遍历回退：跳过隐藏条目与 [`EXCLUDED_DIRS`]，不支持 .gitignore
 /// （文档化降级行为，与 rg 语义的差异点）。brace 模式先展开（见
 /// [`expand_braces`]），任一展开模式命中即计入。
-async fn collect_walk_files(base: &Path, pattern: &str) -> Result<Vec<PathBuf>, TianyanError> {
-    let mut out = Vec::new();
+///
+/// 返回 `(绝对路径, mtime)`——mtime 是遍历时**顺带**取的（见 [`read_dir_sync`]），
+/// 调用方不需要再 stat 一遍。
+async fn collect_walk_files(
+    base: &Path,
+    pattern: &str,
+) -> Result<Vec<(PathBuf, SystemTime)>, TianyanError> {
+    // 整个遍历放进**一次** `spawn_blocking`：遍历是 IO + CPU（glob 匹配），
+    // 旧异步版对每个目录、每个条目都要一次线程池往返，纯属调度开销。
+    let base_owned = base.to_path_buf();
     let patterns = expand_braces(pattern);
-    // 迭代式 DFS（显式栈，避免 async 递归）
+    tokio::task::spawn_blocking(move || collect_walk_files_sync(&base_owned, &patterns))
+        .await
+        .map_err(|e| TianyanError::Custom(format!("executor: glob 遍历失败：{e}")))?
+}
+
+/// 手工遍历的同步实现（语义与旧异步版逐条对应：跳过隐藏条目与
+/// [`EXCLUDED_DIRS`]，不支持 .gitignore——文档化降级行为）。
+fn collect_walk_files_sync(
+    base: &Path,
+    patterns: &[String],
+) -> Result<Vec<(PathBuf, SystemTime)>, TianyanError> {
+    let mut out = Vec::new();
+    // 迭代式 DFS（显式栈，避免递归）
     let mut stack = vec![base.to_path_buf()];
     while let Some(dir) = stack.pop() {
-        let mut rd = tokio::fs::read_dir(&dir).await.map_err(|e| {
+        let entries = read_dir_sync(&dir).map_err(|e| {
             TianyanError::Custom(format!("executor: 读取目录失败 {}：{e}", dir.display()))
         })?;
-        while let Some(entry) = rd.next_entry().await.map_err(|e| {
-            TianyanError::Custom(format!("executor: 读取目录失败 {}：{e}", dir.display()))
-        })? {
-            let name = entry.file_name().to_string_lossy().into_owned();
+        for (path, is_dir, mtime) in entries {
+            let name = path
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default();
             if name.starts_with('.') {
                 continue; // 隐藏条目（与 rg --files 默认行为一致）
             }
-            let path = entry.path();
-            let file_type = match entry.file_type().await {
-                Ok(t) => t,
-                Err(_) => continue, // 单个条目读取失败跳过，不中断整体遍历
-            };
-            if file_type.is_dir() {
+            if is_dir {
                 if EXCLUDED_DIRS.contains(&name.as_str()) {
                     continue;
                 }
                 stack.push(path);
-            } else if file_type.is_file() {
-                if let Ok(rel) = path.strip_prefix(base) {
-                    let rel_str = rel.to_string_lossy().replace('\\', "/");
-                    if patterns.iter().any(|p| glob_match(p, &rel_str)) {
-                        out.push(rel.to_path_buf());
-                    }
+            } else {
+                let hit = path
+                    .strip_prefix(base)
+                    .map(|rel| {
+                        let rel_str = rel.to_string_lossy().replace('\\', "/");
+                        patterns.iter().any(|p| glob_match(p, &rel_str))
+                    })
+                    .unwrap_or(false);
+                if hit {
+                    out.push((path, mtime.unwrap_or(SystemTime::UNIX_EPOCH)));
                 }
             }
         }
     }
     Ok(out)
+}
+
+/// rg 路径的补救：它只给相对路径、没有 mtime，仍需逐条 stat。
+///
+/// **一次 `spawn_blocking` 内同步批量**：实测并发 `tokio::fs::metadata`
+/// （`buffer_unordered(64)`）与同步批量在 3000 条上无差异（595 ms vs 530 ms）——
+/// 成本在系统调用本身（~130 µs/次，见 [`read_dir_sync`] 的注释），不在线程池往返。
+async fn stat_mtimes(
+    base: &Path,
+    rel_paths: Vec<PathBuf>,
+) -> Result<Vec<(PathBuf, SystemTime)>, TianyanError> {
+    let abs: Vec<PathBuf> = rel_paths.into_iter().map(|r| base.join(r)).collect();
+    tokio::task::spawn_blocking(move || {
+        abs.into_iter()
+            .map(|p| {
+                let mtime = std::fs::metadata(&p)
+                    .ok()
+                    .and_then(|m| m.modified().ok())
+                    .unwrap_or(SystemTime::UNIX_EPOCH);
+                (p, mtime)
+            })
+            .collect::<Vec<_>>()
+    })
+    .await
+    .map_err(|e| TianyanError::Custom(format!("executor: glob 取修改时间失败：{e}")))
 }
 
 /// 递归 glob 匹配（回退遍历使用，模式与路径段均以 `/` 分隔）：

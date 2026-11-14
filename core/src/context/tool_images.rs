@@ -44,6 +44,13 @@ impl SessionImages {
     /// 解析 tool 结果原文里的图片引用并加载为 `data:{mime};base64,...` 列表。
     /// 无引用 / 副本缺失 / 超限 / 非图片 → 空（best effort，绝不报错）。
     pub fn resolve(&self, tool_result: &str) -> Vec<String> {
+        // **廉价门控**：绝大多数 tool 结果（命令输出 / 文件内容 / grep 命中）里
+        // 根本没有图片引用，而 `serde_json::from_str::<Value>` 会把整段内容解析成
+        // 语法树（几十 KB ~ 几 MB 的分配 + 解析）——**每条** tool 结果都要付一次。
+        // 子串扫描不分配、不解析，先挡掉这些调用；含引用的结果照旧走完整解析。
+        if !tool_result.contains(SESSION_IMAGES_DIR) {
+            return Vec::new();
+        }
         let Ok(value) = serde_json::from_str::<Value>(tool_result) else {
             return Vec::new();
         };
