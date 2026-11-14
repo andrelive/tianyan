@@ -1067,6 +1067,35 @@ impl Agent {
         force: bool,
         handoff: Option<&str>,
     ) -> Option<StructuredMessage> {
+        // 锁内只取**标量**（段内条数 + 最近一次请求的输入用量），不拷贝消息实体：
+        // 稳态下 `should_compress == false`，任何拷贝都是纯浪费——15.3 MB 的会话
+        // 每轮在这里（含下游 `structured_to_messages` 与 `with_handoff`）共三次
+        // 全量深拷贝，约 45 MB / 30–60 ms，然后 100% 被丢弃。
+        let (seg_len, recent_input_tokens) = {
+            let s = state.read().await;
+            let start_idx = s
+                .structured_messages
+                .iter()
+                .rposition(|m| m.compression_marker)
+                .unwrap_or(0);
+            let seg = &s.structured_messages[start_idx..];
+            // 真实上下文占用：最近一次请求的 prompt 侧 token（取数口径单点见
+            // `StructuredMessage::prompt_side_tokens`——`tokens.input` 是**完整输入**
+            // （含缓存命中部分，`cache.read` 为其子集），两者相加会重复计算。
+            // 压缩点自身不参与——其 tokens 是摘要请求的用量，不代表会话当前占用。
+            let recent = seg
+                .iter()
+                .rev()
+                .find(|m| !m.compression_marker && (m.tokens.input > 0 || m.tokens.cache.read > 0))
+                .map(|m| m.prompt_side_tokens())
+                .unwrap_or(0);
+            (seg.len(), recent)
+        };
+        if seg_len < MIN_MESSAGES_BEFORE_COMPRESSION {
+            return None;
+        }
+
+        // 前置判定通过（确实需要压缩）才拷贝消息实体与已有摘要
         let (messages_since_marker, existing_summary): (Vec<StructuredMessage>, Option<String>) = {
             let s = state.read().await;
             let marker_pos = s
@@ -1083,10 +1112,6 @@ impl Agent {
             (s.structured_messages[start_idx..].to_vec(), existing)
         };
 
-        if messages_since_marker.len() < MIN_MESSAGES_BEFORE_COMPRESSION {
-            return None;
-        }
-
         // 与请求组装同一套工具对规范化（ADR-043）：压缩摘要请求也走同一个上游，
         // 同样不能带断裂的 tool_calls 链（否则压缩本身 400、会话卡死）。
         let conversation: Vec<Message> =
@@ -1096,20 +1121,6 @@ impl Agent {
                 // 摘要是"把历史压缩成文字"，重传图片字节纯属浪费预算）
                 .flat_map(|sm| ContextAssembler::structured_to_messages(sm.as_ref(), None))
                 .collect();
-
-        // 真实上下文占用：最近一次请求的 prompt 侧 token（取数口径单点见
-        // `StructuredMessage::prompt_side_tokens`——`tokens.input` 是**完整
-        // 输入**（含缓存命中部分，`cache.read` 为其子集），两者相加会重复
-        // 计算（判定值≈真实值×2，真实占用远低于阈值也会提前压缩）。
-        // 压缩点自身不参与——其 tokens 是摘要请求（压缩前上下文重发）的
-        // 用量，不代表会话当前占用。从消息持久化的 usage 聚合——最后一条
-        // 带 usage 的消息即最近一次请求的输入统计。
-        let recent_input_tokens = messages_since_marker
-            .iter()
-            .rev()
-            .find(|m| !m.compression_marker && (m.tokens.input > 0 || m.tokens.cache.read > 0))
-            .map(|m| m.prompt_side_tokens())
-            .unwrap_or(0);
 
         let summary_sm = self
             .context_pipeline

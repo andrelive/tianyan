@@ -254,6 +254,17 @@ impl ContextPipeline {
         existing_summary: Option<&str>,
         handoff: Option<&str>,
     ) -> Option<StructuredMessage> {
+        // 阈值判定**前置**：稳态（绝大多数轮次）不需要压缩，这时一次拷贝都不该做。
+        // 此前是无条件 `with_handoff(messages)` 深拷贝整条对话之后才问「要不要压缩」，
+        // 而 `Message` 的 content / reasoning_content / tool_calls 全是 `String`——
+        // 15.3 MB 的会话每轮白付 10–20 ms，克隆随即被丢弃。
+        if !force {
+            let compressor = self.compressor.lock().await;
+            if !compressor.should_compress(recent_input_tokens) {
+                return None;
+            }
+        }
+
         // 交接说明作为**尾部一条 user 消息**进对话（见 `with_handoff`）：摘要 prompt
         // 的形态是「对以下对话做摘要」+ 对话正文，尾部这条自然会被读到，不必改模板。
         let mut conversation = with_handoff(messages, handoff);
