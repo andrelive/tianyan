@@ -234,12 +234,14 @@ impl Agent {
         &self,
         session_id: &str,
     ) -> Option<crate::session::types::SessionModelSelection> {
+        // 只读 header 的 `model_selection`（`session_header` = 单列查询）：
+        // `get_session` 会把整条链读出来反序列化，而这里只要一个字段。
         self.session_manager
-            .get_session(session_id)
+            .session_header(session_id)
             .await
             .ok()
             .flatten()
-            .and_then(|s| s.header.model_selection)
+            .and_then(|h| h.model_selection)
     }
 
     /// 请求中止该会话**当前活动轮**（ADR-035 §9 / U10）。

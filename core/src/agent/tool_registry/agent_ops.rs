@@ -263,10 +263,9 @@ impl ToolRegistry {
                     // 回退到用户输入 U 时，锚点 > U.seq 的任务属于"回退点之后"，
                     // 应一并取消（方案 B：任务与链上时序点关联，精确取消）。
                     match &self.session_manager {
-                        Some(sm) => match sm.get_session(session_id).await {
-                            Ok(Some(s)) => s.messages.len() as i64,
-                            _ => 0,
-                        },
+                        // 只要「链尾后的下一个 seq」= 消息条数：`MAX(seq) + 1` 即可，
+                        // 不必读整条链（长会话一次约 190 ms，而每次启动命令都付）。
+                        Some(sm) => sm.last_seq(session_id).await.map(|s| s + 1).unwrap_or(0),
                         None => 0,
                     },
                     task_working_directory,
@@ -957,10 +956,8 @@ impl ToolRegistry {
         // 时序锚点：任务启动时链上消息数（= 下一条消息的 seq）。
         // 回退到用户输入 U 时，锚点 > U.seq 的任务属于"回退点之后"，应一并取消。
         let anchor_seq = match &self.session_manager {
-            Some(sm) => match sm.get_session(&session_id).await {
-                Ok(Some(s)) => s.messages.len() as i64,
-                _ => 0,
-            },
+            // 同 `execute_command` 的锚点：`MAX(seq) + 1`，不读整条链
+            Some(sm) => sm.last_seq(&session_id).await.map(|s| s + 1).unwrap_or(0),
             None => 0,
         };
         // U5：任务归属工作目录快照（task_status 默认视野按它过滤）。

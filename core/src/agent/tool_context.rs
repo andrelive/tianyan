@@ -150,10 +150,20 @@ impl ToolContext {
             .as_deref()
             .filter(|p| p.is_dir());
         if let Some(sm) = &self.session_manager {
-            if let Ok(Some(session)) = sm.get_session(session_id).await {
-                if let Some(wd) = session.working_directory(fallback) {
-                    return Some(wd);
-                }
+            // 只读 header 一列（`session_header` = `SELECT header_json`）：
+            // 此前用 `get_session` 读整条链，**每次工具调用**都付一次全链反序列化
+            // （实测 5571 条 / 15.3 MB ≈ 190 ms；一轮十几次文件工具就是两秒多）。
+            // 判定规则与 `Session::working_directory` 逐字一致：绑定目录必须真实存在。
+            let bound = sm
+                .session_header(session_id)
+                .await
+                .ok()
+                .flatten()
+                .and_then(|header| header.working_directory)
+                .map(std::path::PathBuf::from)
+                .filter(|p| p.is_dir());
+            if let Some(wd) = bound {
+                return Some(wd);
             }
         }
         fallback.map(std::path::Path::to_path_buf)
@@ -284,12 +294,14 @@ impl ToolContext {
     ) -> Option<(String, Vec<crate::config::ModelCapability>)> {
         let config = crate::config::try_get_config()?;
         let session_selection = match &self.session_manager {
+            // 只读 header 的 `model_selection`：`session_header` = 一次
+            // `SELECT header_json`，而 `get_session` 会把整条链读出来反序列化。
             Some(manager) => manager
-                .get_session(session_id)
+                .session_header(session_id)
                 .await
                 .ok()
                 .flatten()
-                .and_then(|session| session.header.model_selection),
+                .and_then(|header| header.model_selection),
             None => None,
         };
         let (provider, model) = match session_selection {

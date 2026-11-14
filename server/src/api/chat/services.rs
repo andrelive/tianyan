@@ -130,13 +130,21 @@ impl ChatService {
         // 取消 / 失败轮**不落库** assistant 消息；若边界事件无条件取"最后一条
         // assistant"，就会把上一轮的结论当作本轮结果下发，前端把它合并进本轮
         // 占位气泡 → 陈旧内容显示在当前轮位置。水位用于只认"本轮新产生的"消息。
-        let prev_assistant_id = self
-            .session_manager
-            .get_session(&session_id)
-            .await
-            .ok()
-            .flatten()
-            .and_then(|s| last_assistant_message(&s.messages).map(|m| m.id.clone()));
+        let prev_assistant_id = {
+            let tail = self.tail_messages(&session_id).await.unwrap_or_default();
+            match last_assistant_message(&tail) {
+                Some(m) => Some(m.id.clone()),
+                // 窗口内没有 assistant（近 [`TURN_TAIL_ROWS`] 条全是工具/通知）→
+                // 退回全链读保底：水位错会让「上一轮结论」被当成本轮结果（正是上面要防的 bug）。
+                None => self
+                    .session_manager
+                    .get_session(&session_id)
+                    .await
+                    .ok()
+                    .flatten()
+                    .and_then(|s| last_assistant_message(&s.messages).map(|m| m.id.clone())),
+            }
+        };
 
         let result = self
             .agent
@@ -184,6 +192,21 @@ impl ChatService {
         })
     }
 
+    /// 取会话**链尾附近**的窗口（供「本轮水位 / 本轮 assistant」判定）。
+    ///
+    /// 这两处只需要链尾附近的消息，不必为它读整条链（见 [`TURN_TAIL_ROWS`]）。
+    async fn tail_messages(&self, session_id: &str) -> Result<Vec<StructuredMessage>, ApiError> {
+        let last = self.session_manager.last_seq(session_id).await?;
+        if last < 0 {
+            return Ok(Vec::new());
+        }
+        let rows = self
+            .session_manager
+            .load_before(session_id, last + 1, TURN_TAIL_ROWS)
+            .await?;
+        Ok(rows.into_iter().map(|(_seq, m)| m).collect())
+    }
+
     /// 下发 assistant 消息边界事件（流结束后，经同一送达目标）。
     ///
     /// 只下发**本轮新产生的** assistant 消息（判据见 [`select_turn_assistant`]）：
@@ -198,12 +221,10 @@ impl ChatService {
         deliver: &Arc<dyn StreamEventDeliver>,
         prev_assistant_id: Option<&str>,
     ) -> Result<(), ApiError> {
-        let Some(am) = self
-            .session_manager
-            .get_session(session_id)
-            .await?
-            .and_then(|s| select_turn_assistant(&s.messages, prev_assistant_id).cloned())
-        else {
+        // 只取链尾窗口：本轮的 assistant 一定在链尾附近；窗口内没有 assistant
+        // 说明本轮没产生（取消/失败轮）→ 不下发边界事件（与判据一致）。
+        let tail = self.tail_messages(session_id).await?;
+        let Some(am) = select_turn_assistant(&tail, prev_assistant_id).cloned() else {
             return Ok(());
         };
         let event = ChatStreamEvent::message_boundary(
@@ -218,6 +239,14 @@ impl ChatService {
         Ok(())
     }
 }
+
+/// 「本轮水位 / 本轮 assistant」判定时回看的窗口条数。
+///
+/// 这两处只需要**链尾附近**的消息，而 `get_session` 会把整条链读出来逐条反序列化
+/// （长会话实测约 190 ms，而它**每轮对话各走一次**：轮前取水位、轮末发边界事件）。
+/// 200 条足以覆盖「本轮产生的消息 + 上一轮的 assistant」——一轮里的工具调用通常
+/// 几十条，跨多轮才有 200 条，因此里面必然含 assistant。
+const TURN_TAIL_ROWS: usize = 200;
 
 /// 取会话中最后一条 assistant 消息（用作"轮前水位"）。
 fn last_assistant_message(messages: &[StructuredMessage]) -> Option<&StructuredMessage> {
