@@ -15,7 +15,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   存量由 `prune_snapshot_trees --recompress` 迁移，实测省 **1,069.5 MB**。
 - **`[snapshot]` 配置节**：`max_file_bytes`（替代硬编码 2 MiB 上限）+ `excludes`
   （自定义排除，与内置排除和 `.gitignore` 叠加）+ `max_trees_per_session`（每会话树
-  留存上限）。此前这三条边界都不可调。
+  留存上限）+ `strict_hash`。`strict_hash = true` 表示每个文件都重算哈希（最保守），
+  适用于工作区在网络盘 / 虚拟化共享目录（mtime 语义不可靠）、或 `rsync -t` 之类会
+  回填旧 mtime 的工具参与编辑的场景；默认 `false` 使用 racy timestamp 判据（见
+  Changed「回退与捕获性能」）。
 - **内置定时任务可立即执行**：`POST /api/v1/scheduler/tasks/{id}/run` +
   `TaskScheduler::run_now`——语义与定时触发一致（同一个 `execute_task` 路径、同样更新
   `last_run` 并持久化），但没有「跨进程跑运维工具」的标记-清扫竞态。
@@ -42,6 +45,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   46 条演化语义规则不动，无法解析 0 条。**须停服务后执行**（脚本直接打开生产库）。
 
 ### Changed
+
+- **回退耗时 1186 ms → 85 ms**（同一台机器、同一次操作：5,571 条消息 / 15.3 MB 的会话）。
+  五处叠加，每项都有实测依据：
+  - **链截断改增量删除**：此前走 `SessionStore::rewrite`（整表重写＝把前面所有消息
+    删掉、逐条重新序列化插入、FTS 全量重建），而回退通常只截断末尾几条。`seq` 本就是
+    连续顺序号、删尾部不重编号，改为 `DELETE … WHERE seq >= ?`；锚点落在压缩点之前
+    时才退回全量重写（保底正确）。
+  - **全链读归零**：锚点定位改走新增覆盖索引
+    `idx_session_messages_msgid(session_id, message_id)`（`find_seq` 一条查询、不回表）；
+    被截断消息用 `load_from(index)` 只读尾部；工作集 `rebuild` 改**段读**——先取链尾与
+    最后一个压缩点，只读 `[压缩点, 链尾]`，长度校验不符才退回全量加载。此前一次回退
+    要把同一条链读三遍（定位锚点 / 事务内重建 / 事务读基准）。
+  - **新增 `SessionManager::session_header`**：取会话头部（`working_directory` 等）
+    只需 `SELECT header_json` 一列。此前 `resolve_working_directory` 走 `get_session`，
+    为一个字段把整条链读出来逐条反序列化（该会话约 190 ms），而它在**每轮捕获工作区
+    快照**与回退两条路径上都要走——会话越长，每轮对话都跟着变慢。同批：判会话是否
+    存在改 `session_exists`（`EXISTS` 查询）；`recover_last_input_usage` 改读最近 300 条
+    窗口（此前每轮对话读全链）。
+  - **快照缓存短路改 racy timestamp 判据**：原规则是「`size ≤ 64 KiB` 的文件一律重算
+    哈希」，而源码仓库里绝大多数文件都小于该阈值——等于每轮捕获都重读全文重算。现按
+    Git `index` 的同一判据：文件 `mtime` 早于上次快照写下 cache 的时刻（留 1 秒边际）
+    且 `size` 未变即信任缓存哈希；`mtime` 落在边际内 / 取不到 / `cache` 时刻取不到则
+    重算。实测热捕获 `walk` **445 → 198 ms**。
+  - **目录遍历改「每目录一次同步读取」**：`tokio::fs` 的每个操作都是一次
+    `spawn_blocking`（派发 + 回传），原实现对每个文件分别 `file_type` + `metadata`
+    两次跨线程往返，而遍历是串行的（拿不到异步的并发收益）。改为每目录一次同步遍历
+    取回全部条目的类型/长度/mtime。
+- **回退 / 重做响应改分页口径**：`delete_message` / `redo_message` 此前返回**整条链**的
+  剩余消息（实测 1,650 条消息即 25 MB），而前端只用其中的 `rollback` 字段、消息列表
+  另发一次 `GET /messages` 去拿。现在与 `GET /messages` 完全同口径（默认 50 条 +
+  上滚游标），响应体降到几十 KB。
+- **桌面端回退改本地截断列表**：回退的语义就是「该消息及其后全部删除」，而锚点就在
+  当前列表里——按消息 ID 本地截断即可，不必再拉一次。此前是「响应后重发
+  `GET /messages` 整页替换」：多一次往返（状态与列表分两批落地，用户感知为
+  「信息先回填、对话晚一步消失」），且会把已上滚加载的更早历史整页丢掉。
 
 - **`executions` 加 30 天保留窗口**：这张 GEPA 数据表此前**没有任何清理**——实测
   73,427 行 / 79 MB（`result` 62.2 MB + `task_description` 17.7 MB），横跨 85 天。
