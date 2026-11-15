@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.8] - 2026-11-15
+
+### Fixed
+
+- **升级到 1.2.7 后左侧会话列表消失**（装 1.2.7 必现）：老库缺
+  `session_meta.visible_from_seq` 列的 `ALTER` 迁移没有落地，会话列表查询报
+  `no such column` → 接口 500 → 列表空白。本版补齐该迁移（幂等判断），并新增
+  「构造 1.2.6 形态的旧表 → 跑迁移 → 断言列已补、存量数据不变」的回归测试
+  （此前所有单测都跑在内存库上、走 `SCHEMA_SQL` 建表，测不出老库缺列）。
+- **输入框上下键在多行文本里跳到首尾**：改为按**视觉行**（软换行后的行）移动，
+  同列优先用 x 坐标（此前只按 `\n` 硬行计算，软换行文本里 Up/Down 会落到文档
+  开头/结尾）。
+
 ## [1.2.7] - 2026-11-14
 
 ### Changed
