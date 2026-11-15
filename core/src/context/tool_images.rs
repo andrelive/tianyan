@@ -101,25 +101,21 @@ impl SessionImages {
         msg.attach_images(urls);
     }
 
-    /// 轮内图片窗口（ADR-050 修订二）：只保留 `batch_start` 之后新增的 tool 图，
-    /// 把更早批次的 tool 图片片段剥回纯文本（`content_parts = None`——与跨轮组装
-    /// 产出的形态逐字节一致，所以下一轮重新组装时视图不变）。
+    /// 轮内图片窗口（ADR-050 修订二）：**每次工具批次结束后都必须调用**——把
+    /// `batch_start` 之前的 tool 图片片段一律剥回纯文本（`content_parts = None`，
+    /// 与跨轮组装产出的形态逐字节一致，所以下一轮重新组装时视图不变）。
     ///
     /// 按**批**保留而不是按张：`batch_start` 是一次 LLM 请求的全部工具结果起点，
     /// 同批并行 `view_image` 的多张图因此全部可见（"改一版、看一眼、再改一版"）。
     ///
-    /// 两条纪律：
-    /// - **本批没有图时不动更早的图**——普通工具调用不该清掉上一批图，模型可能
-    ///   仍在用它们推理；
-    /// - 只动 `role: tool` 的消息：用户消息里的图（`Part::Image`）不受影响。
+    /// **工具图的生命期 = 它所在的那一批**：本批之后，哪怕下一次工具调用完全不
+    /// 产图（跑命令、读文件），前一批的图也照样失效——"只在当步有效"是硬语义，
+    /// 不做"模型可能还在用"的软保留（需要时 `view_image` 重看，幂等）。
+    ///
+    /// 只动 `role: tool` 的消息：用户消息里的图（`Part::Image`）不受影响——它按
+    /// 业务规则必须随每次请求完整发送。
     pub fn retain_only_last_batch(&self, messages: &mut [Message], batch_start: usize) {
         let start = batch_start.min(messages.len());
-        let batch_has_images = messages[start..]
-            .iter()
-            .any(|m| m.role == MessageRole::Tool && m.content_parts.is_some());
-        if !batch_has_images {
-            return;
-        }
         for m in &mut messages[..start] {
             if m.role == MessageRole::Tool && m.content_parts.is_some() {
                 m.content_parts = None;
@@ -163,9 +159,10 @@ mod tests {
         );
     }
 
-    /// 本批没有图时**不动**更早的图：普通工具调用不该清掉上一批图。
+    /// 本批**没有图**时，更早批次的图照样失效——"只在当步有效"是硬语义：
+    /// 后续哪怕只跑一条命令（不产图），前一批的工具图也不再随请求发送。
     #[test]
-    fn test_retain_only_last_batch_keeps_earlier_when_batch_has_no_images() {
+    fn test_retain_only_last_batch_strips_even_when_batch_has_no_images() {
         let images = SessionImages::new(std::env::temp_dir());
         let mut messages = vec![
             Message::tool_with_images(
@@ -179,8 +176,8 @@ mod tests {
         images.retain_only_last_batch(&mut messages, 1);
 
         assert!(
-            messages[0].content_parts.is_some(),
-            "本批无图 → 上一批图必须留着（模型可能仍在用）"
+            messages[0].content_parts.is_none(),
+            "工具图只在当步有效：后续工具不产图时，前一批图也必须失效"
         );
         assert!(messages[1].content_parts.is_none());
     }

@@ -1623,6 +1623,10 @@ impl AgentLoop {
             // 本批之后的内容全部重算。实测一轮 4 批 × 24K 文本：不剥 ≈ 72K token/
             // 轮，剥后 ≈ 1K。只保留最近一批，断点永远落在"最新一张图"——这是所有
             // 可行策略里重算量最小的（保留最近 K 张会让断点前移到倒数第 K 张）。
+            //
+            // **无条件剥**：本批哪怕完全不产图（跑命令 / 读文件），前一批的图也照样
+            // 失效——"工具图只在当步有效"是业务语义，不做"模型可能还在用"的软保留
+            // （需要细节时用 `view_image` 重看，幂等读同一份冻结副本）。
             if let Some(images) = self.session_images() {
                 images.retain_only_last_batch(ctx.messages.as_mut_slice(), batch_start);
             }
