@@ -5,6 +5,28 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.10] - 2026-11-15
+
+### Fixed
+
+- **会话变长后整轮请求失败（HTTP 413 Payload Too Large）**：历史里的工具图片原先
+  每轮都按 base64 全量重发（无状态 API 的历史全量重传），请求体随看图次数线性增长
+  ——实测一个会话 134 张截图 = 原始 36.2 MB → base64 48 MB，而撞墙那一轮的
+  `cached_input` 只占 1M 窗口的 46.7%（token 预算看起来还剩一半）。现在按两条规则
+  发送：**历史工具图跨轮不再发送**（消息里只留 `session_images/<sha>` 引用，需要
+  细节时用 `view_image` 重看）；**轮内只保留最近一批工具图**——同一批并行看的多张
+  图都可见，本批之后的前一批立即失效（包括"本批没产图"的情况）。用户粘贴的图片
+  不受影响，仍随每次请求完整发送。
+- **413 现在给出可执行提示**：明确报"请求体过大、不是网络故障、重试同样失败"，
+  并指出减少同一轮图片数的动作（此前只有裸的状态码原文，容易被当成网络抖动）。
+
+### Changed
+
+- **彻底移除 Web 端（`gui-vite/`）**：GPUI 原生客户端成为唯一产品前端后，Web 端
+  目录已无任何代码依赖（全仓 56 处提及无一是可执行引用）。删除 219 个跟踪文件、
+  契约 fixture 脚本、只服务 Web 端的 e2e 夹具，并同步清理活代码注释与活文档；
+  ADR 正文、`CHANGELOG.md`、`docs/archive/` 等历史材料保留原文。
+
 ## [1.2.9] - 2026-11-15
 
 ### Fixed
