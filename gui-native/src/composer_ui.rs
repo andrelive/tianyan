@@ -235,6 +235,34 @@ impl HitRow {
         // 落在行尾之后 → 行末
         self.pieces.last().map(|p| p.byte.end).unwrap_or(0)
     }
+
+    /// 光标落点在本行内的 **x 坐标**（跨 piece 累加；chip 取块首/块尾）。
+    ///
+    /// 上/下移行要「同列优先」，而字节列在中文、chip、软换行下没有视觉意义——
+    /// 必须换算成坐标再在目标行反查（见 [`ComposerState::move_vertical`]）。
+    fn cursor_x(&self, cursor: usize) -> f32 {
+        for p in &self.pieces {
+            if cursor < p.byte.start {
+                return p.x;
+            }
+            if cursor <= p.byte.end {
+                return match &p.kind {
+                    HitKind::Chip => {
+                        if cursor <= p.byte.start {
+                            p.x
+                        } else {
+                            p.x + p.width
+                        }
+                    }
+                    HitKind::Text(line) => {
+                        let local = (cursor - p.byte.start).min(p.byte.end - p.byte.start);
+                        p.x + f32::from(line.x_for_index(local))
+                    }
+                };
+            }
+        }
+        self.pieces.last().map(|p| p.x + p.width).unwrap_or(0.0)
+    }
 }
 
 /// 命中表里的一个片段。
@@ -1020,9 +1048,50 @@ impl ComposerState {
         cx.notify();
     }
 
-    /// 上下移一行（按 `\n` 硬行做近似：同列优先，越界就贴行首/行尾）。
+    /// 光标所在的**视觉行**：`(行号, 总行数, 行内 x)`；命中表不可用时 `None`。
+    ///
+    /// 视觉行 = 排版后的行（含**软换行**折出来的行），不是 `\n` 硬行。
+    fn visual_cursor_row(&self, cursor: usize) -> Option<(usize, usize, f32)> {
+        let hits = self.hits.borrow();
+        if hits.len() < 2 {
+            return None;
+        }
+        let idx = hits.iter().position(|r| {
+            r.pieces
+                .iter()
+                .any(|p| p.byte.start <= cursor && cursor <= p.byte.end)
+        })?;
+        Some((idx, hits.len(), hits[idx].cursor_x(cursor)))
+    }
+
+    /// 上下移一行：**按视觉行**移动，同列优先用 x 坐标。
+    ///
+    /// 用户报的 bug（"按上下键光标直接跑到文本开头/结尾"）：此前只按 `\n` 硬行
+    /// 计算——长文本被**软换行**折成多行、但正文里没有 `\n`，于是 Up 直接跳
+    /// offset 0、Down 直接跳文本末尾。现在优先用上一帧的排版命中表定位视觉行；
+    /// 命中表缺失（首帧 / 只有一行）时退回硬行逻辑。
     fn move_vertical(&mut self, dir: i32, extend: bool) {
         let cursor = self.buffer.cursor;
+        if let Some((row, row_count, x)) = self.visual_cursor_row(cursor) {
+            let target_row = row as i32 + dir;
+            if target_row < 0 {
+                // 已在首行再往上 → 文档开头（与常见编辑器一致）
+                self.buffer.set_cursor(0, extend);
+                return;
+            }
+            if target_row as usize >= row_count {
+                self.buffer.set_cursor(self.buffer.text.len(), extend);
+                return;
+            }
+            let target = {
+                let hits = self.hits.borrow();
+                hits[target_row as usize].byte_at(x)
+            };
+            self.buffer.set_cursor(target, extend);
+            return;
+        }
+
+        // ── 回退：按 `\n` 硬行（命中表尚未生成时） ──
         let start = self.buffer.line_start(cursor);
         let col = cursor - start;
         if dir < 0 {
