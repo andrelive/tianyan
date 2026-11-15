@@ -778,28 +778,16 @@ impl Agent {
 
         let s = state.read().await;
         let sid = s.session_id.clone();
-        // ADR-050：注入了数据目录时，tool 结果里的图片引用按 `session_images/`
-        // 加载为 data URL（与落盘侧同一目录）；未注入则保持纯文本组装。
-        let data_dir = self.agent_loop.tool_registry().data_dir.clone();
-        let mut messages = match data_dir {
-            Some(dir) => {
-                let images = crate::context::SessionImages::new(
-                    dir.join(crate::executor::image::SESSION_IMAGES_DIR),
-                );
-                ContextAssembler::assemble_with(
-                    &s.structured_messages,
-                    &injectable,
-                    Some(&images),
-                    tail_summary.as_deref(),
-                )
-            }
-            None => ContextAssembler::assemble_with(
-                &s.structured_messages,
-                &injectable,
-                None,
-                tail_summary.as_deref(),
-            ),
-        };
+        // ADR-050 修订：历史 tool 图片不再随请求重发（只发 `session_images/<sha>`
+        // 引用），图片字节只在**产生它的那一轮**由 agent loop 附加（`hydrate`）。
+        // 逐轮全量重发会让请求体按 base64 字节线性增长（实测 134 张截图 = 48 MB），
+        // 而 token 账本对此几乎没有感知（约 1,000 token/张）——撞上游 body 上限
+        // 即 HTTP 413。理由与取舍见 `ContextAssembler::assemble_with` 文档。
+        let mut messages = ContextAssembler::assemble_with(
+            &s.structured_messages,
+            &injectable,
+            tail_summary.as_deref(),
+        );
 
         // 注入会话定位信息：早期对话被压缩后，摘要字段可能不足以恢复细节，
         // 告知 LLM 当前会话 URI，使其可用 vfs_read 检索被压缩的原始记录。
@@ -1119,7 +1107,7 @@ impl Agent {
                 .iter()
                 // 压缩摘要请求不带图（ADR-050 只为正常组装链路注入图片；
                 // 摘要是"把历史压缩成文字"，重传图片字节纯属浪费预算）
-                .flat_map(|sm| ContextAssembler::structured_to_messages(sm.as_ref(), None))
+                .flat_map(|sm| ContextAssembler::structured_to_messages(sm.as_ref()))
                 .collect();
 
         let summary_sm = self

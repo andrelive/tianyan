@@ -8,7 +8,6 @@ use crate::common::types::{
     FunctionCall, InjectableSkill, Message, MessageRole, Part, PartTime, StructuredMessage,
     TokenUsage, ToolCall as CoreToolCall, ToolCallType,
 };
-use crate::context::SessionImages;
 use std::borrow::Cow;
 
 /// 上下文组装器——纯函数，无副作用。
@@ -17,8 +16,8 @@ pub struct ContextAssembler;
 impl ContextAssembler {
     /// 将结构化消息和注入上下文组装为 LLM 传输格式。
     ///
-    /// **无图版本**：tool 结果里的图片引用不做加载（见 [`Self::assemble_with`]）；
-    /// 不知道 `data_dir` 的调用点（core 内单测等）用它，行为与引入图片能力前一致。
+    /// 历史里的 tool 图片引用**一律不加载**（ADR-050 修订：图片只随产生它的
+    /// 那一轮请求发送，详见 [`Self::assemble_with`]）。
     ///
     /// 输出顺序（缓存最优）：
     /// 1. injectable.soul（system）
@@ -34,19 +33,30 @@ impl ContextAssembler {
         structured_messages: &[StructuredMessage],
         injectable: &InjectableContext,
     ) -> Vec<Message> {
-        Self::assemble_with(structured_messages, injectable, None, None)
+        Self::assemble_with(structured_messages, injectable, None)
     }
 
-    /// 将结构化消息和注入上下文组装为 LLM 传输格式（可携带 tool 结果图片 + 待办摘要）。
+    /// 将结构化消息和注入上下文组装为 LLM 传输格式（另可附带待办摘要）。
     ///
-    /// 与 [`Self::assemble`] 的唯一差别：`images` 非 `None` 时，Tool 分支会按
-    /// [`Part::ToolResult`] 原文里的引用（`session_images/<name>`）加载图片字节，
-    /// 把该 tool 结果组装成携带图片的同一条消息（ADR-050：tool 结果直通图片）。
+    /// # 历史 tool 图片不再随请求重发（ADR-050 修订，2026-11-15）
     ///
-    /// `images` 为 `None` 或引用解析不出图片时，行为与 [`Self::assemble`] 逐字节一致
-    /// （纯文本 tool 结果零变化）。引用解析是 best effort：副本缺失 / 超限 /
-    /// magic 不符 → 该结果保持纯文本，不报错。
+    /// 组装**不加载**任何历史 tool 结果里的图片字节：`Part::ToolResult` 的
+    /// `content` 原文（形如 `{"image":"session_images/<sha>.png",…}`）原样发出，
+    /// 图片字节只在该结果**产生的那一轮**由 agent loop 直接附加（`SessionImages::hydrate`）。
     ///
+    /// 原因是一笔硬账：图片在 token 账本里约 1,000 token/张，而在传输账本里是
+    /// 约 360,000 字节/张（base64），**两个账本比例差 360 倍**。历史图全量重发的
+    /// 结果是 token 预算显示"还剩一半"、请求体却已超出上游的 body 上限（HTTP 413）。
+    /// 实测：134 张截图 → 原始 36.2 MB → base64 48 MB，撞墙时 `cached_input`
+    ///
+    ///
+    /// 为什么不做"超预算就降级最老的图"：任何按"距当前多远"变化的规则都会让历史
+    /// 形态逐轮变形，从降级点起的前缀缓存全部失效——而图片密集的老图位于历史中段，
+    /// 那等于每轮全量重算（ADR-048 回退教训）。当前形态让**落库后的历史永久不变**，
+    /// 缓存只在"新图进入末尾"这一点断一次，与不引入图片时的缓存行为一致。
+    ///
+    /// 代价（明确接受）：模型跨轮看不到历史图，需要时用 `view_image` 重看一次；
+    /// 同一轮内的多张图不受影响（当轮由 loop 附加）。
     /// `todos_summary` 是**当前待办清单**的渲染文本（[`crate::todos::render_todos_summary`]，
     /// `None` = 没有待办、整段不注入）。它插在**最后一条 user 消息之前**——即历史
     /// 之后、当前用户输入之前。**绝不能放进 soul / 环境 / AGENTS.md / rules 那段
@@ -55,7 +65,6 @@ impl ContextAssembler {
     pub fn assemble_with(
         structured_messages: &[StructuredMessage],
         injectable: &InjectableContext,
-        images: Option<&SessionImages>,
         todos_summary: Option<&str>,
     ) -> Vec<Message> {
         let mut messages = Vec::new();
@@ -145,7 +154,7 @@ impl ContextAssembler {
         // `assistant(tool_calls)` 后必须**紧跟**对应 tool 消息，否则整条会话
         // 此后每次请求都被拒（错误链常驻）。
         for sm in Self::normalize_tool_pairs(&structured_messages[start_idx..]) {
-            messages.extend(Self::structured_to_messages(sm.as_ref(), images));
+            messages.extend(Self::structured_to_messages(sm.as_ref()));
         }
 
         // 当前待办清单：插在最后一条 user 消息之前（可变后缀段，不进前缀缓存）
@@ -164,12 +173,7 @@ impl ContextAssembler {
     /// system 角色，此处按 marker 统一归一为 user（新数据落库即 user，转换层
     /// 同时兼容两代数据）。
     ///
-    /// `images` 非 `None` 时，Tool 结果会按原文里的图片引用加载字节并组装成
-    /// 携带图片的同一条消息（ADR-050）；解析不出图片时保持纯文本（best effort）。
-    pub(crate) fn structured_to_messages(
-        sm: &StructuredMessage,
-        images: Option<&SessionImages>,
-    ) -> Vec<Message> {
+    pub(crate) fn structured_to_messages(sm: &StructuredMessage) -> Vec<Message> {
         let mut messages = Vec::new();
 
         // 压缩点归一：旧数据 system → user（见函数文档）。
@@ -269,16 +273,10 @@ impl ContextAssembler {
                         ..
                     } = part
                     {
-                        let urls = images.map(|i| i.resolve(content)).unwrap_or_default();
-                        if urls.is_empty() {
-                            messages.push(Message::tool(tool_call_id.clone(), content.clone()));
-                        } else {
-                            messages.push(Message::tool_with_images(
-                                tool_call_id.clone(),
-                                content.clone(),
-                                urls,
-                            ));
-                        }
+                        // 历史 tool 图片**不加载**（ADR-050 修订）：原文里的
+                        // `session_images/<sha>` 引用原样发出，字节只在当轮由
+                        // `SessionImages::hydrate` 附加。详见 `assemble_with` 文档。
+                        messages.push(Message::tool(tool_call_id.clone(), content.clone()));
                     }
                 }
             }
@@ -638,17 +636,17 @@ mod tests {
         let notify = make_text_msg("sys_1", MessageRole::System, "通知", "ses_1");
 
         assert_eq!(
-            ContextAssembler::structured_to_messages(&old_marker, None)[0].role,
+            ContextAssembler::structured_to_messages(&old_marker)[0].role,
             MessageRole::User,
             "旧数据（system 角色摘要）应归一为 user"
         );
         assert_eq!(
-            ContextAssembler::structured_to_messages(&new_marker, None)[0].role,
+            ContextAssembler::structured_to_messages(&new_marker)[0].role,
             MessageRole::User,
             "新数据（user 角色摘要）保持 user"
         );
         assert_eq!(
-            ContextAssembler::structured_to_messages(&notify, None)[0].role,
+            ContextAssembler::structured_to_messages(&notify)[0].role,
             MessageRole::System,
             "普通 system 消息不受归一影响"
         );
@@ -692,7 +690,7 @@ mod tests {
             finish: None,
             compression_marker: false,
         };
-        let messages = ContextAssembler::structured_to_messages(&sm, None);
+        let messages = ContextAssembler::structured_to_messages(&sm);
         assert_eq!(messages.len(), 1);
         let msg = &messages[0];
         assert_eq!(msg.role, MessageRole::Assistant);
@@ -731,7 +729,7 @@ mod tests {
             finish: None,
             compression_marker: false,
         };
-        let messages = ContextAssembler::structured_to_messages(&sm, None);
+        let messages = ContextAssembler::structured_to_messages(&sm);
         assert_eq!(messages.len(), 1);
         let msg = &messages[0];
         assert_eq!(msg.role, MessageRole::Assistant);
@@ -1044,7 +1042,7 @@ mod tests {
             finish: None,
             compression_marker: false,
         };
-        let messages = ContextAssembler::structured_to_messages(&sm, None);
+        let messages = ContextAssembler::structured_to_messages(&sm);
         assert_eq!(messages.len(), 1);
         let msg = &messages[0];
         assert_eq!(msg.role, MessageRole::Tool);
@@ -1127,7 +1125,7 @@ mod tests {
             finish: None,
             compression_marker: false,
         };
-        let messages = ContextAssembler::structured_to_messages(&sm, None);
+        let messages = ContextAssembler::structured_to_messages(&sm);
         assert_eq!(messages.len(), 1, "文本+图片应合并为一条用户消息");
         let msg = &messages[0];
         assert_eq!(msg.content, "看这张图");
@@ -1149,45 +1147,47 @@ mod tests {
         sm
     }
 
-    /// 组装期把 tool 结果里的引用加载为 data URL，生成**同一条**带图 tool 消息
-    /// （不是追加的合成消息），content 保留原文。
+    /// **判别测试（ADR-050 修订，2026-11-15）**：历史 tool 结果里的图片引用
+    /// **不再**在组装期加载为 data URL——即使副本就在磁盘上、格式也合法。
+    ///
+    /// 图片字节只在该结果**产生的那一轮**由 agent loop 附加
+    /// （`SessionImages::hydrate`）。反向注入验证：把 `structured_to_messages`
+    /// 的 Tool 分支改回"按引用加载图"，本测试必须变红。
     #[test]
-    fn test_structured_to_messages_tool_result_with_images() {
+    fn test_structured_to_messages_tool_result_image_reference_is_plain_text() {
         let dir = tempfile::tempdir().unwrap();
         let images_dir = dir.path().join(crate::executor::image::SESSION_IMAGES_DIR);
         std::fs::create_dir_all(&images_dir).unwrap();
         std::fs::write(images_dir.join("x.png"), b"\x89PNG\r\n\x1A\nrest").unwrap();
-        let images = SessionImages::new(&images_dir);
 
         let content = r#"{"image":"session_images/x.png","sha256":"abc","mime":"image/png"}"#;
         let sm = tool_result_msg("ses_1", "call_1", content);
-        let messages = ContextAssembler::structured_to_messages(&sm, Some(&images));
-        assert_eq!(messages.len(), 1, "图片与 tool 原文是同一条消息");
+        let messages = ContextAssembler::structured_to_messages(&sm);
+
+        assert_eq!(messages.len(), 1);
         let msg = &messages[0];
         assert_eq!(msg.role, MessageRole::Tool);
         assert_eq!(msg.tool_call_id.as_deref(), Some("call_1"));
-        assert_eq!(msg.content, content, "content 保留 tool 结果原文");
-        let urls = msg.image_urls();
-        assert_eq!(urls.len(), 1);
-        assert!(urls[0].starts_with("data:image/png;base64,"));
+        assert_eq!(
+            msg.content, content,
+            "引用原文原样保留——模型仍知道这里曾有张图、可以 view_image 重看"
+        );
+        assert!(
+            msg.content_parts.is_none(),
+            "历史 tool 图片不得随请求重发：base64 字节会逐轮累积（实测 134 张 = 48 MB → HTTP 413）"
+        );
+        assert!(msg.image_urls().is_empty());
     }
 
-    /// 引用存在但副本缺失 → 降级为纯文本 tool 消息（`content_parts` 为 None，best effort）。
+    /// 引用指向不存在的副本也不加载、不报错（best effort 的旧语义现在退化为
+    /// "一律不加载"，但绝不能因引用本身而 panic 或改变原文）。
     #[test]
     fn test_structured_to_messages_tool_result_missing_copy_is_text() {
-        let dir = tempfile::tempdir().unwrap();
-        let images_dir = dir.path().join(crate::executor::image::SESSION_IMAGES_DIR);
-        std::fs::create_dir_all(&images_dir).unwrap();
-        let images = SessionImages::new(&images_dir);
-
         let content = r#"{"image":"session_images/missing.png"}"#;
         let sm = tool_result_msg("ses_1", "call_1", content);
-        let messages = ContextAssembler::structured_to_messages(&sm, Some(&images));
+        let messages = ContextAssembler::structured_to_messages(&sm);
         assert_eq!(messages.len(), 1);
-        assert!(
-            messages[0].content_parts.is_none(),
-            "副本缺失应降级为纯文本工具结果"
-        );
+        assert!(messages[0].content_parts.is_none());
         assert_eq!(messages[0].content, content);
     }
 
@@ -1294,7 +1294,7 @@ mod tests {
     fn assert_pairs_wellformed(chain: &[StructuredMessage]) {
         let msgs: Vec<Message> = ContextAssembler::normalize_tool_pairs(chain)
             .iter()
-            .flat_map(|sm| ContextAssembler::structured_to_messages(sm.as_ref(), None))
+            .flat_map(|sm| ContextAssembler::structured_to_messages(sm.as_ref()))
             .collect();
         assert_messages_wellformed(&msgs);
     }
@@ -1384,7 +1384,7 @@ mod tests {
 
         let msgs: Vec<Message> = out
             .iter()
-            .flat_map(|sm| ContextAssembler::structured_to_messages(sm, None))
+            .flat_map(ContextAssembler::structured_to_messages)
             .collect();
         assert_messages_wellformed(&msgs);
         assert!(
@@ -1512,7 +1512,7 @@ mod tests {
         ];
         let todos = "## 当前待办（1 项，进行中 0）\n- [ ] 待办甲\n完成一步就重发整表并把它标 completed——不要等最后一起标。\n";
 
-        let msgs = ContextAssembler::assemble_with(&chain, &injectable, None, Some(todos));
+        let msgs = ContextAssembler::assemble_with(&chain, &injectable, Some(todos));
 
         let todos_idx = msgs
             .iter()
@@ -1559,11 +1559,10 @@ mod tests {
     fn test_assemble_todos_summary_leaves_prefix_byte_identical() {
         let injectable = full_prefix_injectable();
         let chain = vec![StructuredMessage::user("s1", "当前用户消息")];
-        let without = ContextAssembler::assemble_with(&chain, &injectable, None, None);
+        let without = ContextAssembler::assemble_with(&chain, &injectable, None);
         let with_todos = ContextAssembler::assemble_with(
             &chain,
             &injectable,
-            None,
             Some("## 当前待办（1 项，进行中 0）\n- [ ] 甲\n尾行\n"),
         );
         assert_eq!(
@@ -1594,7 +1593,7 @@ mod tests {
         ];
         let baseline = ContextAssembler::assemble(&chain, &injectable);
         for empty in [None, Some("")] {
-            let msgs = ContextAssembler::assemble_with(&chain, &injectable, None, empty);
+            let msgs = ContextAssembler::assemble_with(&chain, &injectable, empty);
             assert_eq!(msgs.len(), baseline.len(), "无待办不得插入消息：{msgs:?}");
             for (a, b) in msgs.iter().zip(baseline.iter()) {
                 assert_eq!((&a.role, &a.content), (&b.role, &b.content));
@@ -1607,12 +1606,8 @@ mod tests {
     fn test_assemble_todos_appended_when_no_user_message() {
         let chain = vec![StructuredMessage::system("s1", "后台任务完成通知")];
         let todos = "## 当前待办（1 项，进行中 0）\n- [ ] 甲\n尾行\n";
-        let msgs = ContextAssembler::assemble_with(
-            &chain,
-            &InjectableContext::default(),
-            None,
-            Some(todos),
-        );
+        let msgs =
+            ContextAssembler::assemble_with(&chain, &InjectableContext::default(), Some(todos));
         assert_eq!(msgs.len(), 2);
         assert_eq!(msgs[1].content, todos);
     }
@@ -1630,12 +1625,8 @@ mod tests {
             StructuredMessage::system("s1", "后台任务完成通知"),
         ];
         let todos = "## 当前待办（1 项，进行中 0）\n- [ ] 甲\n尾行\n";
-        let msgs = ContextAssembler::assemble_with(
-            &chain,
-            &InjectableContext::default(),
-            None,
-            Some(todos),
-        );
+        let msgs =
+            ContextAssembler::assemble_with(&chain, &InjectableContext::default(), Some(todos));
 
         assert_eq!(
             msgs.last().map(|m| m.content.as_str()),

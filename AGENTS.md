@@ -241,7 +241,7 @@ Harness 工程（外部资料整理，非天演机制）→ [`docs/reference/har
 >
 > **注**：MCP 桥接（`server/src/mcp_bridge.rs`）返回的图片（浏览器截图等）落盘于 `{data_dir}/mcp_images/`，与 snapshot 同级运行时产物例外，不经 VFS（ADR-010）。
 >
-> **注（工具图片冻结副本，ADR-050）**：`view_image` 读取的图片复制到 `{data_dir}/session_images/{sha256}.{ext}`（内容寻址、同图去重、不清理）；tool 结果只存引用（`session_images/<sha>.png`），组装期按引用加载为 data URL 随该条 tool 消息发给模型。与 `tool_output/` 同类运行期产物，不经 VFS。
+> **注（工具图片冻结副本，ADR-050）**：`view_image` 读取的图片复制到 `{data_dir}/session_images/{sha256}.{ext}`（内容寻址、同图去重、不清理）；tool 结果只存引用（`session_images/<sha>.png`）；图片字节**只在该结果产生的那一轮**随请求发送（`SessionImages::hydrate`），**历史组装不再加载**（2026-11-15 修订：逐轮全量重发会让请求体按 base64 字节累积——实测 134 张截图 = 48 MB → HTTP 413，而 token 账本按约 1,000 token/张几乎无感知）；跨轮要细节时模型用 `view_image` 重看。与 `tool_output/` 同类运行期产物，不经 VFS。
 >
 > **注（运行期结构化产物，ADR-022/024）**：`goals.json`/`todos.json`（会话任务与目标）、
 > `scheduled_agent_tasks.json`/`scheduler_state.json`（调度器状态）为**运行期状态文件**
