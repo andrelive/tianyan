@@ -36,8 +36,13 @@ impl SqliteDb {
         }
         let conn = Connection::open(&path).map_err(|e| Self::open_error(&path, e))?;
         // foreign_keys=ON：启用 schema 中声明的 FK 约束（ON DELETE CASCADE 等）
+        // busy_timeout：写冲突（另一个进程 / 运维工具持写锁）时自旋等待 5 秒，
+        //   而不是立刻返回 "database is locked"。它**不解决**双写分叉（那由 ADR-040
+        //   单写者 + `desktop::ensure_server` 的 data_dir 校验拦），只把偶发冲突
+        //   从「立刻失败」变成「等一下」。
         conn.execute_batch(
-            "PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA foreign_keys=ON;",
+            "PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA foreign_keys=ON; \
+             PRAGMA busy_timeout=5000;",
         )
         .map_err(|e| Self::open_error(&path, e))?;
 
@@ -157,6 +162,26 @@ impl SqliteDb {
             if !has_first_tokens_col {
                 conn.execute(
                     "ALTER TABLE session_meta ADD COLUMN first_request_tokens INTEGER",
+                    [],
+                )?;
+            }
+            // 幂等迁移：补 `visible_from_seq`（回退水位，ADR-056）。
+            //
+            // **必须补**：新库由 `SCHEMA_SQL` 建表时带该列，老库没有 → `list_meta`
+            // 里 `sql < COALESCE(visible_from_seq, MAX)` 的可见性条件直接
+            // `no such column: sm.visible_from_seq`，**整个会话列表 500** 且前端
+            // 一片空白（1.2.7 实发事故：单测都在内存库上跑、走的是 SCHEMA_SQL 建表，
+            // 唯一测不出来的就是「老库缺列」这条路径）。
+            let has_visible_col: bool = {
+                let mut stmt = conn.prepare("PRAGMA table_info(session_meta)")?;
+                let cols = stmt
+                    .query_map([], |r| r.get::<_, String>(1))?
+                    .collect::<Result<Vec<_>, _>>()?;
+                cols.iter().any(|c| c == "visible_from_seq")
+            };
+            if !has_visible_col {
+                conn.execute(
+                    "ALTER TABLE session_meta ADD COLUMN visible_from_seq INTEGER",
                     [],
                 )?;
             }
@@ -787,5 +812,62 @@ mod lock_tests {
             .query_row("SELECT COUNT(*) FROM session_messages", [], |r| r.get(0))
             .unwrap();
         assert_eq!(count, 2, "降级不得触碰存量行");
+    }
+
+    /// **1.2.7 实发事故回归**：老库 `session_meta` 没有 `visible_from_seq` 列时，
+    /// `init_all_schemas` 必须把它补上。
+    ///
+    /// 漏了会怎样：`list_meta` 的可见性条件 `sql < COALESCE(visible_from_seq, MAX)`
+    /// 直接报 `no such column: sm.visible_from_seq` → 会话列表接口 500 → 前端
+    /// 左侧列表一片空白（用户实测 1.2.7 装完必须退回 1.2.6）。
+    ///
+    /// **为什么单测一直测不出来**：所有测试都在内存库上 `init_schemas` 后使用，
+    /// 走的是 `SCHEMA_SQL` 建表（新表自带该列）；唯一会暴露问题的是「已有旧表的
+    /// 库跑迁移」这条路径——本测试专门构造它。
+    #[tokio::test]
+    async fn test_legacy_session_meta_gets_visible_from_seq() {
+        let db = SqliteDb::open_in_memory().unwrap();
+        {
+            let conn = db.lock().await;
+            // 模拟 1.2.6 的 session_meta（有 first_request_tokens，没有 visible_from_seq）
+            conn.execute_batch(
+                "CREATE TABLE session_meta (
+                    session_id  TEXT PRIMARY KEY,
+                    header_json TEXT NOT NULL DEFAULT '{}',
+                    created_at  INTEGER,
+                    updated_at  TEXT DEFAULT (datetime('now')),
+                    parent_session_id TEXT,
+                    first_request_tokens INTEGER
+                );
+                INSERT INTO session_meta (session_id) VALUES ('s-legacy');",
+            )
+            .unwrap();
+        }
+        db.init_all_schemas().await.expect("旧库迁移应成功");
+
+        let conn = db.lock().await;
+        let has_col: bool = {
+            let mut stmt = conn.prepare("PRAGMA table_info(session_meta)").unwrap();
+            let cols = stmt
+                .query_map([], |r| r.get::<_, String>(1))
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap();
+            cols.iter().any(|c| c == "visible_from_seq")
+        };
+        assert!(
+            has_col,
+            "老库必须补上 visible_from_seq 列（漏了会让会话列表 500）"
+        );
+        // 存量行保留，且新列为 NULL（= 全部可见，语义正确）
+        let (n, visible): (i64, Option<i64>) = conn
+            .query_row(
+                "SELECT COUNT(*), MAX(visible_from_seq) FROM session_meta",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(n, 1, "迁移不得丢数据");
+        assert_eq!(visible, None, "存量会话 = 全部可见");
     }
 }
