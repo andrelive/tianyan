@@ -17,7 +17,7 @@ use base64::Engine as _;
 use serde_json::Value;
 
 use crate::common::binary::sniff_image_mime;
-use crate::common::types::Message;
+use crate::common::types::{Message, MessageRole};
 use crate::executor::image::{MAX_IMAGE_BYTES, SESSION_IMAGES_DIR};
 
 /// 会话图片加载器：把 tool 结果里的引用解析为 data URL 列表。
@@ -100,6 +100,32 @@ impl SessionImages {
         let urls = self.resolve(&msg.content);
         msg.attach_images(urls);
     }
+
+    /// 轮内图片窗口（ADR-050 修订二）：只保留 `batch_start` 之后新增的 tool 图，
+    /// 把更早批次的 tool 图片片段剥回纯文本（`content_parts = None`——与跨轮组装
+    /// 产出的形态逐字节一致，所以下一轮重新组装时视图不变）。
+    ///
+    /// 按**批**保留而不是按张：`batch_start` 是一次 LLM 请求的全部工具结果起点，
+    /// 同批并行 `view_image` 的多张图因此全部可见（"改一版、看一眼、再改一版"）。
+    ///
+    /// 两条纪律：
+    /// - **本批没有图时不动更早的图**——普通工具调用不该清掉上一批图，模型可能
+    ///   仍在用它们推理；
+    /// - 只动 `role: tool` 的消息：用户消息里的图（`Part::Image`）不受影响。
+    pub fn retain_only_last_batch(&self, messages: &mut [Message], batch_start: usize) {
+        let start = batch_start.min(messages.len());
+        let batch_has_images = messages[start..]
+            .iter()
+            .any(|m| m.role == MessageRole::Tool && m.content_parts.is_some());
+        if !batch_has_images {
+            return;
+        }
+        for m in &mut messages[..start] {
+            if m.role == MessageRole::Tool && m.content_parts.is_some() {
+                m.content_parts = None;
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -107,6 +133,85 @@ mod tests {
     use super::*;
 
     const PNG_BYTES: &[u8] = b"\x89PNG\r\n\x1A\nrest-of-bytes";
+
+    /// 轮内只保留最近一批图：更早批次的 tool 图被剥成纯文本，本批保留。
+    #[test]
+    fn test_retain_only_last_batch_strips_earlier_batches() {
+        let images = SessionImages::new(std::env::temp_dir());
+        let url = || vec!["data:image/png;base64,AA".to_string()];
+        let mut messages = vec![
+            Message::tool_with_images("c1", r#"{"image":"session_images/a.png"}"#, url()),
+            Message::tool_with_images("c2", r#"{"image":"session_images/b.png"}"#, url()),
+            Message::tool_with_images("c3", r#"{"image":"session_images/c.png"}"#, url()),
+        ];
+
+        images.retain_only_last_batch(&mut messages, 2);
+
+        assert!(
+            messages[0].content_parts.is_none(),
+            "更早批次的图必须剥掉（否则断点前移，整批之后全部重算）"
+        );
+        assert!(messages[1].content_parts.is_none());
+        assert!(
+            messages[2].content_parts.is_some(),
+            "最近一批的图必须保留——模型正靠它推理"
+        );
+        assert_eq!(messages[2].image_urls().len(), 1);
+        assert_eq!(
+            messages[0].content, r#"{"image":"session_images/a.png"}"#,
+            "剥图只动 content_parts，引用原文原样保留"
+        );
+    }
+
+    /// 本批没有图时**不动**更早的图：普通工具调用不该清掉上一批图。
+    #[test]
+    fn test_retain_only_last_batch_keeps_earlier_when_batch_has_no_images() {
+        let images = SessionImages::new(std::env::temp_dir());
+        let mut messages = vec![
+            Message::tool_with_images(
+                "c1",
+                r#"{"image":"session_images/a.png"}"#,
+                vec!["data:image/png;base64,AA".to_string()],
+            ),
+            Message::tool("c2", "plain command output"),
+        ];
+
+        images.retain_only_last_batch(&mut messages, 1);
+
+        assert!(
+            messages[0].content_parts.is_some(),
+            "本批无图 → 上一批图必须留着（模型可能仍在用）"
+        );
+        assert!(messages[1].content_parts.is_none());
+    }
+
+    /// 只剥 tool 消息：用户自己贴的图（`Part::Image`）不受影响。
+    #[test]
+    fn test_retain_only_last_batch_never_touches_user_images() {
+        let images = SessionImages::new(std::env::temp_dir());
+        let mut messages = vec![
+            Message::user_with_images("看这张图", vec!["data:image/png;base64,UU".to_string()]),
+            Message::tool_with_images(
+                "c1",
+                r#"{"image":"session_images/a.png"}"#,
+                vec!["data:image/png;base64,AA".to_string()],
+            ),
+            Message::tool_with_images(
+                "c2",
+                r#"{"image":"session_images/b.png"}"#,
+                vec!["data:image/png;base64,BB".to_string()],
+            ),
+        ];
+
+        images.retain_only_last_batch(&mut messages, 2);
+
+        assert!(
+            messages[0].content_parts.is_some(),
+            "用户消息的图与工具图窗口无关"
+        );
+        assert!(messages[1].content_parts.is_none());
+        assert!(messages[2].content_parts.is_some());
+    }
 
     /// 造 `{tmp}/session_images/x.png` 并返回加载器。
     fn fixture(dir: &std::path::Path) -> SessionImages {

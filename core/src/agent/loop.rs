@@ -1569,6 +1569,10 @@ impl AgentLoop {
                 }
             };
 
+            // 轮内图片窗口的**批边界**：本批 = 这一次 LLM 请求的全部 tool_calls
+            // 的结果（`execute_parallel` 一次性返回）。见本循环之后的剥图逻辑。
+            let batch_start = ctx.messages.len();
+
             for (call_id, outcome) in results {
                 let content = match &outcome.result {
                     Ok(ref value) => serde_json::to_string(value).unwrap_or_else(|e| {
@@ -1608,6 +1612,19 @@ impl AgentLoop {
                         )
                         .await;
                 }
+            }
+
+            // ADR-050 修订二：轮内**只保留最近一批**工具图——更早批次的图片片段
+            // 在这里立即剥成纯文本。按**批**而不是按张：同一批并行看的多张图全部
+            // 可见（"改一版、看一眼、再改一版"的对比就在同一批里）。
+            //
+            // 为什么必须剥：跨轮组装时历史图已不发送（见 `assemble_with`），但轮内
+            // 若让多批图累积，下一次请求的公共前缀会断在**本批第一张图**的位置，
+            // 本批之后的内容全部重算。实测一轮 4 批 × 24K 文本：不剥 ≈ 72K token/
+            // 轮，剥后 ≈ 1K。只保留最近一批，断点永远落在"最新一张图"——这是所有
+            // 可行策略里重算量最小的（保留最近 K 张会让断点前移到倒数第 K 张）。
+            if let Some(images) = self.session_images() {
+                images.retain_only_last_batch(ctx.messages.as_mut_slice(), batch_start);
             }
 
             // 模型主动请求了上下文压缩（`compress_context`）→ **本轮立即收尾**。
