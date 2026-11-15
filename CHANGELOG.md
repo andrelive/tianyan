@@ -5,6 +5,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.9] - 2026-11-15
+
+### Fixed
+
+- **输入框上下键改为「粘性目标列」**：连续 ↑/↓ 现在记住目标列（不再每步从当前
+  光标重新推算），比例字体下不会再「往前挪半个格子」，连按 ↓↑ 能回到原位。落点
+  改用最近的字符边界（双向取整）；到文档首/尾后按回方向仍能回到原列。任何水平
+  移动 / 点击 / 编辑 / 输入都会重置目标列。
+
 ## [1.2.8] - 2026-11-15
 
 ### Fixed
