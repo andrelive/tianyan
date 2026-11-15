@@ -11,8 +11,6 @@
 # 版本单源 = 根 `Cargo.toml` 的 `[workspace.package] version`（3 段，如 1.1.0）。
 # - MSI 的 4 段 ProductVersion 由 `gui-native/installer/build-msi.ps1` 补 `.0` 注入，
 #   `tianyan.wxs` 里**不得**出现硬编码版本（本脚本会检查）。
-# - `gui-vite/package.json` 的 version 是 npm 包元数据、不参与产品发布，**不纳入**校验。
-
 [CmdletBinding()]
 param()
 

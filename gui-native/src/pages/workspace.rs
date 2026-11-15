@@ -17,7 +17,7 @@ impl ClientApp {
     /// 只做「能日常用」的最小集合——没有它，换模型只能回 Tauri 版改配置。
     /// 存储 / 安全 / MCP / soul 等分组按后续批次补（端点都已存在，见
     /// `server/src/api/config/routes.rs`）。
-    /// 子智能体页（对齐 `gui-vite/src/components/roles/RolesPanel.tsx`）：
+    /// 子智能体页（对齐 `src/components/roles/RolesPanel.tsx`）：
     /// 左列表（搜索 + 角色项）+ 右详情（统计条 + 系统提示 / 工具 / 模型）。
     /// 文件页（对齐 Web 版 `WorkspacePanel` 的**只读部分**）：左侧单层目录树 +
     /// 右侧文件内容。

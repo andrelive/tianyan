@@ -26,7 +26,7 @@ use std::sync::OnceLock;
 static REGISTERED: AtomicBool = AtomicBool::new(false);
 
 /// 默认组合键：与 tauri 版同一个组合（`tauri/src/lib.rs` 的全局快捷键），
-/// 这样 gui-vite 退役后不用改用户习惯。
+/// 这样 原 Web 端 退役后不用改用户习惯。
 const DEFAULT_COMBO: &str = "Ctrl+Alt+T";
 
 /// 覆盖组合键的环境变量名。

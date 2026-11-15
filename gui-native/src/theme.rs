@@ -282,7 +282,7 @@ pub(crate) mod colors {
     /// 会话列表宽度（`--sidebar-width`：280px）
     pub const LIST_WIDTH: f32 = 280.;
     /// 会话内容列宽度（Tailwind `max-w-4xl` = 896px）：消息列、底部状态条与输入卡片
-    /// 三者必须同宽同左边界——`gui-vite` 的 `ChatPanel` 用 `w-full max-w-4xl mx-auto px-4`，
+    /// 三者必须同宽同左边界——`原 Web 端` 的 `ChatPanel` 用 `w-full max-w-4xl mx-auto px-4`，
     /// `ChatInput` 用 `mx-auto max-w-4xl`，靠同一个 max-width 对齐。
     pub const CHAT_MAX_W: f32 = 896.;
 }

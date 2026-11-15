@@ -2,6 +2,8 @@
 
 > 本文是「上下文工程」的权威说明：把散落在代码注释、ADR 与排查笔记里的机制固化下来。
 > 每个机制陈述都标注了源码依据（`文件:行`）。变更上下文组装 / 压缩行为时，需同步更新本文与相关 ADR。
+> **注**：文中出现的 `gui-vite/...` 路径属于 2026-11 已退役并**删除目录**的 Web 前端，
+> 仅作历史实现参考；现行前端为 `gui-native/`（GPUI 原生）。
 >
 > 涉及 ADR：[ADR-004](decisions/004-prefix-match-context-assembly.md)（前缀匹配组装）、
 > [ADR-012](decisions/012-injectable-snapshot-persistence.md)（注入快照）、

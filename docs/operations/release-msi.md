@@ -1,7 +1,7 @@
 # 发布：native MSI（GPUI 客户端）
 
 > **当前唯一发布渠道 = `gui-native`（GPUI 原生客户端，内嵌 server，单 exe）。**
-> `tauri/` 已于 2026-10 删除，`scripts/build.ps1` / `build.sh`（tauri 打包脚本）一并删除；`gui-vite/` 保留做对照，**不随包发布**。
+> `tauri/` 已于 2026-10 删除，`scripts/build.ps1` / `build.sh`（tauri 打包脚本）一并删除；Web 端 `gui-vite/` 已于 2026-11 退役并删除目录。
 > 本文替代 2026-10 之前的 Tauri 版发布文档（旧流程见 git 历史）。
 
 ## 1. 版本号只有一个源
@@ -72,7 +72,6 @@ WiX **每次 `wix build` 都生成新 GUID**，而 MSI 把「同版本 + 不同 
   3. `build-msi.ps1` → MSI + `SHA256SUMS.txt`
   4. 只有 tag 才 `softprops/action-gh-release` 上传
 - **不产出 `latest.json`**：那是 tauri updater 的清单（带 `.sig`）。native 目前没有自动更新，硬塞一个无签名的 `latest.json` 只会让残留的 tauri 客户端拿到「格式对但签名缺失」的更新而报错。改为 `SHA256SUMS.txt` 供手动校验。
-- **不构建 `gui-vite`**：native 是纯 Rust 前端，MSI 只装 exe。注意 server 的静态服务读 `gui-vite/dist`，当前安装包里没有它。
 - **已知风险**：`arduino/setup-protoc` 从 GitHub Releases 拉取，历史上出现过「00:00 瞬时失败」导致整轮白跑（Linux 侧已改 apt，见 [`ci-pipeline.md`](ci-pipeline.md) §0）。Windows runner 无 apt，暂保留该 action；再遇到改用 `choco install protoc -y`。
 
 ## 4. 已知坑

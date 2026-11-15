@@ -36,7 +36,7 @@
 
 | 文档 | 用途 |
 |---|---|
-| [`development.md`](development.md) | 构建与检查命令（主 workspace / `gui-native` / `gui-vite`）、知识固化判据（`.scratch/` 不算固化）、重构实践（审查 / 波次 / QA 纪律） |
+| [`development.md`](development.md) | 构建与检查命令（主 workspace / `gui-native`）、知识固化判据（`.scratch/` 不算固化）、重构实践（审查 / 波次 / QA 纪律） |
 | [`api-endpoints.md`](api-endpoints.md) | HTTP 端点速查 |
 | [`operations/troubleshooting.md`](operations/troubleshooting.md) | 日志与三类高频故障 + DB 取证 + QA 纪律 |
 | [`operations/data-health-check.md`](operations/data-health-check.md) | 表清单 + 巡检 SQL 集 + 解读处置 |

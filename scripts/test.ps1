@@ -2,9 +2,8 @@
 # 用法: .\scripts\test.ps1 [level]
 #   level: lint | unit | integration | e2e | bench | all (默认)
 #
-# 前端（gui-vite）已于 2026-11 退役：本脚本不再跑 eslint / typecheck / vitest /
-# playwright（Web 端不再是产品前端，CI 也已摘除，见 quality.yml 末尾注释）。
-# 需要时进 `gui-vite/` 手工运行（`npm run lint` / `npm run dev` / `npx playwright test`）。
+# 前端（原 Web 端）已于 2026-11 退役、目录已删除：本脚本不含任何前端层级
+# （eslint / typecheck / vitest / playwright 早已移出，CI 同步）。
 
 param(
     [string]$Level = "all"

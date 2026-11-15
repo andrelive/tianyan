@@ -257,7 +257,7 @@ impl ChatMessage {
             // 消息时间：核心 `MessageTime.created` 是 epoch 毫秒（落库时写入
             // `session_messages.ts`）。此前这里恒 `None`，导致**历史消息在任何
             // 前端都显示不出时间**（前端只有流式轮次本地打点）；补上后
-            // gui-vite / gui-native 的历史消息时间一致可用。
+            // 原 Web 端 / gui-native 的历史消息时间一致可用。
             timestamp: if m.time.created > 0 {
                 chrono::DateTime::from_timestamp_millis(m.time.created).map(|dt| dt.to_rfc3339())
             } else {

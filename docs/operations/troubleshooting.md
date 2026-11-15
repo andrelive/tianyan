@@ -275,8 +275,8 @@ segments/thinking/usage），于是陈旧内容显示在当前轮。
   会话末尾存在"无 id 的流式占位"，故**只有它受影响**；覆盖发生在轮结束（或切回
   重建）时，故**输出过程中看得见、切回后不见**。
 - auto 轮改走下方"按 id 幂等追加/更新"路径（唤醒轮输出是**独立新消息**）。
-- 修复位置：`gui-vite/src/lib/store/chat-slice.ts`（`applyServerMessage` 的
-  assistant 分支）；回归测试：`gui-vite/src/lib/__tests__/chat-stream.test.ts`
+- 修复位置：原 Web 端的 `chat-slice.ts`（`applyServerMessage` 的
+  assistant 分支；该前端已于 2026-11 删除）；回归测试：原 `chat-stream.test.ts`
   （`唤醒轮边界事件不得覆盖用户轮的流式占位` + `用户轮（auto=false）…` 对照用例；
   **判别力已验证**：临时停用修复则该用例必红）。
   > 注：本节的 0.3.17 修复在**服务端**（只下发本轮新产生的 assistant）；唤醒轮的
@@ -356,8 +356,7 @@ FROM background_tasks ORDER BY seq DESC LIMIT 20;
   `127.0.0.1:3000`**（`ServerConfig::default()` = `host 127.0.0.1`, `port 3000`；`TIANYAN_PORT`
   可覆盖，走 `ServerConfig::from_env`）；QA 时**直接测 3000**。
   桌面端不自己抢端口：先经 `tianyan_desktop::ensure_server` **发现同一数据目录的已有实例并复用**，
-  未命中才 `find_available_port` 自起（扫 `3000..=3100`，ADR-051）。**GUI e2e 后端不用 3000**（默认 3099，
-  `gui-vite/playwright.config.ts`）——避免与运行中的桌面应用互斥。
+  未命中才 `find_available_port` 自起（扫 `3000..=3100`，ADR-051）。
 - **配置热更新会落盘**：`PUT /api/v1/config`（`config/services.rs::persist_and_reload`）
   = 校验 → `save_to_file` 写回 `~/.tianyan/tianyan.toml` → 热重载。
   **QA/测试改过配置后必须恢复**，否则污染本机配置。

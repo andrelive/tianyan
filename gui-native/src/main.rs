@@ -1,7 +1,7 @@
 //! 天演原生桌面客户端（GPUI）。
 //!
-//! 与 `gui-vite`（Tauri + React）**并存**的第二个客户端，连同一个内嵌 axum server，
-//! 走同一套 HTTP/SSE 协议。gui-vite 退役前 `tauri/` 必须保留。
+//! 天演唯一的桌面客户端（GPUI 原生）：连同一个内嵌 axum server，
+//! 与后端走同一套 HTTP/SSE 协议（前两代壳 tauri / Web 端均已下线）。
 //!
 //! 当前进度：**11 个一级入口全部实现**（会话 / 文件 / 技能 / 子智能体 / 工具 /
 //! 知识 / 记忆 / 审批 / 定时任务 / 洞察 / 设置），另有内建 GUI 自动化端口
@@ -815,7 +815,7 @@ impl Render for ClientApp {
         // 而自动化验收正是隐藏窗口跑的。回填统一走 `window_handle.update` 现取窗口
         // （见 `backfill_settings_fields` / `set_soul_text`）。
         let _ = window;
-        // 整体骨架与 `gui-vite/src/components/layout/AppLayout.tsx` 一致：
+        // 整体骨架沿用原 Web 端 `AppLayout.tsx` 的排布：
         //   一级 rail(64px) + main(flex-1, bg-primary)
         let mut root = div()
             .size_full()

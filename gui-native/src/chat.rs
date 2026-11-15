@@ -49,7 +49,7 @@ pub(crate) const MAX_COMPOSER_FILES: usize = 20;
 impl ClientApp {
     /// 最近一轮请求的用量 → 上下文占用的分子。
     ///
-    /// 两条来源（与 gui-vite `lib/token-usage.lastMessageUsage` 同口径）：
+    /// 两条来源（与 原 Web 端 `lib/token-usage.lastMessageUsage` 同口径）：
     /// ① 流式 `usage` 上报（`ctx_live`，最新一轮；切会话即清）；
     /// ② 消息链里每条消息自带的 `usage`——从末尾向前找第一条，让**切会话 /
     ///    重开应用**也能立刻显示占用，而不必等下一轮对话才开始有数。
@@ -397,7 +397,7 @@ impl ClientApp {
     /// 拆成多个 render 子函数不是为了整洁：这段曾是 810 行单函数，单帧栈占用把
     /// GPUI 的递归 prepaint 推过栈上限（`has overflowed its stack`）——加一个控件
     /// 就可能崩。新增控件请挂进对应的子函数，不要往这里堆。
-    /// 布局对齐 `gui-vite` 的 `SessionPage`（左栏 280px + 右栏 ChatPanel 撑满）。
+    /// 布局对齐 `原 Web 端` 的 `SessionPage`（左栏 280px + 右栏 ChatPanel 撑满）。
     pub(crate) fn render_chat(&self, cx: &mut Context<Self>) -> impl IntoElement {
         div()
             .size_full()

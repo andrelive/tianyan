@@ -88,7 +88,6 @@ cargo run -p tianyan-server                          # 只跑后端（默认 127
 | `tools-ops/` | 运维工具（服务停止后直接修数据的终端脚本，**不被任何 crate 依赖**） |
 | **`gui-native/`** | **GPUI 原生客户端（主发布渠道）**：独立 workspace，复用 `desktop/` 做单实例发现与端口避让 |
 | `desktop/` | 桌面启动编排：发现「同一数据目录」的已有实例并复用，未命中才自起（ADR-051） |
-| `gui-vite/` | React + TypeScript 前端 —— **已退役**（2026-11），目录作参考实现保留，不随包发布 |
 | `mcp/` | MCP 协议客户端（stdio + streamable HTTP） |
 
 技术栈：**Rust（stable）· GPUI（原生 UI）· Axum 0.8 · Tokio · LanceDB 0.33（嵌入式向量）· SQLite（主存储）**。

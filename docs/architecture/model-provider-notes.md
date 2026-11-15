@@ -218,8 +218,8 @@ pub fn prompt_side_tokens(&self) -> usize {
 
 | 口径 | 公式 | 位置 |
 |---|---|---|
-| 上下文占用百分比 | `prompt_tokens / context_window` | `gui-vite/src/components/chat/ContextRing.tsx:39` |
-| 缓存命中率 | `cache_read / prompt_tokens` | `gui-vite/src/components/chat/ContextRing.tsx:41-43` |
+| 上下文占用百分比 | `prompt_tokens / context_window` | 服务端 `usage` 字段（前端只做展示） |
+| 缓存命中率 | `cache_read / prompt_tokens` | 服务端 `usage` 字段（前端只做展示） |
 
 > **重要边界**：缓存命中部分（`cache_read`）**算窗口占用**（它仍占窗口），**不得**用 `input - cache_read`（"未命中"）当上下文占用——那是**成本口径**，不是**窗口占用口径**（`docs/architecture/context-pipeline.md` §6.1）。
 

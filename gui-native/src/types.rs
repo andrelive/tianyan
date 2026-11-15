@@ -5,7 +5,7 @@
 
 use gpui_kit::assets::IconName;
 
-/// 一级导航项（与 `gui-vite/src/components/sidebar/Sidebar.tsx` 的 `NAV_ITEMS` 逐项对齐）。
+/// 一级导航项（与 `src/components/sidebar/Sidebar.tsx` 的 `NAV_ITEMS` 逐项对齐）。
 ///
 /// 第一列是 rail 上显示的 **Lucide 图标**：`gpui_kit::assets::IconName` 就是完整 Lucide
 /// 目录（1800+ 个，`gpui-kit-assets` 内嵌 SVG），与 Tauri 版 `lucide-react` 同一套图形，
@@ -26,7 +26,7 @@ pub(crate) const NAV_ITEMS: [(IconName, &str, View); 11] = [
     (IconName::Settings, "设置", View::Settings),
 ];
 
-/// 设置页的二级栏目（与 `gui-vite/src/components/settings/SettingsPanel.tsx` 的
+/// 设置页的二级栏目（与 `src/components/settings/SettingsPanel.tsx` 的
 /// `TABS` **逐项对齐**：顺序、id、label、图标全一致）。
 ///
 /// 为什么要有它：设置页是一个大杂烩（模型/存储/安全/日志/…），vite 把它分成 14 个

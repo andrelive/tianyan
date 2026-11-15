@@ -108,7 +108,7 @@ impl ClientApp {
 
     /// 重建左栏行（分组 / 会话 / 查看更多）。
     ///
-    /// 排序对齐 `gui-vite/src/components/session/SessionList.tsx` 的 `sortGroups`：
+    /// 排序对齐 `src/components/session/SessionList.tsx` 的 `sortGroups`：
     /// 1.「最近活跃」段：24h 内有活动的工作区，按组内最近时间倒序，最多 3 个；
     /// 2.「其余」段：按路径字母序（稳定段，位置不随使用漂移）；
     /// 3. 默认组（`""`）始终垫底（即使没有未绑定会话，也要能在这儿新建）。

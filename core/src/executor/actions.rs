@@ -88,8 +88,8 @@ fn suggest_similar_paths(path: &Path) -> String {
 /// 二进制文件结果：大小 + 格式标识 + 可执行 hint + 前 200 字节 lossy 预览。
 ///
 /// **字段契约**：`binary` / `path` / `size` / `preview` 的名称与语义保持历史不变
-/// （`gui-vite` 的 `FileViewer.tsx` 按它们渲染「二进制文件」提示与预览），`format`
-/// / `hint` 只是**新增**字段。刻意不返回 `content`：命中二进制时没有文本内容可给，
+/// （前端按它们渲染「二进制文件」提示与预览），`format` / `hint` 只是**新增**字段。
+/// 刻意不返回 `content`：命中二进制时没有文本内容可给，
 /// 给一段 lossy 文本只会诱导模型从乱码里"读出"内容。
 fn binary_result(path: &str, bytes: &[u8]) -> Value {
     let preview_len = bytes.len().min(200);

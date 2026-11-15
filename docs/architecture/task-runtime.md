@@ -156,6 +156,6 @@ command_output 事件
 - ADR-030：统一 Agent 循环框架（子代理与主 agent 同构；`task_id = session_id`）
 - 代码：`core/src/agent/background.rs`、`core/src/agent/tool_registry/agent_ops.rs`、
   `core/src/executor/command.rs`、`core/src/session/{manager,store}.rs`、
-  `server/src/api/tasks/handlers.rs`、`gui-vite/src/components/chat/AgentTasksPanel.tsx`
+  `server/src/api/tasks/handlers.rs`、原 Web 端 `AgentTasksPanel.tsx`
 - 运维：[../operations/troubleshooting.md](../operations/troubleshooting.md)、
   [../operations/data-health-check.md](../operations/data-health-check.md)

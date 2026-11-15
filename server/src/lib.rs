@@ -509,7 +509,7 @@ async fn create_app_inner(
     // Create API router
     let api_router = create_api_router(state.clone());
 
-    // 静态资源服务已随 gui-vite 退役（SPA 外壳 / /assets / TIANYAN_STATIC_DIR 一并移除）：
+    // 静态资源服务已移除（SPA 外壳 / /assets / TIANYAN_STATIC_DIR 一并删除）：
     // 本服务只提供 `/api/v1/**` 与 `/health`，未知路径由 axum 默认 404 处理。
     Ok((
         Router::new()

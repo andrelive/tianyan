@@ -243,7 +243,7 @@ WSL 里的 Ubuntu 通常**出不了网**（cargo 镜像 `static.crates.io` / ali
 ```bash
 # 源码同步到 WSL 原生盘（DrvFs 上编译慢）
 rsync -a --delete --exclude target/ --exclude 'gui-native/target/' \
-      --exclude 'gui-vite/node_modules/' --exclude .git/ \
+      --exclude .git/ \
       /mnt/<盘符>/<仓库路径>/ /root/tianyan-ci/
 cd /root/tianyan-ci
 CARGO_HOME=/mnt/c/Users/<user>/.cargo CARGO_TARGET_DIR=/root/tianyan-target \

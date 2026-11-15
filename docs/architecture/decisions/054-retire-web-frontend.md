@@ -46,14 +46,24 @@
 - 本地门禁（`scripts/test.ps1`）：移除 `gui-build` / `gui-e2e` 层级与 lint / unit 里的前端步骤。
 - 文档：`AGENTS.md`、`README.md`、`docs/development.md`、`docs/operations/ci-pipeline.md`、
   `docs/architecture/module-map.md`、`docs/known-limits.md` 标注退役状态。
-- `gui-vite/` 目录**原地保留**（`npm run dev` 手工仍可用——vite dev server 自己起 5100
-  并经 proxy 打后端 3000，不依赖 server 的静态服务）。
+- `gui-vite/` 目录**阶段 1 时原地保留**（`npm run dev` 手工仍可用）；目录已在阶段 2 删除（见下）。
 
-### 阶段 2（待执行）
+### 阶段 2（✅ 已完成 2026-11-15）
 
-目录物理删除 + 文档中 `gui-vite` 相关描述全量清理。触发条件：native 这轮功能复验完成、
-且确认无遗漏交互（建议按「vite 可见项 → native 状态」三态表过一遍，已知待核对项：
-`components/clipboard/ClipboardConfirmBar.tsx` 在前端是否有 native 对应物）。
+目录物理删除 + 文档中 `gui-vite` 相关描述清理：
+
+- `git rm -r gui-vite`（215 个跟踪文件）+ 本地 `node_modules` / `dist`（约 277 MB）
+- 删除只服务 Web 端测试的基础设施：`scripts/capture-contract-fixtures.ps1`（契约 fixture，
+  路径早已失效）与 `scripts/e2e/`（mock LLM + Playwright 专用 e2e 配置与工作区夹具，
+  无 Rust 侧依赖）
+- 文档：`AGENTS.md`、`README.md`、`module-map.md`、`development.md`、`known-limits.md`、
+  `release-msi.md`、`ci-pipeline.md`、`troubleshooting.md`、`gui-native/README.md` 去掉
+  「目录保留 / 作参考实现」表述；机制文档（`event-protocol.md` / `context-pipeline.md`）
+  保留历史实现引用并加注「该目录已删除」
+- 源码注释：`server/src/lib.rs`（静态服务已移除）、`core/src/executor/actions.rs`
+  （二进制字段契约）、`gui-native/Cargo.toml`、`scripts/test.ps1`、`scripts/check-version.ps1`
+- ADR-007/010/015/016/019/029/030/031/035/036/041/049 中指向 `gui-vite/src/...` 的路径属
+  **历史决策记录**，不改写（它们记录的是当时的实现）
 
 ## 代价（诚实记账）
 
