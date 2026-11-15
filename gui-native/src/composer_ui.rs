@@ -80,6 +80,14 @@ pub(crate) struct ComposerState {
     caret_on: Cell<bool>,
     /// 是否正在按住鼠标拖拽选区（on_mouse_down 置真、on_mouse_up 置假）。
     dragging: bool,
+    /// 垂直移动的**粘性目标列**（像素 x；`None` = 下次上下移动时用当前光标位置初始化）。
+    ///
+    /// 为什么需要：比例字体下不同行的字符宽度不同，「每次都从当前光标重新推算目标列」
+    /// 会把取整误差累加进去——用户实测「按上下上，光标回不到原位、反而往前挪一位」。
+    /// 这是业界标准做法：Emacs 的 `goal-column`、VS Code 的 `CursorState.desiredX`、
+    /// Chromium 的 `VerticalCursorMovement`、Windows RichEdit 都记这个「期望列」。
+    /// **任何水平移动 / 点击 / 编辑 / 输入都会清除**，只有连续上下移动才沿用。
+    desired_x: Option<f32>,
     /// 闪烁任务（只启动一次）。
     blink_task: Option<gpui_kit::Task<()>>,
 }
@@ -100,6 +108,7 @@ impl ComposerState {
             avail_cache: Cell::new(0.0),
             caret_on: Cell::new(true),
             dragging: false,
+            desired_x: None,
             blink_task: None,
         }
     }
@@ -111,6 +120,7 @@ impl ComposerState {
 
     /// 整体替换正文（草稿恢复 / 自动化写入），光标落到末尾。
     pub(crate) fn set_value(&mut self, text: impl Into<String>, cx: &mut Context<Self>) {
+        self.desired_x = None;
         self.buffer.set_text(text);
         self.marked = None;
         self.scroll = 0.0;
@@ -226,7 +236,10 @@ impl HitRow {
                         }
                     }
                     HitKind::Text(line) => {
-                        let local = line.index_for_x(px(x - p.x)).unwrap_or(0);
+                        // `closest_index_for_x` = **最近的字符边界**（双向取整）；
+                        // `index_for_x` 是 floor 语义（落在哪个字形就取它的左边界），
+                        // 上下移行时会系统性往前偏半个格子。
+                        let local = line.closest_index_for_x(px(x - p.x));
                         p.byte.start + local
                     }
                 };
@@ -982,6 +995,11 @@ impl ComposerState {
         let ks = &ev.keystroke;
         let ctrl = ks.modifiers.control;
         let shift = ks.modifiers.shift;
+        // 非垂直移动键 → 清空粘性目标列（水平移动 / Home/End / 编辑都重置目标列；
+        // 只有连续 ↑/↓ 才沿用同一个 x）
+        if !matches!(ks.key.as_str(), "up" | "down") {
+            self.desired_x = None;
+        }
         let before = (self.buffer.text.clone(), self.buffer.cursor);
         match (ctrl, ks.key.as_str()) {
             (false, "enter") => {
@@ -1072,26 +1090,35 @@ impl ComposerState {
     /// 命中表缺失（首帧 / 只有一行）时退回硬行逻辑。
     fn move_vertical(&mut self, dir: i32, extend: bool) {
         let cursor = self.buffer.cursor;
-        if let Some((row, row_count, x)) = self.visual_cursor_row(cursor) {
-            let target_row = row as i32 + dir;
-            if target_row < 0 {
-                // 已在首行再往上 → 文档开头（与常见编辑器一致）
-                self.buffer.set_cursor(0, extend);
-                return;
-            }
-            if target_row as usize >= row_count {
-                self.buffer.set_cursor(self.buffer.text.len(), extend);
-                return;
-            }
-            let target = {
-                let hits = self.hits.borrow();
-                hits[target_row as usize].byte_at(x)
-            };
-            self.buffer.set_cursor(target, extend);
+        let Some((row, row_count, cur_x)) = self.visual_cursor_row(cursor) else {
+            // 命中表不可用（首帧 / 只有一行）→ 退回按 `\n` 硬行
+            self.move_vertical_by_newline(dir, extend);
+            return;
+        };
+        // **粘性目标列**：本次连续上下移动的第一个键用当前光标 x 初始化，
+        // 之后沿用同一个 x（不在移动后重算——比例字体的取整误差会累积）。
+        let x = *self.desired_x.get_or_insert(cur_x);
+
+        let target_row = row as i32 + dir;
+        if target_row < 0 {
+            // 已在首行再往上 → 文档开头；保留 desired_x，之后按 ↓ 能回原列
+            self.buffer.set_cursor(0, extend);
             return;
         }
+        if target_row as usize >= row_count {
+            self.buffer.set_cursor(self.buffer.text.len(), extend);
+            return;
+        }
+        let target = {
+            let hits = self.hits.borrow();
+            hits[target_row as usize].byte_at(x)
+        };
+        self.buffer.set_cursor(target, extend);
+    }
 
-        // ── 回退：按 `\n` 硬行（命中表尚未生成时） ──
+    /// 上下移行的硬行回退（命中表尚未生成时）：按 `\n` 分行近似。
+    fn move_vertical_by_newline(&mut self, dir: i32, extend: bool) {
+        let cursor = self.buffer.cursor;
         let start = self.buffer.line_start(cursor);
         let col = cursor - start;
         if dir < 0 {
@@ -1123,6 +1150,8 @@ impl ComposerState {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // 点击定位 → 重置粘性目标列（下一次 ↑/↓ 以新位置为准）
+        self.desired_x = None;
         self.focus_handle.focus(window, cx);
         let (ox, oy) = *self.origin.borrow();
         let x = f32::from(ev.position.x) - ox;
@@ -1184,6 +1213,8 @@ impl ComposerState {
         text: &str,
         cx: &mut Context<Self>,
     ) {
+        // 输入 / 粘贴 / IME 上屏都会经过这里 → 文本变了，目标列作废
+        self.desired_x = None;
         self.push_undo();
         let s = byte_from_utf16(&self.buffer.text, range_utf16.start);
         let e = byte_from_utf16(&self.buffer.text, range_utf16.end);
