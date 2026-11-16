@@ -5,16 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [1.2.13] - 2026-11-16
-
-### Fixed
-
-- **产出物块的观感问题**：块宽度随内容收缩（外层容器与行都未撑满消息列）；正文与
-  块之间偶发大段空白、元信息与按钮要等下一次重绘才出现（轮末事件到达后没重测该条
-  消息的高度）；点卡片或文件夹图标会闪一个命令行窗口（spawn 未加
-  `CREATE_NO_WINDOW`）。
-
-## [1.2.12] - 2026-11-16
+## [1.2.11] - 2026-11-16
 
 ### Added
 
@@ -33,6 +24,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **打开历史会话看不到产出物**：`SessionService` 的 `.with_agent(...)` 加到了会话
   列表端点，分页端点没挂，服务端算出来恒为空数组。修复后打开会话即可看到最近
   一页各轮的产出物。
+- **产出物块的观感问题**：块宽度随内容收缩（外层容器与行都未撑满消息列）；正文与
+  块之间偶发大段空白、元信息与按钮要等下一次重绘才出现（轮末事件到达后没重测该条
+  消息的高度）；点卡片或文件夹图标会闪一个命令行窗口（spawn 未加
+  `CREATE_NO_WINDOW`）。
 
 ### 说明
 
