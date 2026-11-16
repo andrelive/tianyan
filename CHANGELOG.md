@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [1.2.11] - 2026-11-16
+## [1.2.12] - 2026-11-16
 
 ### Added
 
@@ -18,6 +18,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - `GET /sessions/{id}/messages` 响应新增 `artifacts` 字段，仅在本页含链尾时计算。
+
+### Fixed
+
+- **打开历史会话看不到产出物**：`SessionService` 的 `.with_agent(...)` 加到了会话
+  列表端点，分页端点没挂，服务端算出来恒为空数组。修复后打开会话即可看到最近
+  一页各轮的产出物。
 
 ### 说明
 
