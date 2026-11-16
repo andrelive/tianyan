@@ -77,6 +77,12 @@ pub struct SessionService {
     snapshot_manager: Option<Arc<SnapshotManager>>,
     /// 会话工作集注册表（ADR-035 §3：写侧收口唯一通道；测试桩为 None 时回退直写）。
     working_sets: Option<Arc<tianyan::agent::working_set::WorkingSetRegistry>>,
+    /// 智能体（产出物重算委托给它：会话工作区解析与快照比较只有一份实现）。
+    ///
+    /// 不挂载时产出物一律为空数组。只做会话 CRUD 的构造点（20 余处）不需要产出物，
+    /// 挂上反而迫使它们先取 agent；真正需要的一处分页端点显式
+    /// [`Self::with_agent`]。
+    agent: Option<Arc<dyn tianyan::agent::AgentCoordinator>>,
 }
 
 impl SessionService {
@@ -90,7 +96,14 @@ impl SessionService {
             session_manager,
             snapshot_manager,
             working_sets,
+            agent: None,
         }
+    }
+
+    /// 挂载智能体（产出物重算的唯一入口，见 [`Self::turn_artifacts_for_page`]）。
+    pub fn with_agent(mut self, agent: Arc<dyn tianyan::agent::AgentCoordinator>) -> Self {
+        self.agent = Some(agent);
+        self
     }
 
     /// 写入收口 ③（ADR-035 §3）：会话头部元数据经工作集读改镜像后落库。
@@ -211,6 +224,7 @@ impl SessionService {
             next_before_seq: None,
             has_more: false,
             last_seq,
+            artifacts: Vec::new(),
         })
     }
 
@@ -248,13 +262,61 @@ impl SessionService {
         .await?;
         // 上滚游标 = 本页最早一条的 seq（=0 表示已到链首，无更早）
         let next_before_seq = rows.first().map(|(seq, _)| *seq).filter(|seq| *seq > 0);
+        // 产出物只在**本页含链尾**时计算：链尾那一轮用「树 vs 当前工作区」，其余轮用
+        // 「树 vs 下一棵树」。上滚加载更早的历史页不算（那一段的产出物按需重算没有
+        // 收益，还会在每次滚动时多读 2N 棵树）。
+        let includes_tail = rows.last().map(|(seq, _)| *seq) == Some(last_seq);
+        let artifacts = if includes_tail {
+            self.turn_artifacts_for_page(session_id, &rows).await
+        } else {
+            Vec::new()
+        };
         Ok(SessionMessagesResponse {
             session_id: session_id.to_string(),
             messages: ChatMessage::messages_from_structured_with_seq(rows),
             next_before_seq,
             has_more: next_before_seq.is_some(),
             last_seq,
+            artifacts,
         })
+    }
+
+    /// 算一页内各轮的产出物（锚点 = 真用户消息；压缩点是 user 角色但不是轮起点）。
+    ///
+    /// 单轮失败（树已被 GC / 无工作目录）只跳过该轮：产出物是展示数据，不能因为
+    /// 某个老会话缺树就让整个分页请求失败。
+    async fn turn_artifacts_for_page(
+        &self,
+        session_id: &str,
+        rows: &[(i64, tianyan::common::types::StructuredMessage)],
+    ) -> Vec<tianyan::agent::TurnArtifacts> {
+        let Some(agent) = &self.agent else {
+            return Vec::new();
+        };
+        let anchors: Vec<String> = rows
+            .iter()
+            .filter(|(_, m)| {
+                m.role == tianyan::common::types::MessageRole::User && !m.compression_marker
+            })
+            .map(|(_, m)| m.id.clone())
+            .collect();
+        let mut out = Vec::new();
+        for (i, anchor) in anchors.iter().enumerate() {
+            let next = anchors.get(i + 1).map(String::as_str);
+            match agent.turn_artifacts_at(session_id, anchor, next).await {
+                Ok(a) if !a.files.is_empty() => out.push(a),
+                Ok(_) => {}
+                Err(e) => {
+                    tracing::debug!(
+                        error = %e,
+                        session = %session_id,
+                        anchor = %anchor,
+                        "历史轮产出物跳过（树缺失或无工作目录）"
+                    );
+                }
+            }
+        }
+        out
     }
 
     /// 删除会话

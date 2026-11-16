@@ -267,6 +267,30 @@ pub trait AgentCoordinator: Send + Sync {
     async fn shutdown(&self) -> Result<()> {
         Ok(())
     }
+
+    /// 取走最近一轮的产出物（一次性消费；无产出物 / 未实现时返回 `None`）。
+    ///
+    /// 展示数据：默认实现返回 `None`，没有快照能力的适配器与测试替身直接继承，
+    /// 前端表现为「这一轮没有产出物块」，不参与任何业务流程。
+    async fn take_turn_artifacts(&self, _session_id: &str) -> Option<crate::agent::TurnArtifacts> {
+        None
+    }
+
+    /// 按锚点算产出物（打开会话时补历史轮次）。
+    ///
+    /// `next_anchor` 为下一轮锚点：`Some` = 历史轮（树 vs 树），`None` = 最近一轮
+    /// （树 vs 当前工作区）。默认实现返回「不支持」：重算要读快照树，未装配快照
+    /// 能力的适配器给不出。
+    async fn turn_artifacts_at(
+        &self,
+        _session_id: &str,
+        _anchor: &str,
+        _next_anchor: Option<&str>,
+    ) -> Result<crate::agent::TurnArtifacts> {
+        Err(crate::common::error::TianyanError::invalid_input(
+            "agent: 当前实现不支持产出物重算",
+        ))
+    }
 }
 
 #[async_trait]
@@ -570,5 +594,18 @@ impl AgentCoordinator for Agent {
     async fn shutdown(&self) -> Result<()> {
         tracing::info!("Shutting down agent");
         Ok(())
+    }
+
+    async fn take_turn_artifacts(&self, session_id: &str) -> Option<crate::agent::TurnArtifacts> {
+        Agent::take_turn_artifacts(self, session_id).await
+    }
+
+    async fn turn_artifacts_at(
+        &self,
+        session_id: &str,
+        anchor: &str,
+        next_anchor: Option<&str>,
+    ) -> Result<crate::agent::TurnArtifacts> {
+        Agent::turn_artifacts_at(self, session_id, anchor, next_anchor).await
     }
 }

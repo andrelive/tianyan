@@ -1102,6 +1102,34 @@ pub(crate) struct MsgRow {
     pub(crate) ts: Option<String>,
 }
 
+/// 一轮产出物里的单个文件（`turn_artifacts` 事件 / 分页响应 `artifacts` 的元素）。
+///
+/// 手写解析而不是 derive：gui-native 只依赖 `serde_json`（不带 `serde` 派生），
+/// 前端其余结构也都是从 `serde_json::Value` 逐字段取的。
+#[derive(Clone, Debug)]
+pub(crate) struct ArtifactRow {
+    /// 相对工作区路径。
+    pub(crate) path: String,
+    /// `added` | `modified` | `removed`。
+    pub(crate) status: String,
+    /// 字节数。历史轮为 0（快照树只存哈希，不记大小），渲染时据此省略大小。
+    pub(crate) size: u64,
+}
+
+impl ArtifactRow {
+    /// 从服务端 JSON 解析；`path` 缺失视为坏数据（返回 `None`，调用方跳过该条）。
+    pub(crate) fn from_json(v: &serde_json::Value) -> Option<Self> {
+        let path = v.get("path")?.as_str()?.to_string();
+        let status = v
+            .get("status")
+            .and_then(|s| s.as_str())
+            .unwrap_or("modified")
+            .to_string();
+        let size = v.get("size").and_then(|s| s.as_u64()).unwrap_or(0);
+        Some(Self { path, status, size })
+    }
+}
+
 /// 一条消息携带的 token 用量（`/messages` 的 `usage` 与流式 `usage` 块同形）。
 ///
 /// 上下文占用 = 最近一轮请求的 `prompt_tokens`——**不是** `total_tokens`

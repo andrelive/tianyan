@@ -17,7 +17,9 @@ use crate::agent::r#loop::{AgentLoop, AgentLoopResult};
 use crate::agent::session_state::SessionState;
 use crate::agent::stream_forward::{spawn_stream_forwarder, StreamEventDeliver, StreamEventMapper};
 use crate::agent::tool_registry::DynamicToolExecutor;
-use crate::agent::types::{AgentResponse, AgentState, StreamChunkType, StreamEventSender};
+use crate::agent::types::{
+    AgentResponse, AgentState, StreamChunkType, StreamEventSender, TurnArtifacts,
+};
 use crate::agent::working_set::{SessionWorkingSet, WorkingSetRegistry};
 use crate::common::error::Result;
 use crate::common::types::{
@@ -157,6 +159,12 @@ pub struct Agent {
     /// 改为「轮内登记意图 + 锁释放后 flush」：不依赖重试与超时，事件顺序仍是
     /// idle → running（前端先看到这一轮收尾，再看到下一轮开始）。
     pub(crate) pending_continuation: Arc<TokioMutex<std::collections::HashSet<String>>>,
+    /// 轮末产出物槽：`session_id → 最近一轮`。
+    ///
+    /// 只存**最近一轮**且由前端在轮末一次性取走（[`Self::take_turn_artifacts`]）：
+    /// 产出物是展示数据，历史轮次按需重算（[`Self::turn_artifacts_at`] 读快照树），
+    /// 不在这里堆积。
+    pub(crate) turn_artifacts: Arc<TokioMutex<std::collections::HashMap<String, TurnArtifacts>>>,
 }
 
 impl Agent {
@@ -199,6 +207,7 @@ impl Agent {
             continuation_waker: Arc::new(TokioMutex::new(None)),
             self_wake_chains: Arc::new(TokioMutex::new(std::collections::HashMap::new())),
             pending_continuation: Arc::new(TokioMutex::new(std::collections::HashSet::new())),
+            turn_artifacts: Arc::new(TokioMutex::new(std::collections::HashMap::new())),
         }
     }
 
@@ -668,6 +677,94 @@ impl Agent {
         {
             tracing::warn!(error = %e, session = %session_id, "工作区快照捕获失败");
         }
+    }
+
+    /// 轮末：算本轮产出物并放进槽位，等宿主取走（不落库）。
+    ///
+    /// 口径是「相对本轮开始那棵快照树的净变化」。失败只记 warn：产出物是展示
+    /// 数据，不能让「快照遍历失败」影响轮结果。
+    pub(crate) async fn collect_turn_artifacts(&self, session_id: &str, anchor: &str) {
+        let Some(sm) = &self.snapshot_manager else {
+            return;
+        };
+        let Some(workdir) = self
+            .resolve_working_directory(session_id)
+            .await
+            .path()
+            .map(std::path::Path::to_path_buf)
+        else {
+            return;
+        };
+        let workdir_label = workdir.display().to_string();
+        match sm
+            .with_workdir(workdir)
+            .changed_paths(session_id, anchor)
+            .await
+        {
+            Ok(files) => {
+                let artifacts = TurnArtifacts {
+                    anchor_message_id: anchor.to_string(),
+                    workdir: workdir_label,
+                    files,
+                };
+                self.turn_artifacts
+                    .lock()
+                    .await
+                    .insert(session_id.to_string(), artifacts);
+            }
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    session = %session_id,
+                    "轮末产出物计算失败（跳过展示）"
+                );
+            }
+        }
+    }
+
+    /// 取走最近一轮的产出物（一次性消费：第二次调用返回 `None`）。
+    pub async fn take_turn_artifacts(&self, session_id: &str) -> Option<TurnArtifacts> {
+        self.turn_artifacts.lock().await.remove(session_id)
+    }
+
+    /// 按锚点算产出物（打开会话时补历史轮次用；不经过槽位）。
+    ///
+    /// `next_anchor` 是下一轮的用户消息 id，决定用哪一档比较：
+    /// - `Some`：历史轮，比较「本轮开始树 vs 下一轮开始树」，两次读 JSON，不碰工作区；
+    /// - `None`：最近一轮，比较「本轮开始树 vs 当前工作区」，走一次 stat 遍历
+    ///   （因此这一档能给出文件大小，历史轮的大小恒为 0）。
+    ///
+    /// # Errors
+    /// * 未装配快照管理器、会话没有可用工作目录、树已被 GC 时返回错误。
+    pub async fn turn_artifacts_at(
+        &self,
+        session_id: &str,
+        anchor: &str,
+        next_anchor: Option<&str>,
+    ) -> Result<TurnArtifacts> {
+        let sm = self.snapshot_manager.as_ref().ok_or_else(|| {
+            crate::common::error::TianyanError::invalid_input(
+                "snapshot: 未配置工作区快照，无法计算产出物",
+            )
+        })?;
+        let workdir = self
+            .resolve_working_directory(session_id)
+            .await
+            .path()
+            .map(std::path::Path::to_path_buf)
+            .ok_or_else(|| {
+                crate::common::error::TianyanError::invalid_input("snapshot: 会话没有可用工作目录")
+            })?;
+        let mgr = sm.with_workdir(workdir.clone());
+        let files = match next_anchor {
+            Some(next) => mgr.diff_trees(session_id, anchor, next).await?,
+            None => mgr.changed_paths(session_id, anchor).await?,
+        };
+        Ok(TurnArtifacts {
+            anchor_message_id: anchor.to_string(),
+            workdir: workdir.display().to_string(),
+            files,
+        })
     }
 
     /// 从持久化存储加载会话并构建 SessionState。
@@ -1355,6 +1452,14 @@ impl Agent {
                 self.maybe_compress_and_persist(state, session_id, false, None),
             )
             .await;
+        }
+
+        // 7. 轮末产出物：本轮工作区净变更（新增 / 修改 / 删除）。
+        //
+        // 锚点 = 本轮用户消息 id（与快照捕获用的是同一个值）：捕获在轮前、比较在
+        // 轮后，差值即本轮净变化。展示数据，失败不影响轮结果（内部只 warn）。
+        if let Some(sm) = &persisted_user {
+            self.collect_turn_artifacts(session_id, &sm.id).await;
         }
         Ok(response)
     }

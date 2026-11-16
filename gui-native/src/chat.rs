@@ -646,6 +646,9 @@ impl ClientApp {
                 // `msg::ts_anchor_flags` —— 不再用「下一条是不是 assistant」这句几何
                 // 判据（`tool` 的 role 也不是 assistant，会把中间步误判成轮末）。
                 let ts_flags = std::rc::Rc::new(ts_anchor_flags(&items));
+                // 产出物：整表 Rc 一次（闭包要 'static），按轮锚点查表
+                let artifacts_map = std::rc::Rc::new(self.turn_artifacts.clone());
+                let artifacts_workdir = std::rc::Rc::new(self.artifacts_workdir.clone());
                 gpui_list(self.msg_list_state.clone(), move |ix, _window, _cx| {
                     let Some(m) = items.get(ix) else {
                         return div().into_any_element();
@@ -658,7 +661,7 @@ impl ClientApp {
                     let show_ts = ts_flags.get(ix).copied().unwrap_or(false);
                     // 段渲染口径见 `render_msg_body`（思考块 / 工具卡可折叠，
                     // 结果按 `tool_calls` 的 id 关联）
-                    render_msg_body(
+                    let body = render_msg_body(
                         m,
                         ix,
                         &expand,
@@ -667,7 +670,18 @@ impl ClientApp {
                         is_continuation,
                         show_ts,
                         stream_pending(m, streaming && ix == tail_ix),
-                    )
+                    );
+                    // 轮末产出物：挂在本轮最后一条消息下方（不新增列表 item，
+                    // `seq` 不变式与滚动锚点算法都不碰）
+                    match artifact_files_for(&items, ix, &artifacts_map) {
+                        Some(files) => div()
+                            .flex()
+                            .flex_col()
+                            .child(body)
+                            .child(render_artifacts_block(files, artifacts_workdir.clone()))
+                            .into_any_element(),
+                        None => body,
+                    }
                 })
                 .size_full()
             });
@@ -1726,5 +1740,210 @@ impl ClientApp {
         input.update(cx, |state, cx| state.clear(cx));
         cx.notify();
         Ok(())
+    }
+}
+
+/// 本轮产出物：按「该轮锚点（用户消息 id）」查表。
+///
+/// 只在 `ix` 是本轮**最后一条消息**、且下一条是 user（新一轮）或已到末尾时返回，
+/// 这样块不会插在轮中间。锚点向前找最近一条真 user；压缩点是 user 角色但带
+/// `compression` 标记，不算轮起点。
+fn artifact_files_for(
+    items: &[MsgRow],
+    ix: usize,
+    map: &std::collections::HashMap<String, Vec<ArtifactRow>>,
+) -> Option<Vec<ArtifactRow>> {
+    let m = items.get(ix)?;
+    if m.role == "user" {
+        return None;
+    }
+    if let Some(next) = items.get(ix + 1) {
+        if next.role != "user" {
+            return None;
+        }
+    }
+    let anchor = items[..=ix]
+        .iter()
+        .rev()
+        .find(|r| r.role == "user" && !r.compression)?;
+    map.get(&anchor.id).cloned()
+}
+
+/// 文件图标（按扩展名；认不出的给通用文档图标）。
+fn artifact_icon(path: &str) -> &'static str {
+    let ext = path.rsplit('.').next().unwrap_or_default().to_lowercase();
+    match ext.as_str() {
+        "doc" | "docx" | "pdf" | "txt" | "md" => "📄",
+        "xls" | "xlsx" | "csv" => "📊",
+        "ppt" | "pptx" => "📽",
+        "png" | "jpg" | "jpeg" | "gif" | "webp" | "svg" => "🖼",
+        "zip" | "7z" | "rar" | "gz" | "tar" => "📦",
+        "rs" | "ts" | "js" | "py" | "go" | "java" | "json" | "toml" | "yaml" | "yml" => "🧾",
+        _ => "📄",
+    }
+}
+
+/// 产出物块：状态分组（新增 → 修改 → 删除）+ 组内路径序，最多展开 3 个。
+///
+/// 按状态分组而不是时间：快照树不记 mtime（历史轮拿不到），而「拿走成果」这个
+/// 用途下状态更有用。大小只在当轮有（历史轮为 0，行里省略）。
+fn render_artifacts_block(
+    files: Vec<ArtifactRow>,
+    workdir: std::rc::Rc<Option<String>>,
+) -> AnyElement {
+    let pick = |st: &str| -> Vec<ArtifactRow> {
+        let mut v: Vec<ArtifactRow> = files.iter().filter(|f| f.status == st).cloned().collect();
+        v.sort_by(|a, b| a.path.cmp(&b.path));
+        v
+    };
+    let added = pick("added");
+    let modified = pick("modified");
+    let removed = pick("removed");
+    let (n_added, n_mod, n_del) = (added.len(), modified.len(), removed.len());
+    let mut ordered = added;
+    ordered.extend(modified);
+    ordered.extend(removed);
+    let total = ordered.len();
+
+    let mut col = div().flex().flex_col().gap_1().mt_2().mb_1();
+    for f in ordered.into_iter().take(3) {
+        col = col.child(render_artifact_row(f, workdir.clone()));
+    }
+    if total > 3 {
+        col = col.child(
+            div()
+                .text_size(px(11.))
+                .text_color(rgb(colors::TEXT_SECONDARY()))
+                .child(format!(
+                    "共 {total} 个文件（新增 {n_added} · 修改 {n_mod} · 删除 {n_del}）"
+                )),
+        );
+    }
+    col.into_any_element()
+}
+
+/// 单个文件行：图标 + 文件名 + 状态/大小 + 两个动作（打开所在文件夹 / 默认应用打开）。
+fn render_artifact_row(f: ArtifactRow, workdir: std::rc::Rc<Option<String>>) -> AnyElement {
+    let name = f.path.rsplit('/').next().unwrap_or(&f.path).to_string();
+    let removed = f.status == "removed";
+    let status_label = match f.status.as_str() {
+        "added" => "新增",
+        "modified" => "修改",
+        _ => "删除",
+    };
+    let meta = if removed || f.size == 0 {
+        status_label.to_string()
+    } else {
+        format!("{status_label} · {}", format_bytes(f.size))
+    };
+    let text_color = if removed {
+        colors::TEXT_SECONDARY()
+    } else {
+        colors::TEXT_PRIMARY()
+    };
+    let wd_open = (*workdir).clone();
+    let wd_reveal = (*workdir).clone();
+    let open_path = f.path.clone();
+    let reveal_path = f.path.clone();
+
+    div()
+        .id(SharedString::from(format!("artifact-{}", f.path)))
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap_2()
+        .px_2()
+        .py_1()
+        .rounded_md()
+        .bg(rgb(colors::BG_SECONDARY()))
+        .cursor_pointer()
+        .child(div().text_size(px(13.)).child(artifact_icon(&f.path)))
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .text_size(px(12.))
+                .text_color(rgb(text_color))
+                .child(name),
+        )
+        .child(
+            div()
+                .text_size(px(10.))
+                .text_color(rgb(colors::TEXT_SECONDARY()))
+                .child(meta),
+        )
+        .child(
+            div()
+                .id(SharedString::from(format!("artifact-reveal-{}", f.path)))
+                .px_1()
+                .rounded_sm()
+                .text_size(px(11.))
+                .text_color(rgb(colors::TEXT_SECONDARY()))
+                .cursor_pointer()
+                .child("📂")
+                .on_click(move |_, _, _| {
+                    reveal_in_folder(wd_reveal.as_deref(), &reveal_path);
+                }),
+        )
+        .on_click(move |_, _, _| {
+            open_with_default(wd_open.as_deref(), &open_path);
+        })
+        .into_any_element()
+}
+
+/// 拼绝对路径。工作目录未知或相对路径含 `..` 时返回 `None`（不做越界访问）。
+fn artifact_abs_path(workdir: Option<&str>, rel: &str) -> Option<std::path::PathBuf> {
+    let wd = workdir?;
+    if wd.trim().is_empty() || rel.contains("..") {
+        return None;
+    }
+    Some(std::path::Path::new(wd).join(rel))
+}
+
+/// 用系统默认程序打开文件。
+fn open_with_default(workdir: Option<&str>, rel: &str) {
+    let Some(path) = artifact_abs_path(workdir, rel) else {
+        return;
+    };
+    let full = path.display().to_string();
+    #[cfg(target_os = "windows")]
+    {
+        let _ = std::process::Command::new("cmd")
+            .args(["/c", "start", "", &full])
+            .spawn();
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let _ = std::process::Command::new("open").arg(&full).spawn();
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        let _ = std::process::Command::new("xdg-open").arg(&full).spawn();
+    }
+}
+
+/// 在文件管理器中定位该文件（Windows 选中该文件；其它平台打开所在目录）。
+fn reveal_in_folder(workdir: Option<&str>, rel: &str) {
+    let Some(path) = artifact_abs_path(workdir, rel) else {
+        return;
+    };
+    let full = path.display().to_string();
+    #[cfg(target_os = "windows")]
+    {
+        let _ = std::process::Command::new("explorer")
+            .arg(format!("/select,{full}"))
+            .spawn();
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let _ = std::process::Command::new("open")
+            .args(["-R", &full])
+            .spawn();
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        if let Some(dir) = path.parent() {
+            let _ = std::process::Command::new("xdg-open").arg(dir).spawn();
+        }
     }
 }

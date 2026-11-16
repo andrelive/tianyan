@@ -65,6 +65,7 @@ pub use tool_registry::{
 };
 pub use types::{
     AgentResponse, AgentState, AgentStreamChunk, RequestPerf, SessionTotals, SkillCallInfo,
-    StreamChunkType, StreamEventSender, ToolCallEvent, ToolResultEvent, TurnStateEvent,
+    StreamChunkType, StreamEventSender, ToolCallEvent, ToolResultEvent, TurnArtifacts,
+    TurnStateEvent,
 };
 pub use working_set::{SessionWorkingSet, WorkingSetRegistry, WORKING_SET_IDLE_TTL};

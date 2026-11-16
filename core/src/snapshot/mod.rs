@@ -159,6 +159,26 @@ pub struct SnapshotManager {
 
 /// 快照树：`{相对路径 → 内容 sha256}`。
 pub type SnapshotTree = HashMap<String, String>;
+/// 当前工作区的扫描结果：文件树 + 每个文件的字节数。
+///
+/// 为什么带 size：轮末的产出物展示（[`SnapshotManager::changed_paths`]）要报文件
+/// 大小，而大小在 `walk_current` 的 `stat` 里已经在手上了（racy 判据用它），
+/// 顺手记下来不增加任何 IO。`diff` / `restore` 只读 [`Self::tree`]，行为不变。
+#[derive(Debug, Default)]
+pub(crate) struct CurrentScan {
+    /// 相对路径 → 内容哈希。
+    pub(crate) tree: SnapshotTree,
+    /// 相对路径 → 字节数（`tree` 的子集：只含本次扫到的文件）。
+    pub(crate) sizes: HashMap<String, u64>,
+}
+
+impl CurrentScan {
+    /// 记一个文件（哈希与大小同时落，避免两个表各自漏项）。
+    fn insert(&mut self, path: String, hash: String, size: u64) {
+        self.sizes.insert(path.clone(), size);
+        self.tree.insert(path, hash);
+    }
+}
 
 /// 快照树落盘格式（**v2**）：文件树 + 捕获时归属信息。
 ///
@@ -462,6 +482,20 @@ pub struct Hunk {
     /// 新内容行数。
     pub new_len: usize,
 }
+/// 轮末产出物的单路径变更：只报状态与大小，不带 diff 内容。
+///
+/// 与 [`FileDiff`] 的区别是**不算 hunk、不读文件内容**。轮末每轮都会调一次这条
+/// 路径，因此它只做 `stat` + 哈希比较（racy 缓存命中时不读内容），把「列出改了
+/// 哪些文件」和「给出 diff 内容」拆成两个成本档位。
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ChangedPath {
+    /// 相对工作区路径。
+    pub path: String,
+    /// 变更状态：`added` | `modified` | `removed`。
+    pub status: String,
+    /// 变更后的字节数（`removed` 为 0）。
+    pub size: u64,
+}
 
 impl SnapshotManager {
     /// 创建快照管理器。
@@ -624,7 +658,7 @@ impl SnapshotManager {
         self.validate_session_id(session_id)?;
         let tree = self.load_tree(session_id, key).await?;
 
-        let mut current: SnapshotTree = HashMap::new();
+        let mut current = CurrentScan::default();
         if self.workdir.exists() {
             let ignored = self.git_ignored_paths(&self.workdir).await;
             // 复用 latest 缓存（mtime/size 短路）：大工作区的 diff 从「全量读 + 哈希」
@@ -651,7 +685,7 @@ impl SnapshotManager {
         // 1. 快照树侧：removed / binary / modified（unchanged 跳过）
         for (path, tree_hash) in &tree.files {
             let work_path = self.workdir.join(path);
-            match current.get(path) {
+            match current.tree.get(path) {
                 Some(cur_hash) if cur_hash == tree_hash => continue,
                 _ => {
                     let meta = match fs::metadata(&work_path).await {
@@ -719,7 +753,7 @@ impl SnapshotManager {
         }
 
         // 2. 当前工作区侧：added（二进制 → binary）
-        for path in current.keys() {
+        for path in current.tree.keys() {
             if tree.files.contains_key(path) {
                 continue;
             }
@@ -751,6 +785,119 @@ impl SnapshotManager {
             key: key.to_string(),
             files,
         })
+    }
+
+    /// 列出「快照 `key` 之后」当前工作区的净变更（轮末产出物口径）。
+    ///
+    /// 口径是**净变化**：同一轮里先新建再改同一文件只报一条 `modified`（大小取
+    /// 最终值）；用户手动改的文件与工具改的文件同等对待（快照只看工作区状态，
+    /// 不区分写入者）。读取不进快照，因此读取过的文件自然不会出现。
+    ///
+    /// 捕获时被跳过的路径（超大文件 / `.gitignore` / 内置排除）两侧都不在树里，
+    /// 不会误报成 `added` 或 `removed`。
+    ///
+    /// # Errors
+    /// * 会话 ID 非法、树缺失（已被 GC）或工作区遍历失败时返回 `TianyanError`。
+    pub async fn changed_paths(&self, session_id: &str, key: &str) -> Result<Vec<ChangedPath>> {
+        self.validate_session_id(session_id)?;
+        let tree = self.load_tree(session_id, key).await?;
+        let mut scan = CurrentScan::default();
+        if self.workdir.exists() {
+            let ignored = self.git_ignored_paths(&self.workdir).await;
+            // 复用 latest 缓存（mtime/size 短路）：只 stat，不读内容。
+            let prev_cache = self
+                .load_cache(&self.latest_cache_path(session_id))
+                .await
+                .unwrap_or(None);
+            let snapshot_at_ns = self.snapshot_at_for(session_id).await;
+            self.walk_current(
+                &self.workdir,
+                "",
+                &mut scan,
+                prev_cache.as_ref(),
+                &ignored,
+                snapshot_at_ns,
+            )
+            .await?;
+        }
+
+        let mut out: Vec<ChangedPath> = Vec::new();
+        for (path, old_hash) in &tree.files {
+            match scan.tree.get(path) {
+                Some(new_hash) if new_hash == old_hash => {}
+                Some(_) => out.push(ChangedPath {
+                    path: path.clone(),
+                    status: "modified".to_string(),
+                    size: scan.sizes.get(path).copied().unwrap_or(0),
+                }),
+                None => out.push(ChangedPath {
+                    path: path.clone(),
+                    status: "removed".to_string(),
+                    size: 0,
+                }),
+            }
+        }
+        for (path, size) in &scan.sizes {
+            if !tree.files.contains_key(path) {
+                out.push(ChangedPath {
+                    path: path.clone(),
+                    status: "added".to_string(),
+                    size: *size,
+                });
+            }
+        }
+        out.sort_by(|a, b| a.path.cmp(&b.path));
+        Ok(out)
+    }
+
+    /// 比较两棵快照树，列出 `b` 相对 `a` 的净变更（历史轮产出物口径）。
+    ///
+    /// 为什么不能复用 [`Self::changed_paths`]：那是「树 vs 当前工作区」，只对**最近
+    /// 一轮**成立。历史轮次要比的是「本轮开始树 vs 下一轮开始树」，两边都在磁盘上，
+    /// 读两棵 JSON 即可，也不会把后续轮次的改动算进来。
+    ///
+    /// 树里只有哈希（[`SnapshotTree`]），没有大小，故历史轮次的 `size` 恒为 0：
+    /// 展示层据此省略大小，状态与路径不受影响。
+    ///
+    /// # Errors
+    /// * 会话 ID 非法，或任一方的树缺失（已被 GC）时返回 `TianyanError`。
+    pub async fn diff_trees(
+        &self,
+        session_id: &str,
+        key_a: &str,
+        key_b: &str,
+    ) -> Result<Vec<ChangedPath>> {
+        self.validate_session_id(session_id)?;
+        let a = self.load_tree(session_id, key_a).await?;
+        let b = self.load_tree(session_id, key_b).await?;
+
+        let mut out: Vec<ChangedPath> = Vec::new();
+        for (path, hash_a) in &a.files {
+            match b.files.get(path) {
+                Some(hash_b) if hash_b == hash_a => {}
+                Some(_) => out.push(ChangedPath {
+                    path: path.clone(),
+                    status: "modified".to_string(),
+                    size: 0,
+                }),
+                None => out.push(ChangedPath {
+                    path: path.clone(),
+                    status: "removed".to_string(),
+                    size: 0,
+                }),
+            }
+        }
+        for path in b.files.keys() {
+            if !a.files.contains_key(path) {
+                out.push(ChangedPath {
+                    path: path.clone(),
+                    status: "added".to_string(),
+                    size: 0,
+                });
+            }
+        }
+        out.sort_by(|x, y| x.path.cmp(&y.path));
+        Ok(out)
     }
 
     /// 删除指定会话的全部快照数据（删会话时调用，T1-12）。
@@ -1126,7 +1273,7 @@ impl SnapshotManager {
         let current: SnapshotTree = match current {
             Some(precomputed) => precomputed,
             None => {
-                let mut scanned: SnapshotTree = HashMap::new();
+                let mut scanned = CurrentScan::default();
                 let ignored = self.git_ignored_paths(workdir).await;
                 self.walk_current(
                     workdir,
@@ -1137,7 +1284,7 @@ impl SnapshotManager {
                     snapshot_at_ns,
                 )
                 .await?;
-                scanned
+                scanned.tree
             }
         };
 
@@ -1384,7 +1531,7 @@ impl SnapshotManager {
         &self,
         dir: &Path,
         prefix: &str,
-        tree: &mut SnapshotTree,
+        scan: &mut CurrentScan,
         prev_cache: Option<&FileCache>,
         ignored: &HashSet<String>,
         snapshot_at_ns: Option<u128>,
@@ -1405,7 +1552,7 @@ impl SnapshotManager {
                 Box::pin(self.walk_current(
                     &entry.path,
                     &rel,
-                    tree,
+                    scan,
                     prev_cache,
                     ignored,
                     snapshot_at_ns,
@@ -1425,12 +1572,12 @@ impl SnapshotManager {
                     if can_trust_cached(prev, entry.len, mtime_ns, snapshot_at_ns)
                         && self.object_path(&prev.hash).exists()
                     {
-                        tree.insert(rel, prev.hash.clone());
+                        scan.insert(rel, prev.hash.clone(), entry.len);
                         continue;
                     }
                 }
                 if let Ok(bytes) = fs::read(&entry.path).await {
-                    tree.insert(rel, hex_sha256(&bytes));
+                    scan.insert(rel, hex_sha256(&bytes), entry.len);
                 }
             }
         }
@@ -2209,6 +2356,72 @@ mod tests {
         let when = SystemTime::now() - Duration::from_secs(ago_secs);
         file.set_times(std::fs::FileTimes::new().set_modified(when))
             .expect("设置 mtime 失败");
+    }
+
+    /// `changed_paths`：净变更口径（新增 / 修改 / 删除各一条），大小取最终值。
+    ///
+    /// 同时钉住两条口径：未变文件不因 racy 重算而误报；同一轮里新建后又修改的文件
+    /// 只报一条 `added`（树里本来没有它），大小取最终值。
+    #[tokio::test]
+    async fn test_changed_paths_reports_net_changes() {
+        let (_dir, mgr) = setup().await;
+        let wd = mgr.workdir().to_path_buf();
+        write(&wd, "keep.md", "same");
+        write(&wd, "mod.md", "old");
+        write(&wd, "gone.md", "bye");
+        mgr.capture("s1", "m1").await.expect("首捕");
+
+        write(&wd, "keep.md", "same");
+        write(&wd, "mod.md", "new-content");
+        std::fs::remove_file(wd.join("gone.md")).expect("删 gone.md");
+        write(&wd, "added.md", "hello");
+        write(&wd, "draft.md", "v1");
+        write(&wd, "draft.md", "v2-longer");
+
+        let got = mgr.changed_paths("s1", "m1").await.expect("changed_paths");
+        let rows: Vec<(String, String, u64)> = got
+            .into_iter()
+            .map(|c| (c.path, c.status, c.size))
+            .collect();
+        assert_eq!(
+            rows,
+            vec![
+                ("added.md".to_string(), "added".to_string(), 5),
+                ("draft.md".to_string(), "added".to_string(), 9),
+                ("gone.md".to_string(), "removed".to_string(), 0),
+                ("mod.md".to_string(), "modified".to_string(), 11),
+            ],
+            "净变更：keep.md 未变不报，draft.md 合并成一条 added 且大小取最终值"
+        );
+    }
+
+    /// 没有变更时返回空表（racy 重算命中相同哈希不得误报 modified）。
+    #[tokio::test]
+    async fn test_changed_paths_empty_when_untouched() {
+        let (_dir, mgr) = setup().await;
+        let wd = mgr.workdir().to_path_buf();
+        write(&wd, "a.txt", "x");
+        write(&wd, "nested/b.txt", "y");
+        mgr.capture("s1", "m1").await.expect("首捕");
+
+        let got = mgr.changed_paths("s1", "m1").await.expect("changed_paths");
+        assert!(got.is_empty(), "未改动的文件不应出现在产出物里");
+    }
+
+    /// 树已被 GC（或键不存在）时报错，调用方据此跳过产出物展示。
+    #[tokio::test]
+    async fn test_changed_paths_missing_tree_errors() {
+        let (_dir, mgr) = setup().await;
+        let wd = mgr.workdir().to_path_buf();
+        write(&wd, "a.txt", "x");
+        let err = mgr
+            .changed_paths("s1", "no-such-anchor")
+            .await
+            .expect_err("树缺失必须报错，而不是报「全都新增」");
+        assert!(
+            err.to_string().contains("no-such-anchor") || err.to_string().contains("快照"),
+            "错误信息应指明缺失的树：{err}"
+        );
     }
 
     /// racy 判据的**边界真值表**（纯函数，覆盖每条分支）。

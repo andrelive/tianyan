@@ -282,6 +282,8 @@ impl ClientApp {
             usage_shown: None,
             usage_anim_epoch: 0,
             request_perf: None,
+            turn_artifacts: std::collections::HashMap::new(),
+            artifacts_workdir: None,
             tasks: Vec::new(),
             tasks_collapsed: false,
             todos: Vec::new(),
@@ -928,6 +930,12 @@ impl ClientApp {
                 self.apply_snapshot(ev, cx);
                 return;
             }
+            // 轮末产出物（本轮工作区净变更）：独立事件类型，自带 `files` 数组、无需
+            // 归约，收到即挂到该轮末条消息下方。历史轮由分页响应补（见 `load_messages`）。
+            Some("turn_artifacts") => {
+                self.apply_turn_artifacts(ev, cx);
+                return;
+            }
             // 任务状态 / 命令输出等：任务面板另有 3s 轮询兜底，这里不接
             _ => return,
         }
@@ -979,6 +987,59 @@ impl ClientApp {
         } else if want < have {
             // 变少（裁头/替换）：把尾部多出来的删掉，保留前 want 项
             self.msg_list_state.splice(want..have, 0);
+        }
+    }
+
+    /// 记一轮产出物（`turn_artifacts` 事件）。
+    ///
+    /// 当前会话直接写自己的表；别的会话写进它 park 着的快照（与 `apply_event_offline`
+    /// 同一份 per-session 归属），切回时随快照恢复。没 park 过的会话忽略：它切回时
+    /// 由分页响应的 `artifacts` 重算补齐。
+    fn apply_turn_artifacts(&mut self, ev: &serde_json::Value, cx: &mut Context<Self>) {
+        let sid = ev
+            .get("session_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default();
+        let anchor = ev
+            .get("anchor_message_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default();
+        if sid.is_empty() || anchor.is_empty() {
+            return;
+        }
+        let files: Vec<crate::types::ArtifactRow> = ev
+            .get("files")
+            .and_then(|f| f.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(crate::types::ArtifactRow::from_json)
+                    .collect()
+            })
+            .unwrap_or_default();
+        if files.is_empty() {
+            return;
+        }
+        let workdir = ev
+            .get("workdir")
+            .and_then(|v| v.as_str())
+            .map(str::to_string);
+        if self.current_session.as_deref() == Some(sid) {
+            self.turn_artifacts.insert(anchor.to_string(), files);
+            if workdir.is_some() {
+                self.artifacts_workdir = workdir;
+            }
+            cx.notify();
+            return;
+        }
+        if let Some((_, snap)) = self
+            .parked
+            .iter_mut()
+            .find(|(k, _)| k.as_deref() == Some(sid))
+        {
+            snap.turn_artifacts.insert(anchor.to_string(), files);
+            if workdir.is_some() {
+                snap.artifacts_workdir = workdir;
+            }
         }
     }
 
@@ -1997,6 +2058,40 @@ impl ClientApp {
         let rows: Vec<MsgRow> = arr.iter().map(parse_msg_row).collect();
         let n = rows.len();
         self.messages = Rc::new(rows);
+        // 产出物：服务端随本页下发（只在本页含链尾时算，上滚页为空数组）。
+        // **空数组不清空**：上滚加载走同一个落地函数，清空会让已显示的块凭空消失；
+        // 而真正的「整页重载」（切会话 / 回退后重拉）带来的是非空结果。
+        if let Some(items) = body.get("artifacts").and_then(|v| v.as_array()) {
+            if !items.is_empty() {
+                self.turn_artifacts.clear();
+                self.artifacts_workdir = None;
+                for item in items {
+                    let anchor = item
+                        .get("anchor_message_id")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or_default();
+                    if anchor.is_empty() {
+                        continue;
+                    }
+                    let files: Vec<crate::types::ArtifactRow> = item
+                        .get("files")
+                        .and_then(|f| f.as_array())
+                        .map(|arr| {
+                            arr.iter()
+                                .filter_map(crate::types::ArtifactRow::from_json)
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    if files.is_empty() {
+                        continue;
+                    }
+                    if let Some(wd) = item.get("workdir").and_then(|v| v.as_str()) {
+                        self.artifacts_workdir = Some(wd.to_string());
+                    }
+                    self.turn_artifacts.insert(anchor.to_string(), files);
+                }
+            }
+        }
         // 条数变了必须重建 list state（item_count 在构造时固定）
         self.msg_list_state =
             new_msg_list_state(n, self.msg_scrolled_up.clone(), self.last_viewport_h);

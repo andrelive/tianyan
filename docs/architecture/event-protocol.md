@@ -87,7 +87,9 @@
 
 ## 3. 事件类型总表
 
-`type` 字段共 **4 类**（`gui-vite/src/hooks/use-unified-events.ts:39` `UnifiedEvent` 联合类型）。
+`type` 字段共 **5 类**。前 4 类对应已退役 Web 版的 `UnifiedEvent` 联合类型
+（`gui-vite/src/hooks/use-unified-events.ts:39`，目录已删，仅作历史参考）；
+`turn_artifacts` 为 2026-11 随「轮末产出物」新增，由 gui-native 消费。
 
 | `type` | 触发点 | 路由字段 | 前端消费位置 | 可靠性等级 |
 |--------|--------|----------|--------------|-----------|
@@ -95,6 +97,7 @@
 | `snapshot` | `POST /api/v1/events/subscribe` 订阅/重连时 | `session_id` | `use-unified-events.ts:153` `applySnapshot`（replace 窗口） | **权威**（读自 SQLite） |
 | `task_status` | 后台任务/命令状态转移（pending/running/终态） | `task_id`（全局广播，无 session_id） | `AgentTasksPanel.tsx:55`（收到即 `poll()` 拉权威列表） | **尽力而为**；权威 = SQLite 任务表 + `GET /tasks` 轮询 |
 | `command_output` | 后台命令输出流逐块读取 | `task_id`（全局广播，无 session_id） | `AgentTasksPanel.tsx:58`（终端视图 append） | **尽力而为**；权威 = 命令日志文件 |
+| `turn_artifacts` | 轮末（本轮工作区有写入类变更时） | `session_id` | gui-native `handle_event` → `apply_turn_artifacts` | **尽力而为**；权威 = 打开会话时 `GET /sessions/{id}/messages` 的 `artifacts`（按锚点重算） |
 
 > ⚠️ `tasks/routes.rs:17` 的文件注释仍写"事件带 type 区分（message / task_status / command_output /
 > 子代理消息）"。**已过时**：`message` 类型在 ADR-031 后移除，实际是 `chat_stream`。
@@ -205,6 +208,32 @@
 **前端消费**：`AgentTasksPanel.tsx:58` 累积到终端视图（本地尾部截断至 64KB，与后端
 `OUTPUT_TAIL_MAX_BYTES` 对齐）。**权威 = 命令日志文件**；精确回看走
 `GET /api/v1/tasks/{id}/log?offset=&limit=`（`handlers.rs:148` `get_task_log`，默认 64KB/段）。
+
+### 3.5 `turn_artifacts`（轮末产出物）
+
+**触发点**：轮收尾时（core `run_agent_turn`）用「本轮开始那棵快照树 vs 当前工作区」算净变更，
+宿主取走后推一条。只在本轮有写入类变更时发（空列表不发，前端不渲染空块）。
+
+**字段清单**：
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `type` | string | 恒为 `"turn_artifacts"` |
+| `session_id` | string | 会话 id |
+| `anchor_message_id` | string | 本轮锚点（用户消息 id，与快照树键同一个值） |
+| `workdir` | string | 本轮工作目录（绝对路径；「默认应用打开」据此拼绝对路径） |
+| `files` | array | `{ path, status, size }`：`status` 取 `added` / `modified` / `removed`，按路径排序；`size` 为字节数（删除项为 0） |
+
+**口径**：只算写入类（新增 / 修改 / 删除），读取不进快照故不出现；同一轮里先建后改只报一条；
+用户手动改的文件与工具改的文件同等对待（快照只看工作区状态，不区分写入者）。
+
+**前端消费**：按 `anchor_message_id` 存进 per-session 表（随 `SessionSnapshot` park/restore，
+切走切回不丢），渲染时挂在该轮最后一条消息下方，**不新增列表条目**（`seq` 不变式与滚动锚点
+算法都不碰）。
+
+**历史轮**：打开会话时 `GET /sessions/{id}/messages` 的响应带 `artifacts`，仅在本页含链尾时
+计算。最近一轮走「树 vs 当前工作区」（能给出文件大小），更早的轮走「相邻两棵树」比较
+（大小恒为 0：快照树只存哈希）；上滚加载更早页不计算。
 
 ---
 
@@ -344,7 +373,7 @@ ADR-029 原设计有"按连接订阅注册表"（只推订阅会话的消息）�
 |---|---------|---------|------|
 | 1 | 统一通道是"有界 mpsc + try_send（单消费者）"（ADR-028 §2） | 实为 `broadcast::channel::<String>(256)`，可多订阅者，`Lagged` 静默丢 | `state.rs:373`、`tasks/handlers.rs:111` |
 | 2 | 落库即推送 message 事件（ADR-028 §2） | 主/子会话消息**不再广播**；仅 System / 压缩点边界消息补发 `chat_stream(message)` | `event_push.rs:78-81` |
-| 3 | 事件 `type` 含 `message`（ADR-028 / `tasks/routes.rs:17` 注释） | 已移除；实际 4 类 = `chat_stream`/`snapshot`/`task_status`/`command_output` | `use-unified-events.ts:39` |
+| 3 | 事件 `type` 含 `message`（ADR-028 / `tasks/routes.rs:17` 注释） | 已移除；ADR-031 之后为 4 类 = `chat_stream`/`snapshot`/`task_status`/`command_output`，2026-11 新增 `turn_artifacts`（§3.5）后为 5 类 | `use-unified-events.ts:39` |
 | 4 | `chunk_type` 含 `clarification`（旧 `system-architecture.md` / `module-relationships.md`） | 实为 `user_message_id`（ADR-031 改名/取代） | `types.rs:78-97` |
 | 5 | `command_output` "每 100ms 合并一批（时间窗节流）"（ADR-028 §4） | `drain_output` 每读一块即 emit，**无节流** | `command.rs:692-702` |
 | 6 | 订阅注册表按连接过滤消息（ADR-029 §2/§5） | 已删除；端点仅推快照，无过滤 | `handlers.rs:45`、ADR-029 §修订 |

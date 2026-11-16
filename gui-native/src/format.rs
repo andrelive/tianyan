@@ -209,6 +209,24 @@ pub(crate) fn relative_from_now(ts: i64) -> String {
     }
 }
 
+/// 字节数 → 人类可读（`59648` → `58.3 KB`）。
+///
+/// 保留一位小数；小于 1 KiB 显示整数字节。产出物卡片的文件大小用它（历史轮没有
+/// 大小，调用方据此省略而不是显示 `0 B`）。
+pub(crate) fn format_bytes(bytes: u64) -> String {
+    const KIB: f64 = 1024.0;
+    let b = bytes as f64;
+    if b < KIB {
+        format!("{bytes} B")
+    } else if b < KIB * KIB {
+        format!("{:.1} KB", b / KIB)
+    } else if b < KIB * KIB * KIB {
+        format!("{:.1} MB", b / (KIB * KIB))
+    } else {
+        format!("{:.1} GB", b / (KIB * KIB * KIB))
+    }
+}
+
 /// 秒 → 粗粒度描述（`2303` → `38 分钟`；「下次还有多久」用）。
 pub(crate) fn format_secs_short(secs: u64) -> String {
     if secs < 60 {

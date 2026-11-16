@@ -26,7 +26,8 @@ pub async fn list_sessions(
         state.session_manager(),
         state.snapshot_manager(),
         Some(state.working_sets()),
-    );
+    )
+    .with_agent(state.agent().await);
 
     service
         .list_sessions()

@@ -190,6 +190,24 @@ pub struct SessionTotals {
     pub completion_tokens: u64,
 }
 
+/// 一轮的产出物：本轮工作区相对「本轮开始那棵快照树」的净变更。
+///
+/// 口径见 [`crate::snapshot::SnapshotManager::changed_paths`]：只含写入类
+/// （新增 / 修改 / 删除），按路径排序；读取不进快照，故不出现。
+///
+/// 为什么带 `workdir`：`path` 是相对路径，前端拼绝对路径才能「打开文件夹 /
+/// 用默认应用打开」。工作目录是会话级事实，随产出物带一次比前端自己推断可靠
+/// （会话可绑定不同目录，且存在默认工作目录兜底）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TurnArtifacts {
+    /// 本轮锚点（用户消息 id，与快照树键同一个值）。
+    pub anchor_message_id: String,
+    /// 本轮工作目录（绝对路径）。
+    pub workdir: String,
+    /// 变更文件（按路径排序；无变更时为空数组）。
+    pub files: Vec<crate::snapshot::ChangedPath>,
+}
+
 /// 轮状态事件（ADR-035 §9）。
 ///
 /// 语义：`running` = 该会话有一个轮（用户轮或 auto 轮）开始执行；

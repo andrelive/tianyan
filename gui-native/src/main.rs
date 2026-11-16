@@ -498,6 +498,14 @@ struct ClientApp {
     pub(crate) usage_shown: Option<(u64, u64, u64)>,
     /// 统计行动画世代号：新值到达时 +1，旧动画任务见世代不符即自行退出（顶掉而不是叠加）。
     pub(crate) usage_anim_epoch: u64,
+    /// 本会话各轮的产出物：`本轮用户消息 id → 变更文件列表`。
+    ///
+    /// 两个来源写同一张表：轮末 `turn_artifacts` 事件（实时）、打开会话时分页响应
+    /// 的 `artifacts` 字段（历史重算）。渲染时按「该轮末条消息」查表，块挂在消息流
+    /// 里，不占列表 item（`seq` 不变式不碰）。
+    pub(crate) turn_artifacts: std::collections::HashMap<String, Vec<ArtifactRow>>,
+    /// 产出物所属工作目录（绝对路径；「打开文件夹 / 默认应用打开」要拼绝对路径）。
+    pub(crate) artifacts_workdir: Option<String>,
     /// 最近一次请求性能（`GET /usage/recent?limit=1`）：
     /// `(ttft_ms, duration_ms, completion_tokens)`；`duration_ms < 0` 时 `None`
     pub(crate) request_perf: Option<(Option<i64>, i64, u64)>,
@@ -718,6 +726,9 @@ pub(crate) struct SessionSnapshot {
     // ── 输入卡片下方统计行（restore 后 `load_session_usage` 会刷新为权威值）──
     pub(crate) session_usage: Option<(u64, u64, u64)>,
     pub(crate) request_perf: Option<(Option<i64>, i64, u64)>,
+    /// 各轮产出物（`本轮用户消息 id → 文件列表`）与所属工作目录。
+    pub(crate) turn_artifacts: std::collections::HashMap<String, Vec<ArtifactRow>>,
+    pub(crate) artifacts_workdir: Option<String>,
     // ── 会话绑定面板 ──
     pub(crate) todos: Vec<(String, String)>,
     pub(crate) goals: Vec<GoalRow>,

@@ -121,6 +121,8 @@ impl ChatService {
 
         // ADR-032 统一转发器：通道先建并立即消费，sender 交给 core 轮。
         let mapper = self.chunk_mapper(&stream_id);
+        // 产出物推送复用同一个通道，但 `event_tx` 随后会被 move 进 `deliver`。
+        let event_tx_artifacts = event_tx.clone();
         let deliver: Arc<dyn StreamEventDeliver> = Arc::new(BroadcastJsonDeliver::new(event_tx));
         let (sender, forward_handle) =
             spawn_stream_forwarder(session_id.clone(), mapper, deliver.clone());
@@ -165,6 +167,21 @@ impl ChatService {
 
         // 轮结束（sender 已释放）→ 等待流排空：尾部事件（完成/usage）不丢。
         let _ = forward_handle.await;
+
+        // 轮末产出物：core 在轮末已算好（相对本轮开始那棵快照树的净变化），此处
+        // 取走并一次性推给前端。空列表（本轮没动文件）不推，前端也就不渲染空块。
+        //
+        // 放在 `result?` **之前**：取消 / 失败轮同样可能已改过文件，产出物照常展示
+        // （它是「工作区发生了什么」的事实，与轮成败无关）。
+        if let Some(artifacts) = self.agent.take_turn_artifacts(&session_id).await {
+            if !artifacts.files.is_empty() {
+                crate::event_push::push_turn_artifacts(
+                    &event_tx_artifacts,
+                    &session_id,
+                    &artifacts,
+                );
+            }
+        }
         result?;
 
         // assistant 消息边界（统一结构）：流结束后取最后一条 assistant 消息，

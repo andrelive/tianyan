@@ -15,6 +15,31 @@
 
 use tianyan::common::types::StructuredMessage;
 
+/// 把轮末产出物推入统一事件通道（`type = turn_artifacts`）。
+///
+/// 独立事件类型（现有 4 类之外的第 5 类）：产出物是「轮级结果」，生命周期与
+/// `chat_stream` 不同（轮末一次性、无需归约），也不该塞进 `turn_state`（那是
+/// 每轮都发的轻量状态）。前端收到即挂到本轮锚点消息下方。
+///
+/// 通道满 / 无订阅者时静默丢弃（broadcast 语义）：产出物是展示数据，权威来源是
+/// 分页接口（打开会话时按锚点重算），丢一条不影响一致性。
+pub fn push_turn_artifacts(
+    event_tx: &tokio::sync::broadcast::Sender<String>,
+    session_id: &str,
+    artifacts: &tianyan::agent::TurnArtifacts,
+) {
+    let payload = serde_json::json!({
+        "type": "turn_artifacts",
+        "session_id": session_id,
+        "anchor_message_id": artifacts.anchor_message_id,
+        "workdir": artifacts.workdir,
+        "files": artifacts.files,
+    });
+    if let Ok(json) = serde_json::to_string(&payload) {
+        let _ = event_tx.send(json);
+    }
+}
+
 /// 把边界消息（System 通知 / 压缩点）转成 chat_stream 事件推入统一通道。
 ///
 /// 复用 `map_chunk_to_event`（Message chunk → ChatStreamEvent 同构转换），

@@ -117,6 +117,11 @@ pub struct SessionMessagesResponse {
     pub has_more: bool,
     /// 会话链尾 seq（分段对齐基准；无消息为 -1）。
     pub last_seq: i64,
+    /// 本页各轮的产出物（打开会话时补历史；上滚加载更早分页时为空数组）。
+    ///
+    /// 每项按 `anchor_message_id`（本轮用户消息 id）对应到页内消息，前端据此把
+    /// 产出物块挂到该轮末条消息下方。空数组 = 这一页没有任何文件变更。
+    pub artifacts: Vec<tianyan::agent::TurnArtifacts>,
 }
 
 /// 会话消息查询参数（ADR-035 §8 分段加载；省略则按全量/最近一页语义由服务决定）。

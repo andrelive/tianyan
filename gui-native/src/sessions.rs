@@ -355,6 +355,8 @@ impl ClientApp {
             ctx_compress: self.ctx_compress.take(),
             session_usage: self.session_usage.take(),
             request_perf: self.request_perf.take(),
+            turn_artifacts: std::mem::take(&mut self.turn_artifacts),
+            artifacts_workdir: self.artifacts_workdir.take(),
             todos: std::mem::take(&mut self.todos),
             goals: std::mem::take(&mut self.goals),
             todo_bar_collapsed: std::mem::take(&mut self.todo_bar_collapsed),
@@ -408,6 +410,9 @@ impl ClientApp {
         self.session_usage = None;
         self.usage_shown = None;
         self.request_perf = None;
+        // 产出物属于会话：切到新会话必须清，否则块的 key 挂着上个会话的消息 id
+        self.turn_artifacts.clear();
+        self.artifacts_workdir = None;
         self.todos.clear();
         self.goals.clear();
         self.todo_bar_collapsed = false;
@@ -637,6 +642,8 @@ impl ClientApp {
         // 恢复是「换了一份权威值」，不接上一个会话的动画中间帧
         self.usage_shown = None;
         self.request_perf = snap.request_perf;
+        self.turn_artifacts = snap.turn_artifacts;
+        self.artifacts_workdir = snap.artifacts_workdir;
         self.todos = snap.todos;
         self.goals = snap.goals;
         self.todo_bar_collapsed = snap.todo_bar_collapsed;
