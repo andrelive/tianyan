@@ -1,33 +1,33 @@
 # Tianyan（天演）
 
-本地优先的通用智能体。**全栈 Rust —— UI、服务、智能体在同一份代码、同一个二进制里。**
+本地优先的通用智能体，Rust 全栈：界面、服务和智能体编译进同一个二进制。
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)&nbsp;
 [![Rust](https://img.shields.io/badge/Rust-2021-orange.svg)](https://www.rust-lang.org/)
 
 ## 全栈 Rust
 
-界面、服务、智能体是三层职责，但只有**一份代码、一个进程、一个二进制**：
+界面、服务和智能体是三层职责，实现在同一个进程里：
 
 | 层 | 实现 |
 |---|---|
-| 界面 | GPUI 原生自绘（Rust，自绘管线，无 WebView） |
-| 服务 | Axum（Rust），与界面同进程 |
-| 智能体与存储 | 同一个进程里的 `core` 库 |
+| 界面 | GPUI 原生自绘（Rust，无 WebView） |
+| 服务 | Axum，与界面同进程 |
+| 智能体与存储 | 同进程内的 `core` 库 |
 | 发布物 | 单个 exe；Windows MSI 约 60 MB |
 
-实测内存：76 MB 空窗口 · 131 MB 带 3000 行编辑器 + 5000 条列表 · 269 MB 打开 10 万行代码文件。
+实测内存：76 MB 空窗口，131 MB 带 3000 行编辑器与 5000 条列表，269 MB 打开 10 万行代码文件。
 
-同一份类型从界面贯通到存储：
+界面与服务共用 `core` 的类型：
 
-- **改一个功能只动一处。** 工具定义、数据结构、错误类型在界面与后端之间**没有第二份**。
-- **`cargo check` 就是全链路检查。** 界面与服务一起编译，字段名改错当场红。
-- **协议共用一份类型。** 界面经**本地 HTTP / SSE** 与内嵌服务通信（同进程，走 TCP 回环），两侧由 `core` 的同一组类型生成。
-- **不依赖 WebView。** 安装包里没有浏览器引擎，启动即窗口。
+- 工具定义、数据结构、错误类型只有一份，改一个功能不需要同步两处。
+- 界面与服务一起编译，字段名改错在 `cargo check` 时红。
+- 界面经本地 HTTP / SSE 与内嵌服务通信（TCP 回环），两侧由同一组类型生成。
+- 安装包里没有浏览器引擎。
 
 ## 核心特性
 
-- **统一上下文（VFS）**：偏好 / 记忆 / 知识 / 技能同构存储与检索 —— L0/L1/L2 三层摘要 + 双向量 RRF 融合；上下文自动 / 手动压缩（ADR-001）
+- **统一上下文（VFS）**：偏好、记忆、知识、技能同构存储与检索；L0/L1/L2 三层摘要加双向量 RRF 融合；上下文自动或手动压缩（ADR-001）
 - **自进化（ADR-017）**：单一「自演化综述」任务统一接管记忆 / 技能 / 规则 / 角色的归纳与淘汰（读用户原话 + 执行数据 + 技能使用统计，产出增删改计划并记账）；附 `planning` 等预置技能与技能导入工具
 - **工具系统**：50+ 内置与插件工具（文件读写 / 语义化编辑 / 代码结构 / 搜索 / 网页抓取 / 知识导入 / 待办与目标 / 委托 / 定时任务 / 剪贴板……），OpenAI function calling 兼容，支持动态注册（完整清单见 [tool-catalog](./docs/architecture/tool-catalog.md)）
 - **子智能体编排**：`delegate_to_agent` 并行委托 + 嵌套（深度上限 3）+ 角色注册表；后台任务完成自动唤醒主会话
@@ -75,7 +75,7 @@ cargo run -p tianyan-server                          # 只跑后端（默认 127
 
 ## 架构
 
-**一个进程两半：GPUI 界面（主线程）+ 内嵌 Axum 服务（tokio 运行时），共享同一个 `tianyan` core 库。**
+界面与服务在同一个进程：GPUI 跑在主线程，内嵌 Axum 服务跑在 tokio 运行时，两者共用 `tianyan` core 库。
 
 | 目录 | 说明 |
 |------|------|
@@ -92,7 +92,7 @@ cargo run -p tianyan-server                          # 只跑后端（默认 127
 
 技术栈：**Rust（stable）· GPUI（原生 UI）· Axum 0.8 · Tokio · LanceDB 0.33（嵌入式向量）· SQLite（主存储）**。
 
-核心设计基于一系列架构决策记录（[ADR 索引](./docs/architecture/decisions/README.md)，共 54 份）：VFS 双层摘要索引（ADR-001）、StructuredMessage 单一真相源（ADR-002）、组件工具化（ADR-003）、前缀匹配上下文组装（ADR-004）、统一事件推送（ADR-028/029）、统一 Agent 循环（ADR-030）、微内核插件化（ADR-049）等。
+核心设计见架构决策记录（[ADR 索引](./docs/architecture/decisions/README.md)，54 份）：VFS 双层摘要索引（ADR-001）、StructuredMessage 单一真相源（ADR-002）、组件工具化（ADR-003）、前缀匹配上下文组装（ADR-004）、统一事件推送（ADR-028/029）、统一 Agent 循环（ADR-030）、微内核插件化（ADR-049）等。
 
 ## 支持的模型
 
@@ -132,10 +132,10 @@ cargo run -p tianyan-server                          # 只跑后端（默认 127
 
 ## 许可证
 
-本项目采用 **MIT** 许可证——详见 [LICENSE](./LICENSE) 文件。
+本项目采用 MIT 许可证，详见 [LICENSE](./LICENSE)。
 
 ## 致谢
 
 - 灵感来源于 OpenViking 的统一文件系统范式
 - 工程实践对标（设计参考与教训吸收）：openclaw（定时任务 / 审批）、opencode（请求重试 / 语义化编辑）、oh-my-openagent (omo)（apply_patch 信封 / 通知唤醒）、deepseek-harness (DSH)（重试策略 / 任务面板）
-- 原生 UI 由 [GPUI](https://github.com/zed-industries/zed)（Zed 的渲染引擎）驱动；使用 Rust 与优秀的开源社区构建
+- 原生 UI 由 [GPUI](https://github.com/zed-industries/zed)（Zed 的渲染引擎）驱动
