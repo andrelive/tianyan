@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [1.2.10] - 2026-11-15
+## [1.2.10] - 2026-11-16
 
 ### Fixed
 
@@ -19,6 +19,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   不受影响，仍随每次请求完整发送。
 - **413 现在给出可执行提示**：明确报"请求体过大、不是网络故障、重试同样失败"，
   并指出减少同一轮图片数的动作（此前只有裸的状态码原文，容易被当成网络抖动）。
+- **新建会话的三处交互问题**：① 点「+」弹出的目录选择器，在**无工作区会话**或
+  **空白新会话**里会停在「浏览根」，而确认按钮对浏览根直接早退（"请先进入一个目录"）
+  ——表现为「点 + 没反应、对话框也不关」；现在兜底用**基础工作目录**
+  （`[agent] working_directory`），与执行侧 fallback 同源。② 首条消息**发送失败**
+  时会把待绑定的工作目录一并丢掉，重发后新会话静默落成「无工作区」；现在失败回滚。
+  ③ 「↑ 加载更早的消息」在空会话 / 对话框开合时反复出现消失；判据收敛为单点
+  （渲染、滚轮、自动化状态三处同源）并补「空列表」「有模态对话框」两个条件。
+- **新建会话的 tab 标题一直是「新对话」**：服务端把"建会话"与"写标题"拆成两步，
+  中间存在标题为空的窗口；客户端在请求返回时立刻刷新列表，恰好落在窗口里就读到
+  默认标题、且之后不再刷新。现在标题与工作目录在**一次写入**中一起落库。
+- **新会话 tab 从最左跳到最右**：待绑定目录的临时 tab 原先渲染在真实 tab 之前，
+  而发首条消息后真实 tab 追加到末尾。现在临时 tab 也排在末尾，位置不跳变。
+
+### Added
+
+- **新建会话的虚拟 tab**：点「+」选完目录后，顶部立即出现 `＋ 新会话 · <目录名>`。
+  会话在首条消息时才真正创建，所以这张 tab 没有会话 id——它的身份就是待绑定的
+  工作目录：切走保留、连点「+」复用、发消息后由真实会话 tab 接替、点 × 丢弃。
 
 ### Changed
 
@@ -26,6 +44,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   目录已无任何代码依赖（全仓 56 处提及无一是可执行引用）。删除 219 个跟踪文件、
   契约 fixture 脚本、只服务 Web 端的 e2e 夹具，并同步清理活代码注释与活文档；
   ADR 正文、`CHANGELOG.md`、`docs/archive/` 等历史材料保留原文。
+- **发布流水线的 protoc 安装改用 `choco install protoc -y`**：原
+  `arduino/setup-protoc` 从 GitHub Releases 下载，1.2.9 的 Release 因它瞬时失败
+  而没出包（该步骤的注释本就写着「若再遇到瞬时失败改用 choco」）。
 
 ## [1.2.9] - 2026-11-15
 

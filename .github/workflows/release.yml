@@ -66,12 +66,18 @@ jobs:
             . -> target
             gui-native -> target
 
-      # ⚠️ 已知风险：`arduino/setup-protoc` 从 GitHub Releases 下载，历史上出现过
-      # 「00:00 瞬时失败」导致整轮白跑（quality.yml 在 Linux 上已改用 apt，见
-      # docs/operations/ci-pipeline.md §0）。Windows runner 上没有 apt，暂保留
-      # 本 action；若再遇到瞬时失败，改用 `choco install protoc -y`。
+      # protoc 走 `choco`（Windows runner 预装 choco），不再用 `arduino/setup-protoc`：
+      # 后者从 GitHub Releases 下载，出现过「00:00 瞬时失败」导致整轮白跑——**1.2.9
+      # 的 Release 正是卡在它上面**（43 秒失败、不出包）。此处原先就写着「若再遇到
+      # 瞬时失败，改用 choco install protoc -y」，现在兑现。
+      # （quality.yml 在 Linux 上用的 apt，见 docs/operations/ci-pipeline.md §0）
       - name: Install protoc (lance-encoding build dependency)
-        uses: arduino/setup-protoc@v3
+        shell: pwsh
+        run: |
+          choco install protoc -y --no-progress
+          # 显式验证：装不上就在这一步明确失败，不要拖到半小时后的 lance-encoding
+          # 编译才报「protoc not found」
+          protoc --version
 
       - name: Install WiX
         shell: pwsh
