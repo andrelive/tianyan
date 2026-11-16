@@ -26,8 +26,7 @@ pub async fn list_sessions(
         state.session_manager(),
         state.snapshot_manager(),
         Some(state.working_sets()),
-    )
-    .with_agent(state.agent().await);
+    );
 
     service
         .list_sessions()
@@ -76,7 +75,10 @@ pub async fn get_session_messages(
         state.session_manager(),
         state.snapshot_manager(),
         Some(state.working_sets()),
-    );
+    )
+    // 产出物重算要经 agent（会话工作区解析与快照比较只有一份实现）。只挂这一个
+    // handler：其余会话 CRUD 端点不需要产出物，挂上就是每请求多一次 agent clone。
+    .with_agent(state.agent().await);
 
     // 分段加载（ADR-035 §8）：默认（无参）= 最近一页（服务端默认 50 条、
     // 上限 200）+ 上滚游标/元数据；更早历史由前端上滚经 `before_seq` 补齐。
