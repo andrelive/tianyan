@@ -5,6 +5,25 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.11] - 2026-11-16
+
+### Added
+
+- **轮末产出物块**：每轮结束在对话末尾列出本轮工作区的净变更（新增 / 修改 / 删除），
+  点卡片用系统默认程序打开，📂 打开所在文件夹。数据源是每轮已有的工作区快照
+  （本轮开始那棵树对当前工作区），`execute_command` 生成的文件同样计入，读取不算。
+  打开会话时服务端按快照重算最近一页各轮，重启后仍能看到。
+- 事件协议新增第 5 类 `turn_artifacts`（见 `docs/architecture/event-protocol.md` §3.5）。
+
+### Changed
+
+- `GET /sessions/{id}/messages` 响应新增 `artifacts` 字段，仅在本页含链尾时计算。
+
+### 说明
+
+- 唤醒轮不捕获快照树，因此没有产出物；历史轮不显示文件大小（快照树只存哈希）；
+  快照每会话保留 150 棵，更早的轮次不显示。
+
 ## [1.2.10] - 2026-11-16
 
 ### Fixed
