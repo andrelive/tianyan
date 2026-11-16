@@ -4,7 +4,7 @@
 
 ## 构建与检查
 
-### Rust —— 主 workspace
+### Rust：主 workspace
 
 ```powershell
 cargo check --workspace                     # 快速编译检查
@@ -16,7 +16,7 @@ cargo test -p tianyan-server --lib          # server 单元测试
 .\scripts\test.ps1 all                      # lint + unit + integration + e2e + bench
 ```
 
-### `gui-native/` —— GPUI 原生客户端（独立 workspace，**主发布渠道**）
+### `gui-native/`：GPUI 原生客户端（独立 workspace，**主发布渠道**）
 
 ```powershell
 cd gui-native; cargo build --release      # 独立 workspace，不进主 workspace
@@ -25,13 +25,13 @@ pwsh -File scripts/verify-gui-native.ps1  # 自动化验收：一条命令跑完
 ```
 
 - 出包（版本号落点 / 本地打 MSI / CI 发布链 / 已知坑 / 验收清单）→ [`operations/release-msi.md`](operations/release-msi.md)。
-- 验收脚本**必须用 PowerShell 7+（`pwsh`）**：5.1 的 `Invoke-RestMethod` 在响应头没有 `charset` 时按 ISO-8859-1 解码 JSON——读到的中文本身是乱码，再写回服务端就会写坏数据。
+- 验收脚本**必须用 PowerShell 7+（`pwsh`）**：5.1 的 `Invoke-RestMethod` 在响应头没有 `charset` 时按 ISO-8859-1 解码 JSON，读到的中文本身是乱码，再写回服务端就会写坏数据。
 
 文档地图（我要做什么该读哪份）→ [docs/README.md](README.md)。
 
 ## 知识固化判据（`.scratch/` 是临时区）
 
-`.scratch/` 被 gitignore、**从不提交**——排查/实测得到的高价值结论若只留在那里，等于随会话丢失。
+`.scratch/` 被 gitignore、**从不提交**，排查/实测得到的高价值结论若只留在那里，等于随会话丢失。
 
 - **临时区**（可以放）：命令日志、一次性探针脚本、中间 JSON、审计草稿。
 - **须固化到 `docs/`**（同一工作周期内）：机制说明（怎么运作）、契约（谁能改什么）、排查路径（故障现象 → 判定 → 处置）、实测数据（含测量条件与来源）。
@@ -40,7 +40,7 @@ pwsh -File scripts/verify-gui-native.ps1  # 自动化验收：一条命令跑完
 
 ## 重构纪律（多 agent / 并行工作）
 
-- 禁止全局 git 操作（stash / reset --hard / checkout . / clean）——多 agent 并行工作会互相毁灭编辑
+- 禁止全局 git 操作（stash / reset --hard / checkout . / clean），多 agent 并行工作会互相毁灭编辑
 - 只允许 `git diff` / `git status` / `git checkout <具体文件>` / `git log` / `git reflog`
 - 重构方法论（审查前置 / 波次 / QA 纪律）见下一章
 
@@ -53,9 +53,9 @@ pwsh -File scripts/verify-gui-native.ps1  # 自动化验收：一条命令跑完
 
 开始任何架构审查前，**先读**：
 
-1. [`architecture/decisions/REJECTED.md`](architecture/decisions/REJECTED.md) — 明确否决项 + **重新评估触发条件**。凡被否决的方向，除非触发条件满足，不要重新建议。
+1. [`architecture/decisions/REJECTED.md`](architecture/decisions/REJECTED.md) 明确否决项 + **重新评估触发条件**。凡被否决的方向，除非触发条件满足，不要重新建议。
 2. 相关 ADR（尤其 ADR-001 VFS / ADR-007 依赖环 / ADR-013 唤醒 / ADR-014 错误语义化）。
-3. 根 `AGENTS.md`「设计原则」——seam 原则、不叠加抽象、共享基础设施归属被依赖方。
+3. 根 `AGENTS.md`「设计原则」，seam 原则、不叠加抽象、共享基础设施归属被依赖方。
 
 **教训来源**：某次审查初期提出的 `pipeline.run` 删除方向，实际是**有意的延后/保留**（文档注释已声明）。先读 REJECTED 和模块文档可避免浪费一轮探索。
 
@@ -70,7 +70,7 @@ pwsh -File scripts/verify-gui-native.ps1  # 自动化验收：一条命令跑完
   → 最终：全套件 + 独立审查（Oracle）+ 手工 QA
 ```
 
-- **每波 gate 全绿才进下一波**——波内文件域不相交是并行前提。
+- **每波 gate 全绿才进下一波**，波内文件域不相交是并行前提。
 - **同一波内不做相互依赖的变更**（例：executor 错误发射与 server 消费必须一次原子落地，否则中间态把 409 降级成 500）。
 - **重名符号按符号全库 `rg`，不要按文件删**：`search_by_visual` 曾同时存在于 `DualLayerRetriever` 与 `VfsSearch` trait 上，只删了前者，trait 上的副本漏网直到复审才发现。
 - 删除死代码的验证协议：`rg "<symbol>" --type rust`（含测试）→ 仅剩定义 → 编译通过。**编译器是删除操作的最终验证器**。
@@ -82,7 +82,7 @@ pwsh -File scripts/verify-gui-native.ps1  # 自动化验收：一条命令跑完
 
 - 新增错误类别 → 改 `core/src/common/error.rs` 一处（KIND 常量 + 构造器 + 谓词 + 碰撞矩阵测试）。
 - server 层映射 HTTP 状态码 → 用 `is_not_found` / `is_conflict` / `is_invalid_input` / `is_permission` / `is_timeout`。
-- 曾犯的错：`contains("快照")` 把解析失败也判 404；`contains("块")` 把任意含"块"字错误判 409——**子串匹配过宽会静默改变 HTTP 语义**。
+- 曾犯的错：`contains("快照")` 把解析失败也判 404；`contains("块")` 把任意含"块"字错误判 409，**子串匹配过宽会静默改变 HTTP 语义**。
 
 ### 4. 组合根收敛
 
@@ -92,7 +92,7 @@ pwsh -File scripts/verify-gui-native.ps1  # 自动化验收：一条命令跑完
 
 ### 5. 手工 QA 纪律
 
-- **副作用可回滚是前提**：`PUT /api/v1/config` 会持久化写入 `tianyan.toml`——QA 后必须恢复（git 不追踪该文件，手工改回）。
+- **副作用可回滚是前提**：`PUT /api/v1/config` 会持久化写入 `tianyan.toml`，QA 后必须恢复（git 不追踪该文件，手工改回）。
 - 起服务器：`cargo run -p tianyan-server`（默认 3000），测完 `Stop-Process` + 确认端口释放。
 - 端点矩阵至少覆盖：health / chat 端到端 / 错误分类（404/400/409/403/504 各一）/ 会话持久化（重启后仍在）/ 热更新 reload。
 - 原生端界面行为验证走 ADR-052 自动化通道（`scripts/verify-gui-native.ps1`），**不要**靠"反复启动 + 人眼看 + 截图比对"。

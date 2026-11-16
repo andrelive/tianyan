@@ -8,16 +8,16 @@
 | 我想… | 读这份 |
 |---|---|
 | 知道天演是什么、怎么装起来 | [`../README.md`](../README.md)（产品介绍 + 快速开始） |
-| 改代码前弄清纪律与禁区 | [`../AGENTS.md`](../AGENTS.md) — **必读**：硬块约束 / 构建命令 / 工作区结构 / 代码规范 / 设计原则 / 模块速览 / 常见陷阱 |
-| 找某个模块在哪、职责是什么 | [`architecture/module-map.md`](architecture/module-map.md) — **唯一的模块索引**（crate / core 子模块 / server / GUI） |
-| 查某个设计为什么这么定 | [`architecture/decisions/`](architecture/decisions/) — 54 份 ADR，全量索引见 [`architecture/decisions/README.md`](architecture/decisions/README.md)；被否的方向见 [`architecture/decisions/REJECTED.md`](architecture/decisions/REJECTED.md) |
+| 改代码前弄清纪律与禁区 | [`../AGENTS.md`](../AGENTS.md) **必读**：硬块约束 / 构建命令 / 工作区结构 / 代码规范 / 设计原则 / 模块速览 / 常见陷阱 |
+| 找某个模块在哪、职责是什么 | [`architecture/module-map.md`](architecture/module-map.md) **唯一的模块索引**（crate / core 子模块 / server / GUI） |
+| 查某个设计为什么这么定 | [`architecture/decisions/`](architecture/decisions/) 54 份 ADR，全量索引见 [`architecture/decisions/README.md`](architecture/decisions/README.md)；被否的方向见 [`architecture/decisions/REJECTED.md`](architecture/decisions/REJECTED.md) |
 | 理解一条链路的机制（不是决策） | 下面的「专题文档」 |
-| 改契约前先确认级别 | [`architecture/contracts.md`](architecture/contracts.md) — S / A / B 契约分级台账（分级已冻结） |
-| 排查故障 / 体检数据 / 出包 / CI / 依赖升级 | [`operations/`](operations/) — 五份运维手册 |
-| 知道用户会长期遇到的限制 | [`known-limits.md`](known-limits.md) — 结构性限制（不含版本号、不含临时状态） |
+| 改契约前先确认级别 | [`architecture/contracts.md`](architecture/contracts.md) S / A / B 契约分级台账（分级已冻结） |
+| 排查故障 / 体检数据 / 出包 / CI / 依赖升级 | [`operations/`](operations/) 五份运维手册 |
+| 知道用户会长期遇到的限制 | [`known-limits.md`](known-limits.md) 结构性限制（不含版本号、不含临时状态） |
 | 查 HTTP 端点 | [`api-endpoints.md`](api-endpoints.md) |
-| 看这个版本改了什么 | [`../CHANGELOG.md`](../CHANGELOG.md) — 权威变更记录（Keep a Changelog） |
-| 翻历史（已完成的迁移 / 旧架构快照） | [`archive/`](archive/) — **不作为事实来源** |
+| 看这个版本改了什么 | [`../CHANGELOG.md`](../CHANGELOG.md) 权威变更记录（Keep a Changelog） |
+| 翻历史（已完成的迁移 / 旧架构快照） | [`archive/`](archive/) **不作为事实来源** |
 | 找外部资料整理（非天演机制） | [`reference/`](reference/) |
 
 ## 专题文档（机制级）
@@ -29,8 +29,8 @@
 | [`architecture/model-provider-notes.md`](architecture/model-provider-notes.md) | Provider 矩阵 + reasoning 回传契约 + 思考强度 × 语言实测 + 前缀缓存 |
 | [`architecture/task-runtime.md`](architecture/task-runtime.md) | 三类任务 + 并发排队 + TTL + 唤醒语义 + 取消 / 回退 |
 | [`architecture/contracts.md`](architecture/contracts.md) | S / A / B 契约分级与跨层接口（常驻台账） |
-| [`architecture/module-map.md`](architecture/module-map.md) | 模块口径（crate / core 子模块 / server / GUI）——唯一的模块文档 |
-| [`architecture/tool-catalog.md`](architecture/tool-catalog.md) | 工具目录 —— **自动生成**，改 schema 后跑 `cargo catalog-gen`，勿手改 |
+| [`architecture/module-map.md`](architecture/module-map.md) | 模块口径（crate / core 子模块 / server / GUI），唯一的模块文档 |
+| [`architecture/tool-catalog.md`](architecture/tool-catalog.md) | 工具目录，**自动生成**，改 schema 后跑 `cargo catalog-gen`，勿手改 |
 
 ## 开发与运维
 
@@ -50,14 +50,14 @@
 
 | 文档 | 性质 |
 |---|---|
-| [`reference/harness-engineering-overview.md`](reference/harness-engineering-overview.md) | 外部资料整理（Harness 工程综述）——**非天演机制**，不描述本仓库实现 |
+| [`reference/harness-engineering-overview.md`](reference/harness-engineering-overview.md) | 外部资料整理（Harness 工程综述），**非天演机制**，不描述本仓库实现 |
 
 ## 归档（历史快照，不作事实来源）
 
 | 文档 | 说明 |
 |---|---|
-| [`archive/code-intelligence-routes.md`](archive/code-intelligence-routes.md) | 代码智能路线决策（grep / tree-sitter / LSP 移除 / code graph）——2026-09 决策、已实施，2026-11 归档 |
-| [`archive/microkernel-baseline.md`](archive/microkernel-baseline.md) | ADR-049 期 0 基线报告（内核体量与全量重编基线）——期次已全部结项，2026-11 归档 |
+| [`archive/code-intelligence-routes.md`](archive/code-intelligence-routes.md) | 代码智能路线决策（grep / tree-sitter / LSP 移除 / code graph），2026-09 决策、已实施，2026-11 归档 |
+| [`archive/microkernel-baseline.md`](archive/microkernel-baseline.md) | ADR-049 期 0 基线报告（内核体量与全量重编基线），期次已全部结项，2026-11 归档 |
 | [`archive/gui-native-migration-inventory.md`](archive/gui-native-migration-inventory.md) | gui-vite → GPUI 迁移盘点（迁移已完成；仓库根的 tauri 壳已于 2026-10 删除） |
 | [`archive/module-descriptions.md`](archive/module-descriptions.md) | 2026-09 前的模块功能说明（含已退役的 Tauri 章节） |
 | [`archive/module-relationships.md`](archive/module-relationships.md) | 2026-09 前的依赖矩阵与调用流程 |
