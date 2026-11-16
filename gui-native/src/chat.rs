@@ -675,6 +675,7 @@ impl ClientApp {
                     // `seq` 不变式与滚动锚点算法都不碰）
                     match artifact_files_for(&items, ix, &artifacts_map) {
                         Some(files) => div()
+                            .w_full()
                             .flex()
                             .flex_col()
                             .child(body)
@@ -1805,7 +1806,7 @@ fn render_artifacts_block(
     ordered.extend(removed);
     let total = ordered.len();
 
-    let mut col = div().flex().flex_col().gap_1().mt_2().mb_1();
+    let mut col = div().w_full().flex().flex_col().gap_1().mt_1().mb_1();
     for f in ordered.into_iter().take(3) {
         col = col.child(render_artifact_row(f, workdir.clone()));
     }
@@ -1848,6 +1849,7 @@ fn render_artifact_row(f: ArtifactRow, workdir: std::rc::Rc<Option<String>>) -> 
 
     div()
         .id(SharedString::from(format!("artifact-{}", f.path)))
+        .w_full()
         .flex()
         .flex_row()
         .items_center()
@@ -1900,6 +1902,14 @@ fn artifact_abs_path(workdir: Option<&str>, rel: &str) -> Option<std::path::Path
     Some(std::path::Path::new(wd).join(rel))
 }
 
+/// Windows 上从 GUI 进程 spawn 控制台程序时不要弹黑窗。
+///
+/// 不加这个标志时，`cmd /c start` 与 `rundll32` 这类控制台宿主会各开一个命令
+/// 提示符窗口闪一下（用户实测「点击文件夹图标会先弹个命令行」）。`explorer`
+/// 本身是 GUI 程序，同样统一加上，避免依赖对宿主类型的判断。
+#[cfg(target_os = "windows")]
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
 /// 用系统默认程序打开文件。
 fn open_with_default(workdir: Option<&str>, rel: &str) {
     let Some(path) = artifact_abs_path(workdir, rel) else {
@@ -1908,8 +1918,10 @@ fn open_with_default(workdir: Option<&str>, rel: &str) {
     let full = path.display().to_string();
     #[cfg(target_os = "windows")]
     {
+        use std::os::windows::process::CommandExt;
         let _ = std::process::Command::new("cmd")
             .args(["/c", "start", "", &full])
+            .creation_flags(CREATE_NO_WINDOW)
             .spawn();
     }
     #[cfg(target_os = "macos")]
@@ -1930,8 +1942,10 @@ fn reveal_in_folder(workdir: Option<&str>, rel: &str) {
     let full = path.display().to_string();
     #[cfg(target_os = "windows")]
     {
+        use std::os::windows::process::CommandExt;
         let _ = std::process::Command::new("explorer")
             .arg(format!("/select,{full}"))
+            .creation_flags(CREATE_NO_WINDOW)
             .spawn();
     }
     #[cfg(target_os = "macos")]

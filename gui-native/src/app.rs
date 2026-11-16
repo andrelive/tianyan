@@ -1028,6 +1028,13 @@ impl ClientApp {
             if workdir.is_some() {
                 self.artifacts_workdir = workdir;
             }
+            // 块改变了该轮末条消息的高度。不重测的话列表仍按旧高度布局：块被画在
+            // 「预留高度」之外，表现为正文与块之间凭空多出一段空白，且块里的元信息
+            // 与按钮要等下一次重绘才补齐（用户实测的「间距过大」「元素后到」）。
+            if let Some(ix) = self.turn_end_ix(anchor) {
+                self.msg_list_state.remeasure_items(ix..ix + 1);
+            }
+            self.sync_list_count();
             cx.notify();
             return;
         }
@@ -1041,6 +1048,24 @@ impl ClientApp {
                 snap.artifacts_workdir = workdir;
             }
         }
+    }
+
+    /// 某轮锚点对应的「该轮末条消息」索引（产出物块挂在那一项下面）。
+    ///
+    /// 判据与 `chat::artifact_files_for` 一致：从锚点那条 user 起，直到下一条 user
+    /// 之前。块的增删改变这一项的高度，重测必须精确到它：整列 `remeasure` 会把
+    /// 已经滚过去的项全部丢掉测量缓存，长会话里能看见滚动位置跳动。
+    fn turn_end_ix(&self, anchor: &str) -> Option<usize> {
+        let items = &self.messages;
+        let start = items.iter().position(|m| m.id == anchor)?;
+        let mut last = start;
+        for i in (start + 1)..items.len() {
+            if items[i].role == "user" {
+                break;
+            }
+            last = i;
+        }
+        Some(last)
     }
 
     /// 把一条事件写回**非当前会话**自己的那份消息快照（per-session store）。
