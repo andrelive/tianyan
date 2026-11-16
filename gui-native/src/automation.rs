@@ -703,6 +703,13 @@ impl ClientApp {
                 // 回填是否真的发生过。`value` 在未回填时会回落成配置值（保存不会错），
                 // 但界面渲染的是**编辑器**：不回填 = 用户看到一片 placeholder。
                 "backfilled": self.settings_backfilled,
+                // 「+ 新建会话」选中的待绑定目录。它在**发首条消息时**被 take 掉并随
+                // 请求下发（`send_text` → `body["working_directory"]`），服务端建会话时
+                // 固化。这里暴露出来，是为了断言「picker 确认后确实写进去了」——
+                // 只靠读代码判断不了（`start_new_session` 内部会把它重置成 None）。
+                "new_session_workspace": self.new_session_workspace.clone(),
+                "new_session_is_unbound": self.current_session.is_none()
+                    && self.messages.is_empty(),
                 "editable_tabs": FIELDS
                     .iter()
                     .map(|f| f.tab.key())

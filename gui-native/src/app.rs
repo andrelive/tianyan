@@ -1913,6 +1913,13 @@ impl ClientApp {
         }
         // 「＋新目录」设置的工作目录：只作用于这一条消息——服务端建会话时固化，
         // 之后的消息再带就没意义了（所以 `take()` 掉）。
+        //
+        // **必须留一份供失败回滚**：`take()` 之后请求若失败（网络 / 413 / 服务端 4xx），
+        // 目录就永久没了 —— 用户重发时这条消息不再带 `working_directory`，新会话于是
+        // 落成「无工作区」（跑到默认目录组下），而且损失是静默的：用户只看到会话归错
+        // 组，不知道原因。目录写入本身是好的（picker 确认时 `new_session_workspace`
+        // 已被设为选中目录），问题只在这一处 take 与请求成败的先后关系。
+        let workspace_for_retry = self.new_session_workspace.clone();
         if let Some(dir) = self.new_session_workspace.take() {
             body["working_directory"] = serde_json::Value::String(dir);
         }
@@ -1928,6 +1935,10 @@ impl ClientApp {
                 }
                 Err(e) => {
                     let _ = this.update(cx, |this, cx| {
+                        // 首条消息没发出去 → 把待绑定目录还回去，重发时仍能绑定
+                        if let Some(ws) = workspace_for_retry {
+                            this.new_session_workspace = Some(ws);
+                        }
                         this.streaming = false;
                         this.remeasure_stream_tail();
                         this.turn_running = false;
