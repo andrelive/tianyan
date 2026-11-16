@@ -19,7 +19,7 @@
 | **B. 统一事件推送（本文主题）** | `core/src/agent/stream_forward.rs`、`server/src/event_push.rs`、`server/src/api/tasks/handlers.rs`、`server/src/api/chat/services.rs` | Agent 循环 → 事件 JSON → 统一通道 → SSE 下发前端（ADR-028/031/032） | `GET /api/v1/events`（常驻 SSE）+ `POST /api/v1/events/subscribe`（快照触发） |
 
 > ⚠️ 任务材料里指向的 `server/src/api/events/*` 实为 **A（webhook）**；**B（SSE 推送）**的实际实现
-> 在 `server/src/event_push.rs` 与 `server/src/api/tasks/handlers.rs`——`tasks/routes.rs` 同时挂了
+> 在 `server/src/event_push.rs` 与 `server/src/api/tasks/handlers.rs`；`tasks/routes.rs` 同时挂了
 > `/events` 与 `/events/subscribe`（见 §5 端点表）。本文只讲 B。
 
 ---
@@ -31,7 +31,7 @@
 - **SSE 连接（水管）**：应用级常驻、与请求/循环生命周期**解耦**。前端启动即建一条
   `EventSource`（`GET /api/v1/events`），进程存活期间不关闭；只有"有新事件"时才流动
   （`gui-vite/src/hooks/use-unified-events.ts:162` `startUnifiedEvents`）。
-- **Agent 循环（抽水机）**：**请求驱动**。`POST /api/v1/chat/stream` 收敛为"开关"——
+- **Agent 循环（抽水机）**：**请求驱动**。`POST /api/v1/chat/stream` 收敛为"开关"：
   校验 + 启动循环 + 立即返回 `{status:"started"}`（不再承载 SSE 响应流），循环输出全部
   经常驻流下发（`server/src/api/chat/handlers.rs:42`、`routes.rs:12`）。
   取消是独立开关：`POST /api/v1/chat/streams/{session_id}/cancel`（显式置位 cancel 标志）。
@@ -73,7 +73,7 @@
 
 `spawn_stream_forwarder(...)`（`stream_forward.rs:123`）在**同一函数内原子地**建通道 +
 `tokio::spawn` 消费任务，返回 `(StreamEventSender, JoinHandle<()>)`。调用方顺序恒为：
-拿到 sender → 交给轮。反向顺序（先跑轮、后消费）在新结构下**无法表达**——输出不会再积压到
+拿到 sender → 交给轮。反向顺序（先跑轮、后消费）在新结构下**无法表达**：输出不会再积压到
 轮结束（旧唤醒轮接线正是此形态：先 `await process_wake`，再消费，容量 100 一满即死锁）。
 
 - 轮结束后 `await` 返回的句柄 = 等待流排空（`rx` 关闭 ⟺ 轮内所有 sender 已释放）。
@@ -97,7 +97,7 @@
 | `command_output` | 后台命令输出流逐块读取 | `task_id`（全局广播，无 session_id） | `AgentTasksPanel.tsx:58`（终端视图 append） | **尽力而为**；权威 = 命令日志文件 |
 
 > ⚠️ `tasks/routes.rs:17` 的文件注释仍写"事件带 type 区分（message / task_status / command_output /
-> 子代理消息）"——**已过时**：`message` 类型在 ADR-031 后移除，实际是 `chat_stream`。
+> 子代理消息）"。**已过时**：`message` 类型在 ADR-031 后移除，实际是 `chat_stream`。
 
 ### 3.1 `chat_stream`（流式增量）
 
@@ -111,7 +111,7 @@
 | 字段 | 类型 | 说明 |
 |------|------|------|
 | `type` | string | 恒为 `"chat_stream"`（转发器注入） |
-| `session_id` | string | 会话 id（子代理 = `task_id`）——路由字段 |
+| `session_id` | string | 会话 id（子代理 = `task_id`），路由字段 |
 | `id` | string | 本响应流 id（`chatcmpl-<short_uuid>`），同流所有 chunk 共享 |
 | `chunk_type` | string | 见 §4（7 成员，小写） |
 | `delta` | string | 正文增量；`thought`/`tool_call`/`observation` 时被置空 |
@@ -134,7 +134,7 @@
 > 如果分两个事件，界面会出现「速度已是这一步、累计还停在上一轮」的中间态；而且前端要么自己
 > 再拉一次 `/usage/stats`（多一条可失败的链路），要么等轮末（累计半天不动）。同帧的代价只是
 > 一次按 `session_id` 的聚合查询（`idx_usage_logs_session`），发送点在 `record_usage_log`
-> **之后**——早于落库查累计会永远少掉当前这一步。
+> **之后**，早于落库查累计会永远少掉当前这一步。
 
 > 子代理路径的 `chunk_to_stream_json` 只产出 `chunk_type`/`delta`/`thinking`/`finish_reason`/
 > `tool_call`/`tool_result`（无 `id`/`usage`/`message`），并跳过 `Message`/`Error` chunk。
@@ -149,7 +149,7 @@
 | 字段 | 类型 | 说明 |
 |------|------|------|
 | `type` | string | 恒为 `"snapshot"` |
-| `session_id` | string | 会话 id——路由字段 |
+| `session_id` | string | 会话 id，路由字段 |
 | `cursor` | number | 快照时最新持久化 seq（`SessionStore::last_seq`，`core/src/session/store.rs:402`） |
 | `messages` | ChatMessage[] | 一页历史（页首对齐到真 user，与 `GET /sessions/{id}/messages` 共用 `load_aligned_page`） |
 | `next_before_seq` | number \| null | 上滚游标（本页最早一条的 seq；`null` = 已到链首） |
@@ -157,7 +157,7 @@
 | `turn` | object | 轮状态权威值 `{state:"running"\|"idle", auto:bool}`（ADR-045） |
 | `clarification` | object \| null | **挂起的追问**（`ask_user` 的问题原文；`null` = 没有在等回答） |
 
-**为什么快照要带 `clarification`**：追问此前只由流式 `tool_call` 事件带到前端——事件一旦
+**为什么快照要带 `clarification`**：追问此前只由流式 `tool_call` 事件带到前端，事件一旦
 错过（该会话从没打开过 / 断线重连 / 应用重启），界面就永远看不到问题，而服务端那一轮会
 一直挂着等回答（用户侧表现：任务凭空停住）。快照是「打开 / 切回 / 重连」时唯一的一次对齐
 机会，所以问答复原也走这里（`UserQuestionService::pending_questions`）。前端收到后**重置**
@@ -165,7 +165,7 @@
 
 **DSH 模式 + replace 兜底**：前端收到快照即 `setSessionMessages(sid, messages)`（**replace** 窗口）；
 **流式进行中跳过 replace**（覆盖流式占位有害；增量由实时事件继续）（`use-unified-events.ts:153`）。
-不使用 `Last-Event-ID` 续传——重连即快照天然覆盖服务端重启/WebView 重建等所有断线场景。
+不使用 `Last-Event-ID` 续传：重连即快照天然覆盖服务端重启/WebView 重建等所有断线场景。
 
 ### 3.3 `task_status`（后台任务状态转移）
 
@@ -186,7 +186,7 @@
 | 命令 running | `type`, `task_id`, `kind:"command"`, `status:"running"`, `command`, `pid`, `created_at` |
 | 命令终态 | `type`, `task_id`, `kind:"command"`, `status`, `exit_code`, `completed_at` |
 
-**前端消费**：收到即 `poll()`（`AgentTasksPanel.tsx:55`）——**事件只是唤醒信号**，权威列表由
+**前端消费**：收到即 `poll()`（`AgentTasksPanel.tsx:55`），**事件只是唤醒信号**，权威列表由
 `GET /api/v1/tasks` 拉取；`usePolling` 兜底轮询。
 
 ### 3.4 `command_output`（命令输出增量）
@@ -199,7 +199,7 @@
 | 字段 | 类型 | 说明 |
 |------|------|------|
 | `type` | string | 恒为 `"command_output"` |
-| `task_id` | string | 命令任务 id（`cmd_*`）——路由字段 |
+| `task_id` | string | 命令任务 id（`cmd_*`），路由字段 |
 | `delta` | string | 输出增量（`String::from_utf8_lossy`） |
 
 **前端消费**：`AgentTasksPanel.tsx:58` 累积到终端视图（本地尾部截断至 64KB，与后端
@@ -227,7 +227,7 @@
 | `RequestPerf` | `request_perf` | 单轮请求性能 + **会话累计**（底部统计条） | `ttft_ms` / `duration_ms` / `perf_completion_tokens` / `session_usage` |
 
 > ⚠️ **旧文档遗留**：`system-architecture.md` / `module-relationships.md` 曾写 `chunk_type` 含
-> `clarification`——**实为 `user_message_id`**（原 `clarification` 已改名/取代）。另 `usage` 并非 chunk_type，
+> `clarification`，**实为 `user_message_id`**（原 `clarification` 已改名/取代）。另 `usage` 并非 chunk_type，
 > 而是 `Answer` chunk 上的 `usage` 字段（工具轮用量由 `send_turn_usage` 以空 delta 的 `answer` chunk 下发）。
 
 **语义要点**：
@@ -270,7 +270,7 @@ POST /api/v1/events/subscribe
 
 ADR-029 原设计有"按连接订阅注册表"（只推订阅会话的消息）。ADR-031 移除消息广播后此语义失效：
 
-- **服务端订阅注册表已删除**——`subscribe_events` **仅承担快照推送**，无 insert/过滤逻辑。
+- **服务端订阅注册表已删除**，`subscribe_events` **仅承担快照推送**，无 insert/过滤逻辑。
 - **前端订阅集合保留**（`subscribedSessions`，`use-unified-events.ts:90`）：resident 语义
   （打开过保持订阅，切回零延迟），用于触发快照恢复与断线重连**重放订阅**（`onopen` 时遍历重放，
   连接断了服务端订阅状态即丢失）。
@@ -280,7 +280,7 @@ ADR-029 原设计有"按连接订阅注册表"（只推订阅会话的消息）�
 ### 5.4 resume 语义（`since` / cursor）
 
 - **cursor**：快照带 `cursor` = `SessionStore::last_seq(session_id)`（最新持久化 seq）。
-- **断点对齐（seq 跳号检测）随 message 广播移除**——重连快照独立兜底（ADR-031）：
+- **断点对齐（seq 跳号检测）随 message 广播移除**，重连快照独立兜底（ADR-031）：
   不再有"前端维护 lastSeq + 跳号补偿"机制。
 - **replace 兜底**：快照到达即 replace 窗口（流式进行中跳过）；`reloadSession`（强制刷新）
   保留 fetch 作为 replace 语义（`use-session-history.ts:37`）。
@@ -300,16 +300,16 @@ ADR-029 原设计有"按连接订阅注册表"（只推订阅会话的消息）�
 3. 其余 `type`（`task_status`/`command_output`）→ 遍历 `unifiedEventsListeners` 回调，
    由组件自行消费。
 
-**归约单点**：`gui-vite/src/lib/chat-stream.ts:64` `handleChatStreamEvent`——每个 `chat_stream`
+**归约单点**：`gui-vite/src/lib/chat-stream.ts:64` `handleChatStreamEvent`，每个 `chat_stream`
 事件翻译为 store 动作（会话归属、轮次边界、截断/中断语义、usage 归位、工具结果挂卡）。
 
-**按 sessionId 管理活跃流**：store 用**字典**（不是每流一个 reducer 实例）——
+**按 sessionId 管理活跃流**：store 用**字典**（不是每流一个 reducer 实例）：
 `sessionMessages: Record<string, ChatMessage[]>` + `streamStatus: Record<string, StreamStatus>`
 （`gui-vite/src/lib/store/chat-slice.ts:48,100`）。事件自带 `session_id`，直接路由到对应字典键
 （主会话 / 子代理 `task_id` 同构）。**组件只负责启停归约器/消费事件**：`useUnifiedEvents(handler)`
 注册回调，卸载只移除回调、**不关闭连接**（应用级常驻）。
 
-> 📌 早期设计中每个 SSE 响应一条独立连接 + per-stream 归约器实例 + 活跃流注册表（Map）——
+> 📌 早期设计中每个 SSE 响应一条独立连接 + per-stream 归约器实例 + 活跃流注册表（Map）；
 > ADR-028/031 收敛为统一通道后**已删除注册表**，"按 sessionId 用 Map 管理活跃流"现指 store 字典
 > （见 §8）。
 
@@ -325,10 +325,10 @@ ADR-029 原设计有"按连接订阅注册表"（只推订阅会话的消息）�
 | `snapshot` | **权威** | 历史加载失败（重试/重连） | 读自 SQLite `session_messages`；重连 `onopen` 重放订阅 |
 | `task_status` | 尽力而为 | 面板状态暂不更新 | 权威 = SQLite `background_tasks`；`GET /tasks` 轮询（`usePolling`）兜底 |
 | `command_output` | 尽力而为 | 终端视图缺段 | 权威 = 命令日志文件；`GET /tasks/{id}/log` 分页回看 |
-| 命令完整输出 | **权威（文件）** | — | 落日志文件（`command.rs` 写文件 + 内存 tail 仅摘要 32KB） |
-| 后台任务状态 | **权威（SQLite）** | — | `background_tasks` 表 `persist_upsert`；重启 `ensure_reloaded` 兜底（Running/Pending → Failed） |
+| 命令完整输出 | **权威（文件）** | | 落日志文件（`command.rs` 写文件 + 内存 tail 仅摘要 32KB） |
+| 后台任务状态 | **权威（SQLite）** | | `background_tasks` 表 `persist_upsert`；重启 `ensure_reloaded` 兜底（Running/Pending → Failed） |
 
-**通道层易失细节**：`broadcast(256)` 有界——消费者慢时 `RecvError::Lagged` 被**静默 `continue`**
+**通道层易失细节**：`broadcast(256)` 有界，消费者慢时 `RecvError::Lagged` 被**静默 `continue`**
 丢弃（`tasks/handlers.rs:111`）；无订阅者时 `send` 直接丢弃（broadcast 语义）。事件通道只承担
 "在线实时通知"，数据完整性靠权威源（DB / 日志文件）。
 

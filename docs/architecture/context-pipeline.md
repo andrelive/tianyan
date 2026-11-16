@@ -18,7 +18,7 @@
 > `context/port.rs`（`ContextPort` 契约）仍在 `core/src/context/`。
 > 内核经 `Arc<dyn ContextPort>` 访问（3 个方法：
 > `load_injectable` / `compress_for_session` / `extract_marker_summary`）。
-> **行为语义（本文的全部机制陈述）在迁移中逐字未变**——变的只是代码住在哪个 crate，
+> **行为语义（本文的全部机制陈述）在迁移中逐字未变**：变的只是代码住在哪个 crate，
 > 以及「改 prompt 模板 / 压缩阈值 / 检索参数」现在只重编插件。
 
 ---
@@ -66,7 +66,7 @@
 > 与 `.scratch/audit-report-2026-09-12.md` C1）。以代码为准：
 > **顺序为 soul → 当前环境 → project_instructions → rules+memories → history**，
 > 由 `assembler.rs:71-74` 与回归测试 `test_assemble_injects_project_instructions_after_soul`
-> 与 `test_assemble_order_soul_environment_agents_then_rules` 三重确认——
+> 与 `test_assemble_order_soul_environment_agents_then_rules` 三重确认：
 > project_instructions 插在 **soul/环境之后、rules/memories 之前**。
 
 - 读取逻辑：`ContextPipeline::load_injectable`（`plugins/policy-context/src/context/pipeline.rs:84-130`）
@@ -77,11 +77,11 @@
 ### 2.1.1 当前环境段（工作目录锚点）
 
 > **为什么需要它**：模型能读到 AGENTS.md（里面有 `docs/architecture/decisions/` 这类
-> **相对路径**），但不知道工作目录是哪个——相对路径失去锚点，于是倾向硬编码绝对路径；
+> **相对路径**），但不知道工作目录是哪个，相对路径失去锚点，于是倾向硬编码绝对路径；
 > 而绝对路径随会话永久落库，换机器即失效。
 
 - 数据来源：`ContextPipeline::load_injectable` 在**同一个 `if let`** 里既探测
-  `AGENTS.md`、又把会话绑定目录记入 `injectable.working_directory`——「探测根」与
+  `AGENTS.md`、又把会话绑定目录记入 `injectable.working_directory`，「探测根」与
   「告诉模型的目录」必然同源（`pipeline.rs:116-119`）。
 - 渲染：`render_environment`（`assembler.rs:369`，纯函数）产出一段
   `## 当前环境`，含工作目录、相对路径解析口径（`read_file`/`glob`/`grep`/`list_dir`/
@@ -105,7 +105,7 @@
 
 - 新数据：`compress_for_session` 落库即 `user` 角色。
 - 旧数据：历史摘要曾持久化为 `system`，由转换层兼容归一为 `user`。
-- **动机**：保证"压缩后的组装视图恒有 ≥1 条 user"——全 system 请求会被云 API 判为无用户输入
+- **动机**：保证"压缩后的组装视图恒有 ≥1 条 user"，全 system 请求会被云 API 判为无用户输入
   而返回空输出（历史事故，见 §7.2 与 `.scratch/wake-no-user-finding.md`）。
 - 普通 system 消息（如通知）不受此归一影响（测试 `test_compression_marker_role_normalized_to_user`）。
 
@@ -155,7 +155,7 @@
 
 - **每轮只检查一次**：`run_agent_turn` 末尾，`if options.do_compress { maybe_compress_and_persist(.., false) }`
   （`core/src/agent/agent_core.rs:691-693`）。
-- 轮内的多次工具调用 / 多次 LLM 交互**不做**压缩检查——这就是"体感上要接近 80% 才压"的机制原因：
+- 轮内的多次工具调用 / 多次 LLM 交互**不做**压缩检查，这就是"体感上要接近 80% 才压"的机制原因：
   一个长轮次内占用可能在末尾检查时已越过窗口的 60%（甚至逼近/超过窗口），但压缩要等这一轮彻底结束才发生。
 - `do_compress` 由调用方按路径语义给定：`process_message` / `process_message_stream` 均 `true`
   （`core/src/agent/coordinator.rs:260`、`:317`）；澄清回答轮为 `false`。
@@ -167,7 +167,7 @@
 1. **作用域**：只看最后一个 `compression_marker` **之后**的消息（`rposition` → `start_idx`，`:531-539`）。
 2. **消息数门槛**：`messages_since_marker.len() < MIN_MESSAGES_BEFORE_COMPRESSION(6)` → 直接返回（`:543-545`）。
 3. **取最近实测占用**：从后向前找**第一条带 usage**（`input>0 || cache.read>0`）且**非压缩点**的消息，
-   取其 `prompt_side_tokens()`（`:553-566`）。**压缩点自身不参与取数**——它的 tokens 是摘要请求
+   取其 `prompt_side_tokens()`（`:553-566`）。**压缩点自身不参与取数**：它的 tokens 是摘要请求
    （压缩前上下文重发）的用量，不代表会话当前占用。
 4. **判定**：`compress_for_session(.., recent_input_tokens, force=false)` →
    `compress_if_needed` → `compressor.should_compress(recent_input_tokens)`（`:568`）。
@@ -179,7 +179,7 @@
 self.tokens.input.max(self.tokens.cache.read)
 ```
 
-- `tokens.input` 是**完整输入**（**含**缓存命中部分，`tokens.cache.read` 是其子集）——故取 `input`。
+- `tokens.input` 是**完整输入**（**含**缓存命中部分，`tokens.cache.read` 是其子集），故取 `input`。
 - **严禁 `input + cache.read`**：两者相加会把缓存命中**重复计一遍**（判定值 ≈ 真实值 × 2，
   真实占用远低于阈值也会提前压缩，或触发"上下文预算不足"误报）。此口径在 `loop.rs`
   的实测输入恢复处也使用（`loop.rs:620-651`），**同一实现点**。
@@ -201,7 +201,7 @@ self.tokens.input.max(self.tokens.cache.read)
 > **已有摘要的数据源（T1 修复）**：增量合并的 `existing_summary` 从**当前会话链
 > 最后一个 `compression_marker` 消息**提取（`ContextPipeline::extract_marker_summary`，
 > 剥去展示包装），随调用链显式传入（`compress_for_session → compress_if_needed →
-> compress_with_existing_summary`）——压缩器不持有任何跨会话状态。此前用进程级
+> compress_with_existing_summary`），压缩器不持有任何跨会话状态。此前用进程级
 > `cached_summary` 缓存（不按会话隔离），会话 A 的摘要会被会话 B 的压缩合并 →
 > **跨会话摘要串号**（B 的历史里混入 A 的记录）。
 
@@ -211,33 +211,33 @@ self.tokens.input.max(self.tokens.cache.read)
   （`pipeline.rs:208-229`）。前端 `sumSessionUsage` 累加所有带 usage 的消息，自动计入
   （`gui-vite/src/lib/token-usage.ts:60-78`）。
 - **注意**：压缩请求用量**不进 `usage_logs` 表**（该表由 AgentLoop 每轮写入，
-  `core/src/agent/loop.rs:756`）——见 §6.3。
+  `core/src/agent/loop.rs:756`），见 §6.3。
 
 ### 4.6 压缩点刷新（会话内唯一免费刷新点）
 
 压缩成功后（自动 / 手动共用）`maybe_compress_and_persist` 调用
 `invalidate_injectable_snapshot`（`agent_core.rs:484-495`）：清空内存 `injectable_context` +
 置空持久化快照，下一轮 `assemble_context` 重新检索 learned rules / memories 并固化新快照。
-理由：压缩已重建 system 前缀（摘要消息插入），此刻刷新零额外缓存成本——会话内唯一免费刷新点
+理由：压缩已重建 system 前缀（摘要消息插入），此刻刷新零额外缓存成本，会话内唯一免费刷新点
 （[ADR-012](decisions/012-injectable-snapshot-persistence.md)）。
 
 ### 4.7 失败降级
 
 `compress_if_needed` 出错时仅 `warn`，本次会话**以降级（不压缩）方式继续**
-（`pipeline.rs:197-202`）——压缩不阻断主流程。
+（`pipeline.rs:197-202`），压缩不阻断主流程。
 
 ---
 
 ### 4.8 工具表变化触发的主动压缩（ADR-030 后续演进）
 
 除阈值与手动两条路径外，还有一条**事件驱动**的压缩入口：**真用户轮**在请求前
-比对"会话工具表指纹"（`ToolRegistry::toolset_fingerprint`，确定性哈希）——
+比对"会话工具表指纹"（`ToolRegistry::toolset_fingerprint`，确定性哈希），
 工具集发生变化（MCP 增删 / 配置热重载）时**主动压缩一次**（`force=true`）。
 
 - 目的：把"因工具变化导致的提示词前缀缓存失效"与一次压缩合并到同一轮
   （变化立即可见 + 掉缓存值得）；仅对用户输入轮付一次指纹成本（唤醒轮不检查）。
 - 首轮（新会话/重启后）只记录基线、不触发压缩。
-- 消息数不足时由压缩门槛（`MIN_MESSAGES_BEFORE_COMPRESSION`）自然拒绝——
+- 消息数不足时由压缩门槛（`MIN_MESSAGES_BEFORE_COMPRESSION`）自然拒绝；
   此时工具表仍已刷新（请求侧每轮现取），只是不做摘要。
 
 ---
@@ -254,7 +254,7 @@ self.tokens.input.max(self.tokens.cache.read)
 调用链：`handler` → `agent.compress_session(&session_id)`（`coordinator.rs:339`）
 → `maybe_compress_and_persist(&state, session_id, **force=true**)`。
 
-- **`force=true` 跳过窗口阈值**（`pipeline.rs:156-158`）——用户主动点击即明确意图；
+- **`force=true` 跳过窗口阈值**（`pipeline.rs:156-158`），用户主动点击即明确意图；
   只受 `MIN_MESSAGES_BEFORE_COMPRESSION`（6 条）下限保护。
 - 自动压缩保留窗口阈值（防频繁压缩）。
 - 返回值：`Some(summary_sm)` = 实际发生压缩（摘要已持久化）；`None` = 无需压缩（消息不足或未超阈值）。
@@ -270,7 +270,7 @@ self.tokens.input.max(self.tokens.cache.read)
 | `context_status`（只读） | 想知道「还剩多少」时取实测值 | 窗口 / 已用 token（占比）/ 自动压缩阈值 / 临界阈值 / 距阈值余量 / 距压缩点条数 / 是否具备压缩条件 / `now` |
 | `compress_context(handoff?)`（写） | 任务还长、需要提前腾空间 | 登记压缩请求，**本轮收尾**（不再输出正文） |
 
-- **只登记、不压缩**：压缩会改写会话链，必须发生在轮末安全点——正在跑的 `AgentLoop`
+- **只登记、不压缩**：压缩会改写会话链，必须发生在轮末安全点，正在跑的 `AgentLoop`
   手里是 `Vec<Message>` 快照，轮内压缩对它不生效。请求进 `CompressionRequests`
   （按会话分条、后写覆盖先写），`AgentLoop` 在工具执行后看到请求即结束本轮。
 - 轮末 `handle_compression_request`：`force=true` 压缩（仍受 6 条下限保护）→ 刷新
@@ -305,14 +305,14 @@ provider usage.prompt_tokens（完整输入，含缓存命中）
 | `UsageStat` 命中率 | `cached_input / (uncached_input + cached_input)` | SQL 聚合 | `core/src/db/usage.rs:214-221` |
 
 **前端 `ContextRing` 的百分比口径与压缩判定同源**：分子都用 prompt 侧**完整**输入（含缓存命中），
-分母都用 `context_window`。区别只是阈值不同——压缩判定比较 `prompt_side_tokens` 与
+分母都用 `context_window`。区别只是阈值不同：压缩判定比较 `prompt_side_tokens` 与
 `context_window × 0.6`，圆环只展示 `prompt_tokens / context_window`。
 `context_window` 由服务端从模型规格解析后注入 `StreamUsage`（失败取兜底 32K，
 `server/src/api/chat/handlers.rs:66`、`server/src/api/chat/services.rs:245-251`、
 `server/src/api/chat/types.rs:113-128`）。
 
 > **重要**：缓存命中部分（`cache_read`）**算占用**（它仍占据窗口），因此**不得**用
-> `input - cache_read`（"未命中"）作为上下文占用——那是成本口径，不是窗口占用口径。
+> `input - cache_read`（"未命中"）作为上下文占用，那是成本口径，不是窗口占用口径。
 
 ### 6.2 从 `session_messages` 聚合（SQL 示例）
 
@@ -384,9 +384,9 @@ WHERE session_id = :sid;
 **口径关系提示**：
 
 - `usage_logs` 记的是**每次请求**（含多轮工具循环），因此同一轮内多次 LLM 调用的 `prompt_tokens`
-  会**重复累加**——它反映"消耗/成本"，**不等于**某一次请求的窗口占用。
+  会**重复累加**，它反映"消耗/成本"，**不等于**某一次请求的窗口占用。
   窗口占用看**单次**：`session_messages` 里最后一条带 usage 的消息的 `prompt_side_tokens`（§4.3）。
-- **压缩请求不在 `usage_logs`**（不经过 AgentLoop）——压缩消耗只体现在摘要消息的 `tokens` 里（§4.5）。
+- **压缩请求不在 `usage_logs`**（不经过 AgentLoop），压缩消耗只体现在摘要消息的 `tokens` 里（§4.5）。
 
 ---
 
@@ -400,7 +400,7 @@ WHERE session_id = :sid;
   1M 窗口下高命中会话直接越过窗口 → 动态 `max_tokens` 归零 → 报"预算不足"。
 - **修复**：统一改用 `prompt_side_tokens`（`input.max(cache.read)`）**单点**
   （`structured_message.rs:239`；使用点 `loop.rs:620-651`、`agent_core.rs:553-566`）。
-- **预算计算入口**：`AgentLoop::prepare_request`（`core/src/agent/loop.rs:251-297`）——
+- **预算计算入口**：`AgentLoop::prepare_request`（`core/src/agent/loop.rs:251-297`），
   动态 `max_tokens` 由实测输入（`prompt_tokens`）与窗口计算；`max_tokens < 1024` 时不发请求，
   直接报错交由压缩链路恢复。回归测试见 `loop_tests.rs:1463-1520`。
 
@@ -411,7 +411,7 @@ WHERE session_id = :sid;
 - **机制**（`.scratch/wake-no-user-finding.md`）：压缩点恰好落在通知前 → 组装视图 =
   `摘要(system) + 通知(system) + 唤醒指令(system)`，**没有任何 user 消息**；云 API 对"无 user"
   请求返回空内容（`finish_reason="load"`，0 token）。
-- **修复**：压缩点以 **user 角色**锚定（§2.3）——压缩后组装视图**恒有 ≥1 条 user**。
+- **修复**：压缩点以 **user 角色**锚定（§2.3），压缩后组装视图**恒有 ≥1 条 user**。
   转换层同时兼容两代数据（旧 `system` → `user`）。
   实现：`pipeline.rs:210-217`（落库 user）、`assembler.rs:82-85`（归一）；
   事件推送门控同步为 `role == System || compression_marker`
@@ -467,6 +467,6 @@ WHERE session_id = :sid;
 
 **排查笔记（`.scratch/`，未纳入版本控制）**
 
-- `.scratch/wake-no-user-finding.md` — 全 system 空输出事故
-- `.scratch/dsh-compaction-study.md` — DSH compaction 对照研究
-- `.scratch/audit-report-2026-09-12.md` — D 节本文件大纲
+- `.scratch/wake-no-user-finding.md`：全 system 空输出事故
+- `.scratch/dsh-compaction-study.md`：DSH compaction 对照研究
+- `.scratch/audit-report-2026-09-12.md`：D 节本文件大纲

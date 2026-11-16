@@ -1,15 +1,15 @@
 # 契约分级台账（ADR-049 D3 落地）
 
 **日期**: 2026-10-20
-**状态**: 常驻台账 · 分级已冻结（期 3 结束，2026-10-21）——改契约按本表的级别条款执行
-**用途**: 回答三个问题 —— 这个 trait 归哪一级、改它会影响谁、谁来保证它不被乱改。
+**状态**: 常驻台账 · 分级已冻结（期 3 结束，2026-10-21）：改契约按本表的级别条款执行
+**用途**: 回答三个问题：这个 trait 归哪一级、改它会影响谁、谁来保证它不被乱改。
 
 ---
 
 ## 一、为什么要分级
 
 Rust 下「契约 = 成本」：契约变更会穿透依赖图，改动成本随消费者数量放大。
-把「想改就改」的自由让渡给插件内部，把「不许乱动」的约束集中到最薄的一层 —— 这是让自由与稳定共存的最小代价。
+把「想改就改」的自由让渡给插件内部，把「不许乱动」的约束集中到最薄的一层，这是让自由与稳定共存的最小代价。
 
 | 级别 | 含义 | 变更纪律 | 谁能改 |
 |---|---|---|---|
@@ -67,19 +67,19 @@ Rust 下「契约 = 成本」：契约变更会穿透依赖图，改动成本随
 | 28 | `CommandEventSink` | `core/src/executor/command.rs:82` | 同上 |
 | 29 | `ApprovalPendingNotifier` | `plugins/policy-approval/src/workflow.rs:33`（随实现迁出 core，ADR-049 期 3-T1） | 审批策略插件内部 |
 | 30 | `TaskReviewer` | `core/src/executor/review.rs`（模块原名 `judge.rs`，ADR-049 期 3-T3 实现迁出后改名） | 评审策略插件内部（单消费者：子代理自审）；实现 `LlmTaskReviewer` 在 `plugins/policy-review`，装配层经 `TaskReviewerFactory` 注入 |
-| 31 | `EvolutionReviewExecutor` | `core/src/scheduler/evolution_executor.rs` | 演化任务插件的唯一外部能力（ADR-049 期 2 序 5b 已提入 core：实现 `AgentEvolutionExecutor` 在 server，经 `TaskServices.evolution_executor` 注入——若留在插件里，server 就得依赖插件，破 D2-1） |
-| 32 | `EmbeddingUsageSink` | `core/src/model/usage.rs`（ADR-049 期 2 序 6 从 `model/provider/middleware.rs` 提到 `model` 根） | 嵌入用量回传：**实现方是通道层**（`UsageLogEmbeddingSink` 写 `usage_logs`）、**消费方是插件**（`plugins/provider-embed` 的 `LoggedEmbeddingService`）——契约必须住在两者之上的 core，否则通道层要 `use tianyan_provider_embed::…`（破 D2-1） |
+| 31 | `EvolutionReviewExecutor` | `core/src/scheduler/evolution_executor.rs` | 演化任务插件的唯一外部能力（ADR-049 期 2 序 5b 已提入 core：实现 `AgentEvolutionExecutor` 在 server，经 `TaskServices.evolution_executor` 注入，若留在插件里，server 就得依赖插件，破 D2-1） |
+| 32 | `EmbeddingUsageSink` | `core/src/model/usage.rs`（ADR-049 期 2 序 6 从 `model/provider/middleware.rs` 提到 `model` 根） | 嵌入用量回传：**实现方是通道层**（`UsageLogEmbeddingSink` 写 `usage_logs`）、**消费方是插件**（`plugins/provider-embed` 的 `LoggedEmbeddingService`），契约必须住在两者之上的 core，否则通道层要 `use tianyan_provider_embed::…`（破 D2-1） |
 | 33 | `ServiceDiscovery` | `core/src/model/traits.rs:73` | 适配器内部（模型列表探测） |
 | 34 | `SummaryService` | `core/src/vfs/summary/engine.rs:51` | 摘要策略插件内部 |
-| 35 | `ApprovalGate` | `core/src/executor/approval/gate.rs:44` | 审批门控 seam（**ADR-049 期 3-T1 新增**）：内核只认 `Arc<dyn ApprovalGate>`，实现在 `plugins/policy-approval`。按 B 级管理的理由——只有一个消费者面（内核的 4 个审批调用点）与一个实现（`ApprovalWorkflow`），属「插件自有的小契约」而非跨插件公共协议；方法集按**调用点证据**最小化到 4 个（`authorize` / `status` / `respond_to_approval` / `record_user_confirmation_by_fingerprint`），冻结时点（期 3 结束）再评估升不升 A 级 |
-| 36 | `ContextPort` | `core/src/context/port.rs` | 上下文工程 seam（**ADR-049 期 3-T2 新增**）：内核只认 `Arc<dyn ContextPort>`，实现在 `plugins/policy-context`（`ContextPipeline`）。按 B 级管理的理由——一个消费者面（内核 3 个调用点：`agent_core.rs:478` 加载注入 / `:783` 会话压缩 / `:751` 压缩点摘要提取）+ 一个实现，属「插件自有的小契约」；方法集按调用点证据最小化到 3 个，**没有** `run()` / `compress_if_needed()` / `compressor()` 之类无生产调用点的方法。**顺序契约 `compress_for_session` → 落库成功 → `ws.reshape_after_compression()`（ADR-035 §2）留在内核执行**，不进本 trait——插件只产出压缩结果。未装配时内核用 `NullContextPort` 兜底（`start_server*` 另有启动期硬守卫）。冻结时点（期 3 结束）再评估升不升 A 级 |
-| ~~37~~ | ~~`SkillReviewPort`~~ | — | **已退役（ADR-049 期 4c）**：技能质量判断改由**演化智能体**依据「技能使用统计（近 30 天调用次数 / 处理异常 / 均耗时 / 最后调用）+ 用户原话材料 + 技能清单」承担；契约 `SkillReviewPort` / `SkillReview`、实现 `SkillReviewer`（`review_conversation`）与插槽 `SkillReviewFactory` 一并删除，`/api/v1/skills/stats` 的 `reviews` 字段与前端两处渲染同步下线。**编号留空不重排**（重排会牵动全表引用）。`REVIEWS_PREFIX` 常量保留在 `core/src/skills/mod.rs`（历史 `_reviews` 目录仍须排除在技能列表外）。原为 B 级（期 3-T3 新增，1 个消费者 + 1 个实现） |
+| 35 | `ApprovalGate` | `core/src/executor/approval/gate.rs:44` | 审批门控 seam（**ADR-049 期 3-T1 新增**）：内核只认 `Arc<dyn ApprovalGate>`，实现在 `plugins/policy-approval`。按 B 级管理的理由：只有一个消费者面（内核的 4 个审批调用点）与一个实现（`ApprovalWorkflow`），属「插件自有的小契约」而非跨插件公共协议；方法集按**调用点证据**最小化到 4 个（`authorize` / `status` / `respond_to_approval` / `record_user_confirmation_by_fingerprint`），冻结时点（期 3 结束）再评估升不升 A 级 |
+| 36 | `ContextPort` | `core/src/context/port.rs` | 上下文工程 seam（**ADR-049 期 3-T2 新增**）：内核只认 `Arc<dyn ContextPort>`，实现在 `plugins/policy-context`（`ContextPipeline`）。按 B 级管理的理由：一个消费者面（内核 3 个调用点：`agent_core.rs:478` 加载注入 / `:783` 会话压缩 / `:751` 压缩点摘要提取）+ 一个实现，属「插件自有的小契约」；方法集按调用点证据最小化到 3 个，**没有** `run()` / `compress_if_needed()` / `compressor()` 之类无生产调用点的方法。**顺序契约 `compress_for_session` → 落库成功 → `ws.reshape_after_compression()`（ADR-035 §2）留在内核执行**，不进本 trait，插件只产出压缩结果。未装配时内核用 `NullContextPort` 兜底（`start_server*` 另有启动期硬守卫）。冻结时点（期 3 结束）再评估升不升 A 级 |
+| ~~37~~ | ~~`SkillReviewPort`~~ | | **已退役（ADR-049 期 4c）**：技能质量判断改由**演化智能体**依据「技能使用统计（近 30 天调用次数 / 处理异常 / 均耗时 / 最后调用）+ 用户原话材料 + 技能清单」承担；契约 `SkillReviewPort` / `SkillReview`、实现 `SkillReviewer`（`review_conversation`）与插槽 `SkillReviewFactory` 一并删除，`/api/v1/skills/stats` 的 `reviews` 字段与前端两处渲染同步下线。**编号留空不重排**（重排会牵动全表引用）。`REVIEWS_PREFIX` 常量保留在 `core/src/skills/mod.rs`（历史 `_reviews` 目录仍须排除在技能列表外）。原为 B 级（期 3-T3 新增，1 个消费者 + 1 个实现） |
 | 38 | `ConnectionProbe` | `core/src/model/assembly.rs` | 连通性探测 seam（**ADR-049 期 2 序 6 新增，期 2 唯一新增 trait**）：通道层只认 `Arc<dyn ConnectionProbe>`，实现 `ProviderConnectionProbe` 在 `plugins/provider-llm`，随 `ProviderLlmServices::probe` 由工厂产出。方法集 **1 个**（`probe(endpoint, api_key, model) -> Result<Vec<String>>`）。**为什么不给探针单开插槽**：探测用用户当场输入的 endpoint/key 造**临时**客户端，必须复用插件那套构造语义（UA 单点 / 方言解析 / 双预算超时 / 动态会话头 / 重试策略）；独立插槽会让装配层多一个必填项，或让第二个工厂复制这套语义。**错误分类不进契约**：`is_permission` / `is_not_found` / `is_timeout` → 用户文案仍是通道层的事（ADR-014 消费端）。未装配 provider 工厂时探针为 `None` → `POST /api/config/test-connection` 返回「连接测试不可用」 |
 
 > 小计：S 14 / A 11 / **B 12** = **37**（含期 3-T1 新增的 `ApprovalGate`、期 3-T2 新增的
 > `ContextPort`、期 2 序 6 补做的 `ConnectionProbe`；期 3-T3 新增的 `SkillReviewPort`
 > 已于期 4c 退役，编号留空不重排）。
-> 反指标「每期净增 pub trait ≤ 3」：期 3 净增 **3**（T1 / T2 / T3 各一——正好用满），
+> 反指标「每期净增 pub trait ≤ 3」：期 3 净增 **3**（T1 / T2 / T3 各一，正好用满），
 > 其中 T3 那根已于期 4c 退役；期 2 序 6（补做）净增 **1**。期 4 起不得再增。
 
 ---
@@ -141,9 +141,9 @@ core/src/agent/tool_registry/mod.rs        # DynamicToolExecutor（仅 trait 定
 ## 五、待决问题
 
 1. **`ToolListener` 的合并时机**：合并会改动 `pipeline.rs` 的注册签名（期 0.5 的 0.5.4 已要求保留 spill/监听在注册表层），需与工具契约改造同批验证。
-2. **`RuntimePort` 的粒度**：通道是否需要感知"轮开始/轮结束/流式块"三种事件的区分，还是统一为事件流 —— 期 1 试点后定。
+2. **`RuntimePort` 的粒度**：通道是否需要感知"轮开始/轮结束/流式块"三种事件的区分，还是统一为事件流，期 1 试点后定。
 3. **S 级冻结与 `#[non_exhaustive]`**：是否给 S 级 enum 加 `#[non_exhaustive]`（防下游穷举 match），需评估对内部 match 的影响（期 3 决定）。
-4. 本表数字与 ADR-049 D3 的「A 级 10 个」有出入（实测 11，且 B 级 9 个为本次首次明确）—— 以本表为准，ADR 的 10 为初估。
+4. 本表数字与 ADR-049 D3 的「A 级 10 个」有出入（实测 11，且 B 级 9 个为本次首次明确），以本表为准，ADR 的 10 为初估。
 
 ---
 
@@ -151,7 +151,7 @@ core/src/agent/tool_registry/mod.rs        # DynamicToolExecutor（仅 trait 定
 
 **为什么必须二分**：`common` 入度 **18 个模块 / 344 处引用**（全仓最高），但它混着两类变化原因完全不同的代码：
 契约（随**协议**变，S 级）与工具（随**运维偏好**变，B 级）。若整体当 kernel-api，改一行日志格式就是 S 级契约变更，
-全插件重编 —— 这正是要避免的。
+全插件重编。这正是要避免的。
 
 ### A. 契约面 → `kernel-api`（≈ 2,633 行）
 
@@ -170,7 +170,7 @@ core/src/agent/tool_registry/mod.rs        # DynamicToolExecutor（仅 trait 定
 | `common/types/tool.rs` | 45 | 工具相关公共类型 | Tool 契约的伴随类型 |
 | `common/types/injectable.rs` | 40 | 可注入上下文标记 | 前缀组装（ADR-004） |
 | `common/types/search.rs` | 27 | 检索请求/结果类型 | 检索契约载荷 |
-| `common/types/mod.rs` | 33 | 模块聚合与再导出 | — |
+| `common/types/mod.rs` | 33 | 模块聚合与再导出 | |
 | `common/error.rs` | 267 | TianyanError 4 变体 + 语义谓词 | **分类契约单点**（ADR-014） |
 
 ### B. 工具面 → `kernel-impl`（≈ 1,389 行）
@@ -179,12 +179,12 @@ core/src/agent/tool_registry/mod.rs        # DynamicToolExecutor（仅 trait 定
 |---|---|---|---|
 | `common/logging.rs` | 535 | 日志初始化/轮转/格式 | 随运维偏好变；格式改一次不该触发全插件重编 |
 | `common/token_estimator.rs` | 248 | token 估算启发式 | 估算策略可调（B 级），且只有内核/上下文策略用 |
-| `common/llm_judge.rs` | 186 | LLM 评审工具函数（`parse_llm_json` / `truncate_output`） | **留内核工具面**（ADR-049 §B.5 第 4 条，期 3-T3 实测复核）：6 个消费者里 **4 个非评审**——`vfs/summary/engine.rs:119`（内核摘要解析）/ `agent/background.rs:42`（任务通知截断）/ `agent/tool_registry/evolution_ops.rs:13`（演化综述）/ `plugins/tools-web`（抓取正文截断）；移进 `policy-review` 会让内核反向依赖策略插件（破 D2-1）。插件只 `use tianyan::common::llm_judge::…` |
+| `common/llm_judge.rs` | 186 | LLM 评审工具函数（`parse_llm_json` / `truncate_output`） | **留内核工具面**（ADR-049 §B.5 第 4 条，期 3-T3 实测复核）：6 个消费者里 **4 个非评审**：`vfs/summary/engine.rs:119`（内核摘要解析）/ `agent/background.rs:42`（任务通知截断）/ `agent/tool_registry/evolution_ops.rs:13`（演化综述）/ `plugins/tools-web`（抓取正文截断）；移进 `policy-review` 会让内核反向依赖策略插件（破 D2-1）。插件只 `use tianyan::common::llm_judge::…` |
 | `common/panic_hook.rs` | 144 | panic 现场落盘 | 进程级保障机制，无插件消费者 |
 | `common/http.rs` | 115 | HTTP 客户端工厂 | 适配器内部实现细节 |
 | `common/truncate.rs` | 86 | UTF-8 安全截断 | 纯工具函数，被 spill/命令输出复用 |
 | `common/binary.rs` | 75 | 二进制文件探测 | 工具实现辅助 |
-| `common/mod.rs` | 18 | 模块聚合 | — |
+| `common/mod.rs` | 18 | 模块聚合 | |
 
 ### C. 判定规则（争议时的裁决线）
 
@@ -192,7 +192,7 @@ core/src/agent/tool_registry/mod.rs        # DynamicToolExecutor（仅 trait 定
 
 按此规则复核两处易错点：
 
-- `TokenUsage` 属契约（`ChatService` 的返回值里有它）；而 `token_estimator`（估算器）属工具 —— **类型与估算器分家**。
-- `ContentLevel` 属契约（VFS 三层的入参）；而 `truncate`（截断）属工具 —— **语义与字节操作分家**。
+- `TokenUsage` 属契约（`ChatService` 的返回值里有它）；而 `token_estimator`（估算器）属工具，**类型与估算器分家**。
+- `ContentLevel` 属契约（VFS 三层的入参）；而 `truncate`（截断）属工具，**语义与字节操作分家**。
 
 > 小计：契约面 2,633 行 / 工具面 1,389 行 ≈ 4,022 行（`common` 文件口径 4,040 行，差额为测试与空行）。

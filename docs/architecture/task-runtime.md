@@ -1,6 +1,6 @@
 # 任务运行时模型（Task Runtime）
 
-> 覆盖：后台任务的**运行时行为**——三类任务、并发与排队、生命周期、唤醒语义、
+> 覆盖：后台任务的**运行时行为**：三类任务、并发与排队、生命周期、唤醒语义、
 > 取消与回退、存储边界、面板数据流。
 > 事件字段/协议见 [event-protocol.md](event-protocol.md)；上下文与压缩见
 > [context-pipeline.md](context-pipeline.md)。
@@ -19,7 +19,7 @@
 | **终端命令**（后台命令） | `execute_command(background: true)` | `cmd_` | 独立进程 + watcher 任务 | `core/src/executor/command.rs` |
 | **定时任务** | 调度器扫描（间隔制，ADR-024） | 任务名 | 调度器循环内串行执行 | `core/src/scheduler/` |
 
-关键建模（ADR-026/030）：**子智能体不是特殊机制，而是"带父会话引用的会话"**——
+关键建模（ADR-026/030）：**子智能体不是特殊机制，而是"带父会话引用的会话"**，
 消息落库、事件推送、前端渲染三层完全复用主会话路径，只在两处特化：
 ① 消息落库**不索引 FTS**（见 §6）；② 事件按 `session_id = task_id` 路由到任务面板。
 
@@ -57,10 +57,10 @@ pending ──(许可)──► running ──(进程退出 / 循环结束)─�
 - **SQL 权威**：任务状态持久化在 `background_tasks` 表（经 `db::Database` 单连接），
   前端列表与任务面板的最终真相以表为准；`task_status` 事件只是"尽力而为"的实时通道。
 - **TTL 逐出**：`evict_expired` 删除**终态且超过 3 天**的任务
-  （`now_ms() - 3*24*3600*1000`，`core/src/agent/background.rs:860-872`）——
+  （`now_ms() - 3*24*3600*1000`，`core/src/agent/background.rs:860-872`），
   **惰性触发**（在 snapshot 类调用时执行），不是独立定时器。
 - **重启语义**：进程重启后重新加载任务表；**中断（仍为 running）的任务被标记为
-  Failed**（回归测试 `test_persistence_reload_interrupted_becomes_failed`）——
+  Failed**（回归测试 `test_persistence_reload_interrupted_becomes_failed`），
   不假装还在运行，避免 `remaining` 计数永久大于 0。
 
 ---
@@ -79,7 +79,7 @@ should_wake = allComplete || failure
 
 `remaining` 的来源是会话级计数（`session_counts`，命令侧）；
 命令侧另有**就绪通知**通道：`on_command_ready`（端口监听/日志关键词命中）
-与就绪超时说明——就绪是重要事件（主 agent 可据此开始后续工作）。
+与就绪超时说明。就绪是重要事件（主 agent 可据此开始后续工作）。
 
 唤醒轮本身也走统一 Agent 循环（`process_wake`），其流式事件与用户轮同构
 （见 event-protocol.md §2.3）。
@@ -92,9 +92,9 @@ should_wake = allComplete || failure
 |------|------|------|
 | 取消任务 | `task_cancel` 工具 / `POST /tasks/{id}/cancel` | 终态任务幂等空操作；运行中则置 `cancelled` 并杀进程树（命令侧 `kill_process_tree`），写入退出标记 `--- terminated (killed) ---` |
 | 主循环停止 | coordinator 注入 `delegation_cancel`（`AtomicBool`） | 子代理在轮顶与 chunk 循环内检查取消标志，及时中断 |
-| 用户回退（会话级） | 前端回退锚点（用户输入） | 按 ADR-027：**锚点之后全部截断**（含该锚点之后发起的任务）——回退是会话时序操作，不是任务操作 |
+| 用户回退（会话级） | 前端回退锚点（用户输入） | 按 ADR-027：**锚点之后全部截断**（含该锚点之后发起的任务），回退是会话时序操作，不是任务操作 |
 
-取消的任务**不做唤醒**（`cancelled` 不是 `failed`）——用户主动中止无需再打扰。
+取消的任务**不做唤醒**（`cancelled` 不是 `failed`），用户主动中止无需再打扰。
 
 ---
 
@@ -129,7 +129,7 @@ task_status 事件（统一事件流，按 session_id 路由）
 command_output 事件
 ```
 
-- 归属过滤：面板按任务的 `parent_session_id`（父会话）过滤——当前会话只看自己的任务；
+- 归属过滤：面板按任务的 `parent_session_id`（父会话）过滤：当前会话只看自己的任务；
 - 事件丢失不影响正确性：重连/切回会重新拉取列表（SQL 权威）与消息快照；
 - 命令输出**完整性由日志文件保证**（`{data_dir}/command_logs/{id}.log`），
   事件只承载实时视图（见 event-protocol.md §7 可靠性分层）。

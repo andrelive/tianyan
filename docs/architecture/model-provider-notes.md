@@ -1,19 +1,19 @@
 # 模型 / Provider 侧事实手册（model-provider-notes）
 
-> **定位**：模型与 Provider 侧的**事实手册**——把排查中积累的高价值知识固化：reasoning 回传契约、思考强度/语言实测、前缀缓存口径、上游异常。
+> **定位**：模型与 Provider 侧的**事实手册**，把排查中积累的高价值知识固化：reasoning 回传契约、思考强度/语言实测、前缀缓存口径、上游异常。
 > **最后更新**：2026-09-13（对应 HEAD `9e285cb`，版本 0.3.17）
 > **取证纪律**（本文所有陈述遵守）：
 > 1. 每条陈述给出**代码位置（`文件:行`）或数据来源（`.scratch/` 文件名）**；
 > 2. 实测数字标注**来源文件 + 条件**，并注明"会话实测/非实验室基准"；
 > 3. 无法在仓库内核实的历史数字，写"来源不明，待复测"，不编造。
 >
-> ⚠️ **`.scratch/` 被 `.gitignore` 忽略且从未提交**（见 `.scratch/audit-reports/bt_6893a4e4.md` §4）。本文引用的 `.scratch/*.py` / `*.json` / `*.txt` 是**本地复现材料**，不在版本控制内——本文把它们承载的结论固化下来，脚本仅作复现线索。
+> ⚠️ **`.scratch/` 被 `.gitignore` 忽略且从未提交**（见 `.scratch/audit-reports/bt_6893a4e4.md` §4）。本文引用的 `.scratch/*.py` / `*.json` / `*.txt` 是**本地复现材料**，不在版本控制内；本文把它们承载的结论固化下来，脚本仅作复现线索。
 >
-> 📌 **路径口径（2026-10-21，ADR-049 期 2 序 6）**：provider 实现已整体搬出 core——
+> 📌 **路径口径（2026-10-21，ADR-049 期 2 序 6）**：provider 实现已整体搬出 core：
 > `plugins/provider-client`（`AsyncOpenAIClient` + 状态码语义分类）、`plugins/provider-llm`
 > （聊天 / 视觉 / 模型目录 / 日志装饰 / 连通性探针）、`plugins/provider-embed`（嵌入 + 日志/
 > 用量/缓存装饰）。本文的路径已更新为插件位置；文中 `chat.rs:NNN` 之类的**行号仍是迁移前
-> 的位置**（代码逐字未变，仅 import 行有位移）——按符号名检索即可。
+> 的位置**（代码逐字未变，仅 import 行有位移），按符号名检索即可。
 
 ---
 
@@ -38,8 +38,8 @@
 | `Ollama` | `reasoning` | ollama OpenAI 兼容层 | `core/src/config/model.rs:79-87` |
 
 - **解析优先级**：显式配置 `thinking_field` > `sniff(endpoint, name)` > 默认 `ReasoningContent`（`core/src/config/model.rs:146-149`）。
-- `sniff` **只认** ollama 域名 / `:11434` / 名称含 `ollama`，**刻意不猜自建域名/代理**（`core/src/config/model.rs:96-104`）——嗅探不到的网关用 `thinking_field` 显式逃生（`core/src/config/model.rs:137-144`，ProviderConfig 字段）。
-- **发错字段名不会报错**：Go 的 `encoding/json` 静默忽略未知字段，请求仍成功，但**思考内容根本没进 prompt**——多轮上下文与思考一致性悄悄受损（`core/src/config/model.rs:66-71`）。
+- `sniff` **只认** ollama 域名 / `:11434` / 名称含 `ollama`，**刻意不猜自建域名/代理**（`core/src/config/model.rs:96-104`）；嗅探不到的网关用 `thinking_field` 显式逃生（`core/src/config/model.rs:137-144`，ProviderConfig 字段）。
+- **发错字段名不会报错**：Go 的 `encoding/json` 静默忽略未知字段，请求仍成功，但**思考内容根本没进 prompt**；多轮上下文与思考一致性悄悄受损（`core/src/config/model.rs:66-71`）。
 - 客户端**构造时解析一次并缓存**，请求路径不再判断（`plugins/provider-client/src/client.rs`）。
 
 ### 1.3 特性矩阵（按协议/字段维度）
@@ -68,7 +68,7 @@
 
 内置规格示例（`core/src/model/spec.rs:96-197`）：`deepseek-v4-flash` 1M/32K、`deepseek-r1`（条目 `spec.rs:110-121`）128K、`kimi-k3` 1M/128K、`gpt-4o` 128K、`claude` 200K、`qwen3`/`qwen` 131K、`llama` 128K。
 
-> **第三级兜底**（`core/src/model/spec.rs:222-233`）：provider 前缀不匹配时**仅按模型名前缀**匹配——网关 provider（如 `opencode`）挂载知名模型（`deepseek-v4-flash`）也能命中规格（`spec.rs:520-528` 测试锁定）。
+> **第三级兜底**（`core/src/model/spec.rs:222-233`）：provider 前缀不匹配时**仅按模型名前缀**匹配，网关 provider（如 `opencode`）挂载知名模型（`deepseek-v4-flash`）也能命中规格（`spec.rs:520-528` 测试锁定）。
 
 ### 1.5 思考强度档位声明（advisory）
 
@@ -101,17 +101,17 @@
 **回填为什么必要**：`convert_messages` 用 async-openai 0.34 的 `ChatCompletionRequestAssistantMessage`（**无 `reasoning_content` 字段**，`..Default::default()` 构造），类型化序列化会**静默丢弃**思考内容；故必须序列化后按索引回填（`plugins/provider-llm/src/chat.rs`）。`convert_messages` 对每条 `Message` 恰好生成一条请求消息 → 索引一一对应（`chat.rs:664-666` 注释）。
 
 **回归测试锁定**（`plugins/provider-llm/src/chat.rs`）：
-- `test_inject_reasoning_content_roundtrip`（`chat.rs:876`）——assistant 的 reasoning 必须回传；
-- `test_inject_reasoning_content_ollama_dialect`（`chat.rs:948`）——ollama 方言写 `reasoning`，且**不得双写** `reasoning_content`（`chat.rs:966-967`）；
+- `test_inject_reasoning_content_roundtrip`（`chat.rs:876`）：assistant 的 reasoning 必须回传；
+- `test_inject_reasoning_content_ollama_dialect`（`chat.rs:948`）：ollama 方言写 `reasoning`，且**不得双写** `reasoning_content`（`chat.rs:966-967`）；
 - `test_inject_reasoning_content_dialects_are_exclusive`（`chat.rs:973`）；
-- `test_structured_to_messages_reasoning_without_tool_call_is_kept`（`core/src/context/assembler.rs:374`）——无工具调用轮也保留。
+- `test_structured_to_messages_reasoning_without_tool_call_is_kept`（`core/src/context/assembler.rs:374`）：无工具调用轮也保留。
 
 ### 2.3 历史结论（已否定方向，勿重复讨论）
 
 | 方向 | 结论 | 依据 |
 |---|---|---|
 | "只对带 `tool_calls` 的消息回传思考内容" | **否定**。`assembler` 已**去掉 `has_tool_calls` 条件**，改为无条件保留 reasoning（回归测试锁定无工具调用轮也保留）。收益≈1%（**会话结论；仓库内无对应数据文件 → 来源不明，待复测**） | `core/src/context/assembler.rs:126-129`；`docs/archive/release-notes.md`（0.2.x 条目"`assembler` 去掉 `has_tool_calls` 条件无条件保留 reasoning"） |
-| "裁剪思考内容（省略历史 reasoning）" | **否定**。契约优先、不裁剪——带 tools 时省略违反官方规则；且字段名/轮次覆盖是"静默失效"风险（发错字段或漏轮次都不会报错，只静默丢上下文）。安全性由探针验证（见下） | `core/src/config/model.rs:66-71`；探针 `.scratch/probe-strip-safety.py`（K1~K5）、`.scratch/probe-strip-safety2.py`（C1/C2/C4） |
+| "裁剪思考内容（省略历史 reasoning）" | **否定**。契约优先、不裁剪，带 tools 时省略违反官方规则；且字段名/轮次覆盖是"静默失效"风险（发错字段或漏轮次都不会报错，只静默丢上下文）。安全性由探针验证（见下） | `core/src/config/model.rs:66-71`；探针 `.scratch/probe-strip-safety.py`（K1~K5）、`.scratch/probe-strip-safety2.py`（C1/C2/C4） |
 
 **裁剪安全性探针**（`.scratch/probe-strip-safety.py` / `probe-strip-safety2.py`，只读本地结果即可，**不要重跑**）：
 - K1~K5 用例：含/省略 thinking × 有/无 tool_calls × 带/不带 tools（脚本 docstring，`probe-strip-safety.py:1-11`）；
@@ -130,13 +130,13 @@
 
 | 模型族 | 附加参数 | 值 |
 |---|---|---|
-| `effort == "off"` | **不进入本函数**，不附加任何参数（模型默认行为） | — |
+| `effort == "off"` | **不进入本函数**，不附加任何参数（模型默认行为） | |
 | 模型名含 `qwen` | `enable_thinking: true` + `thinking_budget` | `low=1024 / medium=4096 / high=16384 / 其他（含 max）=4096` |
-| 其余 OpenAI 兼容族（DeepSeek 等） | **仅 `reasoning_effort`**（2026-09-29 起收窄：`enable_thinking` 只属 DashScope 方言——opencode glm 上游对多余字段 400） | **原档位值原样透传** |
+| 其余 OpenAI 兼容族（DeepSeek 等） | **仅 `reasoning_effort`**（2026-09-29 起收窄：`enable_thinking` 只属 DashScope 方言，opencode glm 上游对多余字段 400） | **原档位值原样透传** |
 
 档位为模型自己声明的集合（`core/src/config/model.rs:245-247`），不做本地翻译；未知档位在 qwen 族用默认 `4096`。
 
-**修订（2026-09-29）**：`enable_thinking: true` 曾对全族无条件附加（依赖"DeepSeek 等实测容忍"）；实测 opencode zen 的 `glm-5.3-flash` 会 400 拒绝该字段（`Upstream request failed: ... unknown field "enable_thinking"`——曾致会话轮中断），且各渠道去掉该字段后推理照常输出，故收窄为**仅 DashScope 方言携带**（见 `plugins/provider-llm/src/chat.rs` 的 `apply_thinking_params` 注释与回归测试）。
+**修订（2026-09-29）**：`enable_thinking: true` 曾对全族无条件附加（依赖"DeepSeek 等实测容忍"）；实测 opencode zen 的 `glm-5.3-flash` 会 400 拒绝该字段（`Upstream request failed: ... unknown field "enable_thinking"`，曾致会话轮中断），且各渠道去掉该字段后推理照常输出，故收窄为**仅 DashScope 方言携带**（见 `plugins/provider-llm/src/chat.rs` 的 `apply_thinking_params` 注释与回归测试）。
 
 ### 3.2 tokenizer 前提：中文比英文省 token
 
@@ -158,8 +158,8 @@
 | `max` | ≈4200+ | T1/max/r1=**29434**、T1/max/r2=19198、T2/max/r1=13249、T2/max/r2=4965 |
 
 **口径与可信度**：
-- 上表"tokens 量级"为**本次会话记录的折算/估计值**（JSON 只存 `reasoning_chars` 与 `reasoning_cjk`，未存逐条 `completion_tokens`——见 `lang-effort-results.json` 中 `completion_tokens: null`）。**精确 token 待复测**。
-- `max` 档常见 `finish: "length"`（思考吃满输出预算，`lang-effort-results.json` 中 T1/max 两条均为 `finish=length`、`content_chars=0`）——即"想完没说话"的主要形态。
+- 上表"tokens 量级"为**本次会话记录的折算/估计值**（JSON 只存 `reasoning_chars` 与 `reasoning_cjk`，未存逐条 `completion_tokens`，见 `lang-effort-results.json` 中 `completion_tokens: null`）。**精确 token 待复测**。
+- `max` 档常见 `finish: "length"`（思考吃满输出预算，`lang-effort-results.json` 中 T1/max 两条均为 `finish=length`、`content_chars=0`），即"想完没说话"的主要形态。
 - `reasoning_cjk` 在无约束时波动大（0.0 ~ 0.588），说明**未约束时思考语言不受控**（`lang-effort-results.json` 全量 `reasoning_cjk`）。
 
 ### 3.4 soul 中文约束（原文引用）
@@ -221,11 +221,11 @@ pub fn prompt_side_tokens(&self) -> usize {
 | 上下文占用百分比 | `prompt_tokens / context_window` | 服务端 `usage` 字段（前端只做展示） |
 | 缓存命中率 | `cache_read / prompt_tokens` | 服务端 `usage` 字段（前端只做展示） |
 
-> **重要边界**：缓存命中部分（`cache_read`）**算窗口占用**（它仍占窗口），**不得**用 `input - cache_read`（"未命中"）当上下文占用——那是**成本口径**，不是**窗口占用口径**（`docs/architecture/context-pipeline.md` §6.1）。
+> **重要边界**：缓存命中部分（`cache_read`）**算窗口占用**（它仍占窗口），**不得**用 `input - cache_read`（"未命中"）当上下文占用，那是**成本口径**，不是**窗口占用口径**（`docs/architecture/context-pipeline.md` §6.1）。
 
 ### 4.5 前缀稳定性（命中的前提）
 
-命中依赖前缀**逐字节稳定**：组装顺序固定（soul → 当前环境 → project_instructions → rules+memories → history）**不可变更**（ADR-004；`docs/architecture/context-pipeline.md` §1）。会话内**不刷新**注入内容（ADR-012），刷新点 = 启动全量 / 新会话增量 / **压缩点**（会话内唯一免费刷新点）——会话内任何前缀抖动都会使缓存失效。其中「当前环境」段的内容是会话绑定的工作目录（会话内不变），故同样逐字节稳定。
+命中依赖前缀**逐字节稳定**：组装顺序固定（soul → 当前环境 → project_instructions → rules+memories → history）**不可变更**（ADR-004；`docs/architecture/context-pipeline.md` §1）。会话内**不刷新**注入内容（ADR-012），刷新点 = 启动全量 / 新会话增量 / **压缩点**（会话内唯一免费刷新点）；会话内任何前缀抖动都会使缓存失效。其中「当前环境」段的内容是会话绑定的工作目录（会话内不变），故同样逐字节稳定。
 
 ---
 
@@ -258,7 +258,7 @@ INFO ... embed_single_with_dimensions succeeded model=text-embedding-v4
 2. **用量极小**：单次只是短 query（几十~百余字符）或摘要文本；数百条内容 +
    千余次检索，按公共价量级也在"元"以下。
 3. **应用内不入账（0.3.17 已修）**：嵌入不走 AgentLoop，其 token 此前**不写
-   `usage_logs`**——`usage_logs` 里只有 chat provider，统计面板自然看不到。
+   `usage_logs`**；`usage_logs` 里只有 chat provider，统计面板自然看不到。
 
 ### 5.3 0.3.17 的两项改动
 
@@ -268,7 +268,7 @@ INFO ... embed_single_with_dimensions succeeded model=text-embedding-v4
 | **查询缓存 + 空串短路** | 键 `model\|dimensions\|text`，容量 256（FIFO）；命中不发请求、不重复上报。空/空白文本直接报错（日志曾出现 `text_len=0` 的调用）。VFS 侧空 query 直接返回空结果、双摘要皆空则跳过索引 | 同上、`core/src/vfs/vfs_impl.rs` |
 
 - 装配点：VFS 实例（`server/src/lib.rs` 的 `initialize_vfs_for_app`）与 Agent 实例
-  （`server/src/state.rs` 构造 + 配置热重载两处）**都注入**——两个实例各自持有缓存。
+  （`server/src/state.rs` 构造 + 配置热重载两处）**都注入**；两个实例各自持有缓存。
 - 验证方式（升级后）：任意检索一次 → `usage_logs` 应出现
   `provider=<你的嵌入 provider>` / `model=text-embedding-v4` 的记录；
   同 query 立刻再检索一次 → **不再新增记录**（缓存命中）。
@@ -324,13 +324,13 @@ SELECT * FROM usage_logs WHERE session_id = '<会话 id>' ORDER BY id DESC LIMIT
 
 - **结论**：1315 token prompt 的**热请求命中 97%–99.9%**；**冷启动存在差异**（首次无缓存/部分命中）。
 - **判定**：这是**上游/网关侧**的缓存行为（前缀命中由服务端决定），**非 agent 缺陷**。
-- **旁证**：DeepSeek 官方响应用顶层 `prompt_cache_hit_tokens` / `prompt_cache_miss_tokens`（`.scratch/verify-resp-deepseek.txt:33`）；ollama 用 `prompt_tokens_details.cached_tokens`（`.scratch/v41-run2.txt`）——**两种形态已由 `extract_cache_tokens` 统一**（`plugins/provider-llm/src/chat.rs`）。
+- **旁证**：DeepSeek 官方响应用顶层 `prompt_cache_hit_tokens` / `prompt_cache_miss_tokens`（`.scratch/verify-resp-deepseek.txt:33`）；ollama 用 `prompt_tokens_details.cached_tokens`（`.scratch/v41-run2.txt`）；**两种形态已由 `extract_cache_tokens` 统一**（`plugins/provider-llm/src/chat.rs`）。
 
 ### 6.3 其他上游异常形态
 
 | 形态 | 说明 | 位置 |
 |---|---|---|
-| reasoning-only（有思考无正文） | ollama 对"system 完成通知"只输出思考不输出正文是**系统性**行为（相同上下文重试结果相同）——已**移除整轮重试**，保留 loop 内部空响应单次重试 | `release-notes.md（已归档 docs/archive/）` 0.3.9 条目；`core/src/agent/agent_core.rs:221-224, 1093-1107` |
+| reasoning-only（有思考无正文） | ollama 对"system 完成通知"只输出思考不输出正文是**系统性**行为（相同上下文重试结果相同）；已**移除整轮重试**，保留 loop 内部空响应单次重试 | `release-notes.md（已归档 docs/archive/）` 0.3.9 条目；`core/src/agent/agent_core.rs:221-224, 1093-1107` |
 | 非标准 `finish_reason` | 网关 `network_error` 等非标准值在 provider 层**显式上抛为错误**而非静默丢弃；`finish_reason` 随 assistant **持久化**到 `StructuredMessage.finish` | `docs/architecture/context-pipeline.md` §7.3 |
 | 流式中断 | 已有内容累积 → 保留为截断输出（`finish="interrupted"`）；完全无内容 → 按失败上报 | `core/src/agent/loop.rs:516-556` |
 | 上游错误分类 | 语义谓词（ADR-014）：`invalid_api_key`/`unauthorized` → permission、`model_not_found` → not_found、超时 → timeout；HTTP 401/403/404/408/504 各自语义分类 | `plugins/provider-llm/src/chat.rs`；`docs/architecture/decisions/014-error-classification.md` |
@@ -347,7 +347,7 @@ SELECT * FROM usage_logs WHERE session_id = '<会话 id>' ORDER BY id DESC LIMIT
 | `lang-effort-results.json` | 上述探针的逐调用结果（`reasoning_chars` / `reasoning_cjk` / `finish` / `elapsed`） | §3.2 / §3.3 | 原始记录（**未存 token**） |
 | `probe-anchor.py` + `reason-anchor-V3-覆盖条款.txt` | 英文历史 + 英文工具输出下的抗锚定对照（V2 硬性 vs V3 覆盖条款） | §3.5（12/12 切中文） | 会话实测 |
 | `probe-reason-text.py` | 抓思考原文（V2 强约束 vs 基线），判断语言是否真切换 | §3.4 / §3.5 旁证 | 会话实测 |
-| `probe-strip-safety.py`（K1~K5）、`probe-strip-safety2.py`（C1/C2/C4） | 思考回传"裁剪安全性"——省略历史 reasoning 是否被 400 拒 | §2.3 | 探针脚本（结果片段已入代码注释） |
+| `probe-strip-safety.py`（K1~K5）、`probe-strip-safety2.py`（C1/C2/C4） | 思考回传"裁剪安全性"：省略历史 reasoning 是否被 400 拒 | §2.3 | 探针脚本（结果片段已入代码注释） |
 | `verify-body-deepseek.json` / `verify-body-ollama.json` | 最小请求体（`stream_options.include_usage`） | §1.3 usage 形态 | 请求体快照 |
 | `verify-resp-deepseek.txt` / `verify-resp-ollama.txt` | 单轮响应原文（字段名差异） | §1.3 / §6.2 | 响应快照 |
 | `verify-long-v41.json` / `verify-long-v4f.json` + `v41-run1/2.txt`、`v4f-run1/2.txt` | 前缀缓存命中实测（固定长前缀 + 冷/热两次） | §6.2 | 会话实测（2026-09-11） |
@@ -358,14 +358,14 @@ SELECT * FROM usage_logs WHERE session_id = '<会话 id>' ORDER BY id DESC LIMIT
 
 | 项 | 状态 |
 |---|---|
-| "只对带 `tool_calls` 的消息回传思考内容"的**收益≈1%** | **来源不明，待复测**——仓库内无对应数据文件；可核实的只有"该方向已被否定 + 代码无条件回传"（§2.3） |
+| "只对带 `tool_calls` 的消息回传思考内容"的**收益≈1%** | **来源不明，待复测**，仓库内无对应数据文件；可核实的只有"该方向已被否定 + 代码无条件回传"（§2.3） |
 | `low≈550 / high≈940 / max≈4200+` **tokens** | 会话实测**折算值**；`lang-effort-results.json` 只存 `reasoning_chars`，未存逐条 `completion_tokens` → **精确 token 待复测**（§3.3） |
 
 ---
 
 ## 8. 相关文档
 
-- `docs/architecture/context-pipeline.md` — 上下文组装顺序 + 压缩机制 + 构成量化方法 + 故障模式
-- `docs/architecture/decisions/014-error-classification.md` — 错误分类语义谓词（KIND 前缀 + 构造器/谓词）
-- `docs/archive/release-notes.md` — 0.2.x（reasoning 回传 + 缓存）、0.3.9（ollama 思考字段回写）、0.3.14（预算误报）、0.3.15（思考语言中文约束）
-- `docs/operations/troubleshooting.md` — 日志/DB 取证 + `finish_reason:"load"` 排查路径
+- `docs/architecture/context-pipeline.md`：上下文组装顺序 + 压缩机制 + 构成量化方法 + 故障模式
+- `docs/architecture/decisions/014-error-classification.md`：错误分类语义谓词（KIND 前缀 + 构造器/谓词）
+- `docs/archive/release-notes.md`：0.2.x（reasoning 回传 + 缓存）、0.3.9（ollama 思考字段回写）、0.3.14（预算误报）、0.3.15（思考语言中文约束）
+- `docs/operations/troubleshooting.md`：日志/DB 取证 + `finish_reason:"load"` 排查路径

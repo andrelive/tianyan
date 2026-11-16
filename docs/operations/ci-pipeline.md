@@ -42,7 +42,7 @@ Rust unit tests (core 1/2)      15 分钟后被 timeout 杀掉
 - 与 `-p tianyan-core` 编出的产物
 
 **编译指纹不同** ⇒ 后者会**整棵依赖树重编译**，前一步的 29 分钟白干。
-（本仓库 core 本身无 features、server/mcp 依赖 core 也不带 feature —— 差异来自"选中集合"本身，不是 feature 声明。）
+（本仓库 core 本身无 features、server/mcp 依赖 core 也不带 feature：差异来自"选中集合"本身，不是 feature 声明。）
 
 ### 本机对照实验（独立 `--target-dir`，2026-10-08）
 
@@ -53,7 +53,7 @@ Rust unit tests (core 1/2)      15 分钟后被 timeout 杀掉
 | STEP3 | `cargo test --workspace --lib --no-run` | 2.7s、0 条编译（本机两集合恰好无差异；CI 上则出现过重编译，见 §0） |
 
 CI 侧另有直接证据（run `37730710190`）：`reuse probe` 步用**与测试步骤逐字相同**的参数跑 `--no-run`，
-耗时 **1.58s**（另一轮 0.53s / 0.23s / 0.01s）—— 证明"同参数必复用"。
+耗时 **1.58s**（另一轮 0.53s / 0.23s / 0.01s），证明"同参数必复用"。
 
 ### 纪律（写 workflow 时必须遵守）
 
@@ -64,7 +64,7 @@ CI 侧另有直接证据（run `37730710190`）：`reuse probe` 步用**与测�
 - `--test-threads N` / nextest 的 `-j N`（并发度）
 - nextest 的 `--partition count:i/n`（测试选择）
 
-`quality.yml` 如今有**两组**集合（core 单独 / server+mcp），**各配一条预编译** —— 这比"强行统一成一组"
+`quality.yml` 如今有**两组**集合（core 单独 / server+mcp），**各配一条预编译**：这比"强行统一成一组"
 更贴合"不把 3 个重二进制同时拉起"的初衷，代价是两条 Build tests 步骤。
 
 > ⚠️ 0.6.3 排查期间我自己也踩过：诊断用的"模块二分"步写成 `-p tianyan-core`（单包），
@@ -78,7 +78,7 @@ CI 侧另有直接证据（run `37730710190`）：`reuse probe` 步用**与测�
 
 `bdddfe1` 的 Release run：`Rust unit tests (1/4)` 一直 `in_progress` 到 job 被判失败（79 分钟），
 `timeout-minutes: 12` / 步骤内的 `timeout 900` 都**没能生效**（runner 已失联，无人执行收尾），
-且 **该 job 日志 blob 不存在**（`BlobNotFound`）—— 这正是历史上反复出现的"**日志为空 / 点不开**"的真因：
+且 **该 job 日志 blob 不存在**（`BlobNotFound`），这正是历史上反复出现的"**日志为空 / 点不开**"的真因：
 **不是日志为空，而是 runner 死前没能把日志 finalize 上传**。
 
 ### 处置纪律
@@ -86,7 +86,7 @@ CI 侧另有直接证据（run `37730710190`）：`reuse probe` 步用**与测�
 1. **诊断输出要写进 artifact，且 artifact 步要放在"可能挂住"的步骤之前**。
    （0.6.3 实测反例：把 `upload-artifact` 放在 libtest 对照步**之后** ⇒ 该步挂住 ⇒ 上传根本没执行 ⇒ 整轮诊断白跑。）
 2. 一步一产物（`ci-probe-<run_id>` 等），别共用 name。
-3. 想让结论**抗失联**，用 `$GITHUB_STEP_SUMMARY`（**步骤级**收集）作为第二通道 —— 0.6.3 实测：
+3. 想让结论**抗失联**，用 `$GITHUB_STEP_SUMMARY`（**步骤级**收集）作为第二通道，0.6.3 实测：
    19 个模块的汇总行在 runner 失联的 run 里依然在 UI 的 Job summary 中可见。
 4. 要"挂住也要有结论"，就把大动作**拆成多个独立步骤**（每步带自己的 `timeout-minutes`）。
 
@@ -134,7 +134,7 @@ curl.exe -sSL --compressed -H "Authorization: Bearer $tok" `
 
 **nextest 是 process-per-test（每个测试一个进程）**。在 4 核免费 runner 上，分片累计创建
 上千个测试进程（每个还要加载数百 MB 的测试二进制）之后，runner 会**失去与 GitHub 的通信**，
-且**整份丢掉 job 日志** —— 历史上所有"日志为空 / 点不开"都是这个，不是日志真的为空。
+且**整份丢掉 job 日志**，历史上所有"日志为空 / 点不开"都是这个，不是日志真的为空。
 
 另：libtest 在 **3 包全量 + 多线程**下**也会挂**（run `37742472765`）⇒ 除进程累积外，还存在
 "**并发 × 测试量**"这一因素（见下节"仍未坐实"）。
@@ -149,7 +149,7 @@ curl.exe -sSL --compressed -H "Authorization: Bearer $tok" `
 - 两组包集合（core 单独 / server+mcp）**各配一条预编译**（§1 纪律）；
 - 效果：单测步骤 **0:52**（19 模块全过），整条 quality **~13 分钟**（此前挂死 79 分钟）；
 - 已移除 `cargo-nextest` 的安装与使用（`.config/nextest.toml` 保留备查）；
-- **别改回 nextest** —— 原因就是上面那条"process-per-test 累积"。
+- **别改回 nextest**：原因就是上面那条"process-per-test 累积"。
 
 ### 已坐实并修复：跨模块并发改进程环境变量（2026-10-09，run `37876186817`）
 
@@ -169,7 +169,7 @@ curl.exe -sSL --compressed -H "Authorization: Bearer $tok" `
 
 **现状与纪律**：
 - 门禁保留「**按模块**分片」（最稳，0:53）；
-- 另保留一步「**全量 + 4 线程**」作为**并发回归哨兵**（20 秒）—— 若日后有人在测试里裸用
+- 另保留一步「**全量 + 4 线程**」作为**并发回归哨兵**（20 秒），若日后有人在测试里裸用
   `set_var`，它会立刻暴露；
 - 新增/修改涉及进程环境变量的测试时，**一律走 `config::test_support::with_env_var`**
   （或至少持 `ENV_LOCK`），不要自建私有锁。
@@ -197,7 +197,7 @@ curl.exe -sSL --compressed -H "Authorization: Bearer $tok" `
    实发事故：CI runner 被整组 SIGKILL ⇒ 该步骤**无任何日志** + `The hosted runner lost communication`；
    WSL 侧表现为服务崩溃（`Wsl/Service/E_UNEXPECTED`，kill-wrapper trace 抓到 `kill -9 -<pgid>` 之后立即崩）。
 2. **2026-10（`f0e8627`）**：再加 `ppid == std::process::id()`。
-   因为 `pgid == pid` **不足以排除 pid 复用** —— 复用的新进程若恰好是另一个组的组长，判据同样成立。
+   因为 `pgid == pid` **不足以排除 pid 复用**，复用的新进程若恰好是另一个组的组长，判据同样成立。
    `ppid` 是唯一能区分「我们自建的组长」与「恰好同号的陌生组长」的廉价判据。
 
 > Windows 走 `taskkill /PID /T /F`（无进程组语义）⇒ **本地从不复现**这条路径的问题。
@@ -271,7 +271,7 @@ Windows 侧一致（同一份源码树）。
 
 - **key 结构**（job 日志 "Cache Configuration" 段）：`Restore Key:
   v0-rust-quality-Linux-x64-{rustc_hash}`，`Cache Key: …-{rustc_hash}-{env_hash}`；
-  **restore 只按 Restore Key 前缀匹配** —— rustc 哈希段一变，旧缓存全部不可见
+  **restore 只按 Restore Key 前缀匹配**：rustc 哈希段一变，旧缓存全部不可见
   （连部分恢复都没有，日志直接 `No cache found.`）。
 - Rust stable **每次小版本发布**都会击中（`1.99.0 → 1.99.1`，2026-10-15 发布、10-13 构建）：
 
@@ -283,7 +283,7 @@ Windows 侧一致（同一份源码树）。
 - **冷编译画像**（Linux runner）：clippy 222–271s → `Build tests (core)`
   **1226–1621s** → `Build tests (server + mcp)` **1080–1212s** → 3-pkg 集 ~125s →
   catalog ~388s。**runner 间性能波动可达 ±25%**。
-- **纪律**：① **timeout 以冷编译为基准**——0.6.6 实发：同批两台 runner 一台
+- **纪律**：① **timeout 以冷编译为基准**，0.6.6 实发：同批两台 runner 一台
   1080s 压线过、一台 1212s 被 20 分钟上限杀掉（`server + mcp` 已改 45 分钟）；
   ② 修复路径 = **先让一轮 success 落缓存**（失败轮不保存），此后 rerun / 后续
   run 即恢复 2–4 分钟常速；③ 取证信号：`Run Swatinem/rust-cache` 步骤耗时
@@ -309,7 +309,7 @@ Windows 侧一致（同一份源码树）。
 - **SSH 通道可能整体不通**（0.6.3 期间 `github.com:443` 与 `ssh.github.com:443` 同时
   `Connection timed out`，重试 5 次全败）。此时改走 **HTTPS 推送**：
   `git push https://github.com/andrelive/tianyan.git <ref>`（凭据由 GCM 提供）。
-- ⚠️ **push 失败不影响 `workflow_dispatch`** —— 有过一次"push 挂了但 dispatch 成功"，
+- ⚠️ **push 失败不影响 `workflow_dispatch`**：有过一次"push 挂了但 dispatch 成功"，
   结果触发的是**旧提交**，白跑一轮还污染 run 列表。**先校验远端 refs 再 dispatch**。
 
 ### 其它

@@ -1,6 +1,6 @@
 # 依赖升级台账（期 5）
 
-> 目的：记录**每个依赖升级批次的决策与依据**，尤其是「为什么不升」——避免将来重复
+> 目的：记录**每个依赖升级批次的决策与依据**，尤其是「为什么不升」，避免将来重复
 > 调研同一问题，也避免「无脑升到最新」引入无收益的风险。
 > 基线：`0.8.0`（ADR-049 期 1–3 的微内核化重构完成后）。**该版本号未对外发布**（无 tag、无产物），
 > 其全部内容随 **1.0.0** 一并交付；目标：1.0 前完成依赖现代化。
@@ -16,10 +16,10 @@
 | **P1** | `thiserror 2` / `rusqlite 0.33` / `image 0.25` / `calamine 0.28` / `config 0.15` / `dirs 6` | ✅ | `a0a9831` |
 | **P2** | `pulldown-cmark 0.9 → 0.13` | ✅ | `dbd3245` |
 | **P3** | `schemars 0.8 → 1.0` | ✅ | `8398257` |
-| **P4** | `lancedb 0.33 → 0.39/0.40` | ⛔ **暂缓**（见下） | — |
+| **P4** | `lancedb 0.33 → 0.39/0.40` | ⛔ **暂缓**（见下） | |
 | **F2** | `vite 8`（Rolldown）/ `vitest 5` / `plugin-react 6` / `jsdom 30` | ✅ | `80decfe` |
 | **F3** | `React 19` / `zustand 5` | ✅ | 本批 |
-| **F3′** | `msw 3` / `Tailwind 4` | ⛔ **暂缓**（见下） | — |
+| **F3′** | `msw 3` / `Tailwind 4` | ⛔ **暂缓**（见下） | |
 
 ---
 
@@ -42,13 +42,13 @@ error[E0599]: no variant named `Http` found for enum `error::Error`
 - 但 `lancedb/src/lib.rs:188` 的 `pub mod job;` **没有** 对应的 `#[cfg(feature = "remote")]`；
 - `job.rs` 在两处无条件构造 `Error::Http`。
 
-于是**任何未启用 `remote` feature 的构建都会编译失败**——这是上游打包缺陷，不是我们的用法问题
+于是**任何未启用 `remote` feature 的构建都会编译失败**，这是上游打包缺陷，不是我们的用法问题
 （0.39 与 0.40 都是同一处，说明跨版本未修）。
 
 ### 为什么不干脆启用 `remote`
 
 `remote` feature 会引入：`arrow-flight` + `prost` + `reqwest` + `http` + `tonic`(gRPC) +
-`urlencoding` + `lance-namespace-impls/rest*` —— 一整套**远程 LanceDB 服务客户端**依赖。
+`urlencoding` + `lance-namespace-impls/rest*`，一整套**远程 LanceDB 服务客户端**依赖。
 
 本项目只用**本地嵌入式** LanceDB（`connect(path)` + 本地表），这些依赖一行都用不到，纯增加
 编译时间与二进制体积。
@@ -106,7 +106,7 @@ error[E0599]: no variant named `Http` found for enum `error::Error`
 2. **`ServeDir::not_found_service` 看起来「版本不支持」** → 读源码发现它内部
    `SetStatus(NOT_FOUND)`，语义本来就是「404 + 自定义 body」，是我用错 API。
 
-**结论：在资源争抢或信息不足时，不要急着归因于「版本/环境问题」——先做隔离实验或读源码。**
+**结论：在资源争抢或信息不足时，不要急着归因于「版本/环境问题」，先做隔离实验或读源码。**
 
 ---
 
@@ -129,7 +129,7 @@ error[E0599]: no variant named `Http` found for enum `error::Error`
 4.x 是**配置体系重写**（CSS-first：`@import "tailwindcss"` + `@theme` / `@custom-variant`，
 PostCSS 插件换成 `@tailwindcss/postcss` 且内置 autoprefixer）。本项目的配置虽然简单
 （`darkMode: 'class'` + 两个色值 + `fontSize` 覆盖 xs/sm），但迁移影响的是**所有组件的
-视觉表现**——而当前**没有视觉回归测试**（vitest 只测行为，不测样式），改错只能靠人工看 UI
+视觉表现**，而当前**没有视觉回归测试**（vitest 只测行为，不测样式），改错只能靠人工看 UI
 才能发现。
 
 评估：3.4 仍在维护、无安全压力；我们未使用任何 4.x 新特性。

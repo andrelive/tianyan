@@ -11,17 +11,17 @@
 
 LLM 让**代码生成**变得近乎无限、近乎免费。这一变化重新定义了软件工程的根本矛盾：它不再是"如何更快地产出代码"，而是"**如何以有限的人类注意力，审查和验证海量的 AI 产出**"。
 
-传统软件工程中，写代码是瓶颈，审查代码相对充裕。LLM 时代倒置了这个天平——代码产出不再是瓶颈，人类注意力才是。
+传统软件工程中，写代码是瓶颈，审查代码相对充裕。LLM 时代倒置了这个天平：代码产出不再是瓶颈，人类注意力才是。
 
 Harness Engineering 是对这个矛盾的**系统性回应**。它不提高人写代码的效率，它提高人**确保代码质量的效率**。
 
-> 就像马具不削弱马的力量，而是把它引导到正确的方向——Harness 不限制智能体的生成能力，而是把它引导到可维护的、正确的结果。
+> 就像马具不削弱马的力量，而是把它引导到正确的方向：Harness 不限制智能体的生成能力，而是把它引导到可维护的、正确的结果。
 
 ---
 
 ## 二、核心机制：失败驱动的环境增强
 
-2026 年 2 月 5 日，Mitchell Hashimoto（HashiCorp 创始人）在博客中首次命名了这个概念。六天后的 2 月 11 日，OpenAI 发表了同样的观点并提供了大规模实验数据。这种独立收敛本身就说明问题——足够多的人同时撞上了同一堵墙。
+2026 年 2 月 5 日，Mitchell Hashimoto（HashiCorp 创始人）在博客中首次命名了这个概念。六天后的 2 月 11 日，OpenAI 发表了同样的观点并提供了大规模实验数据。这种独立收敛本身就说明问题：足够多的人同时撞上了同一堵墙。
 
 ### 2.1 Hashimoto 的原始定义
 
@@ -37,7 +37,7 @@ Harness Engineering 是对这个矛盾的**系统性回应**。它不提高人�
 
 **程序化工具（Programmatic Tools）**
 
-编写脚本和工具让智能体**自我验证**——截图检查 UI、筛选运行测试、验证 API 返回格式、对比 golden file。智能体被明确告知这些工具存在，并在合适时机主动调用它们。
+编写脚本和工具让智能体**自我验证**：截图检查 UI、筛选运行测试、验证 API 返回格式、对比 golden file。智能体被明确告知这些工具存在，并在合适时机主动调用它们。
 
 ### 2.3 核心公式
 
@@ -46,7 +46,7 @@ Agent = Model + Harness
 ```
 
 - **Model（模型）**: 提供推理和生成能力，越来越商品化
-- **Harness（Harness）**: 模型之外的一切——指令、上下文、工具、权限、约束、反馈循环、验证系统
+- **Harness（Harness）**: 模型之外的一切：指令、上下文、工具、权限、约束、反馈循环、验证系统
 
 > 技术类比：模型是 CPU，上下文窗口是 RAM，Harness 是操作系统，Agent 是应用程序。只选模型就像买电脑不装系统。
 
@@ -76,17 +76,17 @@ Agent = Model + Harness
 | 工程师人数 | 3 人（后增至 7 人） |
 | 人均日产量 | 3.5 PR/人/天 |
 | 时间节省 | 约 90%（为传统开发的 1/10 时间） |
-| 约束条件 | **不允许人工修代码**——失败时必须增强 Harness |
+| 约束条件 | **不允许人工修代码**：失败时必须增强 Harness |
 
 ### 3.2 三个关键发现
 
 **发现一：打破 Brooks 定律**
 
-传统软件工程中，增加人手会让项目更慢（沟通开销非线性增长）。但此实验中，团队从 3 人增至 7 人，吞吐量**不降反升**——因为人类工作从"写代码"转为"设计 Harness"，彼此独立增量。
+传统软件工程中，增加人手会让项目更慢（沟通开销非线性增长）。但此实验中，团队从 3 人增至 7 人，吞吐量**不降反升**：因为人类工作从"写代码"转为"设计 Harness"，彼此独立增量。
 
 **发现二：同一失败绝不发生两次**
 
-OpenAI 团队的铁律：智能体失败时绝不人工修代码。必须回答："Harness 缺少什么能力，如何让智能体下次自主解决？"每次失败都转化为 Harness 的永久增强——新工具、新约束、新文档。Harness 越用越强。
+OpenAI 团队的铁律：智能体失败时绝不人工修代码。必须回答："Harness 缺少什么能力，如何让智能体下次自主解决？"每次失败都转化为 Harness 的永久增强：新工具、新约束、新文档。Harness 越用越强。
 
 **发现三：模型是商品，Harness 是护城河**
 
@@ -152,7 +152,7 @@ Types → Config → Repo → Service → Runtime → UI
 2. **结构测试**验证依赖方向
 3. **CI 阻断**违反层边界的 PR
 
-**关键洞察**: 约束是速度的乘数——一旦编码，到处同时生效。没有机械约束，坏模式会指数级复合，因为智能体会复制仓库中已存在的模式，**包括次优的**。
+**关键洞察**: 约束是速度的乘数：一旦编码，到处同时生效。没有机械约束，坏模式会指数级复合，因为智能体会复制仓库中已存在的模式，**包括次优的**。
 
 **Linter 错误信息的设计**:
 
@@ -166,7 +166,7 @@ Types → Config → Repo → Service → Runtime → UI
 
 ### 4.3 Garbage Collection（垃圾回收 / 熵减）
 
-**目标**: 对抗系统熵增——文档漂移、规则违反、架构退化。
+**目标**: 对抗系统熵增：文档漂移、规则违反、架构退化。
 
 **机制**:
 - 周期性运行的智能体扫描文档不一致性
@@ -175,9 +175,9 @@ Types → Config → Repo → Service → Runtime → UI
 - 质量评分随时间追踪
 
 **质量文档**:
-- `docs/quality/domain-grades.md` — 各域质量等级
-- `docs/quality/verification-status.md` — 验证状态
-- `docs/quality/` 下的 golden-principles — 核心原则的机械规则
+- `docs/quality/domain-grades.md`：各域质量等级
+- `docs/quality/verification-status.md`：验证状态
+- `docs/quality/` 下的 golden-principles：核心原则的机械规则
 
 **运行策略**:
 - 每次运行结束执行轻量 cleanup
@@ -199,7 +199,7 @@ Harness Engineering 文献中反复警告一个容易被忽视的维度：**即�
 2. **未认证源选择（Uncertified Source Selection）**: 智能体查询已废弃的数据表，Harness 无从预警
 3. **Schema 漂移（Schema Drift）**: 字段定义在不同系统间分叉，产出"语法正确但事实错误"的结果
 
-核心洞察：**Harness 的设计缺陷可以被 Guides 和 Sensors 捕获，但数据层的错误往往是无声的——没有异常，只有错误的答案。**
+核心洞察：**Harness 的设计缺陷可以被 Guides 和 Sensors 捕获，但数据层的错误往往是无声的：没有异常，只有错误的答案。**
 
 ---
 
@@ -243,13 +243,13 @@ Birgitta Böckeler 引入了控制论框架，将 Harness 的控制机制分为�
 
 > 智能体失败时，不是修代码的问题，是 Harness 缺能力的问题。
 
-这是 Harness Engineering 的根基原则。每次失败问："Harness 缺少什么，让智能体下次能自主解决？"人工修代码是一种资源浪费——它不会让下一次变得更好。
+这是 Harness Engineering 的根基原则。每次失败问："Harness 缺少什么，让智能体下次能自主解决？"人工修代码是一种资源浪费：它不会让下一次变得更好。
 
 ### 原则 2：环境可读性（Environment Legibility）
 
 > 智能体只能和它能检索到的东西一样正确。
 
-结构化日志、可追踪指标、可自动化验证、清晰的入口文档——这些不是运维部门的任务，而是智能体的"感官系统"。
+结构化日志、可追踪指标、可自动化验证、清晰的入口文档：这些不是运维部门的任务，而是智能体的"感官系统"。
 
 ### 原则 3：约束即乘数（Constraints as Multipliers）
 
@@ -284,11 +284,11 @@ Mitchell Hashimoto 以自身经历总结了从 AI 怀疑论者到 Harness Engine
 | 步骤 | 内容 | 核心收获 |
 |------|------|----------|
 | 1 | 放弃聊天机器人 | Agent（能读文件+执行命令+调用 API）是唯一有效形态 |
-| 2 | 人工 + Agent 双重作业 | 先手工写，再逼 Agent 产出同等质量——不惜时间，建立手感 |
+| 2 | 人工 + Agent 双重作业 | 先手工写，再逼 Agent 产出同等质量：不惜时间，建立手感 |
 | 3 | 收工前 30 分钟派发 Agent | 找到 Agent 真正擅长的任务类型：深度调研、并行试错、机械重构 |
 | 4 | 外包必做题 | 把确定性高、目标清晰的小任务完全交给 Agent |
-| 5 | 工程化 Harness | 每次失败转化为 AGENTS.md 规则或程序化工具——**本阶段开始** |
-| 6 | 永葆 Agent 运行 | Agent 作为后台常驻进程，全天候接收任务——**目标状态** |
+| 5 | 工程化 Harness | 每次失败转化为 AGENTS.md 规则或程序化工具：**本阶段开始** |
+| 6 | 永葆 Agent 运行 | Agent 作为后台常驻进程，全天候接收任务：**目标状态** |
 
 > Hashimoto 坦诚：他目前只在每天 10-20% 的时间保持 Agent 后台运行。Step 6 仍然是理想目标。
 
@@ -317,7 +317,7 @@ Claude Code 采用**索引式记忆**而非全量存储：
 - **会话级持久化**: `MEMORY.md` 索引文件（ID + 时间戳 + 嵌入指针），指向分布式主题文件
 - **长期记忆**: 跨会话的持久化知识
 
-**严格写入纪律**: 记忆更新先作为候选，验证成功后才提交——失败的工具调用不污染持久状态。
+**严格写入纪律**: 记忆更新先作为候选，验证成功后才提交：失败的工具调用不污染持久状态。
 
 ### 9.3 上下文熵管理
 
@@ -345,15 +345,15 @@ Harness Engineering 不是凭空出现的。它是智能体开发方法的第三
 
 ## 十一、关键参考资料
 
-1. **Mitchell Hashimoto** — "My AI Adoption Journey" (2026-02-05)
+1. **Mitchell Hashimoto**："My AI Adoption Journey" (2026-02-05)
    - 来源: mitchellh.com/writing/my-ai-adoption-journey
    - 核心: "Engineer the harness" 起源，六步采纳路径
 
-2. **OpenAI 官方博客** — "Harness engineering" (2026-02-11)
+2. **OpenAI 官方博客**："Harness engineering" (2026-02-11)
    - 来源: openai.com/index/harness-engineering
    - 核心: 100 万行代码实验的原始报告
 
-3. **Martin Fowler / Thoughtworks** — "Harness Engineering" (2026-02-17)
+3. **Martin Fowler / Thoughtworks**："Harness Engineering" (2026-02-17)
    - 来源: martinfowler.com/articles/exploring-gen-ai/harness-engineering.html
    - 核心: Context + Constraints + Garbage Collection 三大分类
 
@@ -361,11 +361,11 @@ Harness Engineering 不是凭空出现的。它是智能体开发方法的第三
    - 来源: 社区多份深度分析
    - 核心: 51.2 万行代码揭示的生产级 Harness 架构
 
-5. **Harness.io 博客** — "The Agent Loop Is the New OS" (2026-04-23)
+5. **Harness.io 博客**："The Agent Loop Is the New OS" (2026-04-23)
    - 来源: harness.io/blog/agent-loop-new-os
    - 核心: MCP Server 设计哲学，操作系统类比
 
-6. **Octopus Deploy 博客** — "Harness engineering" (2026)
+6. **Octopus Deploy 博客**："Harness engineering" (2026)
    - 来源: octopus.com/devops/continuous-delivery/harness-engineering/
    - 核心: Vibe Coding vs Harness Engineering 对比，人类角色的重新定义
 
@@ -400,9 +400,9 @@ Harness Engineering 不是凭空出现的。它是智能体开发方法的第三
 | Sensors（反馈控制） | `VerificationGate` + `LlmJudge` | `core/src/executor/` | ✅ 已实现 |
 | 技能定义 + 学习 | `skills/` (含 GEPA 引擎) | `core/src/skills/` | ✅ 已实现 |
 | GC / 熵减 | `GcTask` | `plugins/task-builtin/src/gc_task.rs`（ADR-049 序 5a 迁出 core） | ✅ 已实现 |
-| 架构约束 | 待实现（linter + 结构测试） | — | ❌ 未实现 |
+| 架构约束 | 待实现（linter + 结构测试） | | ❌ 未实现 |
 
-> **注意**：`AgentHarness` 和 `AgentSkills` wrapper 结构体已删除，功能由 `Agent` 直接持有。规则记录经工具执行管线内联写入（`RuleRecorder`）；规则提炼/记忆/技能/组织形态的演化统一由 `EvolutionTask`（ADR-017，每日）承担——`RuleTask`/`RuleSuggester`/`MemoryTask` 均已删除（ADR-018 落实）。详见 [module-map.md](../architecture/module-map.md) 中的"已删除/废弃组件"。
+> **注意**：`AgentHarness` 和 `AgentSkills` wrapper 结构体已删除，功能由 `Agent` 直接持有。规则记录经工具执行管线内联写入（`RuleRecorder`）；规则提炼/记忆/技能/组织形态的演化统一由 `EvolutionTask`（ADR-017，每日）承担：`RuleTask`/`RuleSuggester`/`MemoryTask` 均已删除（ADR-018 落实）。详见 [module-map.md](../architecture/module-map.md) 中的"已删除/废弃组件"。
 
 ### 13.2 规则管线架构（ADR-017 后：统一演化任务）
 
@@ -430,9 +430,9 @@ Agent {
 }
 ```
 
-- `metrics.record_execution(success)` — 记录每次 AgentLoop 执行结果
-- `metrics.record_pipeline_failure()` — 记录管线失败
-- `metrics.record_rule_hit()` / `metrics.record_rule_injection()` — 追踪规则有效性
+- `metrics.record_execution(success)`：记录每次 AgentLoop 执行结果
+- `metrics.record_pipeline_failure()`：记录管线失败
+- `metrics.record_rule_hit()` / `metrics.record_rule_injection()`：追踪规则有效性
 
 ### 13.4 失败驱动增强闭环
 

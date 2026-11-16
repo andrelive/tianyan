@@ -1,12 +1,12 @@
-# tianyan-gui-native — GPUI 原生客户端
+# tianyan-gui-native：GPUI 原生客户端
 
 > **状态：可行性验证已完成，进入真实实现阶段。**
-> 结论：**技术上可行，且比我预期好**——UI 层（渲染/IME/流式/虚拟列表/编辑器）与
+> 结论：**技术上可行，且比我预期好**，UI 层（渲染/IME/流式/虚拟列表/编辑器）与
 > 发布层（MSI 打包/静默升级）两块硬骨头都已实测通过。
 > 本文档记录**实测数据与踩坑**，是后续开发的最小背景材料。
 >
 > 📌 **文中「Tauri 版」指 2026-10 已删除的 tauri 壳**（它的 UI 代码是 Web 端 `gui-vite/`，该目录已于 2026-11 删除）。
-> 保留这些对照是为了说明「这条行为对齐的依据是什么」——不是指向还能运行的代码。
+> 保留这些对照是为了说明「这条行为对齐的依据是什么」，不是指向还能运行的代码。
 
 ## 这个 crate 是什么
 
@@ -35,7 +35,7 @@
 | 新增 tree-sitter 依赖后重编 | 79.4 s |
 | `target/` 体积 | 2.87 GB（debug） |
 
-> 调研阶段流传的「GPUI 首编 10–20 分钟」不适用——那是 git 依赖整个 Zed 仓库的情形。
+> 调研阶段流传的「GPUI 首编 10–20 分钟」不适用，那是 git 依赖整个 Zed 仓库的情形。
 > 走 crates.io 快照是好几个数量级的差别。
 
 ## 内存对比（关键，容易误判）
@@ -75,10 +75,10 @@ GPUI 侧分档：
 - [x] **虚拟列表**：5 万条稳态只渲染 **40 项**；滚动 3000+ 行内存 131–139MB 不涨
 - [x] **代码编辑器语法高亮**：tree-sitter，需显式开 feature + 设语言
 - [x] **超大文件**：10 万行 / 2.9MB，`EditorState` 创建 **43.95 ms**，不崩
-- [x] **SSE 常驻订阅 + 发送闭环**（`GET /events` + `POST /chat/stream`）：无人值守自测通过——
+- [x] **SSE 常驻订阅 + 发送闭环**（`GET /events` + `POST /chat/stream`）：无人值守自测通过，
       13 个 `chat_stream` 事件、`delta` 共 9 字、"消息 2 条"、`turn_state` 回 `idle` 后
       `streaming=false`；新会话 id 由客户端本地生成、服务端据此新建（列表 49 → 50 条）
-- [x] **输入框**：自研编辑器（`composer.rs` 编辑核心 + `composer_ui.rs` 绘制与输入）——文件引用
+- [x] **输入框**：自研编辑器（`composer.rs` 编辑核心 + `composer_ui.rs` 绘制与输入），文件引用
       与正文**同行**渲染成 chip（vite 形态）、IME / 选区 / 拖拽选择 / 光标闪烁自绘、
       Enter 发送 / Shift+Enter 换行；粘贴分流：图片 → 附件区、文件 → 行内 chip、其余 → 文本
 - [x] **停止**：`streaming` 时按钮切「停止」→ `POST /chat/streams/{id}/cancel`
@@ -92,7 +92,7 @@ GPUI 侧分档：
 | 2 | **窗口第一层必须是 `Root`** | 背景/弹层/焦点管理都不对 | `cx.new(\|cx\| Root::new(view, window, cx))` |
 | 3 | **主题默认浅色** | 深色背景下表格、代码块白得刺眼 | `Theme::change(ThemeMode::Dark, None, cx)` |
 | 4 | **`Bounds::centered` 要 `&App`** | `cx.spawn` 闭包里只有 `&mut AsyncApp`，编译不过 | 先在 `run` 回调（`&mut App`）里算好 bounds 再进 spawn |
-| 5 | **`TextViewMotion` 默认全 `ZERO`** | 渐显"看不到"——源码注释：*every duration defaults to zero* | 显式 `set_motion(...with_stream_fade(...))` |
+| 5 | **`TextViewMotion` 默认全 `ZERO`** | 渐显"看不到"（源码注释：*every duration defaults to zero*） | 显式 `set_motion(...with_stream_fade(...))` |
 | 6 | **流式跟随要手动做** | 内容变长，滚动条停在原地 | 每次追加后 `state.list_state().scroll_to_end()`；`AutoScroll` 是**拖拽选择**用的，不是流式跟随 |
 | 7 | **语法高亮要开 feature** | `Editor` 静默无高亮、不报错 | `gpui-kit` 开 `tree-sitter` + `tree-sitter-<lang>`，并 `EditorState::language("rust")` |
 | 8 | **`App` 命名冲突** | 自定义 `struct App` 与 `gpui::App` 撞，`items_count(&App)` 报类型不匹配 | 自己的根视图别叫 `App`（本项目用 `DemoApp`） |
@@ -112,7 +112,7 @@ GPUI 侧分档：
 | 22 | **bin crate 里写 `#[test]` 别用 `use super::*`** | `recursion limit reached while expanding #[test]`；更狠时 rustc 直接 `STATUS_STACK_OVERFLOW`（0xc00000fd） | bin crate 的根是 `main.rs`，`super::*` 把整棵模块树 + 巨大泛型拉进宏展开。显式 `use crate::types::{MsgRow, Seg, ToolCall}`；必要时 `$env:RUST_MIN_STACK = "67108864"` 给 rustc 加栈 |
 | 23 | **剪贴板图片可直接读，不用落盘** | 想「截图→粘贴」，以为得走 Win32 `CF_DIB` + 手工转 PNG | GPUI 的 `cx.read_from_clipboard()` 返回 `ClipboardItem.entries`，其中 `ClipboardEntry::Image(Image { format, bytes, .. })` 直接给原始字节 + 格式，复用 `bytes_to_data_url` 即可（8MB 上限） |
 | 24 | **GPUI `Textarea` 没有行内元素钩子** | 想用 `set_highlighter` / `TextDecoration` 给文件引用画 chip，结果毫无效果 | 那些只在 `LayoutMode::CodeEditor` 生效；`Textarea` 是纯文本控件。行内 chip 只能自绘（`composer_ui.rs`：`shape_line` 直绘 + 自绘光标/选区/IME 下划线 + 自管命中测试） |
-| 25 | **IME 组合串走 `replace_and_mark_text_in_range` 时 range 常为 `None`** | 中文逐键组合变成「wwo我」——旧实现按 `None` 走 insert，把组合串追加了而不是替换 | 记住上次组合串的 range，**替换**它：拆 `apply_compose`（替换）/ `apply_commit`（提交）。实测「w→wo→wǒ→我」得 `'我'`，连打两次得 `'我我'` |
+| 25 | **IME 组合串走 `replace_and_mark_text_in_range` 时 range 常为 `None`** | 中文逐键组合变成「wwo我」：旧实现按 `None` 走 insert，把组合串追加了而不是替换 | 记住上次组合串的 range，**替换**它：拆 `apply_compose`（替换）/ `apply_commit`（提交）。实测「w→wo→wǒ→我」得 `'我'`，连打两次得 `'我我'` |
 | 26 | **自绘元素被 `ContentMask` 裁掉时不报错** | 高度按估算给，多出来的行静默消失（看起来像「不换行/被截断」） | `prepaint` 把真实行数/宽度回写缓存（`rows_cache` / `avail_cache`），下一帧 `request_layout` 用真实值定高；另外自绘元素**不受父级 padding 恩惠**，内边距要自己给 |
 | 27 | **flex 子项 `min-width: auto` 撑爆父级 + flex 换行以 item 为单位** | 文本折行失效被裁；chip 与文字做不到「行内绕排」（chip 之后强制换行） | 文本段加 `min_w_0()`、容器 `w_full()`；行内绕排必须自绘 inline formatting（本项目 `RichTextBody` 复用输入框那份 `layout_rows`，宽度两段式：先估、`prepaint` 按真实宽度重排） |
 
@@ -146,7 +146,7 @@ impl ListDelegate for D {
 }
 List::new(&entity)                              // IndexPath 从 gpui_kit::component 导入
 
-// 输入框（自研：GPUI 的 Textarea 是纯文本控件，没有行内元素钩子 —— 高亮只在 CodeEditor
+// 输入框（自研：GPUI 的 Textarea 是纯文本控件，没有行内元素钩子，高亮只在 CodeEditor
 // 模式生效，chip 只能自绘。编辑语义在 composer.rs::Buffer，绘制/输入在 composer_ui.rs）
 let input: Entity<ComposerState> = cx.new(|cx| ComposerState::new(cx));
 state.value() -> String                          // 正文（含 `@file:"…"` 标记，chip 就是它）
@@ -165,7 +165,7 @@ entity.update(&mut app, |state, cx| {...})      // 返回 ()，不是 Result
 
 ## 开工途中挖出的产品级问题：MCP 客户端忙循环（已修）
 
-原生客户端空闲时有一个线程接近满载——**功能完全正常**（25 个 MCP 工具全部可用），
+原生客户端空闲时有一个线程接近满载，**功能完全正常**（25 个 MCP 工具全部可用），
 所以此前一直被当作「UI 渲染开销」。用 GPUI 侧的干净窗口做 CPU 时间二分（5 秒窗口的
 进程 CPU 时间）才定位到真正的源头：
 
@@ -184,11 +184,11 @@ entity.update(&mut app, |state, cx| {...})      // 返回 ()，不是 Result
 结论：忙循环在 `rust-mcp-sdk 0.9.0` 内部（与连接成败无关，连上了也忙）。
 修法是升级到 1.1.0，**天演自身代码零改动**（stdio / streamable-http 传输、
 client handler、工具列表在 1.x 保持兼容），`cargo test -p tianyan-mcp` 18/18 通过。
-**这条修复对现有 Tauri 桌面版同样生效**（同一份 MCP 客户端代码）——用户可感知的变化
+**这条修复对现有 Tauri 桌面版同样生效**（同一份 MCP 客户端代码），用户可感知的变化
 是「应用常开时风扇不再一直转」。变更记录见根 `CHANGELOG.md` 的 `[Unreleased]`。
 
 > 方法学备忘：**「server 慢」不等于「server 代码有问题」**。这次二分先按「是不是
-> runtime」「是不是某个插槽」推进，两轮都空手——真正的判据是「把 MCP 关掉就干净」。
+> runtime」「是不是某个插槽」推进，两轮都空手，真正的判据是「把 MCP 关掉就干净」。
 > 遇到「功能正常但白烧 CPU」时，先按**外部依赖**（子进程 / SDK / 网络客户端）分叉，
 > 比按自己的模块分叉收敛得快。
 
@@ -209,7 +209,7 @@ client handler、工具列表在 1.x 保持兼容），`cargo test -p tianyan-mc
 | 设置 | 14 个二级栏目（见下节）；`/config`(GET/PUT 整份) · `/config/models` · `/config/soul` · `/config/mcp/servers` · `/usage/stats` · `/health` · `/config/migrate-data-dir` |
 
 验证：`pwsh -NoProfile -File .\scripts\automation-pages.ps1`（只读冒烟，含「11 个入口
-全部可达」；做法见上文「自动验证」——全程不截图、不点坐标）。
+全部可达」；做法见上文「自动验证」，全程不截图、不点坐标）。
 
 ## 设置页：14 个二级栏目，全部可用（无「暂未实现」）
 
@@ -223,11 +223,11 @@ vite 是 14 份手写受控表单，这里是「字段声明成数据 + 一套�
 | 只读展示（4） | 用量统计 · 连接 · 关于 · 外观 | 用量（时段×分组×占比条）/ `/health` 实测（版本·数据目录·pid·一致性告警）/ 版本与构建形态 / 三套色板 |
 
 **保存语义（比 vite 更保守）**：`PUT /config` 是整份替换，所以保存时先 `GET` 最新配置、
-只覆盖**真正改动过**的字段、再整份提交——把「读-改-写」窗口压到一次往返，不会冲掉
+只覆盖**真正改动过**的字段、再整份提交，把「读-改-写」窗口压到一次往返，不会冲掉
 期间被别处改过的东西（例如 agent 刚切换的模型）。顶部状态行给「已修改 N 项」与
 「保存 N 项 / 放弃」，保存后汇总「其中 M 项需重启客户端生效」。
 
-**数据目录搬迁的闭环**：入口只有一处 —— 设置页「数据目录」行右侧的「搬迁…」
+**数据目录搬迁的闭环**：入口只有一处，设置页「数据目录」行右侧的「搬迁…」
 （该字段**只读**；`PUT /config` 会丢弃对它的修改，搬迁是唯一写入通道，见 ADR-023 §4）。
 点击后是目录选择器 → 确认框（选中 ≠ 生效），再 `POST /config/migrate-data-dir`：
 它只写请求文件并触发服务关停，真正「复制 → 校验 → 改配置 → 删源」在服务停掉之后做
@@ -240,7 +240,7 @@ vite 是 14 份手写受控表单，这里是「字段声明成数据 + 一套�
 - ~~没有单实例保护~~ **已解决（ADR-051）**：抽了 `desktop/` 启动编排段，`ensure_server`
   先发现「服务同一数据目录」的已有实例并复用（判据 = `/health` 的 `service` **且**
   `data_dir`），未命中才自起。当初实测到的问题：同时跑桌面版（3000）与 gui-native（3001）
-  时两个内嵌 server 共享同一个数据目录（`D:\tianyan`）——定时任务各跑一遍、SQLite 并发写。
+  时两个内嵌 server 共享同一个数据目录（`D:\tianyan`），定时任务各跑一遍、SQLite 并发写。
 
 - **变高列表启动有 O(n) 测高**：5 万条 → `render_item` 5080 次 / 2.9s CPU（一次性）。
   稳态渲染量与总数无关（40 项）。改造方向：消息行高设上限，或改用 `v_virtual_list`。
@@ -280,28 +280,28 @@ vite 是 14 份手写受控表单，这里是「字段声明成数据 + 一套�
 | 2 | **流式时工具渲染不对** | `tool_call` 事件曾被塞成正文文本 `` `🔧 name` ``（没有参数/结果/耗时，还和正文混在同一个 Markdown 段里）。改为结构化 `Seg::Tool` + `ToolCall` 占位，渲染走与历史消息**同一条** `render_tool_card` |
 | 3 | **流式结束后前面的工具调用全不见** | 一轮是**多步**（LLM→工具→LLM…），库里每步一条 assistant 消息，而前端把整轮堆在一条占位里 → 任何一次「用权威消息替换最后一条」都会把前面几步抹掉。改为**步边界新开消息**（判据 `step_closed`），并让 `observation` 按 `tool_call_id` 回填结果（此前是空实现，结果永不显示） |
 | 4 | **新建会话后输入框还留着上一段文字**（"在别的会话输入的字跟着过去了"） | 草稿的键取 `current_session.unwrap_or_default()`：新会话（首条消息未发）的键是**空串**，于是所有「新建会话」共用一个桶；而 `start_new_session` 是「先存本会话草稿（空键）→ 再按新键恢复（同一个空键）」= **自存自读**，内容原地不动。改为：`save` 在 `current_session == None` 时直接不存，`restore` 此时**必须清空**（不查任何桶）。实测（隔离实例 + `/state` 的 `usage.composer_text`）：输入 `AAA`→点新建→仍是 `AAA`；输入 `BBB`→再点新建→仍是 `BBB`；修后两次都为空 |
-| 5 | **轮次进行中切走再切回，"停止"按钮退回"发送"** | `open_session` 里无条件 `self.streaming = false`（"本客户端只渲染当前会话的增量"），而服务端这一轮**还在跑**——切回后既没有停止入口，也看不出它在生成。新增 `running_sessions: HashSet<String>`：`turn_state` 事件带 `session_id`，因此在 `handle_event` 的**会话过滤之前**记账（非当前会话也记），`open_session` 改为 `streaming = running_sessions.contains(&id)`；发送时乐观 insert、失败/删会话时 remove。实测：发送后 `streaming=true` → 切到新会话（false）→ 切回（**修前 false，修后 true**） |
+| 5 | **轮次进行中切走再切回，"停止"按钮退回"发送"** | `open_session` 里无条件 `self.streaming = false`（"本客户端只渲染当前会话的增量"），而服务端这一轮**还在跑**，切回后既没有停止入口，也看不出它在生成。新增 `running_sessions: HashSet<String>`：`turn_state` 事件带 `session_id`，因此在 `handle_event` 的**会话过滤之前**记账（非当前会话也记），`open_session` 改为 `streaming = running_sessions.contains(&id)`；发送时乐观 insert、失败/删会话时 remove。实测：发送后 `streaming=true` → 切到新会话（false）→ 切回（**修前 false，修后 true**） |
 | 6 | **会话里图片上下有大片空白** | 只写了 `.max_w(240).max_h(240)`。GPUI 的 `img()` 在 `size` 为 Auto 时会把元素尺寸设成**图片原始像素**（`img.rs:352-376`：`style.size = image_size`），随后 `max_w`/`max_h` 是**两次独立钳制**（各自取 min，不是等比）→ 得到 **240×240 的正方框**，图片再 `ObjectFit::Contain` 居中画成 240×150，上下各留 45px 空白。修法：新增 `image_dimensions`（`ImageReader::into_dimensions`，只读 header 不解全图）+ `fit_image_size`（等比缩放、小图不放大），渲染时显式 `w`/`h`。1024×640 → **384×240**（与 vite 的 `max-h-[240px]` 观感一致），6 个单测锁住 |
 | 7 | **待发送图片缩略图在输入框下方**（vite 在上方） | `render_composer` 里 `.child(Textarea)` 之后才 `.children(attachments)`。修法：附件挪到 Textarea **之前**；缩略图同时对齐 vite 的 `w-16 h-16 object-cover`（原来 `.max_w(64).max_h(64)` + Contain，非正方形图同样有白边）→ `.w(64).h(64)` + `ObjectFit::Cover` |
 | 8 | **「↑ 加载更早的消息」常驻在消息区上方** | 早先判据只有 `has_more_history`（库里有更早的）。改为**滚到列表顶部才出现**：列表容器挂 `on_scroll_wheel` → `cx.notify()` 重渲染，渲染时读 `logical_scroll_top().item_ix == 0`（不消费事件，列表照常滚）。state 加 `messages.older_button_visible` 可断言 |
 | 9 | **多会话切换时上下抖动** | `render_usage_line` 无数据时返回 0 高元素；而 `open_session` 会清空 `session_usage`/`request_perf` 等新数据 → 整行消失、输入区矮 24px → 消息列表可视高度跟着变。改为恒定高度 `USAGE_LINE_H = 24`（空数据也占位） |
 | 10 | **输入框文字跨会话残留（第一次"修"了但没修好）** | ⚠️ 这是全项目最容易重犯的一类：上一轮用 `window_handle.update(...)` 写输入框。真实点击（切会话/新建会话/关 Tab/目录选择器）发生在 `on_click` 里，**窗口已在借用中** → 对同一窗口二次借用返回 `Err`，而代码写的是 `let _ =`（静默吞掉）→ 输入框根本没被改写。自动化路径（HTTP handler）不在借用中，所以上一轮自动化实测全绿、用户照样踩坑。修法：`open_session`/`start_new_session`/`close_tab`/`confirm_workspace_picker` 收 `Option<&mut Window>`，`on_click` 传 `Some(window)` 直接写（先例 `insert_into_composer`）；自动化传 `None` 走 handle 且失败 `set_error`。诊断字段 `messages.draft_restore_path`（window/handle/handle-failed） |
-| 11 | 知识库列表**全是 64 位哈希**，认不出是哪份文档（顺手修） | 条目名 `name` 是摄入时算出的内容 sha256，而给人看的 L0 摘要就在旁边没人用。`GET /knowledge/entries` 增加 `abstract_excerpt`（合并空白 + 按**字符**限长 200，不会切出半个 UTF-8；无摘录时字段省略）——数据取自同一次 `vfs.list` 已读出的 `ContextEntry`，**零额外 IO**。UI 有摘录即以它为标题，哈希退成右侧 `c45badca…  L0 L1 L2` 短标记。原始文件名暂不可得：`original_name` 只进了向量 payload，`vfs_entries` 表没有该列（存量条目也补不回，要补得加列 + 迁移） |
-| 12 | **回车发送后消息里多一个换行**（光标不在文字最后时） | `gpui_base` 处理 Enter 的方式是「先在光标处插入换行 → 再 emit `InputEvent::PressEnter`」。早先收到事件就发送，那个换行已经落进正文：光标在末尾时它跟在最后（Markdown 不显形），在**中间**时卡在语句里（用户实测）。修法 `send_on_enter`：**只把「待发送的字符串」里那个 `\n` 删掉**（`selected_range()` 是 UTF-8 字节偏移，`\n` 单字节，不会切坏多字节字符）；生成中不动（此时发送本就禁用，Enter 就该只是换行）。两条**反例**都踩过：① `capture_key_down` 拦不住（GPUI 的 keybinding→action 派发在原始 key listener **之前**，`dispatch_key_event` 先 `dispatch_key`、后才 `finish_dispatch_key_event`）；② 在 `PressEnter` 回调里 `set_value(fixed)` 把编辑器改回去 —— `set_value` 会重设选区、清空 undo 历史、打断 IME 组合态，实测后果是**回车只换行、消息发不出去**（用户报障）。任何「发送前顺手修一下输入框」的念头都要掐掉：只改 payload |
-| 13 | 停止按钮是**空心方框**；压缩点像一条空消息 | 停止图标：vite 是 `<Square className="fill-current" />`（lucide 描边矩形被填满 = 实心），GPUI 的 `svg()` 只能渲染 stroke 版，改不了 fill → 直接画 12×12 白方块（照抄 lucide `rect x=3 y=3 w=18 h=18 rx=2` 按 16px 渲染的几何，1.5px 圆角，放大截图核对过）。压缩点：先去掉 footer（一个「看不见内容的复制按钮 + 时间戳」比没有更糟），随后按用户选择改成**可展开的摘要卡片**——胶囊 + 分割线照旧，右侧「摘要 ▸」点开显示摘要正文（Markdown，限高 320 可滚，默认收起），展开态存在 `ExpandState.compression`（key `c:{mi}`），`/state` 的 `messages.expanded` 可断言 |
-| 14 | **输入后切走再切回，助手回复只剩一个思考块；更早的历史也没了** | 两个独立根因。①切回时若该轮在跑 → 整页 `load_messages` **替换**列表，把最后一条 assistant **占位**删掉；而流结束的权威 `message` 事件在 `apply_authoritative_message` 第一行就要求「最后一条是 assistant」，否则直接 return —— 于是那轮内容**永远无处落地**。②该轮已结束时反而不重拉，本地缺切走期间的增量（非当前会话的 `answer` 事件被丢弃）。修法：三条**互不重叠**的路 —— 首进拉一页 / **还在跑就什么都不做**（占位留着，等权威消息整条覆盖，切走期间缺的增量由全文一次补齐）/ 已结束则整页重拉且 `limit = 本地已有条数`（不被 50 截断），滚动位置用**顶部那条消息的 seq** 找回。⚠️ 纪律：**前端不要维护「本地消息 ↔ 库里消息」的对应关系**（不要按 seq/id 合并、不要给占位补 seq）—— 那条路要前端替服务端记账，漏一处就是错位（vite 版反复改的就是它）。`seq` 只作**服务端下发值的查询键**（分页游标 `next_before_seq`、滚动锚点） |
+| 11 | 知识库列表**全是 64 位哈希**，认不出是哪份文档（顺手修） | 条目名 `name` 是摄入时算出的内容 sha256，而给人看的 L0 摘要就在旁边没人用。`GET /knowledge/entries` 增加 `abstract_excerpt`（合并空白 + 按**字符**限长 200，不会切出半个 UTF-8；无摘录时字段省略），数据取自同一次 `vfs.list` 已读出的 `ContextEntry`，**零额外 IO**。UI 有摘录即以它为标题，哈希退成右侧 `c45badca…  L0 L1 L2` 短标记。原始文件名暂不可得：`original_name` 只进了向量 payload，`vfs_entries` 表没有该列（存量条目也补不回，要补得加列 + 迁移） |
+| 12 | **回车发送后消息里多一个换行**（光标不在文字最后时） | `gpui_base` 处理 Enter 的方式是「先在光标处插入换行 → 再 emit `InputEvent::PressEnter`」。早先收到事件就发送，那个换行已经落进正文：光标在末尾时它跟在最后（Markdown 不显形），在**中间**时卡在语句里（用户实测）。修法 `send_on_enter`：**只把「待发送的字符串」里那个 `\n` 删掉**（`selected_range()` 是 UTF-8 字节偏移，`\n` 单字节，不会切坏多字节字符）；生成中不动（此时发送本就禁用，Enter 就该只是换行）。两条**反例**都踩过：① `capture_key_down` 拦不住（GPUI 的 keybinding→action 派发在原始 key listener **之前**，`dispatch_key_event` 先 `dispatch_key`、后才 `finish_dispatch_key_event`）；② 在 `PressEnter` 回调里 `set_value(fixed)` 把编辑器改回去，`set_value` 会重设选区、清空 undo 历史、打断 IME 组合态，实测后果是**回车只换行、消息发不出去**（用户报障）。任何「发送前顺手修一下输入框」的念头都要掐掉：只改 payload |
+| 13 | 停止按钮是**空心方框**；压缩点像一条空消息 | 停止图标：vite 是 `<Square className="fill-current" />`（lucide 描边矩形被填满 = 实心），GPUI 的 `svg()` 只能渲染 stroke 版，改不了 fill → 直接画 12×12 白方块（照抄 lucide `rect x=3 y=3 w=18 h=18 rx=2` 按 16px 渲染的几何，1.5px 圆角，放大截图核对过）。压缩点：先去掉 footer（一个「看不见内容的复制按钮 + 时间戳」比没有更糟），随后按用户选择改成**可展开的摘要卡片**：胶囊 + 分割线照旧，右侧「摘要 ▸」点开显示摘要正文（Markdown，限高 320 可滚，默认收起），展开态存在 `ExpandState.compression`（key `c:{mi}`），`/state` 的 `messages.expanded` 可断言 |
+| 14 | **输入后切走再切回，助手回复只剩一个思考块；更早的历史也没了** | 两个独立根因。①切回时若该轮在跑 → 整页 `load_messages` **替换**列表，把最后一条 assistant **占位**删掉；而流结束的权威 `message` 事件在 `apply_authoritative_message` 第一行就要求「最后一条是 assistant」，否则直接 return，于是那轮内容**永远无处落地**。②该轮已结束时反而不重拉，本地缺切走期间的增量（非当前会话的 `answer` 事件被丢弃）。修法：三条**互不重叠**的路，首进拉一页 / **还在跑就什么都不做**（占位留着，等权威消息整条覆盖，切走期间缺的增量由全文一次补齐）/ 已结束则整页重拉且 `limit = 本地已有条数`（不被 50 截断），滚动位置用**顶部那条消息的 seq** 找回。⚠️ 纪律：**前端不要维护「本地消息 ↔ 库里消息」的对应关系**（不要按 seq/id 合并、不要给占位补 seq），那条路要前端替服务端记账，漏一处就是错位（vite 版反复改的就是它）。`seq` 只作**服务端下发值的查询键**（分页游标 `next_before_seq`、滚动锚点） |
 | 15 | **会话输出完了，界面却停在中间某个阶段不动**（按钮已回到「发送」，正文缺最后一段；重启应用才正常） | 根因是**事件流不可靠且没有兜底**。服务端事件走 `broadcast`（有界）→ SSE handler 再转 `mpsc`（有界）：UI 一慢，链条末端满 → `Lagged` → **旧事件被挤出**。被挤掉的如果正好是收尾的 `message`（权威全文），而 `turn_state(idle)` 侥幸留下，就出现「按钮已回到发送、正文停在工具结果」。vite 靠「任何一次重连/订阅都用快照与数据库收敛」恢复；native 此前既不调订阅端点、又把 `snapshot` 帧当未知类型丢掉，只能重启（见下方「事件订阅的可靠性」） |
 
 > **第 10 条的教训（写进纪律）**：`AnyWindowHandle::update` 给的是 `&mut AnyView`，
 > 拿不到 `&mut ClientApp`，所以**自动化永远构造不出 `on_click` 的借用上下文**。
-> 凡是「on_click 里改 entity 状态」的写路径，自动化只验证了**另一半**——必须
+> 凡是「on_click 里改 entity 状态」的写路径，自动化只验证了**另一半**，必须
 > ①有 window 就直接用、②失败不静默、③state 里留诊断分支，三者缺一不可。
 
 回归：`step_boundary_tests` 5 个单测（空占位/只有思考/已有正文/工具未回结果/工具已回结果）+ 77 项界面断言全绿。
 第 4/5 条的复现与回归都用**隔离实例**（`TIANYAN_CONFIG` 指独立配置、`storage.data_dir` 指临时目录、
 `TIANYAN_GUI_AUTOMATION_PORT` 指独立端口），全程 `/act` + `/state` 断言，不碰 `D:\tianyan`。
 ⚠️ 教训：隔离实例与已装实例**进程同名**（都叫 `tianyan-gui-native`），收尾**禁止**
-`Get-Process tianyan-gui-native | Stop-Process`——那会把用户正在用的实例一起杀掉
+`Get-Process tianyan-gui-native | Stop-Process`，那会把用户正在用的实例一起杀掉
 （实测踩过）。只按 `Start-Process -PassThru` 拿到的 **PID**（或按 `Path`）精确操作。
 
 ### 1.1.0 第二批（页面空白 / 检索为空 / 设置页显示与危险操作）
@@ -311,14 +311,14 @@ vite 是 14 份手写受控表单，这里是「字段声明成数据 + 一套�
 | 16 | **工具 / 技能 / 知识 / 记忆四个页面点进去全空** | 后端不空（`/skills` 14、`/tools` 57、`/memory` 115、知识两级 20 条），空的是界面：左栏 `on_click` 自己写了一份精简判断，只给 `Roles`/`Workspace` 补拉，其余七个页面**从未触发过加载**（旁边注释「数据已在启动时预加载」也不成立，启动只拉会话与配置）。而自动化 `/act` 走 `switch_view`（会加载）→「自动化验得出来、人点不出来」，正是 ADR-052 D8 警告的分叉。修法：左栏点击 / 对话页「文件视图」一律改调 `switch_view`，加载口径收进 `load_view_data`（每视图一次判定，统一「每次进入都刷新」；文件树只空时拉、知识页保留当前目录） |
 | 17 | **知识搜索任何 query 都是 0 条** | `namespace` 过滤在「取回 top_k **之后**」用内存 `retain` 做的，而每列 ANN 只取 top_k 行：全局 top_k 被技能/记忆/agent 占满，过滤后一条不剩（同一 query **不加**过滤能命中 7 条 knowledge）。修法：过滤下推 DB 层 `only_if("namespace = '…'")`（`QueryRequest.prefilter` 默认 true = 先过滤再 ANN），单列与 RRF 两条路径都改。**影响面不止知识页**：`policy-context` 的注入检索（`retriever.rs:150` 同样传 namespace）此前等于「按命名空间检索必空」 |
 | 18 | **搜索结果的相似度是负数**（-0.047 / -0.133） | LanceDB 默认 `L2`（平方欧氏），而代码一律 `score = 1 - _distance`：未归一化向量下毫无意义，归一化向量下等于 `2cos-1`（正交算出 -1）。修法：两处检索显式 `.distance_type(DistanceType::Cosine)` ⇒ `_distance = 1 - cos`、`score = cos`。实测同一条目同一 query **-0.047 → 0.476**。**顺带修好一处被误诊的退化**：`ContentLoadStrategy` 的 `score > 0.6` 是按余弦标定的（它自己的测试注释就写着「阈值按余弦相似度标定（0.6），导致所有结果永远停留在 Abstract」），底层给 `2cos-1` ⇒ 0.6 只对应余弦 0.2 ⇒ 注入永远只取 L0 |
-| 19 | **知识搜索结果卡片全空**，只剩一个分数 | 后端 `search` 把 `content`/`source` 留空、`metadata.title` 填 `None`，注释写「由前端按需调 `/entries/read`」——两个前端都没实现那一步。修法：服务端一次带回（title = L0 摘要、content = L2 前 300 字、source = 父目录路径），DTO 层把 score 钳到 0..1；native 搜索卡片改成「标题 / 百分比 / 目录 / 正文预览」四行 |
+| 19 | **知识搜索结果卡片全空**，只剩一个分数 | 后端 `search` 把 `content`/`source` 留空、`metadata.title` 填 `None`，注释写「由前端按需调 `/entries/read`」，两个前端都没实现那一步。修法：服务端一次带回（title = L0 摘要、content = L2 前 300 字、source = 父目录路径），DTO 层把 score 钳到 0..1；native 搜索卡片改成「标题 / 百分比 / 目录 / 正文预览」四行 |
 | 20 | **设置页「数据目录」显示成 `%LOCALAPPDATA%\tianyan`**（placeholder） | 后端是对的（`/config` 里就是 `D:\tianyan`）。界面里 ReadOnly 字段直接读配置、**文本字段读的是编辑器**，而编辑器从未回填。三个叠加原因：①只有点二级栏目才懒加载 + 回填；②回填判据用 `raw_config.is_none()`，而 `load_models` 也会顺手设它 ⇒ 以为「不是首次」跳过；③**回填失败也置 `settings_backfilled = true`**（窗口句柄未就绪时静默失败）⇒ 一次性失败固化成永久状态。修法：进设置页就保证加载 + 回填、判据改 `!settings_backfilled && settings_dirty.is_empty()`、`handle.update` 成功才置位。**断言口径本身也要修**：`/state` 的字段 `value` 走 `field_edit_value`（未回填时回落配置值，看起来永远正确），新增 `settings_fields.backfilled` 与每字段 `editor` 才能看见「界面是空的」 |
-| 21 | 数据目录**可编辑**（与「搬迁才是唯一入口」的设计冲突） | 直接改配置里的 `storage.data_dir`，下次启动就在空目录里跑（旧库还在原处、服务看不到）= 用户视角「数据全没了」。修法两道防线：UI 改只读；`ConfigService::update_config` **以运行时值为准、丢弃请求里的 data_dir** 并 `warn!`（不返回 400 —— 客户端整份 PUT，报错会让「保存任意字段」连带失败）。实测直接 `PUT` 改成 `C:\should-be-ignored` → 重读仍是原值 |
+| 21 | 数据目录**可编辑**（与「搬迁才是唯一入口」的设计冲突） | 直接改配置里的 `storage.data_dir`，下次启动就在空目录里跑（旧库还在原处、服务看不到）= 用户视角「数据全没了」。修法两道防线：UI 改只读；`ConfigService::update_config` **以运行时值为准、丢弃请求里的 data_dir** 并 `warn!`（不返回 400：客户端整份 PUT，报错会让「保存任意字段」连带失败）。实测直接 `PUT` 改成 `C:\should-be-ignored` → 重读仍是原值 |
 | 22 | 搬迁是一张**常驻卡片**（当前目录 + 手输路径 + 按钮） | 按用户意见改成「字段行动作 → 选择器 → 确认」：`storage.data_dir` 行右侧「搬迁…」→ `WorkspacePicker`（新增 `PickerTarget::DataDir`，标题/说明随用途切换）→ 选中后弹 `Dialog::DataDirMigrate` 确认（**选中 ≠ 生效**，整库搬迁不可撤销）。删掉整块卡片与 `storage_move_target` / `storage_msg` / `storage_msg_err` 三个字段，结果反馈改用 `push_notice`（`/state` 的 `notices` 本来就能断言） |
 | 23 | 向量索引两个字段**改了不报错但会坏** | 换 `collection_name` = 换一套空索引（检索立刻全空）；改 `vector_dimension` = 表重建 + **全量重新嵌入**（几分钟 + 嵌入费用）。不锁死（换嵌入模型时维度必须跟着改，是合法动作），改成**保存前确认**：`save_settings_fields_checked(force)` 检测到这两项脏就弹 `Dialog::VectorIndexChange`（点名要改哪几个），确认后才落盘 |
-| 24 | **记忆详情满屏 `#`、`**`、`- `** | 记忆是以 markdown 存进 VFS 的（`# 记忆: xxx` + `- **类别**: fact` + `## 内容`），而 L0/L1/L2 三段按纯文本渲染。改用 `TextView::markdown`（消息正文同一组件），L2 折叠展开一起改。限制：该组件**不继承父级 `text_color`**（用组件主题 foreground），只适用于普通/次级背景 —— 消息里的用户气泡是深棕底，那里不能用 |
+| 24 | **记忆详情满屏 `#`、`**`、`- `** | 记忆是以 markdown 存进 VFS 的（`# 记忆: xxx` + `- **类别**: fact` + `## 内容`），而 L0/L1/L2 三段按纯文本渲染。改用 `TextView::markdown`（消息正文同一组件），L2 折叠展开一起改。限制：该组件**不继承父级 `text_color`**（用组件主题 foreground），只适用于普通/次级背景，消息里的用户气泡是深棕底，那里不能用 |
 
-> **本批的教训**：16 / 17 / 20 三条都是「**两条路径各写一份**」——
+> **本批的教训**：16 / 17 / 20 三条都是「**两条路径各写一份**」，
 > 左栏点击 vs `switch_view`、内存过滤 vs DB 过滤、`raw_config` 判据 vs
 > `settings_backfilled`。修法一律是「收成一个入口 + 把判据换成真正表达语义的
 > 那个标志」。第 20 条还多一条：**断言口径本身会骗人**（`value` 回落配置值，
@@ -348,7 +348,7 @@ cargo run            # 首次约 3 分钟，之后增量 2-6 秒
 它做三件事，都是为了**不在用户桌面上折腾**：
 
 1. **复用**：3010 上已有实例就直接用，不重启；
-2. **隐藏**：需要新起时带 `TIANYAN_GUI_START_HIDDEN=1`——窗口建好但不显示（任务栏
+2. **隐藏**：需要新起时带 `TIANYAN_GUI_START_HIDDEN=1`，窗口建好但不显示（任务栏
    不闪、不抢焦点），而 `/state`、`/act` 全部照常；
 3. **一次跑完**：14 个栏目切换 + 字段引擎（改→脏→保存→后端落库→恢复）+ 用量 +
    人设 + MCP + 存储 + 连接，**跑完自动把改动恢复原值**（配置与人设都校验回基线）。
@@ -364,7 +364,7 @@ cargo run            # 首次约 3 分钟，之后增量 2-6 秒
 
 | 机制 | vite | native（现在） |
 |---|---|---|
-| 服务端心跳 | 同样缺（全仓搜不到 `KeepAlive`） | `Sse::keep_alive(15s)` —— 半死连接可被发现 |
+| 服务端心跳 | 同样缺（全仓搜不到 `KeepAlive`） | `Sse::keep_alive(15s)`，半死连接可被发现 |
 | 心跳超时判定 | 浏览器 `EventSource` 内部处理 | **50s 无任何字节 → 判半死、主动重连**（`reqwest` 的 `bytes_stream()` 默认没有读超时，必须自己包 `timeout`） |
 | 断线重连 | `EventSource` 自动 + 退避 | 指数退避 1s→2s→…→30s，连上即重置 |
 | 重连后**重放订阅** | `onopen` 里 `for sid of subscribedSessions: doSubscribe(sid)` | `on_event_stream_connected` 整集重放（`force=true` 绕过幂等） |
@@ -385,7 +385,7 @@ cargo run            # 首次约 3 分钟，之后增量 2-6 秒
   的 `session.events.subscribed` 从 0 变 1
 - 重启后（`inputs`/订阅集都空）→ 选中会话 → 快照帧到达 → `loaded=2 last='甲'`
 
-### 首选：内建自动化端口（ADR-052）—— 不截图、不点坐标
+### 首选：内建自动化端口（ADR-052），不截图、不点坐标
 
 界面自己提供 `GET /state`（状态快照）与 `POST /act`（语义动作），agent 直接读断言、
 直接触发动作。**锁屏也能跑**（不依赖窗口可见）：
@@ -434,8 +434,8 @@ pwsh -NoProfile -File .\scripts\verify-enter-send.ps1 -Exe gui-native\target\deb
 权威判据是 SQLite（ADR-018，会话消息的真相在那里）；`/state` 的
 `state.messages.recent[].newlines` 是配套的快速断言字段。
 > ⚠️ `/state` 与 `/act` 的响应都是 `{ ok, state }` **包装**（字段全在 `.state` 下）。
-> 直接读 `$st.streaming` / `$st.input` 永远是空 —— 实测踩过，差点误判成「粘贴没进去」。
-> ⚠️ 收尾只按 PID 杀（`Start-Process -PassThru` 那一个）—— 按进程名会连用户正在用的
+> 直接读 `$st.streaming` / `$st.input` 永远是空；实测踩过，差点误判成「粘贴没进去」。
+> ⚠️ 收尾只按 PID 杀（`Start-Process -PassThru` 那一个），按进程名会连用户正在用的
 > 实例一起杀掉。
 
 ### 像素级核对：内建截图优先，抓屏兜底
@@ -463,7 +463,7 @@ Invoke-RestMethod http://127.0.0.1:3010/act -Method Post -ContentType applicatio
 > - **从未显示过的窗口**（`TIANYAN_GUI_START_HIDDEN=1`，即 `WindowOptions.show=false`）
 >   没有可用帧 → 截出 1×1。所以「隐藏启动跑断言」与「截图核对视觉」必须分开跑：
 >   前者用隐藏窗口，后者用可见窗口。
-> - 「先显示过、再 `SW_HIDE` 藏到托盘」仍能截（帧还在）——与「从未显示」是两种情形。
+> - 「先显示过、再 `SW_HIDE` 藏到托盘」仍能截（帧还在），与「从未显示」是两种情形。
 
 **兜底：进程外抓屏**（生产构建没有 `screenshot` feature 时）：
 
@@ -474,7 +474,7 @@ Invoke-RestMethod http://127.0.0.1:3010/act -Method Post -ContentType applicatio
 ```
 
 > ⛔ **必读坑：PowerShell 默认 DPI-unaware。** 本机 2560×1440 @150%，`GetWindowRect`
-> 返回的是虚拟化坐标——物理 1920×1230 的窗口只报 1295×857，于是 `CopyFromScreen`
+> 返回的是虚拟化坐标：物理 1920×1230 的窗口只报 1295×857，于是 `CopyFromScreen`
 > **只抓到窗口左上角那块**。症状极像「右下角的元素没渲染」（消息区空白、输入卡片
 > 消失、任务面板不见），曾据此误判 GPUI 的 flex 布局失效、白查数轮。
 > `scripts/ui-shot.ps1` 已用 `SetProcessDpiAwareness(2)` 修掉，**不要再手写截图**。
@@ -500,7 +500,7 @@ win32 消息循环**（GPUI 独占主线程循环且不暴露 hook），主线�
 三个坑（都实测踩过）：
 
 1. **通知必须要 AppUserModelID**。不注册也能弹，但归属名退回 `Windows PowerShell`
-   ——「PowerShell 发来一条通知」比不弹更糟。启动时写
+   ；「PowerShell 发来一条通知」比不弹更糟。启动时写
    `HKCU\Software\Classes\AppUserModelId\Tianyan.GuiNative`（`DisplayName` + `IconUri`，
    **免管理员**）。
 2. **托盘找窗口不能只看 `IsWindowVisible`**。窗口一被 `SW_HIDE`，可见性就是 false，
@@ -512,6 +512,6 @@ win32 消息循环**（GPUI 独占主线程循环且不暴露 hook），主线�
 `unsafe` 只出现在 `tray.rs` / `hotkey.rs` 的 Win32 边界（枚举窗口、显隐窗口、泵消息、
 注册热键），每处都有 SAFETY 注释。
 
-打包 MSI：**不要直接跑 WiX CLI** —— 版本注入、产物命名、`$(var.ProductVersion)` 门禁都在
+打包 MSI：**不要直接跑 WiX CLI**，版本注入、产物命名、`$(var.ProductVersion)` 门禁都在
 `installer/build-msi.ps1` 里；完整流程（含依赖版本、静默安装与验收清单）见
 [`../docs/operations/release-msi.md`](../docs/operations/release-msi.md)。

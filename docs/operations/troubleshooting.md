@@ -50,7 +50,7 @@ max_files = 5
 
 `core/src/common/panic_hook.rs::install` 把 panic 报告（时间 / 线程 / 位置 / 消息 / 回溯）append 到安装时给的目录；桌面端与 server 都传 `<data_dir>/logs`。目录不存在时尽力创建、写入失败静默（hook 内不得再失败）。
 
-桌面端崩溃、闪退、窗口没出来 —— **先看这个文件**，再看 §3 的 DB。
+桌面端崩溃、闪退、窗口没出来：**先看这个文件**，再看 §3 的 DB。
 
 `panic_hook::default_log_dir()` 仍保留，但那是**兜底**：`%APPDATA%\com.tianyan.app\logs\`
 （`dirs::data_dir()` = 系统应用数据根，与配置里的 `storage.data_dir` **不是同一个东西**），
@@ -190,7 +190,7 @@ max_files = 5
 **根因（0.3.14 修复，双叠）**
 
 1. **double count**：`run_turns` 实测输入恢复为 `tokens.input + tokens.cache.read`
-   —— `input` **已含缓存命中**，`cache.read` 是其**子集**，相加使判定值 ≈ 真实 × 2。
+   `input` **已含缓存命中**，`cache.read` 是其**子集**，相加使判定值 ≈ 真实 × 2。
    事故实测：压缩前 `input=593399` / `cache.read=592128` → 判定 `1185527` 直接越过 1M 窗口 →
    `dynamic_max_tokens` 返回 `None` → 请求根本不发出。
 2. **恢复范围未按压缩点截断**：压缩后组装视图已从压缩点重新开始（实际仅 ~1.7 万），
@@ -208,7 +208,7 @@ pub fn prompt_side_tokens(&self) -> usize {
 - **不得**写成 `input + cache.read`。
 - 压缩判定与实测输入恢复**共用**该函数（`agent_core::maybe_compress_and_persist` 与
   `agent::loop` 同源）。
-- **压缩点自身不参与**占用统计——它的 tokens 是摘要请求（压缩前上下文重发）的用量。
+- **压缩点自身不参与**占用统计：它的 tokens 是摘要请求（压缩前上下文重发）的用量。
 
 **压缩阈值与作用域**
 
@@ -236,13 +236,13 @@ ORDER BY seq DESC LIMIT 10;
 
 - 确认版本 ≥ 0.3.14（口径修复 + 阈值 60%）。
 - 已卡死的旧会话：升级后新请求按修复后口径重算；若仍异常，检查模型 `context_length`
-  （与 `storage.vector` 无关——向量维度是另一回事，见数据体检文档）。
+  （与 `storage.vector` 无关，向量维度是另一回事，见数据体检文档）。
 - 回归证据：`core/src/agent/loop_tests.rs` 的“预算不足 1024”事故复现测试（`input=593_399`）。
 
 ### 2.d 终止后前端显示「上一轮的回答」
 
 **现象**：在输入框打字（内容有误）后点击「终止/停止」，前端把**上一轮的 assistant
-结论**渲染到本轮位置——内容明显不属于本轮。
+结论**渲染到本轮位置，内容明显不属于本轮。
 
 **根因（0.3.17 修复）**：服务层在流式轮结束后**无条件**补发 assistant 消息边界事件，
 而该事件取的是「会话中**最后一条** assistant 消息」。取消/失败轮根本不落库 assistant
@@ -252,22 +252,22 @@ segments/thinking/usage），于是陈旧内容显示在当前轮。
 **修复位置**：`server/src/api/chat/services.rs`
 
 - 轮前记录水位：`last_assistant_message(session.messages).id` → `prev_assistant_id`；
-- 边界事件只下发 `select_turn_assistant(messages, prev_assistant_id)`——即**本轮新产生**
+- 边界事件只下发 `select_turn_assistant(messages, prev_assistant_id)`，即**本轮新产生**
   的 assistant 消息；本轮没有新消息则**不下发**（取消/失败轮静默）；
 - 回归测试：`api::chat::services::tests::test_select_turn_assistant_*`
   （取消场景断言返回 `None`；反向验证：恢复旧行为必红）。
 
 **排查入口**（旧版本再遇到时）：
 
-1. 查该轮是否落库 assistant 消息——`session_messages` 按 seq 倒序看最近两条
+1. 查该轮是否落库 assistant 消息：`session_messages` 按 seq 倒序看最近两条
    （取消轮只会看到用户消息）；
 2. 比对前端展示的消息 id 与上一轮 assistant id 是否相同（相同即命中此 bug）。
 
 **前端加固（2026-10-09 已实施）**：`applyServerMessage` 合并边界事件时**校验消息
-归属本轮** —— 实现用 `turnState[sessionId].auto`（用户轮 `false` / 唤醒轮 `true`）：
+归属本轮**：实现用 `turnState[sessionId].auto`（用户轮 `false` / 唤醒轮 `true`）：
 
 - **auto 轮（唤醒轮 / 后台轮）的边界事件不得替换"用户轮的流式占位"**：两者是
-  不同轮次、不同消息，按位置反查"最后一个无 id 的 assistant"必然跨轮错配 ——
+  不同轮次、不同消息，按位置反查"最后一个无 id 的 assistant"必然跨轮错配，
   唤醒轮消息（有 id、且自带 `segments`）覆盖用户轮占位后，会把占位已累积的
   **`segments`（thinking 段 / tool 段）** 抹掉；三者全空时渲染层 `MessageBubble`
   直接 `return null`，表现为**该会话的思考块与工具卡片整条消失**。
@@ -280,7 +280,7 @@ segments/thinking/usage），于是陈旧内容显示在当前轮。
   （`唤醒轮边界事件不得覆盖用户轮的流式占位` + `用户轮（auto=false）…` 对照用例；
   **判别力已验证**：临时停用修复则该用例必红）。
   > 注：本节的 0.3.17 修复在**服务端**（只下发本轮新产生的 assistant）；唤醒轮的
-  > 边界事件在服务端看来是"合法的新消息"，服务端侧无法拦住 —— 故这一层加固必须
+  > 边界事件在服务端看来是"合法的新消息"，服务端侧无法拦住，故这一层加固必须
   > 落在前端，两者互补。
 
 ---
@@ -352,7 +352,7 @@ FROM background_tasks ORDER BY seq DESC LIMIT 20;
 
 - **测试命令**：统一走 `.\scripts\test.ps1 [lint|unit|integration|e2e|gui-build|gui-e2e|bench|all]`；
   纯 Rust 单测可直接 `cargo test -p tianyan-core --lib`（见 `AGENTS.md`）。
-- **端口约定**：`server/src/main.rs` **不解析 `--host/--port`**——独立启动**默认监听
+- **端口约定**：`server/src/main.rs` **不解析 `--host/--port`**：独立启动**默认监听
   `127.0.0.1:3000`**（`ServerConfig::default()` = `host 127.0.0.1`, `port 3000`；`TIANYAN_PORT`
   可覆盖，走 `ServerConfig::from_env`）；QA 时**直接测 3000**。
   桌面端不自己抢端口：先经 `tianyan_desktop::ensure_server` **发现同一数据目录的已有实例并复用**，
@@ -379,7 +379,7 @@ At line:1 char:1
 + CategoryInfo : NotSpecified: (...) [], RemoteException
 ```
 
-—— 那只是 cargo 的一行 Info，却被报成 `RemoteException`。tauri 已删除，这个陷阱不随壳消失。
+那只是 cargo 的一行 Info，却被报成 `RemoteException`。tauri 已删除，这个陷阱不随壳消失。
 
 **当前脚本的写法（已核实，如实描述）**
 
@@ -416,7 +416,7 @@ powershell.exe - Application Error
 
 **它不是天演弹的**，是 Windows 的 HardError 对话框（CSRSS 弹出）：某个 `powershell.exe`
 子进程在**初始化阶段**就崩了，进程没能起来。天演侧通常只看到一条失败的命令（甚至看不到
-—— 弹窗把进程挂住）。
+弹窗把进程挂住）。
 
 **取证**（决定性证据在 WER，不在天演日志）：
 
@@ -446,8 +446,8 @@ P5: oft.PowerShell.ConsoleControl+<>c.<.cctor>b__106_1
 
 **真根因（2026-11-10 重查：当年那条归因只治了表面）**
 
-历史触发源换过四代——`waitfor /t N`、`ping -n N`、裸写 `powershell`（→5.1）、以及
-**`pwsh` 7**——每一代都撞过同一个框。当年按「5.1 的 `ConsoleControl` 静态构造有 bug」
+历史触发源换过四代：`waitfor /t N`、`ping -n N`、裸写 `powershell`（→5.1）、以及
+**`pwsh` 7**，每一代都撞过同一个框。当年按「5.1 的 `ConsoleControl` 静态构造有 bug」
 归因、换成了 pwsh，实际只是把异常码换了一个（`0xc0000142` → `0x80131623`），框照弹。
 
 **真根因是「无控制台状态被叠加了两层」**：
@@ -476,16 +476,16 @@ P5: oft.PowerShell.ConsoleControl+<>c.<.cctor>b__106_1
 唯一差别是「链条上游有没有一个健康的控制台」。所以 `tianyan-server` 这种控制台宿主
 直接 spawn 是安全的，**只有「无控制台父 + 下游再叠加一层」的组合会崩**。
 
-**观测纪律**：只数 `Get-WinEvent Id=1000` 会把 HardError 弹窗整个漏掉——「0 条崩溃」
+**观测纪律**：只数 `Get-WinEvent Id=1000` 会把 HardError 弹窗整个漏掉：「0 条崩溃」
 可能是假的 0。要同时枚举窗口（类名 `#32770` 即标准对话框），两条通道一起看。
 
 **天演侧的处理**：
 - 子进程退出码为「没起来」类时，工具结果里会带 `startup_failure` 字段给人话诊断
   （`executor::command::startup_failure_hint`，覆盖 `0xC0000142` / `0xC000013A` / `0xC0000005`）；
-- 执行底层默认 `auto`（优先 pwsh 7）—— 5.1 只在你显式配 `[executor].shell = "powershell"`
+- 执行底层默认 `auto`（优先 pwsh 7）；5.1 只在你显式配 `[executor].shell = "powershell"`
   或机器没有 pwsh 时才会用到。
 - **测试编译下不再叠加 `CREATE_NO_WINDOW`**（`ShellSpec::build_command` 的 `cfg(test)`
-  分支）：测试进程本身跑在终端里（有控制台），子进程继承即可——既不弹新窗口，也不会
+  分支）：测试进程本身跑在终端里（有控制台），子进程继承即可，既不弹新窗口，也不会
   叠加第二层「无控制台」。生产路径（GUI）保持原样，实测安全。
 
 **「到底用的是哪个 shell」怎么一眼确认（别再翻日志）**：设置页 → Agent 栏目顶部
@@ -503,7 +503,7 @@ P5: oft.PowerShell.ConsoleControl+<>c.<.cctor>b__106_1
 
 **现象**：回退到某条消息时失败，错误里带一个相对路径与 64 位 sha256。
 
-**先定性**：这**不是数据损坏**。恢复是「先全量校验后动手」——任一对象缺失即中止，工作区
+**先定性**：这**不是数据损坏**。恢复是「先全量校验后动手」：任一对象缺失即中止，工作区
 一个字节都没改，消息链也没截断（ADR-040）。所以不会出现「消息回退了、文件只回退一半」。
 
 **根因**：快照对象库是内容寻址（`<data_dir>/snapshots/objects/<hash 前2位>/<hash>.bin`，
@@ -545,7 +545,7 @@ capture 可能覆盖）。代价：回退到该锚点时这个文件保持当前
 
 **预防**（1.2.6 起）：缓存命中 mtime/size 前会先确认对象存在（`object_path(hash).exists()`），
 `prune_snapshot_trees` 重写树后也会自动清掉 `latest.cache.json` 与 `redo/tree-*.cache.json`
-（实测一次清理后有 44,233 条缓存记录指向已删对象——它们会让人误判「文件未变」而复用失效
+（实测一次清理后有 44,233 条缓存记录指向已删对象，它们会让人误判「文件未变」而复用失效
 hash，让新树引用悬空对象）。
 
 ## 附：本手册核实来源

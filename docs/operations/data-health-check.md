@@ -45,12 +45,12 @@ python -c "import sqlite3; c=sqlite3.connect(r'file:$env:LOCALAPPDATA\tianyan\ti
 **关键口径**
 
 - `session_messages`：`seq` 为会话内追加序号（唯一索引 `idx_session_messages_uniq`）；
-  `text` / `tool_text` 是**派生列**（供 FTS/窗口查询），且**被截断**——
+  `text` / `tool_text` 是**派生列**（供 FTS/窗口查询），且**被截断**，
   `text` 上限 `MAX_TEXT_CHARS=4000`、`tool_text` 上限 `MAX_TOOL_TEXT_CHARS=500`
   （`core/src/session/store.rs`）。**完整内容只在 `content_parts`**。
 - FTS 只索引**非空 `text`**（空消息/纯图片占 `seq` 但不进 FTS）；**子智能体会话**（`persist_no_fts`）
   全程**不写 FTS**（`session_meta.parent_session_id IS NOT NULL` 的会话）。
-- `compression_marker` **不是独立列**——它是 `content_parts` JSON 里的一个布尔字段
+- `compression_marker` **不是独立列**，它是 `content_parts` JSON 里的一个布尔字段
   （`"compression_marker":true`）；压缩点以 **user 角色**锚定（旧数据可能为 system）。
 - 时间列：`ts` / `created_at` / `completed_at` 为**毫秒 epoch**；`recorded_at` / `updated_at`
   等文本列为 SQLite `datetime('now')`（UTC，`YYYY-MM-DD HH:MM:SS`）。
@@ -164,7 +164,7 @@ WHERE NOT EXISTS (
 
 ### S5. 向量库（LanceDB）与 VFS 条目一致性
 
-向量库是**独立目录** `<data_dir>\lancedb\`，纯 SQL 查不到——需两边分别取数再比对。
+向量库是**独立目录** `<data_dir>\lancedb\`，纯 SQL 查不到，需两边分别取数再比对。
 
 ```sql
 -- SQLite 侧：非目录的 VFS 条目数
@@ -218,7 +218,7 @@ WHERE role = 'tool' AND LENGTH(content_parts) > 200000;
 | --- | --- | --- |
 | **S1 体量** | 单会话 `content_parts` 总量异常大（如 > 50MB）；`session_messages` 行数远超预期 | 定位大消息（S6）；确认读通道治理（0.3.14 起 `read_file`/`execute_command` 已截断）；历史存量不自动收缩，必要时按会话导出后清理 |
 | **S2 压缩点** | 出现 `role='system'` 的压缩点（旧数据）；或某会话压缩点异常密集 | `system` 压缩点是**旧数据**，组装层会归一为 user，无需手改；密集压缩关注 §“压缩阈值 60%”口径是否被误触发 |
-| **S3 超期任务** | `completed_at` 超 3 天仍在库；或存在 `running/pending` 僵尸 | 终态超期本应由 **TTL 逐出（3 天，惰性，`snapshot()` 时触发）** 删除——若仍在，说明 snapshot 未被调用或写路径失败（检查日志 `后台任务 TTL 逐出失败`）；僵尸 Running/Pending 由启动迁移标记 Failed，否则检查启动流程 |
+| **S3 超期任务** | `completed_at` 超 3 天仍在库；或存在 `running/pending` 僵尸 | 终态超期本应由 **TTL 逐出（3 天，惰性，`snapshot()` 时触发）** 删除，若仍在，说明 snapshot 未被调用或写路径失败（检查日志 `后台任务 TTL 逐出失败`）；僵尸 Running/Pending 由启动迁移标记 Failed，否则检查启动流程 |
 | **S3 孤儿任务** | `parent_session_id` 无对应 `session_meta` | 主会话删除应级联删子会话/任务；出现孤儿说明级联未跑，可手工清理（见下） |
 | **S4 FTS 缺口** | `unindexed_main` 显著 > 0 | 正常情况应为 0（`append` 与 FTS 同事务写入）。非 0 说明历史写入路径异常或旧库未重建；可触发 `session_recall` 前先重建 FTS（见下） |
 | **S4 FTS 残留** | `orphan_fts` > 0 | 重写/删除的 FTS 清理未完成；重建 FTS 修正 |
