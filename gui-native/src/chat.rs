@@ -785,14 +785,12 @@ impl ClientApp {
             )
             // 追问面板**不在这里**：它替换输入框（见 `render_composer` 开头），
             // 与 vite `ChatInput` 同位置。
-            // 与消息正文、输入卡片同一内缩：三者左右边界必须对齐（用户实测反馈）
-            .child(
-                div()
-                    .w_full()
-                    .max_w(px(colors::CHAT_MAX_W))
-                    .px_4()
-                    .child(self.render_todo_bar(cx)),
-            )
+            // 横向口径与输入卡片**逐字一致**：通栏 → 左右各 16 → 内容限宽 896 居中
+            // （对应 `render_composer` 外层 `px_4` + 卡片 `max_w(896)`）。这里只负责
+            // 「通栏内缩」，限宽交给 `render_todo_bar` 自己。
+            // 反例（用户实测两次）：本层也写 `max_w(896)` 的话，`max_w` 钳的是**含
+            // padding 的盒**，卡片只剩 896-32=864；本层与内层都加 `px_4` 则叠成 832。
+            .child(div().w_full().px_4().child(self.render_todo_bar(cx)))
             .into_any_element()
     }
 

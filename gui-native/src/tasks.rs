@@ -1382,8 +1382,9 @@ impl ClientApp {
             }
             card = card.child(list);
         }
+        // 卡片本体限宽居中；左右各 16 的**通栏内缩由外层给**（`chat.rs::render_banners`），
+        // 与输入卡片同一口径。这里再补一层 `px_4` 会让卡片比输入框窄 32px（用户实测）。
         div()
-            .px_4()
             .pb(px(6.))
             .child(
                 div()
