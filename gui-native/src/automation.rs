@@ -388,6 +388,10 @@ impl ClientApp {
                 // 顶部会话 Tab（浏览器式）：断言「点 × 有没有真的关掉」只能看这里
                 // —— 实测的 bug 正是「close_tab 删掉、冒泡又把 id 加回来」。
                 "tabs": self.open_tabs.clone(),
+                // 虚拟 tab（未开始的新会话）是否显示。它与渲染用**同一个判据**
+                // （`new_session_workspace.is_some()`）——这张 tab 的全部身份就是这个
+                // 字段，不进 `open_tabs`（服务端还没有这条会话记录）。
+                "pending_tab_visible": self.new_session_workspace.is_some(),
                 // Tab 上的活跃标（对齐 vite `SessionTabBar`）：运行中 / 等待回答 /
                 // 名下后台任务数。与左栏绿点**同源**（`running_sessions`）——
                 // 「顶部没有活跃提示」那条只能靠这里断言。
@@ -1063,6 +1067,11 @@ impl ClientApp {
             // （`usage.draft_restore_path`），复现时能直接看出是哪条。
             "select_session" => self.open_session(arg_str(cmd, "id")?, None, cx),
             "new_session" => self.start_new_session(None, cx),
+            // 虚拟 tab（未开始的新会话）的两条真实点击路径：Tab 本体 = 激活回空态，
+            // Tab 上的 × = 丢弃它选定的目录。这里调的是与按钮 **同一个方法**，
+            // 不另写一套（ADR-052：动作必须复用真实交互路径，否则测过的不是用户点的）。
+            "activate_pending_tab" => self.activate_pending_session(None, cx),
+            "dismiss_pending_tab" => self.dismiss_pending_session(cx),
             // 关掉一个会话 Tab（与点 × 同一条路径：`close_tab`）。带 `window` 的那条
             // 路径在真实点击里走 `Some(window)`，自动化走 `None`（同其它动作口径）。
             "close_tab" => self.close_tab(arg_str(cmd, "id")?, None, cx),

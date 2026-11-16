@@ -1372,7 +1372,9 @@ impl ClientApp {
     /// 单独成方法：`render_chat` 的栈帧已经很紧（GPUI 递归 prepaint，
     /// 单帧过大会 `has overflowed its stack`），这里不再往它体内塞嵌套。
     pub(crate) fn render_session_tabs(&self, cx: &mut Context<Self>) -> AnyElement {
-        if self.open_tabs.is_empty() {
+        // 没有真实 tab 也**可能**有虚拟 tab（新建会话、尚未发首条消息）——两者都空
+        // 才退回单行标题。
+        if self.open_tabs.is_empty() && self.new_session_workspace.is_none() {
             return div()
                 .px_3()
                 .py_2()
@@ -1394,6 +1396,75 @@ impl ClientApp {
             .border_b_1()
             .border_color(rgb(colors::BORDER()))
             .overflow_hidden();
+        // ── 虚拟 tab：新建会话尚未发首条消息 ────────────────────────────────
+        //
+        // 此刻服务端**还没有**这条记录（会话在首条消息时才创建），所以它没有
+        // `session_id`，也不进 `open_tabs`——它的**全部身份就是
+        // `new_session_workspace`**：
+        // - 点「+」选完目录 → 这个字段有值 → 本 tab 出现；
+        // - 切到别的会话 → 本 tab 变灰但仍在（可点回，目录不丢）；
+        // - 点 × → 字段清空 → 本 tab 消失；
+        // - 发首条消息 → `send_text` 里 `take()` 掉 → 本 tab 消失、真实 tab 由
+        //   `ensure_tab` 顶上。
+        //
+        // 标题带所处目录（用户要求）：否则用户分不清这个「新会话」准备建在哪个
+        // 工作区。只取末段目录名，全路径太长会把 tab 撑爆。
+        if let Some(ws) = self.new_session_workspace.clone() {
+            let is_cur = self.current_session.is_none();
+            row = row.child(
+                div()
+                    .id("session-tab-pending")
+                    .px_2()
+                    .py_1()
+                    .rounded_md()
+                    .cursor_pointer()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_1()
+                    .whitespace_nowrap()
+                    .bg(rgb(if is_cur {
+                        colors::BG_TERTIARY()
+                    } else {
+                        colors::BG_SECONDARY()
+                    }))
+                    .text_size(px(12.))
+                    .text_color(rgb(if is_cur {
+                        colors::TEXT_PRIMARY()
+                    } else {
+                        colors::TEXT_SECONDARY()
+                    }))
+                    .child(
+                        div()
+                            .flex_shrink_0()
+                            .text_color(rgb(colors::TEXT_TERTIARY()))
+                            .child("＋"),
+                    )
+                    .child(format!("新会话 · {}", group_label(&ws)))
+                    .child(
+                        div()
+                            .id("session-tab-pending-x")
+                            .px_1()
+                            .rounded_md()
+                            .cursor_pointer()
+                            .child(
+                                svg()
+                                    .path(IconName::X.path())
+                                    .size(px(10.))
+                                    .text_color(rgb(colors::TEXT_TERTIARY())),
+                            )
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                // 同真实 tab 那条坑：不吞冒泡会顺带触发外层「激活」
+                                cx.stop_propagation();
+                                this.dismiss_pending_session(cx);
+                            })),
+                    )
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.activate_pending_session(Some(window), cx);
+                    })),
+            );
+        }
+
         for id in &self.open_tabs {
             let is_cur = self.current_session.as_deref() == Some(id.as_str());
             let title = self
@@ -1505,6 +1576,37 @@ impl ClientApp {
         row.into_any_element()
     }
 
+    /// 激活「未开始的新会话」这张虚拟 tab：从别的会话切回来。
+    ///
+    /// 不能直接调 `start_new_session()` —— 那是**新建**语义，结尾会把
+    /// `new_session_workspace` 重置成 `None`，虚拟 tab 的身份就没了。这里保存再恢复。
+    pub(crate) fn activate_pending_session(
+        &mut self,
+        window: Option<&mut Window>,
+        cx: &mut Context<Self>,
+    ) {
+        // 已经停在空态（没有 current_session）→ 无需重复切换
+        if self.current_session.is_none() {
+            return;
+        }
+        let ws = self.new_session_workspace.clone();
+        self.start_new_session(window, cx);
+        self.new_session_workspace = ws;
+        cx.notify();
+    }
+
+    /// 关掉「未开始的新会话」这张虚拟 tab：丢弃它选定的目录。
+    pub(crate) fn dismiss_pending_session(&mut self, cx: &mut Context<Self>) {
+        if self.new_session_workspace.take().is_none() {
+            return;
+        }
+        // 当前就停在这张 tab 上 → 回到「没有会话」的空态（标题跟着回）
+        if self.current_session.is_none() {
+            self.current_title = "选择左侧会话查看消息".to_string();
+        }
+        cx.notify();
+    }
+
     /// 关闭一个会话 Tab：若是当前会话则切到剩余 tab 的最后一个（没有则回空态）。
     pub(crate) fn close_tab(
         &mut self,
@@ -1516,6 +1618,11 @@ impl ClientApp {
         if self.current_session.as_deref() == Some(id.as_str()) {
             match self.open_tabs.last().cloned() {
                 Some(next) => self.open_session(next, window, cx),
+                // 没有真实 tab 了，但还有虚拟 tab → 切到它。直接 `start_new_session`
+                // 会把 `new_session_workspace` 清掉，等于顺带关掉了那张 tab。
+                None if self.new_session_workspace.is_some() => {
+                    self.activate_pending_session(window, cx)
+                }
                 None => self.start_new_session(window, cx),
             }
         } else {
