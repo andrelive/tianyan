@@ -939,17 +939,24 @@ impl ClientApp {
                 .find(|s| Some(s.id.as_str()) == self.current_session.as_deref())
                 .map(|s| s.working_directory.clone())
                 .filter(|d| !d.trim().is_empty());
-            // 兜底：**最近用过**的工作目录。此前兜底是空串 → 选择器停在「浏览根」，
-            // 而 `confirm_workspace_picker` 对浏览根**直接早退**（"请先进入一个目录"），
-            // 表现为「点 `+` 没反应」——**新会话**（`current_session` 为 `None`）与
-            // **无工作区会话**都会踩到（用户实测：「通过不同的文件夹创建，结果不一样」）。
+            // 兜底：**基础工作目录**（`[agent] working_directory`）。这不是随手挑的
+            // 一个"上次用过的目录"，而是执行侧同一个 fallback：会话未绑定目录时
+            // `Session::working_directory(fallback)` 就用它跑命令/读写文件。选择器的
+            // 默认值必须与执行侧同源，否则用户在这里看到的目录和实际执行目录不是一回事。
+            //
+            // 此前兜底是空串 → 选择器停在「浏览根」，而 `confirm_workspace_picker` 对
+            // 浏览根**直接早退**（"请先进入一个目录"），表现为「点 `+` 没反应」（picker
+            // 也不关）。**无工作区会话**与**空白新会话**都会踩到。
             current_dir
                 .or_else(|| {
-                    self.sessions_data
-                        .iter()
-                        .filter(|s| !s.working_directory.trim().is_empty())
-                        .max_by(|a, b| a.updated_at.cmp(&b.updated_at))
-                        .map(|s| s.working_directory.clone())
+                    self.raw_config
+                        .as_ref()
+                        .and_then(|cfg| {
+                            crate::pages::settings::fields::json_get(cfg, "agent.working_directory")
+                        })
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.trim().to_string())
+                        .filter(|s| !s.is_empty())
                 })
                 .unwrap_or_default()
         } else {
