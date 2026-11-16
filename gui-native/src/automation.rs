@@ -411,10 +411,10 @@ impl ClientApp {
                 "oldest_seq": self.oldest_seq,
                 "has_more": self.has_more_history,
                 "loading_older": self.loading_older,
-                // 「↑ 加载更早的消息」此刻是否可见：判据 = 有更早历史 **且** 列表已滚
-                // 到最前项。用户实测过「常驻顶部不合预期」，这个字段让那条回归可断言。
-                "older_button_visible": self.has_more_history
-                    && self.msg_list_state.logical_scroll_top().item_ix == 0,
+                // 「↑ 加载更早的消息」此刻是否可见。**判据单点**：直接调渲染用的
+                // 同一个方法（`ClientApp::older_entry_visible`），不在这里重写一遍
+                // 条件——否则自动化断言会与真实界面脱节（测过的不是用户看到的）。
+                "older_button_visible": self.older_entry_visible(),
                 // 草稿恢复走了哪条路（真实点击=window / 自动化=handle / 失败=handle-failed）
                 "draft_restore_path": self.draft_restore_path,
                 // 滚动锚点（列表最前项的索引）。per-session 重构的核心收益就是它：

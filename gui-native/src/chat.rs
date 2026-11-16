@@ -550,6 +550,31 @@ impl ClientApp {
             .into_any_element()
     }
 
+    /// 「↑ 加载更早的消息」此刻是否可见。
+    ///
+    /// **判据单点**：三处必须同口径——
+    /// 1. 渲染（[`Self::render_message_column`] 决定要不要挂那颗浮层按钮）；
+    /// 2. 滚轮重渲染判定（`on_scroll_wheel` 里比较 `want != older_btn_shown`）；
+    /// 3. 自动化状态（`/state` 的 `older_button_visible`，回归断言靠它）。
+    ///
+    /// 一旦这三处任何一处自己写一遍条件，就会出现「`want` 与 `shown` 永远不等」→
+    /// 每次滚轮事件都 `notify()` → 反复重渲染（用户看到的按钮闪烁），或者自动化断言
+    /// 与真实界面脱节（测过的东西不是用户看到的东西）。
+    ///
+    /// 四个条件都是「此刻这个入口没有意义」：
+    /// - 没有更早历史；
+    /// - 列表没滚到最前项；
+    /// - **列表为空**（空列表不存在"更早的消息"）；
+    /// - **有模态对话框打开**（目录选择器/确认框）：对话框开合会让主区重渲染、
+    ///   `logical_scroll_top()` 在两次读取之间抖动 → 按钮反复出现/消失；而且模态
+    ///   期间用户本来就点不到主区。
+    pub(crate) fn older_entry_visible(&self) -> bool {
+        self.has_more_history
+            && self.msg_list_state.logical_scroll_top().item_ix == 0
+            && !self.messages.is_empty()
+            && self.dialog.is_none()
+    }
+
     /// 消息列：限宽 896 居中（与输入卡片同宽、同左边界）。
     ///
     /// 父级用 `flex_col + items_center` 让限宽块水平居中；限宽块自身
@@ -573,12 +598,13 @@ impl ClientApp {
         // `ListOffset { item_ix, offset_in_item }`，`item_ix == 0` 即已滚到最前项。
         // 缺的那半环是**滚动后重新渲染**——在列表容器上挂 `on_scroll_wheel`
         // （见下），滚轮到达时 `cx.notify()`。它不消费事件，列表自身照常滚动。
-        let at_top = self.msg_list_state.logical_scroll_top().item_ix == 0;
         // 入口**只在滚到顶部时出现**（早先常驻时用户抱怨「一直出现，不符合预期」）。
-        // 但它必须做成**浮层**（见下方 `list_area` 的绝对定位）：按 `at_top` 出现/消失
+        // 但它必须做成**浮层**（见下方 `list_area` 的绝对定位）：按"到顶"出现/消失
         // 的东西一旦参与纵向布局，就会在滚到顶的那一刻改变列表的可用高度 → 内容整体
         // 位移（用户实测「向上滚到最前面那两轮对话时会跳一下、不平滑」）。
-        let show_older = self.has_more_history && at_top;
+        //
+        // 判据单点见 [`Self::older_entry_visible`]（渲染 / 滚轮 / `/state` 三处同源）。
+        let show_older = self.older_entry_visible();
         // 记录本次渲染的按钮可见性：滚动监听据此判断「要不要重渲染」（见
         // `on_scroll_wheel`）。
         self.older_btn_shown.set(show_older);
@@ -597,8 +623,8 @@ impl ClientApp {
             // 不 stop_propagation：列表自己还要滚。
             .on_scroll_wheel(
                 cx.listener(|this, _ev: &gpui_kit::ScrollWheelEvent, _window, cx| {
-                    let at_top = this.msg_list_state.logical_scroll_top().item_ix == 0;
-                    let want = this.has_more_history && at_top;
+                    // 与渲染同口径（单点见 [`ClientApp::older_entry_visible`]）。
+                    let want = this.older_entry_visible();
                     if want != this.older_btn_shown.get() {
                         cx.notify();
                     }
