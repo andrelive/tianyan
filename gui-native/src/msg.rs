@@ -1623,6 +1623,10 @@ pub(crate) struct ExpandState {
     /// 摘要正文是给模型看的压缩结果（几百字），平时不该铺开占满窗口；但用户需要能
     /// 查证「这里到底压了什么」，所以给一个「摘要」入口，点开才显示。
     pub(crate) compression: std::collections::HashSet<String>,
+    /// 轮末产出物块：列表展开全部（key = `a:{mi}`）。
+    ///
+    /// 默认只列前 [`crate::chat::ARTIFACTS_PREVIEW`] 个，文件多时不撑长会话。
+    pub(crate) artifacts_more: std::collections::HashSet<String>,
 }
 
 pub(crate) type ExpandRef = Rc<std::cell::RefCell<ExpandState>>;

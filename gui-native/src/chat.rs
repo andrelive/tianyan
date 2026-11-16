@@ -21,6 +21,11 @@ use gpui_kit::list as gpui_list;
 /// 切换会话时 `session_usage` 会被清空等新数据，若整行随之消失，
 /// 输入区高度就抖一下（用户实测「多会话切换上下抖动」）。
 const USAGE_LINE_H: f32 = 24.0;
+
+/// 轮末产出物块默认列出的文件数，超出的折进「还有 N 个 · 展开全部」。
+///
+/// 3 个是用户在多方案原型里定的：三行以内块不撑长会话，剩下的点一下就能看全。
+pub(crate) const ARTIFACTS_PREVIEW: usize = 3;
 /// 开发期强制显示「思考中…」（`TIANYAN_GUI_HINT_FORCE=1`），供**静态截图核对位置**用
 /// （真实触发要等模型首 token 前的静默，时机不可控）。
 ///
@@ -679,7 +684,13 @@ impl ClientApp {
                             .flex()
                             .flex_col()
                             .child(body)
-                            .child(render_artifacts_block(files, artifacts_workdir.clone()))
+                            .child(render_artifacts_block(
+                                files,
+                                artifacts_workdir.clone(),
+                                &expand,
+                                &app,
+                                ix,
+                            ))
                             .into_any_element(),
                         None => body,
                     }
@@ -774,10 +785,12 @@ impl ClientApp {
             )
             // 追问面板**不在这里**：它替换输入框（见 `render_composer` 开头），
             // 与 vite `ChatInput` 同位置。
+            // 与消息正文、输入卡片同一内缩：三者左右边界必须对齐（用户实测反馈）
             .child(
                 div()
                     .w_full()
                     .max_w(px(colors::CHAT_MAX_W))
+                    .px_4()
                     .child(self.render_todo_bar(cx)),
             )
             .into_any_element()
@@ -1770,125 +1783,197 @@ fn artifact_files_for(
     map.get(&anchor.id).cloned()
 }
 
-/// 文件图标（按扩展名；认不出的给通用文档图标）。
-fn artifact_icon(path: &str) -> &'static str {
-    let ext = path.rsplit('.').next().unwrap_or_default().to_lowercase();
-    match ext.as_str() {
-        "doc" | "docx" | "pdf" | "txt" | "md" => "📄",
-        "xls" | "xlsx" | "csv" => "📊",
-        "ppt" | "pptx" => "📽",
-        "png" | "jpg" | "jpeg" | "gif" | "webp" | "svg" => "🖼",
-        "zip" | "7z" | "rar" | "gz" | "tar" => "📦",
-        "rs" | "ts" | "js" | "py" | "go" | "java" | "json" | "toml" | "yaml" | "yml" => "🧾",
-        _ => "📄",
-    }
+/// 展开/收起「全部产出物」用的字段选择器（`toggle_expand` 要 `fn` 指针，闭包推导不过）。
+fn arts_more_set(s: &mut crate::msg::ExpandState) -> &mut std::collections::HashSet<String> {
+    &mut s.artifacts_more
 }
 
-/// 产出物块：状态分组（新增 → 修改 → 删除）+ 组内路径序，最多展开 3 个。
+/// 轮末产出物块（方案 E2）：头部摘要 + 文件 chips，默认只列前 `ARTIFACTS_PREVIEW` 个。
 ///
-/// 按状态分组而不是时间：快照树不记 mtime（历史轮拿不到），而「拿走成果」这个
-/// 用途下状态更有用。大小只在当轮有（历史轮为 0，行里省略）。
+/// 头部：`本轮产出 N 个文件 · 新增 a · 修改 m · 删除 d`，右侧 `📋` 复制全部绝对路径。
+/// chip：状态色点 + 文件名 + 大小，点击用默认程序打开；右侧 `📂` 在文件管理器中选中它。
+/// 超过预览条数时末尾一行「还有 N 个 · 展开全部」，状态存 `ExpandState::artifacts_more`。
 fn render_artifacts_block(
     files: Vec<ArtifactRow>,
     workdir: std::rc::Rc<Option<String>>,
+    expand: &crate::msg::ExpandRef,
+    app: &crate::msg::AppRef,
+    mi: usize,
 ) -> AnyElement {
-    let pick = |st: &str| -> Vec<ArtifactRow> {
-        let mut v: Vec<ArtifactRow> = files.iter().filter(|f| f.status == st).cloned().collect();
-        v.sort_by(|a, b| a.path.cmp(&b.path));
-        v
-    };
-    let added = pick("added");
-    let modified = pick("modified");
-    let removed = pick("removed");
-    let (n_added, n_mod, n_del) = (added.len(), modified.len(), removed.len());
-    let mut ordered = added;
-    ordered.extend(modified);
-    ordered.extend(removed);
+    // 排序：新增 → 修改 → 删除；组内保持服务端给的路径序
+    let mut ordered: Vec<ArtifactRow> = Vec::with_capacity(files.len());
+    for st in ["added", "modified", "removed"] {
+        ordered.extend(files.iter().filter(|f| f.status == st).cloned());
+    }
     let total = ordered.len();
+    let n_added = ordered.iter().filter(|f| f.status == "added").count();
+    let n_mod = ordered.iter().filter(|f| f.status == "modified").count();
+    let n_del = ordered.iter().filter(|f| f.status == "removed").count();
 
-    let mut col = div().w_full().flex().flex_col().gap_1().mt_1().mb_1();
-    for f in ordered.into_iter().take(3) {
-        col = col.child(render_artifact_row(f, workdir.clone()));
-    }
-    if total > 3 {
-        col = col.child(
-            div()
-                .text_size(px(11.))
-                .text_color(rgb(colors::TEXT_SECONDARY()))
-                .child(format!(
-                    "共 {total} 个文件（新增 {n_added} · 修改 {n_mod} · 删除 {n_del}）"
-                )),
-        );
-    }
-    col.into_any_element()
-}
-
-/// 单个文件行：图标 + 文件名 + 状态/大小 + 两个动作（打开所在文件夹 / 默认应用打开）。
-fn render_artifact_row(f: ArtifactRow, workdir: std::rc::Rc<Option<String>>) -> AnyElement {
-    let name = f.path.rsplit('/').next().unwrap_or(&f.path).to_string();
-    let removed = f.status == "removed";
-    let status_label = match f.status.as_str() {
-        "added" => "新增",
-        "modified" => "修改",
-        _ => "删除",
-    };
-    let meta = if removed || f.size == 0 {
-        status_label.to_string()
+    let more_key = format!("a:{mi}");
+    let all_shown = expand.borrow().artifacts_more.contains(&more_key);
+    let shown = if all_shown {
+        total
     } else {
-        format!("{status_label} · {}", format_bytes(f.size))
+        total.min(ARTIFACTS_PREVIEW)
     };
-    let text_color = if removed {
-        colors::TEXT_SECONDARY()
-    } else {
-        colors::TEXT_PRIMARY()
-    };
-    let wd_open = (*workdir).clone();
-    let wd_reveal = (*workdir).clone();
-    let open_path = f.path.clone();
-    let reveal_path = f.path.clone();
 
-    div()
-        .id(SharedString::from(format!("artifact-{}", f.path)))
+    let mut summary = format!("新增 {n_added} · 修改 {n_mod}");
+    if n_del > 0 {
+        summary.push_str(&format!(" · 删除 {n_del}"));
+    }
+    let all_paths = ordered
+        .iter()
+        .map(|f| {
+            artifact_abs_path((*workdir).as_deref(), &f.path)
+                .map(|p| p.display().to_string())
+                .unwrap_or_else(|| f.path.clone())
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    let head = div()
         .w_full()
         .flex()
         .flex_row()
         .items_center()
         .gap_2()
-        .px_2()
-        .py_1()
-        .rounded_md()
-        .bg(rgb(colors::BG_SECONDARY()))
-        .cursor_pointer()
-        .child(div().text_size(px(13.)).child(artifact_icon(&f.path)))
         .child(
             div()
-                .flex_1()
-                .min_w_0()
-                .text_size(px(12.))
+                .text_size(px(11.))
+                .text_color(rgb(colors::TEXT_SECONDARY()))
+                .child("本轮产出"),
+        )
+        .child(
+            div()
+                .text_size(px(11.))
+                .text_color(rgb(colors::TEXT_PRIMARY()))
+                .child(format!("{total} 个文件")),
+        )
+        .child(
+            div()
+                .text_size(px(11.))
+                .text_color(rgb(colors::TEXT_TERTIARY()))
+                .child(format!("· {summary}")),
+        )
+        .child(div().flex_1())
+        .child(
+            div()
+                .id(SharedString::from(format!("arts-copy:{mi}")))
+                .px_1()
+                .rounded_sm()
+                .cursor_pointer()
+                .text_size(px(11.))
+                .text_color(rgb(colors::TEXT_TERTIARY()))
+                .child("📋")
+                .on_click(move |_, _, cx: &mut App| {
+                    cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string(all_paths.clone()));
+                }),
+        );
+
+    let mut chips = div().w_full().flex().flex_row().flex_wrap().gap_1();
+    for f in ordered.into_iter().take(shown) {
+        chips = chips.child(render_artifact_chip(f, workdir.clone()));
+    }
+
+    let mut col = div()
+        .w_full()
+        .flex()
+        .flex_col()
+        .gap_2()
+        .mt_1()
+        .mb_1()
+        .child(head)
+        .child(chips);
+
+    if total > ARTIFACTS_PREVIEW {
+        let hidden = total - shown;
+        let label = if all_shown {
+            "收起 ⌃".to_string()
+        } else {
+            format!("还有 {hidden} 个 · 展开全部 ›")
+        };
+        let app_toggle = app.clone();
+        col = col.child(
+            div()
+                .id(SharedString::from(format!("arts-more:{mi}")))
+                .cursor_pointer()
+                .text_size(px(11.))
+                .text_color(rgb(colors::TEXT_SECONDARY()))
+                .child(label)
+                .on_click(move |_, _, cx| {
+                    crate::msg::toggle_expand(&app_toggle, more_key.clone(), arts_more_set, cx);
+                }),
+        );
+    }
+
+    col.into_any_element()
+}
+
+/// 单个文件 chip：状态色点 + 文件名 + 大小；点击打开文件，右侧 `📂` 定位所在目录。
+fn render_artifact_chip(f: ArtifactRow, workdir: std::rc::Rc<Option<String>>) -> AnyElement {
+    let name = f.path.rsplit('/').next().unwrap_or(&f.path).to_string();
+    let dot_color = match f.status.as_str() {
+        "added" => colors::SUCCESS(),
+        "removed" => colors::ERROR(),
+        _ => colors::WARNING(),
+    };
+    let removed = f.status == "removed";
+    let text_color = if removed {
+        colors::TEXT_SECONDARY()
+    } else {
+        colors::TEXT_PRIMARY()
+    };
+    let meta = if removed || f.size == 0 {
+        "已删除".to_string()
+    } else {
+        format_bytes(f.size)
+    };
+    let wd_open = (*workdir).clone();
+    let wd_reveal = (*workdir).clone();
+    let p_open = f.path.clone();
+    let p_reveal = f.path.clone();
+
+    div()
+        .id(SharedString::from(format!("art:{}", f.path)))
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap_1()
+        .px_2()
+        .py_1()
+        .rounded_full()
+        .bg(rgb(colors::BG_SECONDARY()))
+        .cursor_pointer()
+        .child(div().w(px(5.)).h(px(5.)).rounded_full().bg(rgb(dot_color)))
+        .child(
+            div()
+                .max_w(px(220.))
+                .text_size(px(11.))
                 .text_color(rgb(text_color))
                 .child(name),
         )
         .child(
             div()
                 .text_size(px(10.))
-                .text_color(rgb(colors::TEXT_SECONDARY()))
+                .text_color(rgb(colors::TEXT_TERTIARY()))
                 .child(meta),
         )
         .child(
             div()
-                .id(SharedString::from(format!("artifact-reveal-{}", f.path)))
+                .id(SharedString::from(format!("art-reveal:{}", f.path)))
                 .px_1()
                 .rounded_sm()
-                .text_size(px(11.))
-                .text_color(rgb(colors::TEXT_SECONDARY()))
                 .cursor_pointer()
+                .text_size(px(10.))
+                .text_color(rgb(colors::TEXT_TERTIARY()))
                 .child("📂")
                 .on_click(move |_, _, _| {
-                    reveal_in_folder(wd_reveal.as_deref(), &reveal_path);
+                    reveal_in_folder(wd_reveal.as_deref(), &p_reveal);
                 }),
         )
         .on_click(move |_, _, _| {
-            open_with_default(wd_open.as_deref(), &open_path);
+            open_with_default(wd_open.as_deref(), &p_open);
         })
         .into_any_element()
 }
