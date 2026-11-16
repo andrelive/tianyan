@@ -11,6 +11,12 @@ use crate::types::*;
 use gpui_kit::assets::IconName;
 use gpui_kit::component::input::InputState;
 
+/// 首开等订阅快照帧的超时（毫秒）：超时即回退 HTTP 拉一页。
+///
+/// 见 `open_session` 的 Miss 分支：首屏改由订阅帧喂（消息 + 轮状态 + 产物一次给全），
+/// 不再与 HTTP 抢同一份数据；这一档只兜「订阅失败 / 帧丢失」的情况。
+const SNAPSHOT_FIRST_FRAME_TIMEOUT_MS: u64 = 1500;
+
 /// [`ClientApp::restore_view_state`] 的结果：调用方据此决定「要不要去服务端拉一页」。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum RestoreOutcome {
@@ -849,12 +855,12 @@ impl ClientApp {
                 "[消息] 切回会话使用本地投影（{} 条，零请求）",
                 self.messages.len()
             );
-        } else {
+        } else if matches!(restored, RestoreOutcome::Stale) {
+            // 跨代（断线重连过 / 断开态）：本地投影不可信，直接拉权威页。
+            //
             // `anchor_seq` = 恢复出来的窗口**顶部**那条消息的 seq：重拉后按它找回
-            // 阅读位置，否则每次切回都会被 `ListAlignment::Bottom` 钉到底部
-            // （vite 靠 store 里保留的 Virtuoso 实例天然保位，native 得显式给锚点）。
-            // 锚点必须带**消息内偏移**（`offset_in_item`），只给 seq 会落到那条消息
-            // 的顶部（见 `load_messages_with` 的文档）。
+            // 阅读位置，否则每次切回都会被钉到底部。锚点必须带**消息内偏移**
+            // （`offset_in_item`），只给 seq 会落到那条消息的顶部。
             let anchor = self.msg_list_state.logical_scroll_top();
             let anchor_seq = self
                 .messages
@@ -862,6 +868,13 @@ impl ClientApp {
                 .map(|m| m.seq)
                 .filter(|s| *s > 0);
             self.load_messages_with(id, MESSAGE_BASE, anchor_seq, anchor.offset_in_item, cx);
+        } else {
+            // 首开（Miss）：消息、轮状态、挂起追问、产出物都由订阅快照帧一次给全，
+            // 不再同时发一次 HTTP —— 此前那条 HTTP 几乎每次都被 epoch 判据整页
+            // 作废（快照帧经 SSE 总是先到），挂在它上面的产物也就一起丢了。
+            // 等不到帧由兜底任务回退 HTTP，见 `spawn_first_frame_fallback`。
+            println!("[消息] 首开等待快照帧 {id}");
+            self.spawn_first_frame_fallback(id, cx);
         }
         self.load_session_usage(cx);
         self.load_todos_goals(cx);
@@ -880,6 +893,33 @@ impl ClientApp {
         // 追问编辑框按恢复出来的问题数补齐（切回一个挂起追问的会话时要能继续答）
         self.ensure_clarify_inputs(cx);
         self.rebuild_session_rows(cx);
+    }
+
+    /// 首开等快照帧的超时兜底：超时仍没等到就回退 HTTP 拉一页。
+    ///
+    /// 为什么需要：首开不再发 HTTP（见 `open_session` 的 Miss 分支），代价是「订阅
+    /// 失败 / 帧丢失」时首屏空白。本地订阅往返远小于这个阈值，真超时说明订阅这条
+    /// 链路有问题，此时 HTTP 兜底仍能把内容补上（分页接口本身是好的）。
+    pub(crate) fn spawn_first_frame_fallback(
+        &mut self,
+        session_id: String,
+        cx: &mut Context<Self>,
+    ) {
+        self.awaiting_snapshot.insert(session_id.clone());
+        cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(std::time::Duration::from_millis(
+                    SNAPSHOT_FIRST_FRAME_TIMEOUT_MS,
+                ))
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                if this.awaiting_snapshot.remove(&session_id) {
+                    println!("[事件] 首屏快照帧超时，回退 HTTP 拉取 {session_id}");
+                    this.load_messages_with(session_id.clone(), MESSAGE_BASE, None, px(0.), cx);
+                }
+            });
+        })
+        .detach();
     }
 
     /// 打开「重命名会话」对话框：新建输入框实体并回填原标题。

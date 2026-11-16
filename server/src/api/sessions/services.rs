@@ -290,33 +290,7 @@ impl SessionService {
         session_id: &str,
         rows: &[(i64, tianyan::common::types::StructuredMessage)],
     ) -> Vec<tianyan::agent::TurnArtifacts> {
-        let Some(agent) = &self.agent else {
-            return Vec::new();
-        };
-        let anchors: Vec<String> = rows
-            .iter()
-            .filter(|(_, m)| {
-                m.role == tianyan::common::types::MessageRole::User && !m.compression_marker
-            })
-            .map(|(_, m)| m.id.clone())
-            .collect();
-        let mut out = Vec::new();
-        for (i, anchor) in anchors.iter().enumerate() {
-            let next = anchors.get(i + 1).map(String::as_str);
-            match agent.turn_artifacts_at(session_id, anchor, next).await {
-                Ok(a) if !a.files.is_empty() => out.push(a),
-                Ok(_) => {}
-                Err(e) => {
-                    tracing::debug!(
-                        error = %e,
-                        session = %session_id,
-                        anchor = %anchor,
-                        "历史轮产出物跳过（树缺失或无工作目录）"
-                    );
-                }
-            }
-        }
-        out
+        artifacts_for_page(self.agent.as_ref(), session_id, rows).await
     }
 
     /// 删除会话
@@ -498,6 +472,47 @@ impl SessionService {
             .await?;
         Ok(selection)
     }
+}
+
+/// 算一页内各轮的产出物（锚点 = 真用户消息；压缩点是 user 角色但不是轮起点）。
+///
+/// 自由函数而不是 `SessionService` 方法：分页接口与订阅快照帧（`tasks::handlers`）
+/// 必须同一份口径，而后者没有 `SessionService` 实例。
+///
+/// 单轮失败（树已被 GC / 无工作目录）只跳过该轮：产出物是展示数据，不能因为
+/// 某个老会话缺树就让整个请求失败。
+pub(crate) async fn artifacts_for_page(
+    agent: Option<&Arc<dyn tianyan::agent::AgentCoordinator>>,
+    session_id: &str,
+    rows: &[(i64, tianyan::common::types::StructuredMessage)],
+) -> Vec<tianyan::agent::TurnArtifacts> {
+    let Some(agent) = agent else {
+        return Vec::new();
+    };
+    let anchors: Vec<String> = rows
+        .iter()
+        .filter(|(_, m)| {
+            m.role == tianyan::common::types::MessageRole::User && !m.compression_marker
+        })
+        .map(|(_, m)| m.id.clone())
+        .collect();
+    let mut out = Vec::new();
+    for (i, anchor) in anchors.iter().enumerate() {
+        let next = anchors.get(i + 1).map(String::as_str);
+        match agent.turn_artifacts_at(session_id, anchor, next).await {
+            Ok(a) if !a.files.is_empty() => out.push(a),
+            Ok(_) => {}
+            Err(e) => {
+                tracing::debug!(
+                    error = %e,
+                    session = %session_id,
+                    anchor = %anchor,
+                    "历史轮产出物跳过（树缺失或无工作目录）"
+                );
+            }
+        }
+    }
+    out
 }
 
 #[cfg(test)]

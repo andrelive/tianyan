@@ -87,6 +87,7 @@ fn snapshot_payload_keeps_tool_call_results() {
         false,
         serde_json::json!({"state": "idle", "auto": false}),
         serde_json::json!(null),
+        Vec::new(),
     );
 
     assert_eq!(payload["type"], "snapshot");
@@ -126,6 +127,7 @@ fn snapshot_payload_surfaces_tool_error() {
         false,
         serde_json::json!({"state": "idle", "auto": false}),
         serde_json::json!(null),
+        Vec::new(),
     );
 
     let calls = payload["messages"][0]["tool_calls"].as_array().unwrap();
@@ -147,6 +149,7 @@ fn snapshot_payload_maps_orphan_tool_result_to_assistant() {
         false,
         serde_json::json!({"state": "idle", "auto": false}),
         serde_json::json!(null),
+        Vec::new(),
     );
 
     let messages = payload["messages"].as_array().unwrap();

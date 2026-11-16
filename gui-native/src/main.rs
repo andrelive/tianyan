@@ -506,6 +506,11 @@ struct ClientApp {
     pub(crate) turn_artifacts: std::collections::HashMap<String, Vec<ArtifactRow>>,
     /// 产出物所属工作目录（绝对路径；「打开文件夹 / 默认应用打开」要拼绝对路径）。
     pub(crate) artifacts_workdir: Option<String>,
+    /// 首开正在等快照帧的会话（首屏由订阅帧喂，见 `open_session` 的 Miss 分支）。
+    ///
+    /// 收到该会话的快照帧就移出集合；超过 `SNAPSHOT_FIRST_FRAME_TIMEOUT_MS` 还在
+    /// 集合里，说明订阅这条链路有问题，由兜底任务回退到 HTTP 拉一页。
+    pub(crate) awaiting_snapshot: std::collections::HashSet<String>,
     /// 最近一次请求性能（`GET /usage/recent?limit=1`）：
     /// `(ttft_ms, duration_ms, completion_tokens)`；`duration_ms < 0` 时 `None`
     pub(crate) request_perf: Option<(Option<i64>, i64, u64)>,

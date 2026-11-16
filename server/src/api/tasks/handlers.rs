@@ -102,6 +102,7 @@ pub(crate) fn build_snapshot_payload(
     has_more: bool,
     turn: serde_json::Value,
     clarification: serde_json::Value,
+    artifacts: Vec<tianyan::agent::TurnArtifacts>,
 ) -> serde_json::Value {
     let next_before_seq = messages.first().map(|(seq, _)| *seq).filter(|seq| *seq > 0);
     let messages = ChatMessage::messages_from_structured_with_seq(messages);
@@ -114,6 +115,9 @@ pub(crate) fn build_snapshot_payload(
         "messages": messages,
         "turn": turn,
         "clarification": clarification,
+        // 产物与消息窗口**同源**：前端拿一帧就是完整首屏（含轮末产出物块），
+        // 不再依赖分页请求是否被「epoch 作废」分支丢掉。
+        "artifacts": artifacts,
     })
 }
 
@@ -190,6 +194,16 @@ pub async fn subscribe_events(
         .pending_questions(&request.session_id)
         .await
         .unwrap_or(serde_json::Value::Null);
+    // 本页各轮的产出物：与消息窗口用**同一份 page** 算出，随帧一起下发。
+    // 产物与窗口同源之后，前端首屏只认这一帧，不再依赖分页请求（那条会被
+    // 「期间快照已对齐」整页作废）。
+    let agent = state.agent().await;
+    let artifacts = crate::api::sessions::services::artifacts_for_page(
+        Some(&agent),
+        &request.session_id,
+        &page,
+    )
+    .await;
     let payload = build_snapshot_payload(
         &request.session_id,
         page,
@@ -197,6 +211,7 @@ pub async fn subscribe_events(
         has_more,
         turn,
         clarification,
+        artifacts,
     );
     if let Ok(json) = serde_json::to_string(&payload) {
         let _ = state.task_event_tx.send(json);

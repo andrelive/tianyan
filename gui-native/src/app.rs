@@ -284,6 +284,7 @@ impl ClientApp {
             request_perf: None,
             turn_artifacts: std::collections::HashMap::new(),
             artifacts_workdir: None,
+            awaiting_snapshot: std::collections::HashSet::new(),
             tasks: Vec::new(),
             tasks_collapsed: false,
             todos: Vec::new(),
@@ -673,6 +674,63 @@ impl ClientApp {
         cx.notify();
     }
 
+    /// 把 `artifacts` JSON 解析成 `(anchor → files, workdir)`。
+    ///
+    /// 分页响应与快照帧的字段形状一致，两处共用这一份解析（少一处漂移）。
+    fn parse_artifacts_json(
+        items: &[serde_json::Value],
+    ) -> (
+        std::collections::HashMap<String, Vec<crate::types::ArtifactRow>>,
+        Option<String>,
+    ) {
+        let mut map = std::collections::HashMap::new();
+        let mut workdir: Option<String> = None;
+        for item in items {
+            let anchor = item
+                .get("anchor_message_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default();
+            if anchor.is_empty() {
+                continue;
+            }
+            let files: Vec<crate::types::ArtifactRow> = item
+                .get("files")
+                .and_then(|f| f.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(crate::types::ArtifactRow::from_json)
+                        .collect()
+                })
+                .unwrap_or_default();
+            if files.is_empty() {
+                continue;
+            }
+            if let Some(wd) = item.get("workdir").and_then(|v| v.as_str()) {
+                workdir = Some(wd.to_string());
+            }
+            map.insert(anchor.to_string(), files);
+        }
+        (map, workdir)
+    }
+
+    /// 用一段 `artifacts` JSON **替换**当前会话的产出物表。
+    ///
+    /// 空数组直接返回：上滚分页返回空是常态（只有含链尾的那一页才算），清空会让
+    /// 已显示的块凭空消失；会话切换的清空由 `reset_view_state` / park 负责。
+    fn apply_artifacts_json(&mut self, items: &[serde_json::Value]) {
+        if items.is_empty() {
+            return;
+        }
+        let (map, workdir) = Self::parse_artifacts_json(items);
+        if map.is_empty() {
+            return;
+        }
+        self.turn_artifacts = map;
+        if workdir.is_some() {
+            self.artifacts_workdir = workdir;
+        }
+    }
+
     /// 处理订阅快照帧（`type=snapshot`，ADR-029）：replace 窗口 + 轮状态权威值。
     ///
     /// 三条口径（对齐 vite `applySnapshot`）：
@@ -719,6 +777,14 @@ impl ClientApp {
             .filter(|v| !v.is_null())
             .map(parse_ask_user)
             .filter(|qs| !qs.is_empty());
+
+        // 产物与消息窗口同源：快照帧带本页各轮的产出物，是首屏的**唯一**来源
+        // （分页响应经常被 `load_messages_with` 的 epoch 判据整页作废）。
+        let artifacts_json: Vec<serde_json::Value> = ev
+            .get("artifacts")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
 
         // 轮状态是**会话级全局**事实（与 `handle_event` 里 `turn_state` 的记账同口径）：
         // 快照帧带的是权威值，不管是不是当前会话都要落到 `running_sessions`。
@@ -867,6 +933,9 @@ impl ClientApp {
             // 断线重连走的正是这条快照路径 —— 用户实测「刚启动底部什么都没有，
             // 要等到某一轮结束才出现」。一次快照一次 GET，代价可忽略。
             self.load_session_usage(cx);
+            // 首开等待解除（Y：Miss 分支的首屏靠这一帧）
+            self.awaiting_snapshot.remove(&sid);
+            self.apply_artifacts_json(&artifacts_json);
         } else if let Some(pos) = self
             .parked
             .iter()
@@ -881,6 +950,16 @@ impl ClientApp {
             // 记上代际让切回直接命中投影（否则断线重连后每个后台会话都被判 `Stale`
             // 白拉一次，而这批快照正是重连时 `on_event_stream_connected` 强制重放产生的）。
             snap.epoch = self.stream_epoch;
+            // 后台会话的产物也写回它自己的快照（切回时随快照恢复）
+            if !artifacts_json.is_empty() {
+                let (map, wd) = Self::parse_artifacts_json(&artifacts_json);
+                if !map.is_empty() {
+                    snap.turn_artifacts = map;
+                    if wd.is_some() {
+                        snap.artifacts_workdir = wd;
+                    }
+                }
+            }
             // 追问态跟着写回该会话自己的快照（切回时 restore 会把它连同编辑框一起恢复）
             match &pending_questions {
                 Some(qs) => {
@@ -2084,38 +2163,9 @@ impl ClientApp {
         let n = rows.len();
         self.messages = Rc::new(rows);
         // 产出物：服务端随本页下发（只在本页含链尾时算，上滚页为空数组）。
-        // **空数组不清空**：上滚加载走同一个落地函数，清空会让已显示的块凭空消失；
-        // 而真正的「整页重载」（切会话 / 回退后重拉）带来的是非空结果。
+        // 空数组不清空，判据在 `apply_artifacts_json` 内部。
         if let Some(items) = body.get("artifacts").and_then(|v| v.as_array()) {
-            if !items.is_empty() {
-                self.turn_artifacts.clear();
-                self.artifacts_workdir = None;
-                for item in items {
-                    let anchor = item
-                        .get("anchor_message_id")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or_default();
-                    if anchor.is_empty() {
-                        continue;
-                    }
-                    let files: Vec<crate::types::ArtifactRow> = item
-                        .get("files")
-                        .and_then(|f| f.as_array())
-                        .map(|arr| {
-                            arr.iter()
-                                .filter_map(crate::types::ArtifactRow::from_json)
-                                .collect()
-                        })
-                        .unwrap_or_default();
-                    if files.is_empty() {
-                        continue;
-                    }
-                    if let Some(wd) = item.get("workdir").and_then(|v| v.as_str()) {
-                        self.artifacts_workdir = Some(wd.to_string());
-                    }
-                    self.turn_artifacts.insert(anchor.to_string(), files);
-                }
-            }
+            self.apply_artifacts_json(items);
         }
         // 条数变了必须重建 list state（item_count 在构造时固定）
         self.msg_list_state =
