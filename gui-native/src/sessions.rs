@@ -1396,6 +1396,10 @@ impl ClientApp {
             .border_b_1()
             .border_color(rgb(colors::BORDER()))
             .overflow_hidden();
+        // 虚拟 tab 的渲染结果先存这里，**等真实 tab 都排完再追加**（见函数末尾）。
+        // 否则它永远在最左；而发首条消息后真实 tab 由 `ensure_tab` push 到
+        // `open_tabs` 末尾 —— 同一个会话的 tab 就从最左「跳」到最右（实测）。
+        let mut pending_tab: Option<AnyElement> = None;
         // ── 虚拟 tab：新建会话尚未发首条消息 ────────────────────────────────
         //
         // 此刻服务端**还没有**这条记录（会话在首条消息时才创建），所以它没有
@@ -1411,7 +1415,7 @@ impl ClientApp {
         // 工作区。只取末段目录名，全路径太长会把 tab 撑爆。
         if let Some(ws) = self.new_session_workspace.clone() {
             let is_cur = self.current_session.is_none();
-            row = row.child(
+            pending_tab = Some(
                 div()
                     .id("session-tab-pending")
                     .px_2()
@@ -1461,7 +1465,8 @@ impl ClientApp {
                     )
                     .on_click(cx.listener(|this, _, window, cx| {
                         this.activate_pending_session(Some(window), cx);
-                    })),
+                    }))
+                    .into_any_element(),
             );
         }
 
@@ -1572,6 +1577,11 @@ impl ClientApp {
                         }
                     })),
             );
+        }
+        // 虚拟 tab 排在**真实 tab 之后**（位置与 `ensure_tab` 的 push 一致）：
+        // 发首条消息后虚拟 tab 消失、真实 tab 出现在同一位置，不跳位。
+        if let Some(tab) = pending_tab {
+            row = row.child(tab);
         }
         row.into_any_element()
     }

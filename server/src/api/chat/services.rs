@@ -426,20 +426,25 @@ async fn resolve_or_create_session(
             tracing::warn!(working_directory = %wd, "新会话工作目录不存在，忽略绑定");
         }
     }
+    // 标题**与工作目录一起在建会话时写入**（取首条用户消息的第一行 / 前 30 字）。
+    //
+    // 不能拆成「先建会话、再 `update_header` 补标题」：两步之间存在 `title = None`
+    // 的窗口，而前端在 POST 返回时立刻刷新列表（流式接口返回得很早，ADR-028），
+    // 恰好落在窗口里的那次刷新会把标题读成「新对话」——**且之后不再刷新**，界面就
+    // 一直是「新对话」（用户实测：发完首条消息，Tab 标题始终不变成那句话）。
+    // 新会话不存在并发写头部的情况，一次写入没有覆盖别人字段的风险。
+    let title = generate_session_title(initial_message);
+    if !title.is_empty() {
+        header.title = Some(title);
+    }
     // ? 传播：保留 core 错误语义（不吞成 Internal）
     session_manager
         .create_session_with_header(&new_id, msg, header)
         .await?;
 
     // ADR-039：会话头部与消息写入**唯一入口** = 工作集（缓存与库同步推进）。
-    // 工作目录/标题经收口 ③（局部字段写，不覆盖并发写入的字段）；清空经收口 ②。
+    // 工作目录与标题已在建会话时一并写入（见上）；清空经收口 ②。
     let ws = working_sets.ensure(&new_id).await?;
-
-    // 用第一条用户消息生成标题（取第一行或前 30 个字符）
-    let title = generate_session_title(initial_message);
-    if !title.is_empty() {
-        ws.update_header(|h| h.title = Some(title)).await?;
-    }
 
     // 清空 create_session 预写的消息：会话历史统一由 agent.process_message 追加，
     // 避免同一条用户消息在历史中重复（物理删除——预写消息不该留成「可撤销」）
