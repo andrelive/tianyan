@@ -7,23 +7,16 @@
 
 ## 全栈 Rust
 
-界面、服务和智能体三层跑在同一个进程里：
+界面、服务和智能体三层跑在同一个进程里，界面经本地 HTTP / SSE 与内嵌服务通信：
 
 | 层 | 实现 |
 |---|---|
-| 界面 | GPUI 原生自绘（Rust，无 WebView） |
+| 界面 | GPUI 原生自绘 |
 | 服务 | Axum，与界面同进程 |
 | 智能体与存储 | 同进程内的 `core` 库 |
 | 发布物 | 单个 exe；Windows MSI 约 60 MB |
 
 实测内存：76 MB 空窗口，131 MB 带 3000 行编辑器与 5000 条列表，269 MB 打开 10 万行代码文件。
-
-界面与服务共用 `core` 的类型：
-
-- 工具定义、数据结构、错误类型只有一份，改一个功能不需要同步两处。
-- 界面与服务一起编译，字段名改错在 `cargo check` 时红。
-- 界面经本地 HTTP / SSE 与内嵌服务通信（TCP 回环），两侧由同一组类型生成。
-- 安装包里没有浏览器引擎。
 
 ## 核心特性
 
@@ -75,19 +68,17 @@ cargo run -p tianyan-server                          # 只跑后端（默认 127
 
 ## 架构
 
-界面与服务在同一个进程：GPUI 跑在主线程，内嵌 Axum 服务跑在 tokio 运行时，两者共用 `tianyan` core 库。
-
 | 目录 | 说明 |
 |------|------|
 | `core/` | 核心库（lib 名 `tianyan`）：Agent 循环、工具系统、VFS、上下文工程（检索 / 压缩 / 组装）、会话、快照、可观测性 |
-| `server/` | Axum HTTP 服务：REST API + SSE 事件流 + MCP 桥接 + 定时任务（**经类型擦除插槽接收能力，不认识任何插件**） |
-| `assembly/` | 装配清单（ADR-049 期 4）：插件工厂与 `full()` / `policies()` 两份清单的唯一实现 |
+| `server/` | Axum HTTP 服务：REST API + SSE 事件流 + MCP 桥接 + 定时任务 |
+| `assembly/` | 装配清单：插件工厂与 `full()` / `policies()` 两份清单 |
 | `app/` | headless 装配器（bin `tianyan-server`）：配置加载 + 启动 + 搬迁重启 |
-| `plugins/*` | 15 个编译期插件（工具 / 存储 / 任务 / 策略 / provider / 工具管线），只依赖 `core` |
+| `plugins/*` | 15 个编译期插件（工具 / 存储 / 任务 / 策略 / provider / 工具管线） |
 | `service/config/` | 服务层：配置加载 / 持久化 / 数据目录迁移 / 校验 / 向导 DTO |
-| `tools-ops/` | 运维工具（服务停止后直接修数据的终端脚本，**不被任何 crate 依赖**） |
-| **`gui-native/`** | **GPUI 原生客户端（主发布渠道）**：独立 workspace，复用 `desktop/` 做单实例发现与端口避让 |
-| `desktop/` | 桌面启动编排：发现「同一数据目录」的已有实例并复用，未命中才自起（ADR-051） |
+| `tools-ops/` | 运维工具：服务停止后直接修数据的终端脚本 |
+| **`gui-native/`** | **GPUI 原生客户端**：独立 workspace |
+| `desktop/` | 桌面启动编排：发现并复用同数据目录的已有实例，未命中才自起 |
 | `mcp/` | MCP 协议客户端（stdio + streamable HTTP） |
 
 技术栈：**Rust（stable）· GPUI（原生 UI）· Axum 0.8 · Tokio · LanceDB 0.33（嵌入式向量）· SQLite（主存储）**。
