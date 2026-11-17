@@ -1044,11 +1044,7 @@ impl ClientApp {
                     .w_full()
                     .max_w(px(896.))
                     .mx_auto()
-                    // 圆角**定死 17px**，不是 `rounded_lg`(8) 也不是 `rounded_full`：
-                    // 折叠态高 34，17 正好是半圆，与上方产出物 chips 的胶囊同一套观感；
-                    // 而展开后高度过百，若用 `rounded_full` 半径会跟着撑成 50 多 px，
-                    // 顶边底边被啃掉、列表贴边（用户实测原型里那档崩了）。
-                    .rounded(px(17.))
+                    .rounded_lg()
                     .border_1()
                     .border_color(rgb(colors::WARNING()))
                     .bg(rgb(colors::BG_SECONDARY()))
@@ -1399,7 +1395,14 @@ impl ClientApp {
                     .w_full()
                     .max_w(px(896.))
                     .mx_auto()
-                    .rounded_lg()
+                    // 圆角**定死 17px**，不是 `rounded_lg`(8) 也不是 `rounded_full`：
+                    // 折叠态高 34，17 正好是半圆，与上方产出物 chips 的胶囊同一套观感；
+                    // 展开后高度过百，若用 `rounded_full` 半径会跟着撑成 50 多 px，
+                    // 顶边底边被啃掉、列表贴边（原型里那一档实测崩了）。
+                    //
+                    // 注意：`render_approval_banner` 里有一段几乎一样的外框代码（同样是
+                    // w_full + max_w(896) + mx_auto + rounded + border），别改串了。
+                    .rounded(px(17.))
                     .border_1()
                     .border_color(rgb(colors::BORDER()))
                     .bg(rgb(colors::BG_SECONDARY()))
