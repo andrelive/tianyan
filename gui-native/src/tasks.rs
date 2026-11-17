@@ -1236,7 +1236,11 @@ impl ClientApp {
     /// - 状态用 Lucide 图标（`CircleCheck` / `LoaderCircle` / `CircleDotDashed` /
     ///   `Circle`），不用 `[x]` / `[ ]` 文本——文本形态读起来像正文，且与 vite 两套观感。
     ///
-    /// 已完成项只做置灰（vite 另有 line-through，GPUI 的 `Styled` 没有对应笔画修饰）。
+    /// 已完成项只做置灰：置灰 + 勾选图标已经足够区分，不再叠删除线。
+    ///
+    /// （订正：早先这里写的是「GPUI 的 `Styled` 没有对应笔画修饰」，那是错的。`Styled`
+    /// 有 `line_through()` / `underline()` / `text_decoration_color()`，见 gpui-pre
+    /// `src/styled.rs`，产出物 chip 的删除项就在用它。）
     pub(crate) fn render_todo_bar(&self, cx: &mut Context<Self>) -> AnyElement {
         if self.todos.is_empty() && self.goals.is_empty() {
             return div().into_any_element();

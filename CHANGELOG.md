@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.12] - 2026-11-17
+
+### Changed
+
+- **产出物 chip 的状态更好认**：状态点从 5px 放大到 9px，并改用一组 chip 专用的鲜色
+  （主题的绿 / 黄 / 红是为大面积色块调的，落在这么小的圆点上偏灰，认不出新增和修改的
+  差别）；删除项的文件名加删除线并淡化，不再只靠颜色区分。
+
 ## [1.2.11] - 2026-11-17
 
 ### Added

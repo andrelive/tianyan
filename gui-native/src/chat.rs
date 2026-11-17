@@ -26,6 +26,13 @@ const USAGE_LINE_H: f32 = 24.0;
 ///
 /// 3 个是用户在多方案原型里定的：三行以内块不撑长会话，剩下的点一下就能看全。
 pub(crate) const ARTIFACTS_PREVIEW: usize = 3;
+
+/// chip 状态点的颜色。**刻意不复用主题的 `SUCCESS` / `WARNING` / `ERROR`**：那三个是给
+/// 大面积色块调的（羊皮纸主题下偏灰），落在 9px 小圆点上辨识度不够（用户实测提出）。
+/// 只在 chip 里用，改主题不影响它们。
+const ART_DOT_ADDED: u32 = 0x2b8a3e;
+const ART_DOT_MODIFIED: u32 = 0xe08b1a;
+const ART_DOT_REMOVED: u32 = 0xd13b2a;
 /// 开发期强制显示「思考中…」（`TIANYAN_GUI_HINT_FORCE=1`），供**静态截图核对位置**用
 /// （真实触发要等模型首 token 前的静默，时机不可控）。
 ///
@@ -1913,8 +1920,12 @@ fn render_artifacts_block(
     col.into_any_element()
 }
 
-/// 单个文件 chip：状态色点 + 文件名 + （大小 / 已删除）；点击打开文件，右侧文件夹图标
+/// 单个文件 chip：状态色点 + 文件名 + （大小）；点击打开文件，右侧文件夹图标
 /// 在文件管理器中定位它。
+///
+/// **状态怎么表达**（2026-11 用户在原型里选定）：只靠颜色 + 删除项的删除线，不写状态字。
+/// 色点 9px，且用一组 chip 专用的鲜色（`ART_DOT_*`）—— 主题的 `SUCCESS` / `WARNING` /
+/// `ERROR` 是为大面积色块调的，落在 9px 圆点上偏灰、认不出来。
 ///
 /// 三个坑，都是实测撞出来的：
 /// 1. **不能拿 `size == 0` 推断「已删除」**。历史轮的产出物走「两棵快照树比较」，树里
@@ -1927,20 +1938,18 @@ fn render_artifact_chip(f: ArtifactRow, workdir: std::rc::Rc<Option<String>>) ->
     let name = f.path.rsplit('/').next().unwrap_or(&f.path).to_string();
     let removed = f.status == "removed";
     let dot_color = match f.status.as_str() {
-        "added" => colors::SUCCESS(),
-        "removed" => colors::ERROR(),
-        _ => colors::WARNING(),
+        "added" => ART_DOT_ADDED,
+        "removed" => ART_DOT_REMOVED,
+        _ => ART_DOT_MODIFIED,
     };
     let text_color = if removed {
-        colors::TEXT_SECONDARY()
+        colors::TEXT_TERTIARY()
     } else {
         colors::TEXT_PRIMARY()
     };
-    // 只有 `removed` 才写「已删除」；其余 `size == 0` 表示「大小未知」（历史轮），
-    // 这段文案直接省掉，不要编一个数出来。
-    let meta = if removed {
-        Some("已删除".to_string())
-    } else if f.size > 0 {
+    // 大小只在**知道**的时候写。历史轮走两棵树比较，树里没存大小（`size == 0`），
+    // 那时什么都不显示，不要编一个数出来，也不要因此判成「已删除」。
+    let meta = if !removed && f.size > 0 {
         Some(format_bytes(f.size))
     } else {
         None
@@ -1949,6 +1958,22 @@ fn render_artifact_chip(f: ArtifactRow, workdir: std::rc::Rc<Option<String>>) ->
     let wd_reveal = (*workdir).clone();
     let p_open = f.path.clone();
     let p_reveal = f.path.clone();
+
+    // 文件名：删除项加删除线并淡化。`Styled::line_through()` 是 gpui-pre 自带的
+    // （`src/styled.rs`，给 `text_style().strikethrough` 设 1px 厚度），会级联到该元素内的文字。
+    let mut name_el = div()
+        .max_w(px(220.))
+        // 文件名一律单行 + 超长省略：长名字换行会把 chip 撑成两行高，
+        // 同一行其余 chip 也跟着变高（用户实测「容器被撑高」）。
+        // `text_ellipsis` 只在单行生效，必须配 `whitespace_nowrap`。
+        .overflow_hidden()
+        .whitespace_nowrap()
+        .text_ellipsis()
+        .text_size(px(11.))
+        .text_color(rgb(text_color));
+    if removed {
+        name_el = name_el.line_through();
+    }
 
     let mut chip = div()
         .id(SharedString::from(format!("art:{}", f.path)))
@@ -1961,20 +1986,9 @@ fn render_artifact_chip(f: ArtifactRow, workdir: std::rc::Rc<Option<String>>) ->
         .rounded_full()
         .bg(rgb(colors::BG_SECONDARY()))
         .cursor_pointer()
-        .child(div().w(px(5.)).h(px(5.)).rounded_full().bg(rgb(dot_color)))
-        .child(
-            div()
-                .max_w(px(220.))
-                // 文件名一律单行 + 超长省略：长名字换行会把 chip 撑成两行高，
-                // 同一行其余 chip 也跟着变高（用户实测「容器被撑高」）。
-                // `text_ellipsis` 只在单行生效，必须配 `whitespace_nowrap`。
-                .overflow_hidden()
-                .whitespace_nowrap()
-                .text_ellipsis()
-                .text_size(px(11.))
-                .text_color(rgb(text_color))
-                .child(name),
-        );
+        // 9px：5px 太小、颜色语义要靠记（用户实测「看不出来哪个是新增哪个是修改」）
+        .child(div().w(px(9.)).h(px(9.)).rounded_full().bg(rgb(dot_color)))
+        .child(name_el.child(name));
     if let Some(meta) = meta {
         chip = chip.child(
             div()
