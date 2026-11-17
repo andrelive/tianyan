@@ -184,7 +184,7 @@ pub(crate) fn current_theme() -> ThemeKind {
 /// 叠出来是**提亮**。所以同一张表对三个主题都成立，将来加新主题也不必再找一个
 /// 「不太深也不太浅」的中间色（午夜蓝的 `bg_hover` 就几乎和页面分不开）。
 /// 浓度只是一个数，觉得重就调小。
-const INLINE_CODE_INK: f32 = 0.08;
+const INLINE_CODE_INK: f32 = 0.10;
 
 /// 把组件库主题里与 Markdown 相关的那几个 token 覆盖成天演 palette 的值。
 ///
