@@ -177,6 +177,66 @@ pub(crate) fn current_theme() -> ThemeKind {
     }
 }
 
+/// 把组件库主题里与 Markdown 相关的那几个 token 覆盖成天演 palette 的值。
+///
+/// # 为什么必须覆盖
+///
+/// `TextView::markdown` 渲染行内代码与代码块时，底色取自**组件库自己的** `Theme`：
+/// `with_inline_code(HighlightStyle { background_color: Some(theme.accent) })` 与
+/// `with_code_background(theme.muted)`（见 gpui-component `src/text/mod.rs`）。而组件库
+/// 的 `Theme` 与我们的 palette 是两套 —— 我们只调 `Theme::change(ThemeMode::Light/Dark)`
+/// 切模式，色值仍是它内置的 neutral 系。羊皮纸走 Light 模式，行内代码底色就是
+/// `neutral-100`（近白 `#f5f5f5`），落在暖米黄页面上像贴了张白纸（用户实测提出）。
+///
+/// # 为什么只动这几个
+///
+/// 组件库有 40 多个 token（`chart.*` / `danger` / `info` / `sidebar` / `tab` / `table` …），
+/// 而天演界面几乎全自己画，只用到它很少几个控件。全量映射是纯负担，且每个映射都可能
+/// 是一个新 bug。这里只碰 Markdown 真正会读的那几个，外加同一份样式里的
+/// `border` / `link` / `selection`。`foreground` 也一并覆盖：Markdown 正文吃的是组件库
+/// 的 `foreground`（不继承外层 `text_color`），不覆盖就会是中性灰而不是主题墨色。
+///
+/// # 为什么按语义取色
+///
+/// `bg_tertiary` / `bg_secondary` 是「比页面深一档 / 深两档」的语义位：浅色主题下它们
+/// 变深、深色主题下它们变浅，所以同一张表对三个主题自动成立，将来加新主题不必再配。
+/// 面积越小的底需要越强的对比，故行内代码取三级面、代码块取二级面。
+///
+/// # 调用时机是硬约束
+///
+/// `Theme::change` 内部会重新 `install_text_view_defaults`，用组件库色值把我们盖掉的
+/// 再盖回去。所以本函数必须在它**之后**调用，且**每次切主题都要重调一次**。
+/// 参数取 `&mut App` 而不是 `impl AppContext`：`global_mut` 是 `App` 的固有方法，
+/// 不在 `AppContext` trait 上；而 `Context<T>` 实现了 `DerefMut<Target = App>`，
+/// 调用点直接传 `cx` 即可自动 deref。
+pub(crate) fn sync_component_theme(palette: Palette, cx: &mut gpui_kit::App) {
+    // `gpui` 不是本 crate 的直接依赖，一律走门面 crate 的 re-export。
+    fn hsla(v: u32) -> gpui_kit::Hsla {
+        gpui_kit::rgb(v).into()
+    }
+
+    // 先把颜色算好再取 `global_mut`：拿到 `&mut Theme` 之后就不能再借 cx。
+    let foreground = hsla(palette.text_primary);
+    let muted_foreground = hsla(palette.text_secondary);
+    let inline_code_bg = hsla(palette.bg_tertiary);
+    let code_block_bg = hsla(palette.bg_secondary);
+    let border = hsla(palette.border);
+    let link = hsla(palette.accent);
+    let selection = hsla(palette.accent).opacity(0.22);
+
+    let theme = cx.global_mut::<gpui_kit::component::theme::Theme>();
+    theme.colors.foreground = foreground;
+    theme.colors.muted_foreground = muted_foreground;
+    // 行内代码：底色 `accent`、字色 `accent_foreground`（组件库的语义叫法）
+    theme.colors.accent = inline_code_bg;
+    theme.colors.accent_foreground = foreground;
+    // 代码块底色
+    theme.colors.muted = code_block_bg;
+    theme.colors.border = border;
+    theme.colors.link = link;
+    theme.colors.selection = selection;
+}
+
 /// 客户端偏好文件（外观这类 GUI 侧选择）。
 ///
 /// 不进 `tianyan.toml`：那是**服务端配置**，改它要走 `PUT /config` 热更新

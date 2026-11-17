@@ -1053,6 +1053,10 @@ fn main() {
             None,
             cx,
         );
+        // 与 `apply_theme_with` 同一份口径，且同样必须在 `Theme::change` 之后
+        // （它内部会重装 text view 默认样式）。漏了这一步，首屏 Markdown 的行内代码
+        // 会回到组件库的 neutral 底色，切一次主题才变正常。
+        crate::theme::sync_component_theme(theme.palette(), cx);
         let bounds = Bounds::centered(None, size(px(1280.), px(820.)), cx);
         // 自动化端口（ADR-052）：服务在 tokio 线程、动作用 UI 线程执行，所以先把
         // `AsyncApp` 取出来带进窗口构建闭包——窗口建好才有状态可读。

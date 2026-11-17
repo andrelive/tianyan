@@ -2529,6 +2529,9 @@ impl ClientApp {
             window,
             cx,
         );
+        // 必须在 `Theme::change` **之后**：它内部会重装 text view 默认样式，用组件库
+        // 内置色值把 Markdown 的行内代码 / 代码块底色盖回去（详见 `sync_component_theme`）。
+        crate::theme::sync_component_theme(kind.palette(), cx);
         save_theme_pref(kind);
         cx.notify();
     }
