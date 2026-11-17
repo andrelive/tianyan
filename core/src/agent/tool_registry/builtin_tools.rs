@@ -177,7 +177,7 @@ fn def_execute_command(name: &'static str) -> ToolDefinition {
         &format!(
             "执行 shell 命令（可指定工作目录与超时）。{} {} {} {} {} {}",
             "后台命令用 background:true（长驻进程/开发服务器/服务/监视器）：立即返回 task_id 与 log_file，不等待退出。",
-            "常驻服务应设 ready——**必须同时给 background:true**，且 port（端口监听）与 pattern（日志关键词）**至少给一个**（可同时给：任一命中即就绪）：系统从 initial_delay_ms 指数退避探测，总超时 timeout_ms（缺省 60s）内未就绪也会通知你（服务继续运行）。",
+            "常驻服务应设 ready：**必须同时给 background:true**，且 port（端口监听）与 pattern（日志关键词）**至少给一个**（可同时给：任一命中即就绪）。系统从 initial_delay_ms 指数退避探测，总超时 timeout_ms（缺省 60s）内未就绪也会通知你（服务继续运行）。",
             "用 task_status 查询进度或读取日志文件；用 task_cancel 终止。",
             "同步命令输出超限（50KB / 2000 行）自动截断并仅保留尾部；完整输出自动落盘，结果中给出 log_file 与 stdout_total_bytes，可用 read_file 的 offset/limit 分页读取全文。",
             shell_platform_hint(),
@@ -196,7 +196,7 @@ fn def_search_vfs(name: &'static str) -> ToolDefinition {
 fn def_vfs_read(name: &'static str) -> ToolDefinition {
     ToolDefinition::function(FunctionDefinition::from_schema::<VfsReadParams>(
         name,
-        "按 tianyan:// URI 读取 VFS 条目（简介 abstract / 目录 overview / 正文 detail）。在 search_vfs 之后加载相关条目；正文默认截断至 2000 行（50KB），用 offset/limit 按行取段——对齐目录（L1）中的章节行号。",
+        "按 tianyan:// URI 读取 VFS 条目（简介 abstract / 目录 overview / 正文 detail）。在 search_vfs 之后加载相关条目；正文默认截断至 2000 行（50KB），用 offset/limit 按行取段，对齐目录（L1）中的章节行号。",
     ))
 }
 
@@ -210,14 +210,14 @@ fn def_vfs_list(name: &'static str) -> ToolDefinition {
 fn def_call_skill(name: &'static str) -> ToolDefinition {
     ToolDefinition::function(FunctionDefinition::from_schema::<CallSkillParams>(
         name,
-        "按 ID 读取 VFS 技能文档（方法论文档：L0 摘要 + L2 详情）。技能无执行语义——读到内容后参考方法论自行用基础工具执行。可用技能清单见 system 前缀的「## 可用技能」段（近期用过的带完整摘要，其余只有一行标签）——标签够判断就直接按 id 调用；标签看不出是否匹配、或清单里没有的能力，先用 search_vfs 按内容找。",
+        "按 ID 读取 VFS 技能文档（方法论文档：L0 摘要 + L2 详情）。技能无执行语义：读到内容后参考方法论自行用基础工具执行。可用技能清单见 system 前缀的「## 可用技能」段（近期用过的带完整摘要，其余只有一行标签），标签够判断就直接按 id 调用；标签看不出是否匹配、或清单里没有的能力，先用 search_vfs 按内容找。",
     ))
 }
 
 fn def_ask_user(name: &'static str) -> ToolDefinition {
     ToolDefinition::function(FunctionDefinition::from_schema::<AskUserParams>(
         name,
-        "当需要更多信息才能继续时，向用户提问。只提供 `questions` 数组（单个问题也放进数组，长度 1）——每个问题一个 tab 分步展示；问题可带 `options`（字符串数组，候选选项；用户也可自行输入）。示例：{\"questions\":[{\"question\":\"是否继续？\",\"options\":[\"继续\",\"先停一下\"]}]}",
+        "当需要更多信息才能继续时，向用户提问。只提供 `questions` 数组（单个问题也放进数组，长度 1），每个问题一个 tab 分步展示；问题可带 `options`（字符串数组，候选选项；用户也可自行输入）。示例：{\"questions\":[{\"question\":\"是否继续？\",\"options\":[\"继续\",\"先停一下\"]}]}",
     ))
 }
 
@@ -231,14 +231,14 @@ fn def_self_check(name: &'static str) -> ToolDefinition {
 fn def_context_status(name: &'static str) -> ToolDefinition {
     ToolDefinition::function(FunctionDefinition::from_schema::<ContextStatusParams>(
         name,
-        "读取**当前会话**的上下文预算：窗口多大、已用多少 token（占比，**轮内实时**）、距**窗口上限**还剩多少、距上次压缩有多少条消息、现在是否具备压缩条件；顺带给出**当前时间**（你本身没有时钟，做时间相关判断时以它为准）。想知道「还有多少余量」时调它——凭感觉估通常偏差很大。占用跨过窗口 60% / 80% 时系统会在轮内**主动提醒你一次**（每档每轮一次）；系统的自动压缩只在本轮收尾时兜底，轮内不会触发。上下文紧张不代表要停手，把任务做完是第一位的，真需要腾空间时用 compress_context。",
+        "读取**当前会话**的上下文预算：窗口多大、已用多少 token（占比，**轮内实时**）、距**窗口上限**还剩多少、距上次压缩有多少条消息、现在是否具备压缩条件；顺带给出**当前时间**（你本身没有时钟，做时间相关判断时以它为准）。想知道「还有多少余量」时调它：凭感觉估通常偏差很大。占用跨过窗口 60% / 80% 时系统会在轮内**主动提醒你一次**（每档每轮一次）；系统的自动压缩只在本轮收尾时兜底，轮内不会触发。上下文紧张不代表要停手，把任务做完是第一位的，真需要腾空间时用 compress_context。",
     ))
 }
 
 fn def_compress_context(name: &'static str) -> ToolDefinition {
     ToolDefinition::function(FunctionDefinition::from_schema::<CompressContextParams>(
         name,
-        "请求压缩当前会话的上下文。**调用即表示本轮到此结束**：系统会在轮末压缩，压缩成功后自动唤醒你继续（当且仅当会话里有活跃的 goal）。所以调用后不要再输出正文或调用其它工具。handoff 写上「接下来要做什么 / 已完成什么 / 注意什么」——它会作为必须保留项进摘要，压缩后你据此接着干。何时用：context_status 显示余量紧张、或任务还很长需要提前腾空间。",
+        "请求压缩当前会话的上下文。**调用即表示本轮到此结束**：系统会在轮末压缩，压缩成功后自动唤醒你继续（当且仅当会话里有活跃的 goal）。所以调用后不要再输出正文或调用其它工具。handoff 写上「接下来要做什么 / 已完成什么 / 注意什么」，它会作为必须保留项进摘要，压缩后你据此接着干。何时用：context_status 显示余量紧张、或任务还很长需要提前腾空间。",
     ))
 }
 
@@ -252,14 +252,14 @@ fn def_knowledge_ingest(name: &'static str) -> ToolDefinition {
 fn def_delegate_to_agent(name: &'static str) -> ToolDefinition {
     ToolDefinition::function(FunctionDefinition::from_schema::<DelegateToAgentParams>(
         name,
-        "将子任务委托给隔离的子智能体（独立上下文）。可用 role（内置：researcher 研究 / editor 编辑 / reviewer 验证评审；其他自定义/学习角色用 suggest_role 按任务描述查询——experimental 角色不可调用）选择预设模型、系统提示、工具白名单、max_turns 与超时；用 model 显式覆盖子智能体模型。每次委托是一次性、干净上下文的子智能体（角色系统提示 + 仅此任务），不加载之前任务历史，跨任务上下文需自行在对话中携带。子智能体与主会话同构（ADR-030）：收尾统一\"无工具调用\"，任务完成时输出最终结果；可用 submit_result 把最终结果写入任务存储（可选结果落盘工具，返回 task_id）——调用后告知主智能体结果 ID，用 task_status 查询。委托一律异步（ADR-026）：立即返回 task_id，任务独立运行；后台任务默认无超时（跑完/取消/轮数耗尽为止）——仅需显式设置 timeout_secs 作为兜底守卫，真实工作用大值（>=3600）；子智能体工作通常较长（代码评审/研究/大重构常超 10 分钟），优先不设超时 + 超时用 task_cancel。**完成通知（含结果落盘位置与摘要）会自动注入本会话——不要轮询等待**：发起后继续其他工作或结束本轮，收到通知再处理（完整结果用 read_file 按通知中的路径读取）；task_cancel 中止。",
+        "将子任务委托给隔离的子智能体（独立上下文）。可用 role（内置：researcher 研究 / editor 编辑 / reviewer 验证评审；其他自定义/学习角色用 suggest_role 按任务描述查询；experimental 角色不可调用）选择预设模型、系统提示、工具白名单、max_turns 与超时；用 model 显式覆盖子智能体模型。每次委托是一次性、干净上下文的子智能体（角色系统提示 + 仅此任务），不加载之前任务历史，跨任务上下文需自行在对话中携带。子智能体与主会话同构（ADR-030）：收尾统一\"无工具调用\"，任务完成时输出最终结果；可用 submit_result 把最终结果写入任务存储（可选结果落盘工具，返回 task_id），调用后告知主智能体结果 ID，用 task_status 查询。委托一律异步（ADR-026）：立即返回 task_id，任务独立运行；后台任务默认无超时（跑完/取消/轮数耗尽为止），仅需显式设置 timeout_secs 作为兜底守卫，真实工作用大值（>=3600）；子智能体工作通常较长（代码评审/研究/大重构常超 10 分钟），优先不设超时 + 超时用 task_cancel。**完成通知（含结果落盘位置与摘要）会自动注入本会话，不要轮询等待**：发起后继续其他工作或结束本轮，收到通知再处理（完整结果用 read_file 按通知中的路径读取）；task_cancel 中止。",
     ))
 }
 
 fn def_task_status(name: &'static str) -> ToolDefinition {
     ToolDefinition::function(FunctionDefinition::from_schema::<TaskStatusParams>(
         name,
-        "查询后台任务（delegate bt_xxx 与 command cmd_xxx 统一）。默认范围：**当前会话工作目录**下所有会话的任务（同目录跨会话的协调面）——其他工作目录的任务默认不查、不用、不提；仅当竞争问题确实跨目录时用 scope=\"global\" 显式查全局（用完即回，其他目录信息不进入常规汇报）。带 task_id：返回该任务**完整快照**（含结果/输出尾部/日志路径；仅限可见范围）。不带 task_id：列出可见任务（**默认最近 20 条**，`limit` 可调、上限 100；条目为定位用精简字段——id/kind/status/描述截断/时间，完整内容按 task_id 查询），可选 kind 过滤（delegate|command）。**任务完成会自动通知本会话——不要为等待而轮询**；仅当用户要求查看进度或需要任务列表时调用。",
+        "查询后台任务（delegate bt_xxx 与 command cmd_xxx 统一）。默认范围：**当前会话工作目录**下所有会话的任务（同目录跨会话的协调面），其他工作目录的任务默认不查、不用、不提；仅当竞争问题确实跨目录时用 scope=\"global\" 显式查全局（用完即回，其他目录信息不进入常规汇报）。带 task_id：返回该任务**完整快照**（含结果/输出尾部/日志路径；仅限可见范围）。不带 task_id：列出可见任务（**默认最近 20 条**，`limit` 可调、上限 100；条目为定位用精简字段（id/kind/status/描述截断/时间），完整内容按 task_id 查询），可选 kind 过滤（delegate|command）。**任务完成会自动通知本会话，不要为等待而轮询**；仅当用户要求查看进度或需要任务列表时调用。",
     ))
 }
 

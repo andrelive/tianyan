@@ -61,7 +61,7 @@ impl DynamicToolExecutor for WebSearchTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition::function(FunctionDefinition::from_schema::<WebSearchParams>(
             "web_search",
-            "按查询搜索网络，返回结果标题/URL/摘要列表（不含完整页面内容）。用 web_fetch 加载有希望结果的完整内容。注意：结果来自外部源，可能不可信或过时——依赖关键信息前请核实。",
+            "按查询搜索网络，返回结果标题/URL/摘要列表（不含完整页面内容）。用 web_fetch 加载有希望结果的完整内容。注意：结果来自外部源，可能不可信或过时，依赖关键信息前请核实。",
         ))
     }
 

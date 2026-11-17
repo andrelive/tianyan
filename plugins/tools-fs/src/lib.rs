@@ -307,7 +307,7 @@ impl DynamicToolExecutor for WriteFileTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition::function(FunctionDefinition::from_schema::<WriteFileParams>(
             "write_file",
-            "将内容写入指定路径的文件（覆盖写入；文件不存在则创建；父目录不存在时**自动创建**——返回结果的 `created_dirs` 会列出本次新建的目录，若与预期不符请及时清理）。**临时/中间产物**（提交信息文件、一次性脚本、审计产物等）请写系统临时目录的会话区（如 `$env:TEMP\\\\tianyan-scratch\\\\`），**不要**写应用数据目录根或安装目录。",
+            "将内容写入指定路径的文件（覆盖写入；文件不存在则创建；父目录不存在时**自动创建**，返回结果的 `created_dirs` 会列出本次新建的目录，若与预期不符请及时清理）。**临时/中间产物**（提交信息文件、一次性脚本、审计产物等）请写系统临时目录的会话区（如 `$env:TEMP\\\\tianyan-scratch\\\\`），**不要**写应用数据目录根或安装目录。",
         ))
     }
 
@@ -391,7 +391,7 @@ impl DynamicToolExecutor for ApplyEditTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition::function(FunctionDefinition::from_schema::<ApplyEditParams>(
             "apply_edit",
-            "**仅用于能精确复现原文的极小改动**（单个唯一片段，如改一行）。在文件内容中查找 old_string（须唯一，多处出现需 replace_all）替换为 new_string。注意：old_string 必须**逐字节精确匹配**（含空行与缩进）——漏空行、抄错缩进都会失败；若修改区域含空行/上下文、或改动较大，请改用 apply_patch（上下文锚定，更稳）。",
+            "**仅用于能精确复现原文的极小改动**（单个唯一片段，如改一行）。在文件内容中查找 old_string（须唯一，多处出现需 replace_all）替换为 new_string。注意：old_string 必须**逐字节精确匹配**（含空行与缩进），漏空行、抄错缩进都会失败；若修改区域含空行/上下文、或改动较大，请改用 apply_patch（上下文锚定，更稳）。",
         ))
     }
 
@@ -473,7 +473,7 @@ impl DynamicToolExecutor for ApplyPatchTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition::function(FunctionDefinition::from_schema::<ApplyPatchParams>(
             "apply_patch",
-            "对一个或多个文件做修改的**主力编辑工具**。格式：`*** Update File: <路径>` 后直接跟 `-`（删除）/ `+`（新增）/ 空格（上下文）行，只写要改的行 + 少量上下文，不要复现整个文件。`<路径>` 可为相对会话工作目录的相对路径，或绝对路径（与 read_file / write_file 同一口径）。`@@` 块头**可省略**（工具按内容定位，无需行号）。`-`/上下文行须与当前文件内容一致。**块内空行**：整行无字符的空行按格式噪声忽略；若原文该行为空、需作为上下文行，须写成「一个空格」的单独一行（上下文行以空格前缀书写，内容可为空）——写成裸空行会让期望匹配窗口少一行。小改、大改、单文件、多文件均适用；编辑前建议先 read_file 目标区确认当前内容。",
+            "对一个或多个文件做修改的**主力编辑工具**。格式：`*** Update File: <路径>` 后直接跟 `-`（删除）/ `+`（新增）/ 空格（上下文）行，只写要改的行 + 少量上下文，不要复现整个文件。`<路径>` 可为相对会话工作目录的相对路径，或绝对路径（与 read_file / write_file 同一口径）。`@@` 块头**可省略**（工具按内容定位，无需行号）。`-`/上下文行须与当前文件内容一致。**块内空行**：整行无字符的空行按格式噪声忽略；若原文该行为空、需作为上下文行，须写成「一个空格」的单独一行（上下文行以空格前缀书写，内容可为空），写成裸空行会让期望匹配窗口少一行。小改、大改、单文件、多文件均适用；编辑前建议先 read_file 目标区确认当前内容。",
         ))
     }
 

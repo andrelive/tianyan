@@ -129,7 +129,7 @@ impl DynamicToolExecutor for RepoMapTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition::function(FunctionDefinition::from_schema::<RepoMapParams>(
             "repo_map",
-            "生成仓库结构地图：跨文件符号骨架，按「被引用次数」排序——一次调用替代多轮 grep 试探。用途：摸清代码布局与模块划分、定位某功能实现位置、重构前侦察影响面与耦合热点。每行 `路径:行 种类 名称(外部引用数)`；用 focus 聚焦关键字相关子图，用 path 限定子树。**引用度是文本级近似**（不做名称解析：宏展开/重导出/动态分发不可见）——要精确影响面，改完跑 `cargo check`（编译器给精确清单）。",
+            "生成仓库结构地图：跨文件符号骨架，按「被引用次数」排序，一次调用替代多轮 grep 试探。用途：摸清代码布局与模块划分、定位某功能实现位置、重构前侦察影响面与耦合热点。每行 `路径:行 种类 名称(外部引用数)`；用 focus 聚焦关键字相关子图，用 path 限定子树。**引用度是文本级近似**（不做名称解析：宏展开/重导出/动态分发不可见），要精确影响面，改完跑 `cargo check`（编译器给精确清单）。",
         ))
     }
 
@@ -203,7 +203,7 @@ impl DynamicToolExecutor for GrepTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition::function(FunctionDefinition::from_schema::<SearchCodeParams>(
             "grep",
-            "用正则搜索文件内容（类似 ripgrep），用于定位。默认只列命中文件名（output_mode=files_with_matches）；要看匹配行传 output_mode=content（返回**匹配行单行预览**：行号 + 匹配行、超长截断；**不含上下文**——需要上下文时用 read_file 读匹配处附近窗口）；统计各文件命中数用 output_mode=count。结果条数默认 100、上限 200，超出即截断并附收窄/续查指引；支持 glob/type 过滤、ignore_case、multiline、offset 分页续查。搜索文件内容统一用本工具（勿用 execute_command 跑 shell 的 grep/rg/findstr）；开放式探索（摸代码布局、重构前侦察）优先用 repo_map 或子代理。",
+            "用正则搜索文件内容（类似 ripgrep），用于定位。默认只列命中文件名（output_mode=files_with_matches）；要看匹配行传 output_mode=content（返回**匹配行单行预览**：行号 + 匹配行、超长截断；**不含上下文**，需要上下文时用 read_file 读匹配处附近窗口）；统计各文件命中数用 output_mode=count。结果条数默认 100、上限 200，超出即截断并附收窄/续查指引；支持 glob/type 过滤、ignore_case、multiline、offset 分页续查。搜索文件内容统一用本工具（勿用 execute_command 跑 shell 的 grep/rg/findstr）；开放式探索（摸代码布局、重构前侦察）优先用 repo_map 或子代理。",
         ))
     }
 

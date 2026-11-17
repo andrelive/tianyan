@@ -65,7 +65,7 @@ pub async fn render(registry: &ToolRegistry) -> String {
     let defs = registry.definitions().await;
     let mut md = String::new();
     md.push_str("# 天演工具目录（自动生成）\n\n");
-    md.push_str("> 本文件由 `scripts/gen-tool-catalog.ps1` 自动生成（权威生成器：`server/examples/tool_catalog.rs`——覆盖 core 内置 + server 组件工具）。\n");
+    md.push_str("> 本文件由 `scripts/gen-tool-catalog.ps1` 自动生成（权威生成器：`app/examples/tool_catalog.rs`，覆盖 core 内置 + server 组件工具）。\n");
     md.push_str("> 手工修改将被覆盖；freshness 由 `scripts/gen-tool-catalog.ps1 -Check` 门禁。\n");
     md.push_str("> 生成原则（DSH gen-tool-catalog 吸收）：运行时注册是 schema 唯一真相源。\n\n");
     md.push_str(&format!("共 {} 个工具。\n\n", defs.len()));

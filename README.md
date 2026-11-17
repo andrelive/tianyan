@@ -1,13 +1,13 @@
 # Tianyan（天演）
 
-本地优先的通用智能体，Rust 全栈：界面、服务和智能体编译进同一个二进制。
+基于 Rust 全栈的本地优先通用智能体。
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)&nbsp;
 [![Rust](https://img.shields.io/badge/Rust-2021-orange.svg)](https://www.rust-lang.org/)
 
 ## 全栈 Rust
 
-界面、服务和智能体是三层职责，实现在同一个进程里：
+界面、服务和智能体三层跑在同一个进程里：
 
 | 层 | 实现 |
 |---|---|

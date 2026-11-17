@@ -100,16 +100,16 @@ impl ShellKind {
 ///
 /// **注意**：这些文本是提示词前缀的一部分——修改会打掉前缀缓存（纪律见
 /// 模块文档）；`tool_catalog --check` 的跨平台归一化遍历 [`HINT_TEMPLATES`]。
-pub const HINT_PWSH: &str = "平台：Windows。Shell 是 PowerShell 7+（pwsh）——支持 && / || 命令链接；cmdlet（Out-File、Select-String、Get-ChildItem）与管道可用。";
+pub const HINT_PWSH: &str = "平台：Windows。Shell 是 PowerShell 7+（pwsh），支持 && / || 命令链接；cmdlet（Out-File、Select-String、Get-ChildItem）与管道可用。";
 /// 5.1 提示词：明确 `&&`/`||` 不支持（模型高频踩坑，实测多起）。
-pub const HINT_WINDOWS_POWERSHELL: &str = "平台：Windows。Shell 是 Windows PowerShell 5.1，不是 cmd.exe——不支持 && / ||（请用 ; 分隔多条命令，或分多次调用）；cmdlet 与管道可用。";
+pub const HINT_WINDOWS_POWERSHELL: &str = "平台：Windows。Shell 是 Windows PowerShell 5.1，不是 cmd.exe，不支持 && / ||（请用 ; 分隔多条命令，或分多次调用）；cmdlet 与管道可用。";
 /// cmd 提示词（如实描述；模型生成 cmd 命令能力一般，复杂场景建议换 PS）。
-pub const HINT_CMD: &str = "平台：Windows。Shell 是 cmd.exe——命令用 & / && 链接（cmd 语义）；如需 PowerShell 语法请配置 [executor].shell。";
+pub const HINT_CMD: &str = "平台：Windows。Shell 是 cmd.exe，命令用 & / && 链接（cmd 语义）；如需 PowerShell 语法请配置 [executor].shell。";
 /// bash 提示词（完整 bash 语法）。
 pub const HINT_BASH: &str =
-    "平台：Unix。Shell 是 bash——支持完整 bash 语法（[[ ]]、数组、进程替换等）与标准管道/重定向。";
+    "平台：Unix。Shell 是 bash，支持完整 bash 语法（[[ ]]、数组、进程替换等）与标准管道/重定向。";
 /// sh 提示词（POSIX 边界，附切换指路）。
-pub const HINT_SH: &str = "平台：Unix。Shell 是 sh -c（POSIX）——仅 POSIX 语法（无 [[ ]]、数组；如需 bash 语法请配置 [executor].shell = \"bash\"）。";
+pub const HINT_SH: &str = "平台：Unix。Shell 是 sh -c（POSIX），仅 POSIX 语法（无 [[ ]]、数组；如需 bash 语法请配置 [executor].shell = \"bash\"）。";
 
 /// 全部内置提示词模板（`tool_catalog` freshness 跨平台归一化遍历此表）。
 pub const HINT_TEMPLATES: &[&str] = &[

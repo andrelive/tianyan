@@ -103,11 +103,11 @@ impl DynamicToolExecutor for ScheduleTaskTool {
         ToolDefinition::function(FunctionDefinition::from_schema::<ScheduleTaskArgs>(
             "schedule_task",
             "创建一个后台定时任务：到点在指定工作目录调用智能体完成给定指令。\
-             【两种调度】① 定点（推荐给「每天/每周某时刻」）——`schedule={\"kind\":\"daily\",\"at\":\"15:30\"}`（本地时间），也支持 weekly / once；\
-             ② 间隔——`schedule={\"kind\":\"every\",\"secs\":1800}` 或旧参数 `interval_secs`（距上次执行达到间隔即触发，最小 60 秒）。\
+             【两种调度】① 定点（推荐给「每天/每周某时刻」），如 `schedule={\"kind\":\"daily\",\"at\":\"15:30\"}`（本地时间），也支持 weekly / once；\
+             ② 间隔，如 `schedule={\"kind\":\"every\",\"secs\":1800}` 或旧参数 `interval_secs`（距上次执行达到间隔即触发，最小 60 秒）。\
              【错过策略】`missed` 决定「时刻点已过但服务没在跑」时怎么办：`{\"kind\":\"skip\"}` 只在准点跑、错过等下一个（**收盘后/盘中不能跑的定点任务必须用它**）；\
              `{\"kind\":\"within\",\"grace_secs\":28800}` 时刻点后 8 小时内可补、超出跳过；`{\"kind\":\"run_once\"}` 错过立即补跑一次（缺省，维护类任务用）。\
-             注意 `run_once` + 间隔制的旧组合会在服务重启后立刻补跑——定点任务请显式指定 schedule 与 missed=skip/within。",
+             注意 `run_once` + 间隔制的旧组合会在服务重启后立刻补跑，定点任务请显式指定 schedule 与 missed=skip/within。",
         ))
     }
 
@@ -275,7 +275,7 @@ impl DynamicToolExecutor for UpdateScheduledTaskTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition::function(FunctionDefinition::from_schema::<UpdateScheduledTaskArgs>(
             "update_scheduled_task",
-            "修改一个**已有**的定时任务（不要为「改」而新建——那会让同一件事有两个任务并行）。\
+            "修改一个**已有**的定时任务（不要为「改」而新建，那会让同一件事有两个任务并行）。\
              【定位】`task` 传任务 id 或名称（名称必须唯一命中）；不知道叫什么就先传一个大概的名称，\
              报错信息会列出全部现有任务（名称 / id / 当前调度）。\
              【只改要改的】其余字段保持原值：只改 `prompt`（指令）不会让它额外跑一次；\

@@ -37,7 +37,7 @@ impl DynamicToolExecutor for ViewImageTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition::function(FunctionDefinition::from_schema::<ViewImageParams>(
             "view_image",
-            "查看本地图片文件（png/jpeg/gif/bmp/webp，单张 ≤ 5MB）。图片内容会**随本工具结果一起发送给你**——你能直接看到像素，不需要其他工具转述；同一张图重复调用是幂等的（按内容 sha256 冻结副本，原文件后续被移动/修改不影响历史回放）。超大图会自动等比缩到 2048 像素以内，结果里的 original_dimensions 与 scale_hint 给出原图尺寸和坐标乘数（在原图上定位特征时按它换算）。只支持本地文件，不支持 URL；读文本仍用 read_file；要求当前模型声明视觉（vision）能力。返回 {image, sha256, mime, bytes, width, height, original_dimensions, scale_hint, path}。",
+            "查看本地图片文件（png/jpeg/gif/bmp/webp，单张 ≤ 5MB）。图片内容会**随本工具结果一起发送给你**，你能直接看到像素，不需要其他工具转述；同一张图重复调用是幂等的（按内容 sha256 冻结副本，原文件后续被移动/修改不影响历史回放）。超大图会自动等比缩到 2048 像素以内，结果里的 original_dimensions 与 scale_hint 给出原图尺寸和坐标乘数（在原图上定位特征时按它换算）。只支持本地文件，不支持 URL；读文本仍用 read_file；要求当前模型声明视觉（vision）能力。返回 {image, sha256, mime, bytes, width, height, original_dimensions, scale_hint, path}。",
         ))
     }
 
