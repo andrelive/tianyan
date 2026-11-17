@@ -177,6 +177,15 @@ pub(crate) fn current_theme() -> ThemeKind {
     }
 }
 
+/// 行内代码底色的「墨色浓度」。代码块取 0.6 倍：同样浓度下面积越大越显重。
+///
+/// 为什么用「主题墨色 + 低透明度」而不是某个中间面（`bg_tertiary` / `bg_secondary`）：
+/// 墨色本身的方向就是对的 —— 浅色主题里它是深色，叠出来是**加深**；深色主题里它是浅色，
+/// 叠出来是**提亮**。所以同一张表对三个主题都成立，将来加新主题也不必再找一个
+/// 「不太深也不太浅」的中间色（午夜蓝的 `bg_hover` 就几乎和页面分不开）。
+/// 浓度只是一个数，觉得重就调小。
+const INLINE_CODE_INK: f32 = 0.08;
+
 /// 把组件库主题里与 Markdown 相关的那几个 token 覆盖成天演 palette 的值。
 ///
 /// # 为什么必须覆盖
@@ -198,9 +207,8 @@ pub(crate) fn current_theme() -> ThemeKind {
 ///
 /// # 为什么按语义取色
 ///
-/// `bg_tertiary` / `bg_secondary` 是「比页面深一档 / 深两档」的语义位：浅色主题下它们
-/// 变深、深色主题下它们变浅，所以同一张表对三个主题自动成立，将来加新主题不必再配。
-/// 面积越小的底需要越强的对比，故行内代码取三级面、代码块取二级面。
+/// 行内代码与代码块都不取固定面，而是**主题墨色的低透明度叠加**（见 [`INLINE_CODE_INK`]）：
+/// 浅色主题下加深、深色主题下提亮，天然自适应。正文墨色、链接、边框才取 palette 的实色。
 ///
 /// # 调用时机是硬约束
 ///
@@ -228,6 +236,12 @@ pub(crate) fn sync_component_theme(palette: Palette, cx: &mut gpui_kit::App) {
         format!("#{v:06x}").into()
     }
 
+    // 8 位 hex 是 `#RRGGBBAA`（组件库 `parse_hex` 前 6 位 RGB、后 2 位 alpha）。
+    fn ink(v: u32, alpha: f32) -> gpui_kit::SharedString {
+        let a = (alpha.clamp(0., 1.) * 255.).round() as u8;
+        format!("#{v:06x}{a:02x}").into()
+    }
+
     let mode = {
         let theme = cx.global_mut::<Theme>();
         // 只改当前模式那一套：切主题时会再走一遍本函数，另一套届时自然被覆盖。
@@ -239,10 +253,10 @@ pub(crate) fn sync_component_theme(palette: Palette, cx: &mut gpui_kit::App) {
         cfg.colors.foreground = Some(hex(palette.text_primary));
         cfg.colors.muted_foreground = Some(hex(palette.text_secondary));
         // 行内代码：底色 `accent`、字色 `accent_foreground`（组件库的语义叫法）
-        cfg.colors.accent = Some(hex(palette.bg_tertiary));
+        cfg.colors.accent = Some(ink(palette.text_primary, INLINE_CODE_INK));
         cfg.colors.accent_foreground = Some(hex(palette.text_primary));
-        // 代码块底色
-        cfg.colors.muted = Some(hex(palette.bg_secondary));
+        // 代码块底色：面积大，浓度降到 0.6 倍
+        cfg.colors.muted = Some(ink(palette.text_primary, INLINE_CODE_INK * 0.6));
         cfg.colors.border = Some(hex(palette.border));
         cfg.colors.link = Some(hex(palette.accent));
         theme.mode
