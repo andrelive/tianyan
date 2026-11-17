@@ -1788,9 +1788,11 @@ fn arts_more_set(s: &mut crate::msg::ExpandState) -> &mut std::collections::Hash
 
 /// 轮末产出物块（方案 E2）：头部摘要 + 文件 chips，默认只列前 `ARTIFACTS_PREVIEW` 个。
 ///
-/// 头部：`本轮产出 N 个文件 · 新增 a · 修改 m · 删除 d`，右侧 `📋` 复制全部绝对路径。
+/// 头部：`本轮产出 N 个文件 · 新增 a · 修改 m · 删除 d`，右侧是**展开/收起入口**
+/// （「还有 N 个 · 展开全部 ›」/「收起 ⌃」）。
 /// chip：状态色点 + 文件名 + 大小，点击用默认程序打开；右侧 `📂` 在文件管理器中选中它。
-/// 超过预览条数时末尾一行「还有 N 个 · 展开全部」，状态存 `ExpandState::artifacts_more`。
+/// 文件名恒为单行、超长省略（长名字换行会把整块撑高）；展开状态存
+/// `ExpandState::artifacts_more`。
 fn render_artifacts_block(
     files: Vec<ArtifactRow>,
     workdir: std::rc::Rc<Option<String>>,
@@ -1815,22 +1817,20 @@ fn render_artifacts_block(
     } else {
         total.min(ARTIFACTS_PREVIEW)
     };
+    // 折起来的条数（头部右侧「还有 N 个」用；展开后为 0）
+    let hidden = total - shown;
 
     let mut summary = format!("新增 {n_added} · 修改 {n_mod}");
     if n_del > 0 {
         summary.push_str(&format!(" · 删除 {n_del}"));
     }
-    let all_paths = ordered
-        .iter()
-        .map(|f| {
-            artifact_abs_path((*workdir).as_deref(), &f.path)
-                .map(|p| p.display().to_string())
-                .unwrap_or_else(|| f.path.clone())
-        })
-        .collect::<Vec<_>>()
-        .join("\n");
-
-    let head = div()
+    // 头部右侧 = **展开/收起入口**（取代原先的 📋「复制全部路径」图标）。
+    //
+    // 用户实测两条：① 那个复制图标点下去界面毫无变化，等于死入口（`write_to_clipboard`
+    // 本身是生效的，但剪贴板这类操作没有界面反馈，用户就判断不了）；② 展开入口原先
+    // 独占一行挂在 chips 下方（左下角），把整块又抬高一行。
+    // 同一件事只留一处，且这个位置点下去**立刻改变 chips 数量**，反馈自明。
+    let mut head = div()
         .w_full()
         .flex()
         .flex_row()
@@ -1854,27 +1854,39 @@ fn render_artifacts_block(
                 .text_color(rgb(colors::TEXT_TERTIARY()))
                 .child(format!("· {summary}")),
         )
-        .child(div().flex_1())
-        .child(
+        .child(div().flex_1());
+    if total > ARTIFACTS_PREVIEW {
+        let label = if all_shown {
+            "收起 ⌃".to_string()
+        } else {
+            format!("还有 {hidden} 个 · 展开全部 ›")
+        };
+        let app_toggle = app.clone();
+        let key = more_key.clone();
+        head = head.child(
             div()
-                .id(SharedString::from(format!("arts-copy:{mi}")))
+                .id(SharedString::from(format!("arts-more:{mi}")))
+                // 头部一行排满时不许被压扁（`flex_1` 的空档已占满剩余空间）
+                .flex_shrink_0()
+                .whitespace_nowrap()
                 .px_1()
                 .rounded_sm()
                 .cursor_pointer()
                 .text_size(px(11.))
-                .text_color(rgb(colors::TEXT_TERTIARY()))
-                .child("📋")
-                .on_click(move |_, _, cx: &mut App| {
-                    cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string(all_paths.clone()));
+                .text_color(rgb(colors::TEXT_SECONDARY()))
+                .child(label)
+                .on_click(move |_, _, cx| {
+                    crate::msg::toggle_expand(&app_toggle, key.clone(), arts_more_set, cx);
                 }),
         );
+    }
 
     let mut chips = div().w_full().flex().flex_row().flex_wrap().gap_1();
     for f in ordered.into_iter().take(shown) {
         chips = chips.child(render_artifact_chip(f, workdir.clone()));
     }
 
-    let mut col = div()
+    let col = div()
         .w_full()
         .flex()
         .flex_col()
@@ -1883,27 +1895,6 @@ fn render_artifacts_block(
         .mb_1()
         .child(head)
         .child(chips);
-
-    if total > ARTIFACTS_PREVIEW {
-        let hidden = total - shown;
-        let label = if all_shown {
-            "收起 ⌃".to_string()
-        } else {
-            format!("还有 {hidden} 个 · 展开全部 ›")
-        };
-        let app_toggle = app.clone();
-        col = col.child(
-            div()
-                .id(SharedString::from(format!("arts-more:{mi}")))
-                .cursor_pointer()
-                .text_size(px(11.))
-                .text_color(rgb(colors::TEXT_SECONDARY()))
-                .child(label)
-                .on_click(move |_, _, cx| {
-                    crate::msg::toggle_expand(&app_toggle, more_key.clone(), arts_more_set, cx);
-                }),
-        );
-    }
 
     col.into_any_element()
 }
@@ -1947,12 +1938,19 @@ fn render_artifact_chip(f: ArtifactRow, workdir: std::rc::Rc<Option<String>>) ->
         .child(
             div()
                 .max_w(px(220.))
+                // 文件名一律单行 + 超长省略：长名字换行会把 chip 撑成两行高，
+                // 同一行其余 chip 也跟着变高（用户实测「容器被撑高」）。
+                // `text_ellipsis` 只在单行生效，必须配 `whitespace_nowrap`。
+                .overflow_hidden()
+                .whitespace_nowrap()
+                .text_ellipsis()
                 .text_size(px(11.))
                 .text_color(rgb(text_color))
                 .child(name),
         )
         .child(
             div()
+                .whitespace_nowrap()
                 .text_size(px(10.))
                 .text_color(rgb(colors::TEXT_TERTIARY()))
                 .child(meta),
