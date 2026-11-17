@@ -1390,26 +1390,28 @@ impl ClientApp {
         // 与输入卡片同一口径。这里再补一层 `px_4` 会让卡片比输入框窄 32px（用户实测）。
         div()
             .pb(px(6.))
-            .child(
-                div()
-                    .w_full()
-                    .max_w(px(896.))
-                    .mx_auto()
-                    // 圆角**定死 17px**，不是 `rounded_lg`(8) 也不是 `rounded_full`：
-                    // 折叠态高 34，17 正好是半圆，与上方产出物 chips 的胶囊同一套观感；
-                    // 展开后高度过百，若用 `rounded_full` 半径会跟着撑成 50 多 px，
-                    // 顶边底边被啃掉、列表贴边（原型里那一档实测崩了）。
-                    //
-                    // 注意：`render_approval_banner` 里有一段几乎一样的外框代码（同样是
-                    // w_full + max_w(896) + mx_auto + rounded + border），别改串了。
-                    .rounded(px(17.))
+            .child({
+                // 圆角**跟着折叠状态走**，不是定死一个值：
+                // - 折叠态用 `rounded_full`，半径自动取高度的一半，永远是真半圆，与上方
+                //   产出物 chips 的胶囊同一观感。写死不行：折叠高随字号与 DPI 变，
+                //   我按 padding + 行高估成 34 写过 17px，实测高约 45，看着明显不够圆
+                //   （用户指出「感觉不够」）。
+                // - 展开态高度过百，全圆角会把顶边底边啃掉、列表贴边（原型那一档崩了），
+                //   所以切回 17px。
+                let mut shell = div().w_full().max_w(px(896.)).mx_auto();
+                shell = if collapsed {
+                    shell.rounded_full()
+                } else {
+                    shell.rounded(px(17.))
+                };
+                shell
                     .border_1()
                     .border_color(rgb(colors::BORDER()))
                     .bg(rgb(colors::BG_SECONDARY()))
                     .px_3()
                     .py_2()
-                    .child(card),
-            )
+                    .child(card)
+            })
             .into_any_element()
     }
 
