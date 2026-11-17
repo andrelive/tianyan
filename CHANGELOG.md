@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [1.2.11] - 2026-11-16
+## [1.2.11] - 2026-11-17
 
 ### Added
 
@@ -18,6 +18,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - `GET /sessions/{id}/messages` 响应新增 `artifacts` 字段，仅在本页含链尾时计算。
+- **产出物块的呈现**：头部右侧改为展开/收起入口（原「还有 N 个 · 展开全部」独占一行挂在
+  chips 下方）；chip 的文件名固定单行、超长省略；文件夹按钮改用与其它图标同一套的 Lucide 图标。
+- **横向对齐**：正文、思考块、工具卡、产出物块、待办条统一到同一条左边界（列宽 896 减左右各 16），
+  输入卡片单独保持 896。
 
 ### Fixed
 
@@ -32,6 +36,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   拉同一份消息，分页结果几乎总被判「期间快照已对齐」整页作废，搭在它上面的产出物
   一并丢失。现在首屏只走订阅快照帧（消息 + 轮状态 + 挂起追问 + 产出物一次给全），
   分页只服务上滚；订阅 1.5 秒没到帧再回退 HTTP 兜底。
+- **产出物 chip 误报「已删除」**：历史轮的文件大小恒为 0（快照树只存哈希），原判据把它
+  当成删除，于是头部写「修改 1」而 chip 写「已删除」。现在状态只认 `status`，大小未知
+  时不显示大小。
+- **点文件夹按钮会同时打开文件夹和文件**：事件冒泡到 chip 自身的「默认程序打开」。
+  现在只打开文件夹。
+- **已删除的文件仍显示文件夹按钮**：文件已不在，定位没有目标，不再渲染该按钮。
+- **待办条比消息宽 32px**：待办容器漏了消息列那层的限宽，宽窗口下取到 896，而消息内容
+  是 864。
 
 ### 说明
 
