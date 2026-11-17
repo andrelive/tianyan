@@ -717,6 +717,10 @@ impl ClientApp {
                     .child(
                         div()
                             .id("load-older")
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .gap_1()
                             .px_3()
                             .py_1()
                             .rounded_full()
@@ -726,10 +730,19 @@ impl ClientApp {
                             .text_size(px(11.))
                             .text_color(rgb(colors::TEXT_SECONDARY()))
                             .cursor_pointer()
+                            // 箭头用图标不用「↑」文本：项目里所有折叠 / 方向指示都是
+                            // `IconName::*`（思考块、工具卡、待办条都如此），文本箭头在
+                            // 不同字体下粗细与基线都对不齐。
+                            .child(
+                                svg()
+                                    .path(IconName::ArrowUp.path())
+                                    .size(px(11.))
+                                    .text_color(rgb(colors::TEXT_SECONDARY())),
+                            )
                             .child(if self.loading_older {
                                 "正在加载更早的消息…".to_string()
                             } else {
-                                "↑ 加载更早的消息".to_string()
+                                "加载更早的消息".to_string()
                             })
                             .on_click(
                                 cx.listener(|this, _, _window, cx| this.load_older_messages(cx)),
@@ -1806,8 +1819,8 @@ fn arts_more_set(s: &mut crate::msg::ExpandState) -> &mut std::collections::Hash
 /// 轮末产出物块（方案 E2）：头部摘要 + 文件 chips，默认只列前 `ARTIFACTS_PREVIEW` 个。
 ///
 /// 头部：`本轮产出 N 个文件 · 新增 a · 修改 m · 删除 d`，右侧是**展开/收起入口**
-/// （「还有 N 个 · 展开全部 ›」/「收起 ⌃」）。
-/// chip：状态色点 + 文件名 + 大小，点击用默认程序打开；右侧 `📂` 在文件管理器中选中它。
+/// （「还有 N 个 · 展开全部」+ ChevronDown / 「收起」+ ChevronUp，图标而非文本符号）。
+/// chip：状态色点 + 文件名 + 大小，点击用默认程序打开；右侧文件夹图标在文件管理器中选中它。
 /// 文件名恒为单行、超长省略（长名字换行会把整块撑高）；展开状态存
 /// `ExpandState::artifacts_more`。
 fn render_artifacts_block(
@@ -1873,16 +1886,25 @@ fn render_artifacts_block(
         )
         .child(div().flex_1());
     if total > ARTIFACTS_PREVIEW {
-        let label = if all_shown {
-            "收起 ⌃".to_string()
+        // 图标而非「⌃」/「›」文本：与思考块、工具卡、待办条的折叠控件同一套
+        // （`IconName::ChevronDown` 收起态 / `ChevronUp` 展开态，11px）。
+        let (chevron, label) = if all_shown {
+            (IconName::ChevronUp, "收起".to_string())
         } else {
-            format!("还有 {hidden} 个 · 展开全部 ›")
+            (
+                IconName::ChevronDown,
+                format!("还有 {hidden} 个 · 展开全部"),
+            )
         };
         let app_toggle = app.clone();
         let key = more_key.clone();
         head = head.child(
             div()
                 .id(SharedString::from(format!("arts-more:{mi}")))
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap_1()
                 // 头部一行排满时不许被压扁（`flex_1` 的空档已占满剩余空间）
                 .flex_shrink_0()
                 .whitespace_nowrap()
@@ -1892,6 +1914,12 @@ fn render_artifacts_block(
                 .text_size(px(11.))
                 .text_color(rgb(colors::TEXT_SECONDARY()))
                 .child(label)
+                .child(
+                    svg()
+                        .path(chevron.path())
+                        .size(px(11.))
+                        .text_color(rgb(colors::TEXT_TERTIARY())),
+                )
                 .on_click(move |_, _, cx| {
                     crate::msg::toggle_expand(&app_toggle, key.clone(), arts_more_set, cx);
                 }),
