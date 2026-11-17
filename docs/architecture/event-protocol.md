@@ -222,7 +222,11 @@
 | `session_id` | string | 会话 id |
 | `anchor_message_id` | string | 本轮锚点（用户消息 id，与快照树键同一个值） |
 | `workdir` | string | 本轮工作目录（绝对路径；「默认应用打开」据此拼绝对路径） |
-| `files` | array | `{ path, status, size }`：`status` 取 `added` / `modified` / `removed`，按路径排序；`size` 为字节数（删除项为 0） |
+| `files` | array | `{ path, status, size }`：`status` 取 `added` / `modified` / `removed`，按路径排序；`size` 为字节数（删除项为 0，历史轮次恒为 0，见下） |
+
+**`size` 的两种 0**：删除项的 0 是事实（文件不在了），历史轮次的 0 是**未知**
+（快照树只存哈希，见 `SnapshotManager::diff_trees` 的文档）。消费方不得用
+`size == 0` 判断「已删除」，否则历史轮会把「修改」显示成「已删除」；状态只认 `status`。
 
 **口径**：只算写入类（新增 / 修改 / 删除），读取不进快照故不出现；同一轮里先建后改只报一条；
 用户手动改的文件与工具改的文件同等对待（快照只看工作区状态，不区分写入者）。

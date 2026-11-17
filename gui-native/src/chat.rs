@@ -1913,31 +1913,44 @@ fn render_artifacts_block(
     col.into_any_element()
 }
 
-/// 单个文件 chip：状态色点 + 文件名 + 大小；点击打开文件，右侧 `📂` 定位所在目录。
+/// 单个文件 chip：状态色点 + 文件名 + （大小 / 已删除）；点击打开文件，右侧文件夹图标
+/// 在文件管理器中定位它。
+///
+/// 三个坑，都是实测撞出来的：
+/// 1. **不能拿 `size == 0` 推断「已删除」**。历史轮的产出物走「两棵快照树比较」，树里
+///    只存哈希没有大小，`size` 恒为 0（见 `SnapshotManager::diff_trees` 的文档）。按
+///    size 判就会出现「头部说修改 1、chip 说已删除」的自相矛盾（用户实测截图）。
+/// 2. 文件夹按钮必须 `stop_propagation`：chip 自身的 `on_click` 是「用默认程序打开」，
+///    不拦事件，一次点击会同时打开文件夹和文件（用户实测）。
+/// 3. 已删除的文件没有可定位的目标，不渲染文件夹按钮。
 fn render_artifact_chip(f: ArtifactRow, workdir: std::rc::Rc<Option<String>>) -> AnyElement {
     let name = f.path.rsplit('/').next().unwrap_or(&f.path).to_string();
+    let removed = f.status == "removed";
     let dot_color = match f.status.as_str() {
         "added" => colors::SUCCESS(),
         "removed" => colors::ERROR(),
         _ => colors::WARNING(),
     };
-    let removed = f.status == "removed";
     let text_color = if removed {
         colors::TEXT_SECONDARY()
     } else {
         colors::TEXT_PRIMARY()
     };
-    let meta = if removed || f.size == 0 {
-        "已删除".to_string()
+    // 只有 `removed` 才写「已删除」；其余 `size == 0` 表示「大小未知」（历史轮），
+    // 这段文案直接省掉，不要编一个数出来。
+    let meta = if removed {
+        Some("已删除".to_string())
+    } else if f.size > 0 {
+        Some(format_bytes(f.size))
     } else {
-        format_bytes(f.size)
+        None
     };
     let wd_open = (*workdir).clone();
     let wd_reveal = (*workdir).clone();
     let p_open = f.path.clone();
     let p_reveal = f.path.clone();
 
-    div()
+    let mut chip = div()
         .id(SharedString::from(format!("art:{}", f.path)))
         .flex()
         .flex_row()
@@ -1961,31 +1974,42 @@ fn render_artifact_chip(f: ArtifactRow, workdir: std::rc::Rc<Option<String>>) ->
                 .text_size(px(11.))
                 .text_color(rgb(text_color))
                 .child(name),
-        )
-        .child(
+        );
+    if let Some(meta) = meta {
+        chip = chip.child(
             div()
                 .whitespace_nowrap()
                 .text_size(px(10.))
                 .text_color(rgb(colors::TEXT_TERTIARY()))
                 .child(meta),
-        )
-        .child(
+        );
+    }
+    if !removed {
+        chip = chip.child(
             div()
                 .id(SharedString::from(format!("art-reveal:{}", f.path)))
                 .px_1()
                 .rounded_sm()
                 .cursor_pointer()
-                .text_size(px(10.))
-                .text_color(rgb(colors::TEXT_TERTIARY()))
-                .child("📂")
-                .on_click(move |_, _, _| {
+                // 用 Lucide 图标而不是 📂：emoji 在不同机器上走各自的彩色字体，
+                // 与其它一律单色描边的图标摆在一起风格不搭（用户实测）。
+                .child(
+                    svg()
+                        .path(IconName::FolderOpen.path())
+                        .size(px(11.))
+                        .text_color(rgb(colors::TEXT_TERTIARY())),
+                )
+                .on_click(move |_, _, cx: &mut App| {
+                    // chip 自身的 `on_click` 是「打开文件」，不拦会一次点击触发两个动作
+                    cx.stop_propagation();
                     reveal_in_folder(wd_reveal.as_deref(), &p_reveal);
                 }),
-        )
-        .on_click(move |_, _, _| {
-            open_with_default(wd_open.as_deref(), &p_open);
-        })
-        .into_any_element()
+        );
+    }
+    chip.on_click(move |_, _, _| {
+        open_with_default(wd_open.as_deref(), &p_open);
+    })
+    .into_any_element()
 }
 
 /// 拼绝对路径。工作目录未知或相对路径含 `..` 时返回 `None`（不做越界访问）。
