@@ -1888,6 +1888,10 @@ fn render_artifacts_block(
 
     let col = div()
         .w_full()
+        // 与消息正文同一左边界（16）：它挂在消息项里，而那一层没有 `px_4`
+        // （正文的内边距写在 `render_msg_body` 自己的根节点上），所以这里自己补。
+        // 少了这一行，chips 会从列的最左边缘起步，比正文宽 32px —— 用户实测点出来的。
+        .px_4()
         .flex()
         .flex_col()
         .gap_2()
