@@ -209,32 +209,47 @@ pub(crate) fn current_theme() -> ThemeKind {
 /// 参数取 `&mut App` 而不是 `impl AppContext`：`global_mut` 是 `App` 的固有方法，
 /// 不在 `AppContext` trait 上；而 `Context<T>` 实现了 `DerefMut<Target = App>`，
 /// 调用点直接传 `cx` 即可自动 deref。
+///
+/// # 为什么改的是 config 而不是 `theme.colors`
+///
+/// 第一版直接写 `theme.colors.accent = …`，界面**没有任何变化**（用户实测：羊皮纸
+/// 下行内代码还是白底）。原因是 `install_text_view_defaults` 在 `Theme::change` 内部
+/// 就已经把当时的色值抄进 `TextViewStyle` 存成 global 了，之后再改 `colors` 不会回写
+/// 那份快照。真正喂给它的输入是 `apply_config` 用的 `light_theme` / `dark_theme`，
+/// 所以要改的是那两份 `ThemeConfig`。
+///
+/// 改完 config 还**必须再 `change` 一次**：只有它会把 config 应用成实际色值，并重装
+/// text view 默认样式。少了这一步，config 改了等于没改。
 pub(crate) fn sync_component_theme(palette: Palette, cx: &mut gpui_kit::App) {
-    // `gpui` 不是本 crate 的直接依赖，一律走门面 crate 的 re-export。
-    fn hsla(v: u32) -> gpui_kit::Hsla {
-        gpui_kit::rgb(v).into()
+    use gpui_kit::component::theme::Theme;
+
+    // 配置里的颜色是字符串（组件库的 `Colorize` 认 tailwind 名与 `#rrggbb`）。
+    fn hex(v: u32) -> gpui_kit::SharedString {
+        format!("#{v:06x}").into()
     }
 
-    // 先把颜色算好再取 `global_mut`：拿到 `&mut Theme` 之后就不能再借 cx。
-    let foreground = hsla(palette.text_primary);
-    let muted_foreground = hsla(palette.text_secondary);
-    let inline_code_bg = hsla(palette.bg_tertiary);
-    let code_block_bg = hsla(palette.bg_secondary);
-    let border = hsla(palette.border);
-    let link = hsla(palette.accent);
-    let selection = hsla(palette.accent).opacity(0.22);
+    let mode = {
+        let theme = cx.global_mut::<Theme>();
+        // 只改当前模式那一套：切主题时会再走一遍本函数，另一套届时自然被覆盖。
+        let cfg = if theme.mode.is_dark() {
+            std::rc::Rc::make_mut(&mut theme.dark_theme)
+        } else {
+            std::rc::Rc::make_mut(&mut theme.light_theme)
+        };
+        cfg.colors.foreground = Some(hex(palette.text_primary));
+        cfg.colors.muted_foreground = Some(hex(palette.text_secondary));
+        // 行内代码：底色 `accent`、字色 `accent_foreground`（组件库的语义叫法）
+        cfg.colors.accent = Some(hex(palette.bg_tertiary));
+        cfg.colors.accent_foreground = Some(hex(palette.text_primary));
+        // 代码块底色
+        cfg.colors.muted = Some(hex(palette.bg_secondary));
+        cfg.colors.border = Some(hex(palette.border));
+        cfg.colors.link = Some(hex(palette.accent));
+        theme.mode
+    };
 
-    let theme = cx.global_mut::<gpui_kit::component::theme::Theme>();
-    theme.colors.foreground = foreground;
-    theme.colors.muted_foreground = muted_foreground;
-    // 行内代码：底色 `accent`、字色 `accent_foreground`（组件库的语义叫法）
-    theme.colors.accent = inline_code_bg;
-    theme.colors.accent_foreground = foreground;
-    // 代码块底色
-    theme.colors.muted = code_block_bg;
-    theme.colors.border = border;
-    theme.colors.link = link;
-    theme.colors.selection = selection;
+    // 让上面改过的 config 真正生效（`apply_config` + 重装 text view 默认样式都在里面）。
+    Theme::change(mode, None, cx);
 }
 
 /// 客户端偏好文件（外观这类 GUI 侧选择）。
