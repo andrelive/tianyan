@@ -1,0 +1,21 @@
+[package]
+name = "tianyan-scroll-probe"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+# 独立的 workspace：不进 `gui-native`（那是单一根包，零脚本改动、零 CI 风险），
+# 也不进主 workspace。它的唯一职责是给滚动引擎（`vendor/gpui-pre` 的 21 处
+# `[天演 patch]`）提供一条**能跑**的回归回路。
+#
+# 为什么不直接跑 vendor 自带的 `#[gpui::test]`：那些用例所在的模块 `include_bytes!`
+# 了 `examples/image/*.jpg` 与 `../assets/fonts/**`，vendor 副本没有这些资源，且
+# 需要 `test-support` 特性；`cargo test -p gpui-pre` 也不可能（它是 workspace 外部包）。
+# 从**外部**依赖并开 `test-support` 就绕开了 cfg(test) 里那些资源依赖。
+[workspace]
+
+[dependencies]
+gpui-pre = { version = "0.3.6", features = ["test-support"] }
+
+[patch.crates-io]
+gpui-pre = { path = "../vendor/gpui-pre" }

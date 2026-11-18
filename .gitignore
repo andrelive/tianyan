@@ -2,6 +2,8 @@
 /target
 # gui-native 是独立 workspace（自带 [workspace]），有自己的 target，根规则不覆盖它
 gui-native/target/
+# 滚动引擎的回归回路也是独立 workspace（见 gui-native/scroll-probe/README.md）
+gui-native/scroll-probe/target/
 *.wixpdb
 # 打包产物不进仓（wix build 生成，按 README 的「出包一条链」可复现）
 gui-native/installer/*.msi

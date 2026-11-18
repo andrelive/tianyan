@@ -45,6 +45,7 @@ mod hotkey;
 mod msg;
 mod notify;
 mod pages;
+mod scroll_diag;
 mod sessions;
 mod tasks;
 mod theme;
@@ -97,6 +98,15 @@ pub(crate) const ACTIVE_GROUP_WINDOW_SECS: i64 = 24 * 3_600;
 pub(crate) const ACTIVE_GROUP_LIMIT: usize = 3;
 /// 顶部会话 Tab 上限（超出丢弃最早打开的；当前会话永不被丢）
 pub(crate) const MAX_SESSION_TABS: usize = 8;
+
+/// 逐帧探针快照：`(item_ix, offset_in_item, 消息条数, 列表项数, 视口高, 上滚标志)`。
+///
+/// 抽成别名是因为它作为 `Cell<Option<...>>` 的载荷出现，直接内联 tuple 会触发
+/// clippy 的 `type_complexity`（仓库门禁跑 `--all-targets`，不留新告警）。
+///
+/// 「消息条数」与「列表项数」都要记：两者不一致时虚拟列表按错位的高度布局，
+/// 表现就是「内容在数据里、界面上一片空白」——那是另一类根因，靠这一列能一眼看穿。
+pub(crate) type ScrollProbeKey = (usize, i32, usize, usize, i32, bool);
 
 struct ClientApp {
     /// 左栏派生行（分组 / 会话 / 查看更多）：由 `rebuild_session_rows` 从
@@ -394,6 +404,11 @@ struct ClientApp {
     pub(crate) messages: Rc<Vec<MsgRow>>,
     /// gpui 原生变高虚拟列表的状态（只有可见项会被 render）
     pub(crate) msg_list_state: GpuiListState,
+    /// 逐帧探针的上一帧快照：`(item_ix, offset, 条数, 视口高, 上滚标志)`。
+    ///
+    /// 只在 `scroll_diag` 开启时使用（见 `render`）：滚动缺陷的现场是「用户没动手，
+    /// 位置却变了」的那一帧，所以探针要记录**变化**而不是每帧全量。
+    pub(crate) scroll_probe: std::cell::Cell<Option<ScrollProbeKey>>,
     /// 最近一次布局得到的消息区视口高度。
     ///
     /// 新建 `ListState` 时把它预置进去（`seed_viewport_height`），否则首帧
@@ -401,8 +416,12 @@ struct ClientApp {
     /// 「内容高 − 1200」，视口顶部比真实底部高 660px，下一帧才修正 ——
     /// 用户看到的就是「第一次打开会话时闪一下」。
     pub(crate) last_viewport_h: Pixels,
-    /// 用户是否上滚看历史了（由消息列表的滚动监听维护，**不靠位置推算**）。
-    /// `true` = 别自动滚到底；`false` = 跟随尾部（新内容到达即贴底）。
+    /// 用户是否上滚看历史了（滚动监听维护，**快照旁路用**）。
+    ///
+    /// ⚠️ 它**不是**跟随判定的来源：那个只看引擎（[`ClientApp::follows_tail`]）。
+    /// 这里留一份纯为了 `park` / `restore` 与自动化 `/state` —— 它们需要一个可存进
+    /// 快照、可被外部读到的普通布尔（`ListState` 本身不可序列化）。
+    /// `true` = 用户滚离了底部；`false` = 在尾部。
     pub(crate) msg_scrolled_up: Rc<std::cell::Cell<bool>>,
     /// 消息列顶部此刻是否正显示「↑ 加载更早」浮层（渲染时写入，滚动监听读）。
     ///
@@ -817,6 +836,37 @@ impl Render for ClientApp {
         let vh = self.msg_list_state.viewport_bounds().size.height;
         if vh > px(0.) {
             self.last_viewport_h = vh;
+        }
+        // 逐帧探针（默认开启，`TIANYAN_GUI_SCROLL_DIAG=0` 关闭）。
+        //
+        // 位置 / 条数 / 视口高 / 上滚标志**任一变化**才落一行 —— 滚动缺陷的现场就是
+        // 「用户没动手、位置却变了」的那一帧，前后两行即是现场。字段判读口径见
+        // `scroll_diag` 模块文档。
+        if scroll_diag::on() {
+            let top = self.msg_list_state.logical_scroll_top();
+            let off = f32::from(top.offset_in_item);
+            let key = (
+                top.item_ix,
+                off.round() as i32,
+                self.messages.len(),
+                self.msg_list_state.item_count(),
+                f32::from(self.last_viewport_h).round() as i32,
+                self.msg_scrolled_up.get(),
+            );
+            if self.scroll_probe.get() != Some(key) {
+                self.scroll_probe.set(Some(key));
+                scroll_diag::log(format!(
+                    "[保位] frame item_ix={} off={off:.1} count={} list={} viewport_h={:.1} \
+                     scrolled_up={} following={} streaming={}",
+                    key.0,
+                    key.2,
+                    key.3,
+                    f32::from(self.last_viewport_h),
+                    key.5,
+                    self.msg_list_state.is_following_tail(),
+                    self.busy(),
+                ));
+            }
         }
         // Enter 发送的订阅必须挂在**当前**输入框实体上：换会话 / 重启恢复会话时
         // 输入框是新建的实体，旧订阅留在弃用的那个上 —— 那时回车只换行、不发送。

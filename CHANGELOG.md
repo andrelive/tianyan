@@ -5,6 +5,47 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.13] - 2026-11-18
+
+### Fixed
+
+- **流式输出时想上滚看历史，一滚就被弹回底部**：跟随恢复的判据是「新位置落在内容
+  末尾 1px 之内」，而它写成「上滚即停跟随」之后的**另一条独立 `if`** —— 上滚的第一
+  小步（滚轮/触控板经平滑后的首帧增量约 1px）先停跟随、随即被它重新打开跟随，位置
+  被设成「末尾之后」，下一帧整表贴底（此后每个 delta 继续贴底，用户根本滚不上去）。
+  现在两条判断合并为「上滚 ⇒ 停跟随；**只有向下滚到末尾**才恢复跟随」，上滚不再
+  表达跟随意图。回归用例 `gui-native/scroll-probe` 的
+  `one_pixel_scroll_up_does_not_re_engage_follow`（反向注入旧行为必红、修后绿）。
+- **上滚时偶尔跳掉一段、甚至跨过整条消息**：`scroll()` 的 `scroll_max` 拿
+  `summary().height` 算，而流式新 `splice` 进来的项按 0px 计入（`size_hint: None`）
+  ⇒ 总高偏小 ⇒ 用户位置被钳到偏小的「末尾附近」。现在不再给未测量项补估值
+  （见 Changed 第一条），跨未测量项的误差由引擎 `scroll()` 的**逐项行走**兜住 ——
+  误差局限在一条之内，不再随累计高度线性放大。
+
+### Changed
+
+- **消息列表的滚动状态收敛到引擎**（口径对齐 `gpui-component` 的官方
+  `MessageScroller`：`Top` + `FollowMode::Tail` + 400px overdraw，零 workaround）。
+  删掉三处自造补丁：`measure_all()` 全量预测量、给未测量项的 1200px 高度估值、
+  以及**每个流式 delta 的 `remeasure_items`**；`overdraw` 2400 → 400。三者的共同
+  后果是 `summary().height` 在「估值 / 真值」之间来回跳，而 `scroll()` 的
+  `scroll_max` 与布局的 `rendered_height` 是两次独立计算 —— 两次不一致就是用户看到
+  的「跳跃」。跟随判定 `follows_tail()` 改为直接读引擎的 `is_following_tail()`，
+  应用层不再维护第二份「是否跟随」（`msg_scrolled_up` 退化为 park / restore 与
+  自动化 `/state` 的旁路）。
+
+### Added
+
+- **滚动保位诊断日志（默认开启）**：`%LOCALAPPDATA%\tianyan\logs\gui-scroll.log`。
+  只在位置 / 条数 / 视口高 / 上滚标志**变化**时落一行（`item_ix` / `off` / `count` /
+  `viewport_h` / `scrolled_up` / `following` / `streaming`），超过 2 MB 轮转；
+  `TIANYAN_GUI_SCROLL_DIAG=0` 可关。落文件是因为安装版没有控制台 —— 用户复现时唯一
+  拿得到的证据就是它。
+- **`gui-native/scroll-probe`**：滚动引擎（`gui-native/vendor/gpui-pre` 的 21 处
+  `[天演 patch]`）的回归回路，四条判据（1px 上滚不重开跟随 / 上滚后流式增长位置
+  不动 / 贴底不留白 / 内容不变时布局不得挪位置），
+  `cargo test --manifest-path gui-native\scroll-probe\Cargo.toml`。
+
 ## [1.2.12] - 2026-11-17
 
 ### Changed

@@ -1123,8 +1123,17 @@ impl StateInner {
         // 改成在这里判：`new_scroll_top` 已经过 `scroll_max` 钳制，语义明确。
         if delta.y > px(0.) {
             self.follow_state.stop_following();
-        }
-        if new_scroll_top >= scroll_max - px(1.0) {
+        // [天演 patch] 恢复跟随**只在向下滚到末尾**时发生（原来是两条独立 if：
+        // 上滚先 stop_following，紧接着「已在末尾附近」那条又把它盖回去）。
+        //
+        // `scroll_max` 用的是 `items.summary().height`，而流式期间新 `splice` 进来的
+        // 项是 `size_hint: None`（按 0px 计）——总高偏小 ⇒ 用户明明在历史里，
+        // `new_scroll_top >= scroll_max - 1` 依然成立 ⇒ 跟随被重新打开、下一帧整表
+        // 贴底（用户实测：**输出过程中上滚被拽回底部**，且此后每个 delta 都继续贴底）。
+        //
+        // 语义上也该如此：**上滚从不表达「我要跟随」的意图**，恢复跟随只能是
+        // 「向下滚到了内容末尾」这一个动作。
+        } else if new_scroll_top >= scroll_max - px(1.0) {
             self.follow_state.start_following();
         }
 

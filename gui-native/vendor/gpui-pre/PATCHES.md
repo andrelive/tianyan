@@ -53,7 +53,16 @@ Select-String -Path (Get-ChildItem -Recurse gui-native\vendor\gpui-pre -Filter *
 |----|------|
 | 1013 | **先钳到 `scroll_max` 再减 delta**。原式先减后钳 ⇒ 任何上滚都被钳回贴底 ⇒ 「上滚一格纹丝不动 + 每帧 `start_following` 又把它设回跟随」= 往返跳 |
 | 1031 | **逐项行走**替换 `items.find(&Height(new_scroll_top))`。后者把落点建立在**全表**累计高度上，任何一项不准（未测量项按 `size_hint` 甚至 0 计）误差都会线性放大；逐项行走只依赖「当前项到目标项」这一小段，最坏是一条的估值差。位置表达仍是逻辑坐标 `(item_ix, offset_in_item)`，渲染侧语义不变 |
-| 1117 | **跟随状态只由用户滚动驱动**：上滚 ⇒ 停跟随；滚到 `scroll_max` ⇒ 重新跟随。原判据在布局层按 `scroll_offset + available >= total − 1`，而 `total` 会随测量变化 |
+| 1117 | **跟随状态只由用户滚动驱动**：上滚 ⇒ 停跟随；**只有向下滚到 `scroll_max` 才重新跟随**。原判据在布局层按 `scroll_offset + available >= total − 1`，而 `total` 会随测量变化 |
+
+> **1117 的补充（2026-11-18）**：原来是**两条独立 if** —— 上滚先 `stop_following()`，
+> 紧接着「已在末尾 `scroll_max − 1` 之内」那条又 `start_following()` 把它盖回去。
+> 滚轮/触控板经平滑后的**第一帧增量只有 1px**，正好落在这个缝里：上滚的第一小步被
+> 吞掉、位置被设成「末尾之后」、下一帧整表贴底 —— 用户感受是「一想往上看就被弹回
+> 底部」（2026-11-18 用户复报）。现在两条判断合并成 `if 上滚 { 停跟随 }
+> else if 到末尾 { 跟随 }`，**上滚不再表达跟随意图**。判别用例见
+> `gui-native/scroll-probe` 的 `one_pixel_scroll_up_does_not_re_engage_follow`
+> （修前必红、修后绿）。
 
 ### `layout_items()`
 
@@ -77,13 +86,19 @@ Select-String -Path (Get-ChildItem -Recurse gui-native\vendor\gpui-pre -Filter *
 
 ## 应用层的对应面（不在 vendor 里）
 
-patch 只保证「引擎不主动改坏位置」，跟随语义的另一半在应用层：
+patch 只保证「引擎不主动改坏位置」。**参照实现是同仓的
+`gpui_component::message_scroller`（零 workaround）**，2026-11-18 起应用层按它的
+口径收敛：
 
-- `msg_scrolled_up` 标记 + `scroll_to_end_if_following`（应用层自己判跟随）
-- `restore_view_state` 复用快照 `ListState` + `suppress_autoscroll_once()`
-- 估值 1200px 起步、`average_item_height()` 修正、`splice` 后 `set_uniform_item_height` +
-  `remeasure_all`（`load_older` 路径）
-- `overdraw` 2400px（gpui 文档：overdraw 就是为「滚动时不闪烁」而存在）
+- **跟随判定只有引擎一份**：`follows_tail() = is_following_tail()`；
+  `msg_scrolled_up` 退化为 park / restore 与自动化 `/state` 的旁路值，不再参与判定；
+- `scroll_to_end_if_following`：只在引擎处于跟随态时贴底（内容到达时调用）；
+- `restore_view_state` 复用快照 `ListState` + `suppress_autoscroll_once()`；
+- **不再**给未测量项设估值（`uniform_item_height` 已停用）、**不再**
+  `measure_all()` / `remeasure_all()`，`overdraw` 400px（官方值）。理由见
+  `app.rs` 的 `new_msg_list_state` 文档：估值与全量测量都会让
+  `summary().height` 在「估值 / 真值」之间跳，而 `scroll()` 的 `scroll_max` 与布局的
+  `rendered_height` 是两次独立计算 —— 两次不一致就是用户看到的「跳跃」。
 
 ## 升级 gpui-pre 的流程（必做）
 
@@ -102,3 +117,21 @@ patch 只保证「引擎不主动改坏位置」，跟随语义的另一半在�
 
 **漏同步的后果是静默的**：编译照过、测试照绿（单测覆盖不到滚动引擎内部），
 只有用户切回会话时才表现为「又跳了」。
+
+## 回归回路（`gui-native/scroll-probe`）
+
+本 crate 自带的 `#[gpui::test]` 用例**在这里跑不起来**：测试模块 `include_bytes!` 了
+`examples/image/*.jpg` 与 `../assets/fonts/**`，vendor 副本没有这些资源，还需要
+`test-support` 特性；`cargo test -p gpui-pre` 也不可能（它是 workspace 外部包）。
+
+所以滚动语义的回归回路放在 `gui-native/scroll-probe/`（独立 workspace，从外部依赖
+本 crate 并开 `test-support`，绕开 cfg(test) 里的资源依赖）：
+
+```powershell
+cargo test --manifest-path gui-native\scroll-probe\Cargo.toml
+```
+
+它锁住三条实测过的用户现象：上滚 1px 不得重新开启跟随 / 上滚后流式增长位置不动 /
+跟随态下末条增长时视口不得留白。**改 `list.rs` 的任何 patch 都要跑一次**，并用
+「反向注入旧行为必红」检验新用例是否真的有判别力 —— 2026-11-18 的教训：最初写的
+上滚 300px 用例在旧代码下也是绿的（滚得够多就不会踩到那条判据），换成 1px 才红。

@@ -128,6 +128,7 @@ impl ClientApp {
             session_rows: Vec::new(),
             sessions_data: Vec::new(),
             last_viewport_h: px(0.),
+            scroll_probe: std::cell::Cell::new(None),
             collapsed_groups: std::collections::HashSet::new(),
             expanded_groups: std::collections::HashMap::new(),
             hovered_session: None,
@@ -844,7 +845,7 @@ impl ClientApp {
                 //
                 // 判据用「滚离意图」而不是「位置靠上」：用户没滚过就该贴底看最新，
                 // 滚过就必须原处不动 —— 与 dyad 那条 follow-intent 同口径。
-                let keep = if self.msg_scrolled_up.get() {
+                let keep = if !self.follows_tail() {
                     let a = self.msg_list_state.logical_scroll_top();
                     self.messages
                         .get(a.item_ix)
@@ -876,23 +877,11 @@ impl ClientApp {
                     } else {
                         self.msg_list_state.splice(n..old_items, 0);
                     }
-                    // 新项是「无 hint」= 0px，累计高度因此偏小 —— 而 `scroll()` 正是
-                    // 靠累计高度反查位置，一跨过它们就会跳过好几条（用户实测：
-                    // 上滚到用户消息附近会跳过去 / 速度突然变快）。先补估值，
-                    // 下一次布局再全量测量收敛到真值。
-                    // 估值优先用已有项的**真实平均**：TanStack Virtual 的官方建议是
-                    // 「估小了必然在测量后展开，从而滚动跳跃」，所以别凭空给常数。
-                    let hint = self
-                        .msg_list_state
-                        .average_item_height()
-                        .unwrap_or(px(MSG_ROW_HEIGHT_HINT));
-                    self.msg_list_state.set_uniform_item_height(hint);
-                    // ⚠️ **不要**再 `remeasure_all()`：那会把全部 151 项重新
-                    // render+layout 一遍（markdown 渲染很贵），那一帧高度模型整个重建，
-                    // 位置就跳一下 —— 现象正是「有时跳有时不跳」「滚动不丝滑」
-                    // （只在快照帧/加载帧撞上整表重测时才跳）。
-                    // 新项已经有上面这句 hint，会在 overdraw 覆盖范围内被正常测量
-                    // 逐步收敛，不需要整表重来。
+                    // 不给新项补高度估值（见 `new_msg_list_state` 的「刻意不做」1–3）：
+                    // 估值会让 `summary().height` 在「估值 / 真值」之间来回跳，而
+                    // `scroll()` 的 `scroll_max` 与布局的 `rendered_height` 是两次独立
+                    // 计算 —— 两次不一致就是用户看到的「跳跃」。跨未测量项的误差由
+                    // `scroll()` 的逐项行走 patch 兜住（局限在一条之内）。
                 }
                 // 位置：只有「用户本来滚在历史里」且锚点还能找到、并且确实与当前值
                 // 不同时才动它。在底部（`keep` 为 None）就交给跟随，一句都不必写。
@@ -920,7 +909,6 @@ impl ClientApp {
             self.turn_running = running;
             if !protect_inflight {
                 self.streaming = false;
-                self.remeasure_stream_tail();
             }
             println!(
                 "[事件] 快照 {sid}：{n} 条（replace={} running={running}）",
@@ -1346,7 +1334,6 @@ impl ClientApp {
                 if !self.offline {
                     // 离线（别的会话）时不动当前会话的轮状态与提示条
                     self.streaming = false;
-                    self.remeasure_stream_tail();
                     self.turn_running = false;
                     // 流式错误必须进 toast：否则下一次轮询写状态行就把它盖掉了
                     self.set_error(format!("出错：{msg}"));
@@ -1594,7 +1581,6 @@ impl ClientApp {
             // 30 秒（用户看到「输出完了/没在跑」但内容还在长）。
             //
             // 本轮结束只认 `turn_state(idle)`（服务端权威，见该分支）与 `error`。
-            self.msg_list_state.remeasure_items(idx..idx + 1);
             self.scroll_to_end_if_following();
         }
     }
@@ -1649,57 +1635,47 @@ impl ClientApp {
     ///
     /// 有意**不**在这里做「回到底部」按钮：用户上滚后新内容还在长，先保证不打扰；
     /// 需要提示时再加（那是纯增量）。
+    ///
+    /// `#[track_caller]`：诊断日志要记下**谁**在跟着滚底的真实调用点（见
+    /// `scroll_diag`）。「同一处判断被写在五个地方」是这类缺陷的常见形态，
+    /// 靠函数名分不清调用者。
+    #[track_caller]
     pub(crate) fn scroll_to_end_if_following(&self) {
         if self.follows_tail() {
+            if crate::scroll_diag::on() {
+                let top = self.msg_list_state.logical_scroll_top();
+                let site = std::panic::Location::caller();
+                crate::scroll_diag::log(format!(
+                    "[保位] autoscroll at {}:{} before=({}, {:.1}) count={}",
+                    site.file(),
+                    site.line(),
+                    top.item_ix,
+                    f32::from(top.offset_in_item),
+                    self.messages.len(),
+                ));
+            }
             self.msg_list_state.scroll_to_end();
         }
     }
 
-    /// 流式结束（或失败）后**重测最后一项**的高度。
+    /// 视图此刻是否「跟着尾部」——**直接读引擎的跟随状态**，不再自己维护一份。
     ///
-    /// 为什么必须显式做：流式期间最后一条消息的高度在持续增长，而 `ListState` 只在
-    /// `splice` / `reset`（**条目数变化**）时重新测量——条目数没变的「内容变高」它
-    /// 不会自己重测，缓存里留着流式中间态的高度。表现正是用户实测的：纯历史会话
-    /// 来回切正常，**流式输出过的会话切回必跳**（切走时按旧高度记下阅读位置，
-    /// 切回时高度已经变了）。
-    ///
-    /// 用 `remeasure_items(last..last+1)` 而不是整体 `remeasure()`：只有最后一项的
-    /// 渲染态变了（`stream_pending` 由 true 变 false），其余项高度没动，全量重测
-    /// 会让整页闪一下。
-    pub(crate) fn remeasure_stream_tail(&self) {
-        let Some(last) = self.messages.len().checked_sub(1) else {
-            return;
-        };
-        // 重测会让该项高度瞬间回到 uniform hint，Top 对齐下视口内容会随之上移——
-        // 原本贴底的用户必须重新贴底，否则流式一结束就「凭空往上跳一段」。
-        let was_at_end = self.follows_tail();
-        self.msg_list_state.remeasure_items(last..last + 1);
-        if was_at_end {
-            self.msg_list_state.scroll_to_end();
-        }
-    }
-
-    /// 视图此刻是否「跟着尾部」——**只读用户滚动动作维护的标志**。
+    /// 唯一写者是引擎：用户上滚 ⇒ `stop_following()`；**向下滚到内容末尾** ⇒
+    /// `start_following()`（见 `list.rs` 的 `scroll()` patch）；构造 / 重置 ⇒
+    /// `set_follow_mode(Tail)`。应用层只读，不写。
     ///
     /// 历史（三代修法，别退回去）：
-    /// 1. `is_scrolled_to_end()`：依赖 `last_layout_bounds` + `summary.has_unknown_height`，
-    ///    虚拟列表在中部/顶部或隐藏窗口时返回 `None` —— 当成「在底部」，于是**永远
-    ///    跟随、上滚立刻被拖回**；
-    /// 2. `is_scrolled_to_end()` + `logical_scroll_top().item_ix` 兜底：`item_ix` 只
-    ///    反映「视口顶部是哪一项」，而**流式输出会把最后一条撑得很长** —— 用户在同一
-    ///    条内部向上滚，`item_ix` 仍是最后一条，`top + 1 >= len` 照旧成立 ⇒ 每个
-    ///    delta 又把他拉回底部（用户 2026-11-02 复报的现象）；
-    /// 3. `FollowMode::Tail` + `is_following_tail()`：状态机本身是对的（`scroll_by`
-    ///    向上即 `stop_following`），但它的**恢复**判据
-    ///    `scroll_offset + available_height >= total_height` 里的 `total_height` 来自
-    ///    `summary().height` —— 含未测量项时偏小 ⇒ 用户刚上滚就被判「已回到尾部」
-    ///    并 `start_following()`（实测：`scroll_to(0)` 后 `item_ix` 仍是末尾）。
-    ///
-    /// 现在：`new_msg_list_state` 用一个滚动监听维护 `msg_scrolled_up` ——
-    /// **可见范围到没到最后一个项**是布局算出来的实值，不受未测量项影响；回到尾部
-    /// 时监听把标志清零，跟随自动恢复。追加内容只在标志为「未上滚」时才滚到底。
+    /// 1. `is_scrolled_to_end()`：虚拟列表在中部或隐藏窗口时返回 `None`，被当成
+    ///    「在底部」⇒ 永远跟随、上滚立刻被拖回底部；
+    /// 2. `is_scrolled_to_end()` + `logical_scroll_top().item_ix` 兜底：流式会把最后
+    ///    一条撑得很长，用户在同一条**内部**上滚时 `item_ix` 仍是最后一条 ⇒ 判据照旧
+    ///    成立、每个 delta 又把他拉回底部（2026-11-02 复报）；
+    /// 3. 应用层自建 `msg_scrolled_up` 标志（滚动监听维护）+ 追加内容时读它 —— 能
+    ///    工作，但等于把「是否跟随」抄了一份：两处语义一旦漂移就回到「上滚被拽回 /
+    ///    回底要两次」。现在标志退化为**快照旁路**（`park` / `restore` 与 `/state`
+    ///    用），判定本身只问引擎。
     pub(crate) fn follows_tail(&self) -> bool {
-        !self.msg_scrolled_up.get()
+        self.msg_list_state.is_following_tail()
     }
 
     pub(crate) fn append_delta(&mut self, delta: &str) {
@@ -1718,7 +1694,11 @@ impl ClientApp {
         push_seg_delta(&mut next[idx].segs, delta, false);
         self.messages = Rc::new(next);
         if !self.offline {
-            self.msg_list_state.remeasure_items(idx..idx + 1);
+            // 这里**不** `remeasure_items`：可见项每帧布局都会重新测量
+            // （`layout_items` 对 `visible_height < available_height` 的项逐帧
+            // 渲染+测量），显式重测只会把 `summary().height` 打回旧估值态，而
+            // `scroll()` 的 `scroll_max` 正拿它算 —— 两次独立计算不一致就是
+            // 用户看到的「跳跃」。官方 `MessageScroller` 也从不这么做。
             self.scroll_to_end_if_following();
         }
     }
@@ -1739,7 +1719,11 @@ impl ClientApp {
         push_seg_delta(&mut next[idx].segs, delta, true);
         self.messages = Rc::new(next);
         if !self.offline {
-            self.msg_list_state.remeasure_items(idx..idx + 1);
+            // 这里**不** `remeasure_items`：可见项每帧布局都会重新测量
+            // （`layout_items` 对 `visible_height < available_height` 的项逐帧
+            // 渲染+测量），显式重测只会把 `summary().height` 打回旧估值态，而
+            // `scroll()` 的 `scroll_max` 正拿它算 —— 两次独立计算不一致就是
+            // 用户看到的「跳跃」。官方 `MessageScroller` 也从不这么做。
             self.scroll_to_end_if_following();
         }
     }
@@ -1785,7 +1769,11 @@ impl ClientApp {
         }
         self.messages = Rc::new(next);
         if !self.offline {
-            self.msg_list_state.remeasure_items(idx..idx + 1);
+            // 这里**不** `remeasure_items`：可见项每帧布局都会重新测量
+            // （`layout_items` 对 `visible_height < available_height` 的项逐帧
+            // 渲染+测量），显式重测只会把 `summary().height` 打回旧估值态，而
+            // `scroll()` 的 `scroll_max` 正拿它算 —— 两次独立计算不一致就是
+            // 用户看到的「跳跃」。官方 `MessageScroller` 也从不这么做。
             self.scroll_to_end_if_following();
         }
     }
@@ -2105,7 +2093,6 @@ impl ClientApp {
                             this.new_session_workspace = Some(ws);
                         }
                         this.streaming = false;
-                        this.remeasure_stream_tail();
                         this.turn_running = false;
                         this.running_sessions.remove(&sid_for_cleanup);
                         this.set_error(format!("发送失败：{e}"));
@@ -2238,7 +2225,7 @@ impl ClientApp {
             format!("会话消息（{n} 条）")
         };
         // 原本贴在底部（跟随最新）→ 截断后继续贴底；在历史中段的阅读位置不动
-        if !self.msg_scrolled_up.get() {
+        if self.follows_tail() {
             self.msg_list_state.scroll_to_end();
         }
         println!("[消息] 本地截断 {old_items} → {n} 条（锚点 {anchor_message_id}）");
@@ -2428,37 +2415,14 @@ impl ClientApp {
                 // 3. 程序 splice 不触发滚动监听，`msg_scrolled_up` 原值保持（上滚中仍是
                 //    true），后续 delta 不会把视图拽回底部。
                 if added > 0 {
-                    // ⚠️ 用 `splice` 前插，**不要** `reset_with_uniform_height`。
+                    // ⚠️ 用 `splice` 前插，**不要** `reset`（它会清空
+                    // `logical_scroll_top` 并把所有测量缓存丢成估值，每加载一页整表
+                    // 按估值重排 → 新高度测出来后位置再变一次）。
                     //
-                    // 早先这里走 reset：它会清空 `logical_scroll_top`（诊断日志里每次
-                    // `scroll_to` 的 `prev` 都是 `(count, 0)` 就是这个签名）、把所有项
-                    // 的测量缓存丢成 280px 估值，再靠一次 `scroll_to` 把锚点搬回原处。
-                    // 结果每加载一页就整表按估值重排 → 新高度测出来后位置再变一次
-                    // （用户实测：向上滚动遇到用户消息上跳、来回跳）。
-                    //
-                    // 当初改用 reset 的理由是「`splice` 给新项设 `size_hint: None`
-                    // （视作 0px），一页 50 条会让人按累计高度反查时跨项」。那个问题
-                    // 现在由 `set_uniform_item_height`（补估值）+ overdraw 范围内的
-                    // 正常测量解决：新项会在滚动到它们附近时被逐步量成真实高度
-                    // 高度，不必牺牲位置稳定性。
-                    //
-                    // `splice(0..0, added)` 会把 `logical_scroll_top.item_ix` 自动 +added
-                    // —— 正好跟着同一条消息走，用户正看着的那一行纹丝不动。
+                    // `splice(0..0, added)` 会把 `logical_scroll_top.item_ix` 自动
+                    // +added —— 正好跟着同一条消息走，用户正看着的那一行纹丝不动。
+                    // 与官方 `MessageScrollerState::prepend` 同一语义。
                     this.msg_list_state.splice(0..0, added);
-                    // `splice` 把新项建成「无 hint」= 0px，累计高度因此偏小；而
-                    // `scroll()` 正是靠累计高度反查位置 —— 一跨过这些 0 高度项就会
-                    // 跳过好几条（用户实测「上滚到用户消息附近跳过去 / 速度突变」）。
-                    // 先补一个估值（优先用已有项的真实平均，估小了必跳，见
-                    // `MSG_ROW_HEIGHT_HINT`），新项随后在 overdraw 覆盖范围内被正常
-                    // 测量收敛。
-                    //
-                    // ⚠️ **不要** `remeasure_all()`：整表重测一帧会让位置跳一下
-                    // （「有时跳有时不跳」「不丝滑」就是这个）。
-                    let hint = this
-                        .msg_list_state
-                        .average_item_height()
-                        .unwrap_or(px(MSG_ROW_HEIGHT_HINT));
-                    this.msg_list_state.set_uniform_item_height(hint);
                 }
                 this.message_total = this.messages.len();
                 // 标题跟着走（「还有更早」随 has_more 出现/消失）
@@ -2797,125 +2761,50 @@ impl ClientApp {
 }
 
 /// 线性插值（统计行数字滚动用）：`e` 已含缓动，这里只负责取整。
-/// 构造消息列表状态（**唯一入口**）：同时注册「用户是否上滚」的滚动监听。
+/// 构造消息列表状态（**唯一入口**）。
 ///
-/// 判据**只来自用户滚动动作**（`visible_range` 覆盖到最后一项 = 回到尾部），
-/// 不做任何「是否在底部」的位置推算——虚拟列表的 `summary().height` 含未测量项，
-/// 基于它的判断在长消息上必然翻车（历史见 [`ClientApp::follows_tail`]）。
+/// 口径对齐 `gpui_component::message_scroller`（同仓专做「流式消息 + 前插分页」的
+/// 官方实现，零 workaround）：`ListAlignment::Top` + `FollowMode::Tail` +
+/// 400px overdraw，位置**全部交给引擎**，应用侧只问一个派生问题
+/// （[`ClientApp::follows_tail`]）。
 ///
-/// 有意**不用** `FollowMode::Tail`：它的「滚回底部自动恢复跟随」判据是
-/// `scroll_offset + available_height >= total_height`，`total_height` 同样受
-/// 未测量项影响，实测会把刚上滚的用户立刻拉回底部（2026-11-02）。
-/// 未测量项的统一高度估算（px）。
+/// 刻意**不**做的三件事（都是被官方实现反证掉的旧补丁）：
 ///
-/// **这个值决定「滚动会不会跨项」**：gpui 的 `ListState::new` / `reset` 内部都走
-/// `splice`，而 `splice` 给每个新项 `size_hint: None`，`ListItemSummary` 里直接取
-/// `height = px(0.)`（gpui-pre 0.3.6 `elements/list.rs` 的 `impl sum_tree::Item`）。
-/// 于是所有未测量项的总高度是 0：滚一格（约 60–120px）按累计高度反查位置时，
-/// 会一次跨过好几项——实测「上滚时中间的 user 消息直接被跳过」，上下都是长回复
-/// （几千 px）时最明显。
+/// 1. **不 `measure_all()`**：官方不预测量，靠布局期按需测量。全量测量会在
+///    切会话 / 加载更早时把一页 50 条 markdown 全渲染一遍，`measuring_behavior`
+///    还会被「宽度变化 ⇒ 重置」反复复位 —— 抖动与卡顿都从这里来。
+/// 2. **不 `with_uniform_item_height()`**：给未测量项塞一个估值会让
+///    `summary().height` 在「估值 / 真值」之间来回跳，而 `scroll()` 的
+///    `scroll_max` 与布局的 `rendered_height` 是两次独立计算 —— 两次不一致就是
+///    用户看到的「跳跃」。跨未测量项的误差由 `scroll()` 的**逐项行走** patch 兜住
+///    （退回 `size_hint` / 600px 兜底，误差局限在一条之内）。
+/// 3. **`overdraw` 不加大**：官方就是 400。加大只是把「边界单帧不一致」的窗口推开，
+///    代价是每帧多渲染几屏 markdown；真正的病根是上面两条。
 ///
-/// gpui 为此提供了 `with_uniform_item_height` / `reset_with_uniform_height`：
-/// 给未测量项一个高度 hint，测量后自动被真实值替换（已测量项保持真实高度）。
-/// 只要 hint ≥ 一次滚动步长，反查就不会跨项。
+/// `ListAlignment::Top` 而非 `Bottom`：`Bottom` 下 `logical_scroll_top = None` 表示
+/// 贴底，而 `scroll()` 里「贴底时滚一格会被吞掉」那句会让上滚的第一步失效；
+/// `Top` 的位置始终是明确的 `(item_ix, offset_in_item)`，前插只需把 `item_ix` 后移
+/// （渲染也只依赖 `item_ix`，不依赖前面各项的累计高度）。
 ///
-/// 取值 280：接近消息项高度的中位数（短 user 气泡 60–120，长回复上千）。
-/// 太大 → 测量后收缩、视口内容下移；太小 → 仍会跨项。
-/// 消息项的**默认估值**（没有已测量项可参考时用）。
-///
-/// 取 1200 而不是 280 或 600：TanStack Virtual 的官方建议是「估值**宁可偏大** ——
-/// 估小了必然在测量后展开，从而产生滚动跳跃；估大了测量后收缩，观感自然」。我们的
-/// 消息高度方差极大（user 气泡 ~70px ↔ 长回复/工具卡片 2000px+），任何偏小的估值
-/// 都等于让每条被量出来时「变大」，滚动就一路在跳；宁可比真实偏大，让它是「收紧」。
-///
-/// 更准的做法是用 [`GpuiListState::average_item_height`] 按已有项的真实平均来估；
-/// 这个常量只在完全没有参考（首次进入会话）时兜底。
-pub(crate) const MSG_ROW_HEIGHT_HINT: f32 = 1200.;
+/// `seed_viewport_height` 是唯一保留的「非官方」动作：首帧没有 `last_layout_bounds`
+/// 时引擎会拿 `overdraw` 当视口高，「贴底」被算成 `总高 − overdraw`，用户看到首屏
+/// 闪一下。预置真实视口高即可，不改任何测量语义。
+pub(crate) const MSG_LIST_OVERDRAW: f32 = 400.;
 
 pub(crate) fn new_msg_list_state(
     item_count: usize,
     scrolled_up: Rc<std::cell::Cell<bool>>,
     seed_viewport_h: Pixels,
 ) -> GpuiListState {
-    // overdraw = 视口上下各**预测量**多少像素。gpui 文档原话：它就是为了
-    // 「滚动时不让列表闪烁/弹跳」（elements within this area will be measured
-    // even though they are not visible）——原来只给 120px（约一条短消息），而消息项
-    // 高度方差极大（一行 user 气泡 ↔ 上百行 assistant 回复）：向上滚动时视口上方
-    // 不断有未测量项被测量，`ListItemSummary` 的估算高度被真实值修正，靠估算反查
-    // 出来的 `logical_scroll_top` 随即失效 → 重排后内容整体位移（用户实测「滚过
-    // 两轮对话的位置会跳、不平滑」）。
-    // 600px ≈ 2–3 屏预测量（gpui-component 的 `MessageScroller` 用 400；我们的项
-    // 更重且高度方差更大，取大一档）。代价是每次布局多测量几项，可接受。
-    // 600 → 1200：一屏约 800px，1200 ≈ 1.5 屏预测量，覆盖长消息的两端。
-    //
-    // `.measure_all()` 是**关键**：`scroll_top()` 的定义是
-    // `items.find(Count(item_ix)).height + offset_in_item`——从列表顶部累计的像素，
-    // 只要还有一个 Unmeasured 项（`size_hint: None` → `height = px(0.)`），
-    // 这个累计值就是错的，滚轮按它反查位置就会偏移（滚一格跨过整条消息）。
-    // 只补 uniform hint 只是把误差从「0 vs 3000」缩小到「280 vs 3000」，仍是错的。
-    // `measure_all()` 在**首帧**跑一遍 `layout_all_items`（逐项 render + layout，
-    // 用真实宽度），之后全部是 `ListItem::Measured`，累计高度精确。
-    // 代价：切会话/加载更早时多一次全量布局（一页 MESSAGE_BASE=50 条 markdown）；
-    // `reset()` 会把 `measuring_behavior` 复位，所以每次重置后都会重测一轮。
-    // **`ListAlignment::Top`，不是 Bottom。**
-    //
-    // Bottom 对齐下 `logical_scroll_top = None` 表示「贴底」，而 `StateInner::scroll()`
-    // 里有一句：`if alignment == Bottom && new_scroll_top == scroll_max { logical_scroll_top = None }`
-    // —— 贴底附近滚动一格会被这一句吞掉（位置重置为末尾），下一格才真正生效且已经
-    // 越过了视口底部那一项。实测表现就是「向上滚动时不总是跳，但在刚离开底部时
-    // 特别容易整条跳过」（用户：「刚看到用户输入的边，一下就跳到上面的输出上」）。
-    //
-    // Top 对齐下 `logical_scroll_top` 始终是明确的 `(item_ix, offset_in_item)`，
-    // 而且**渲染只依赖 item_ix**（`layout_items` 从 `scroll_top.item_ix` 开始往下排，
-    // 第一个项用 `-offset_in_item` 偏移），不依赖前面各项的累计高度——所以
-    // `splice(0..0, n)` 前插时只要 item_ix 后移 n 指回同一项，画面就纹丝不动。
-    // 代价：Top 对齐不会自动贴底（Bottom 才用 None 表示末尾），由调用方在数据
-    // 就绪后显式 `scroll_to_end()`（见 `load_messages` / `reset_msg_list_state`）。
-    // overdraw 1200 → 2400：gpui 文档对这个参数的原话就是「滚动时不让列表闪烁/弹跳
-    // （elements within this area will be measured even though they are not visible）」。
-    // 1200px ≈ 2 屏，向上滚到「用户消息 + 它上方的高元素」交界时，需要新测量的项
-    // 正好落在测量窗口边缘 —— 于是出现「边滚边测」的单帧不一致（视觉上是闪一下）。
-    // 2400px ≈ 4 屏，把一次连续滚动会经过的区域提前量完。
-    // 代价：每帧多测量几条（markdown 渲染是主要开销），可接受。
-    let state = GpuiListState::new(item_count, ListAlignment::Top, px(2400.))
-        .with_uniform_item_height(px(MSG_ROW_HEIGHT_HINT))
-        .measure_all();
-    // 交给引擎自己贴底（Tail）。
-    //
-    // 早期否掉 Tail 的理由是「恢复跟随的判据 `scroll_offset + available_height >=
-    // total_height - 1` 依赖 total_height，而未测量项高度是 0，判据失真，会把刚
-    // 上滚的用户立刻拽回底部」。**那个前提已被 `measure_all()` 消除**：现在每项都是
-    // `ListItem::Measured`，`total_height` 是真实值。
-    //
-    // 而 Tail 在 `layout_items()` 开头贴底用的是 `item_ix = items.summary().count`
-    // —— **只依赖条数、不依赖任何高度**。所以「测量前按 280px 估、测量后是真实
-    // 高度」对它毫无影响：每次 layout 都按条数重新贴到末尾，位置不会漂。这恰好
-    // 是「打开工具卡片密集的会话时跳一下」的根治办法（外部手动 `scroll_to_end()`
-    // 只能贴一次，而贴的那一刻高度还是估值）。
+    let state = GpuiListState::new(item_count, ListAlignment::Top, px(MSG_LIST_OVERDRAW));
     state.set_follow_mode(gpui_kit::FollowMode::Tail);
-    // 预置视口高：没有它，首帧 `request_layout` 会拿 `overdraw`（1200px）当视口高，
-    // 「贴底」被算成「内容高 − 1200」，视口顶部比真实底部高 660px；下一帧拿到真实
-    // 高度后才修正 —— 用户看到的就是「第一次打开会话时闪一下」。
     state.seed_viewport_height(seed_viewport_h);
     // 新构造 / 重置后一律贴底（`scrolled_up = false`）
     scrolled_up.set(false);
     state.set_scroll_handler(move |event, _window, _cx| {
-        // 「是否滚离底部」取**引擎的显式意图**，不用可见范围推导。
-        //
-        // 旧写法 `event.visible_range.end < event.count` 有个致命盲区：视口里
-        // 还看得见最后一条消息时两者相等，于是判定「用户还在底部」——而工具卡片
-        // 密集的会话，单条消息几千 px，用户**上滚一屏后最后一条仍占满视口**。
-        // 结果：他明明在看历史，标志却是 false，切回后任何跟随逻辑（
-        // `scroll_to_end_if_following`）都名正言顺地贴底。
-        //
-        // `is_following_tail` 是 gpui 的显式状态：只在用户真的向上滚
-        // （`scroll()` 里 `delta.y > 0`）时 `stop_following()`；只有用户真的滚到
-        // 内容末尾（`scroll()` 里 `new_scroll_top >= scroll_max`）才重新跟随。
-        // ⚠️ 恢复跟随**不再**由布局阶段判 `scroll_offset + available >= total`：
-        // 那个 `total` 会随项目被重新测量而变小，任何位置都可能满足，曾导致
-        // 「滚到长回复中间切回就跳到底部」。
-        // 这与 dyad 那条修法同口径：*follow intent 独立于底部距离，只有显式
-        // 滚离才暂停它*。
+        // 「是否滚离底部」取引擎的显式意图（`FollowMode::Tail` 的开 / 关），
+        // 不做任何「是否在底部」的位置推算 —— 那个推算依赖 `summary().height`，
+        // 未测量项会让它失真（历史上就是这条把人反复拽回底部）。
         scrolled_up.set(!event.is_following_tail);
     });
     state
@@ -2927,7 +2816,10 @@ pub(crate) fn reset_msg_list_state(
     item_count: usize,
     scrolled_up: &Rc<std::cell::Cell<bool>>,
 ) {
-    state.reset_with_uniform_height(item_count, px(MSG_ROW_HEIGHT_HINT));
+    state.reset(item_count);
+    // `reset` 只清位置与测量缓存，不动 `follow_state`；显式补一次与官方
+    // `MessageScrollerState::reset` 同口径（重置后必然是「跟最新」的语境）。
+    state.set_follow_mode(gpui_kit::FollowMode::Tail);
     // Top 对齐不自动贴底，重置后显式回到底部（新会话/切会话的期望位置）
     state.scroll_to_end();
     scrolled_up.set(false);

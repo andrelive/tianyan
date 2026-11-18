@@ -4,7 +4,7 @@
 name = "tianyan-gui-native"
 # 版本与服务端对齐（打包成 MSI 后 ARP 里显示的就是这个号，
 # 与 workspace 版本不一致会让产品版本看起来分叉）
-version = "1.2.12"
+version = "1.2.13"
 edition = "2021"
 description = "天演原生桌面客户端（GPUI）"
 publish = false
