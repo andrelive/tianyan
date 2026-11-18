@@ -416,6 +416,11 @@ pub(crate) enum Dialog {
     DeleteRole { name: String },
     /// 归档技能（`DELETE /skills/{id}`：软删除到 `skill/_archive/`，可恢复）
     DeleteSkill { id: String },
+    /// 删除定时任务（`DELETE /scheduled-tasks/{id}`：**直接删掉，无法恢复**）。
+    ///
+    /// 这个确认框是补上的：此前列表里的「删除」按钮直接发 DELETE，用户点错一下任务
+    /// 就没了（实测发生过，只能从该任务的会话历史里把 prompt 原样捞回来）。
+    DeleteSchedTask { id: String, name: String },
     /// 文件选择弹窗（**GPUI 自绘**，不是 OS 对话框 —— 所以自动化点得到）
     FilePicker,
     /// 回退到某条用户输入之前（`POST /sessions/{id}/messages/delete`，ADR-040 事务）
@@ -457,6 +462,7 @@ impl Dialog {
             Dialog::ResetRole { .. } => "reset_role",
             Dialog::DeleteRole { .. } => "delete_role",
             Dialog::DeleteSkill { .. } => "delete_skill",
+            Dialog::DeleteSchedTask { .. } => "delete_sched_task",
             Dialog::FilePicker => "kb_file_picker",
             Dialog::RollbackMessage { .. } => "rollback_message",
             Dialog::EditApproval { .. } => "edit_approval",

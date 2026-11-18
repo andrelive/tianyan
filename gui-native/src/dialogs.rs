@@ -129,6 +129,14 @@ impl ClientApp {
                 "归档".to_string(),
                 true,
             ),
+            Dialog::DeleteSchedTask { name, .. } => (
+                "删除定时任务".to_string(),
+                Some(format!(
+                    "确定删除定时任务「{name}」吗？此操作不可恢复，任务的指令原文与调度配置都会丢弃。"
+                )),
+                "删除".to_string(),
+                true,
+            ),
             Dialog::RollbackMessage { preview, .. } => (
                 "回退到此处".to_string(),
                 Some(format!(
@@ -263,6 +271,9 @@ impl ClientApp {
                                 }
                                 Some(Dialog::DeleteSkill { id }) => {
                                     this.confirm_delete_skill(id, cx)
+                                }
+                                Some(Dialog::DeleteSchedTask { id, .. }) => {
+                                    this.delete_sched_task(id, cx)
                                 }
                                 Some(Dialog::RollbackMessage {
                                     session_id,

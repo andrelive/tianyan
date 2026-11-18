@@ -376,8 +376,10 @@ impl ClientApp {
         } else {
             let mut list = div().flex().flex_col().gap_2().w_full();
             for (ix, t) in self.sched_tasks.iter().enumerate() {
-                let id = t.id.clone();
                 let id_toggle = t.id.clone();
+                // 「删除」要先弹确认框，所以 id 与名称各留一份给回调 `move` 进去
+                let id_del = t.id.clone();
+                let name_del = t.name.clone();
                 let enabled = t.enabled;
                 // 编辑按钮要把整行带进回调（表单要按现值回填）
                 let row = t.clone();
@@ -513,9 +515,16 @@ impl ClientApp {
                                     },
                                 )),
                             )
+                            // 删除必须先弹确认框：此前这里直接调 `delete_sched_task`，
+                            // 误点一下任务就没了，且 DELETE 是硬删、取不回来（实测发生过，
+                            // 最后是从该任务的会话历史里把 prompt 原样捞回来的）。
                             .child(card_btn(("sched-del", ix), "删除", true).on_click(
                                 cx.listener(move |this, _, _, cx| {
-                                    this.delete_sched_task(id.clone(), cx)
+                                    this.dialog = Some(Dialog::DeleteSchedTask {
+                                        id: id_del.clone(),
+                                        name: name_del.clone(),
+                                    });
+                                    cx.notify();
                                 }),
                             )),
                     );
