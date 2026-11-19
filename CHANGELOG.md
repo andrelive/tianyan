@@ -5,6 +5,41 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.14] - 2026-11-19
+
+### Changed
+
+- **设置页改为「卡片级编辑」**：默认整页只读，点卡片右上角「编辑」才把这一块的
+  字段变成输入框，保存 / 取消只作用于这一张卡片；顶部状态行给脏计数，切栏目即
+  放弃未保存的改动。旧链（进设置页把 26 个编辑器一次填满 → `settings_backfilled`
+  标志位 → 保存时全字段校验）整条删除——「编辑器一片 placeholder、点保存报一串
+  『不能为空』」这个故障面随之消失，只读态直接读配置值渲染，没有「回填」这道工序。
+
+### Fixed
+
+- **设置页回填不可靠**：判据 `applied.is_ok()` 只表示调用成功、不代表值已落地。
+  窗口未完成首帧时 `set_value` 会被随后的初始化盖掉，于是 `backfilled=true` +
+  编辑器空 被固化，之后进设置页直接跳过回填（连 `/config` 都不再拉）。1.2.14 起由
+  「卡片级编辑」根治：只在进入编辑那一刻灌种子。
+- **窗口默认尺寸在逻辑分辨率不足的屏幕上溢出成负坐标**：`Bounds::centered` 用屏幕
+  尺寸算居中，写死 1280×820 一旦大于屏幕就会产出负偏移（实测窗口矩形 L=-7 T=-7、
+  1721×927，而屏幕 1707×960），标题栏与右侧内容被屏幕边缘裁掉。改为按
+  `primary_display().visible_bounds()` 收缩，四周留 48。
+
+### Added
+
+- **`scripts/gui-shot.ps1`**：内建截图入口（`/act {action:"screenshot"}` →
+  `render_to_image`），支持 `-Tab` / `-EditPath` / `-WidthPx`，取渲染输出而非屏幕
+  像素，不受 DPI 缩放与窗口遮挡影响。
+
+### Fixed（验证脚本）
+
+- **`scripts/verify-gui-native.ps1` 两处假绿**：`Act` 把响应 `Out-Null` 掉，而动作
+  失败是 HTTP 200 + `{ok:false}`——93 项断言全绿，界面却从未切到设置页；同一脚本的
+  `switch_tab` 参数名写成 `tab`（服务端读 `view`），切页一直是失败的空操作。现在
+  检查 `ok` 并补「已切到设置视图」断言，另加卡片级交互断言 8 条（只读基线 / 进编辑 /
+  脏计数 / 取消回只读且值不被污染 / 取消不污染后端 / 保存回只读）。
+
 ## [1.2.13] - 2026-11-18
 
 ### Fixed
