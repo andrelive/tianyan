@@ -893,7 +893,8 @@ impl ClientApp {
                 .bg(rgb(colors::BG_PRIMARY()))
                 .px_4()
                 .pt_3()
-                .pb_3()
+                // 与下方统计行贴紧（原 12px 会把那行文字推到窗口底边上）
+                .pb_2()
                 .child(self.render_clarification(cx))
                 .into_any_element();
         }
@@ -911,7 +912,9 @@ impl ClientApp {
             .bg(rgb(colors::BG_PRIMARY()))
             .px_4()
             .pt_3()
-            .pb_3()
+            // 与统计行贴紧：统计行是页面最末一个元素，这里留 12px 会把那行文字
+            // 推到「离输入框远、离窗口底近」的位置（用户实测反馈）。
+            .pb_2()
             .child(
                 div()
                     .w_full()
@@ -1140,16 +1143,29 @@ impl ClientApp {
     /// 表现就是「多个会话间切换时上下抖动」（用户实测）。恒定高度让切换前后
     /// 布局不变。
     pub(crate) fn render_usage_line(&self) -> AnyElement {
-        let mut line = div()
+        // 两组分开：左边「会话累计」（未命中 / 缓存命中 / 输出 / 命中率），
+        // 右边「最近一轮性能」（TTFT / tok/s）。早先整行居中，一长一短互相推挤，
+        // 读起来像两段不相干的话；分开后左边永远从同一条竖线起排、右边永远贴右
+        // 边界，扫视时位置固定。
+        let mut left = div().flex().flex_row().items_center().gap_2();
+        let mut right = div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_2()
+            // 右组不参与压缩：窗口窄时宁可让左组少显示，也不能把「TTFT」挤成两行
+            .flex_shrink_0();
+        let line = div()
             .w_full()
             .max_w(px(colors::CHAT_MAX_W))
             .mx_auto()
             .h(px(USAGE_LINE_H))
             .flex()
             .flex_row()
-            .items_center()
-            .justify_center()
-            .gap_2()
+            // 贴顶而非垂直居中：整行是页面最末一个元素，居中会让文字看起来
+            // 偏向窗口底部（用户实测：「离输入框远、离底部近」）。贴顶后上方
+            // 只留输入卡片那一段间距，下方自然空出一截，视觉上就贴住输入框了。
+            .items_start()
             .text_size(px(11.))
             .text_color(rgb(colors::TEXT_TERTIARY()));
         // 显示值优先取**动画中间帧**（`usage_shown`）：它只在数值刚变的那 260ms 里
@@ -1167,7 +1183,7 @@ impl ClientApp {
             } else {
                 0
             };
-            line = line
+            left = left
                 .child(div().child(format!("未命中输入 {}", group_thousands(uncached))))
                 .child(dot())
                 .child(div().child(format!("缓存命中输入 {}", group_thousands(cached))))
@@ -1177,18 +1193,19 @@ impl ClientApp {
                 .child(div().child(format!("缓存命中率 {hit_rate}%")));
         }
         if let Some((ttft, duration, completion)) = self.request_perf {
-            if shown.is_some() {
-                line = line.child(dot());
-            }
-            line = line.child(div().child(format!(
+            right = right.child(div().child(format!(
                 "TTFT {}",
                 ttft.map(format_ms).unwrap_or_else(|| "—".to_string())
             )));
             if let Some(tps) = tokens_per_sec(ttft, duration, completion) {
-                line = line.child(dot()).child(div().child(format!("{tps} tok/s")));
+                right = right
+                    .child(dot())
+                    .child(div().child(format!("{tps} tok/s")));
             }
         }
-        line.into_any_element()
+        // 左组 `flex_1`：占满剩余宽度（内部仍从左排），右组因此被推到最右；
+        // 左组为空时也一样（空 div 吃掉宽度），右边不会掉到左边来。
+        line.child(left.flex_1()).child(right).into_any_element()
     }
 
     /// 上下文详情浮层（点圆环弹出）：占用 / 缓存命中 / 输出 +「压缩会话」。

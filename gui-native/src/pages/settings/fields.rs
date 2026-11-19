@@ -110,11 +110,16 @@ impl FieldKind {
         }
     }
 
-    /// 编辑器高度（单行 32 / 多行自定义）。
-    fn height(&self) -> f32 {
+    /// 编辑器外壳高度：多行给固定高度（内部滚动），单行给 `None`。
+    ///
+    /// 单行**不能**写死高度：内容自然高 = 上内边距 8 + 行高 20 + 下内边距 8
+    /// = 36px（`Size::Medium` + `LINE_HEIGHT = 1.25rem`），外壳写 32 再
+    /// `overflow_hidden` 就是上下各裁 2px —— 文字贴着上边框、下面空一截，
+    /// 看起来「没有垂直居中」。不设高度让它自然撑开，上下内边距才对称。
+    fn height(&self) -> Option<f32> {
         match self {
-            FieldKind::Lines { height, .. } => *height,
-            _ => 32.0,
+            FieldKind::Lines { height, .. } => Some(*height),
+            _ => None,
         }
     }
 }
@@ -1393,7 +1398,14 @@ impl ClientApp {
         }
         let hint = div()
             .text_size(px(10.))
-            .text_color(rgb(colors::TEXT_TERTIARY()))
+            // hint 是「辅助说明」，权重必须低于字段值：三级文字原色在羊皮纸上
+            // 对比约 2.7:1，10pt 小字依然压得住，和右边填的值混在一起分不出主次。
+            //
+            // 取 65% 不透明度（浅色 ≈ 1.85:1 / 深色 ≈ 2.4:1）。先试过 80%：
+            // 肉眼看不出与原本的差别（实测反馈「好像没变化」），一档不够就压到底。
+            // 65% 是「10pt 仍认得清、但不会先跳进眼里」的位置；用透明度而非另立
+            // 色值，三种主题与卡片底色都自动适配。
+            .text_color(rgba((colors::TEXT_TERTIARY() << 8) | 0xa6))
             // 显式换行：hint 是长句，撑成一行会把控件区挤出去
             .whitespace_normal()
             .child(def.hint);
@@ -1877,17 +1889,26 @@ impl ClientApp {
     }
 }
 
-/// 编辑器外壳（统一边框 / 底色 / 内边距；高度固定，`Textarea` 自带外观关掉）。
-fn editor_box(editor: &Entity<TextareaState>, height: f32) -> AnyElement {
-    div()
+/// 编辑器外壳（统一边框 / 底色；`Textarea` 自带外观关掉）。
+///
+/// **内边距与高度都不在这里给** —— 两个都是踩出来的：
+/// - 横向：`Input` 的编辑器自己带 `Size::Medium` 的左右 10px 内边距，外面再叠
+///   一个 `px_2`（8px）就是 18px，URL / key 一进来左边空一大截。
+/// - 纵向：单行自然高 36px（见 [`FieldKind::height`]），外壳写 32px 会裁掉上下
+///   各 2px，表现为文字贴顶、下方空一截。单行因此不传高度，由内边距自然撑开；
+///   只有多行（`Lines`）传固定高度 + 内部滚动。
+fn editor_box(editor: &Entity<TextareaState>, height: Option<f32>) -> AnyElement {
+    let mut outer = div()
         .w_full()
-        .h(px(height))
         .overflow_hidden()
         .rounded_md()
         .border_1()
         .border_color(rgb(colors::BORDER()))
-        .bg(rgb(colors::BG_PRIMARY()))
-        .px_2()
+        .bg(rgb(colors::BG_PRIMARY()));
+    if let Some(h) = height {
+        outer = outer.h(px(h));
+    }
+    outer
         .child(Textarea::new(editor).appearance(false))
         .into_any_element()
 }
