@@ -25,6 +25,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   尺寸算居中，写死 1280×820 一旦大于屏幕就会产出负偏移（实测窗口矩形 L=-7 T=-7、
   1721×927，而屏幕 1707×960），标题栏与右侧内容被屏幕边缘裁掉。改为按
   `primary_display().visible_bounds()` 收缩，四周留 48。
+- **点「编辑」后输入框只剩 placeholder**：写种子走的是 `window_handle.update(...)`，
+  真实点击时窗口正在事件处理中，二次借用失败被 `let _ =` 静默吞掉——界面进了编辑态、
+  编辑器却是空的，只显示 placeholder（如「数字：200」只剩「数字」）。现在点击路径直接
+  用回调里的 `&mut Window` 写种子（自动化路径无窗口时才退回 `window_handle`），写不进去
+  就在状态行报「进入编辑失败：写不进输入框（原因）」。
 
 ### Added
 
@@ -39,6 +44,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `switch_tab` 参数名写成 `tab`（服务端读 `view`），切页一直是失败的空操作。现在
   检查 `ok` 并补「已切到设置视图」断言，另加卡片级交互断言 8 条（只读基线 / 进编辑 /
   脏计数 / 取消回只读且值不被污染 / 取消不污染后端 / 保存回只读）。
+- **编辑器内容断言**：新增 `fields[].editor`（编辑器原始内容，不回落配置值）必须等于
+  配置值——上述静默失败在自动化路径下不会复现（`/act` 在窗口更新之外执行，借用不冲突），
+  只能靠「读编辑器里实际是什么」这一条抓住。
 
 ## [1.2.13] - 2026-11-18
 
