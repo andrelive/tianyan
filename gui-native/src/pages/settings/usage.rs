@@ -11,7 +11,6 @@ use crate::theme::colors;
 use crate::types::*;
 use crate::widgets::stat_card;
 use crate::*;
-use gpui_kit::component::chart::LineChart;
 // 滚动扩展方法（.overflow_y_scrollbar()）
 use gpui_kit::component::scroll::ScrollableElement as _;
 
@@ -372,74 +371,103 @@ impl ClientApp {
         col.into_any_element()
     }
 
-    /// 用量趋势：调用次数 × 单次平均 token（两张并排的折线图）。
+    /// 用量趋势：**一张图、左右两套刻度**。
     ///
-    /// **为什么不是「三条 token 曲线」**：这台机器上缓存命中是未命中的 20~60 倍，
-    /// 三条线挤在同一根轴上时，未命中与输出会被压成贴底的直线（原型阶段拿真实
-    /// 数据量过）。拆成「次数」和「单次均量」，回答的是另一个问题——用量涨，
-    /// 是喊得更频繁，还是每次请求更肥。
+    /// 左轴 = 每日调用次数，右轴 = 每次调用的平均 token。两条线量级差一两个数量级
+    /// （实测 2 千次 vs 30 万 token/次），共用一根轴时必有一条被压成贴着底边的直线，
+    /// 所以必须双轴。
+    ///
+    /// 双轴的代价写在明面上：两条线的**交叉点没有含义**（各自刻度不同），只能分别
+    /// 读走势。左右刻度文字因此取对应曲线的颜色——这是双轴图必须给的线索。
+    ///
+    /// 没用组件库的 `LineChart`：它只支持单 Y 轴且强制从 0 起算，做不出双轴。
     fn render_usage_chart(&self) -> AnyElement {
         let series = &self.usage_series;
         // 一个点连不成线；没数据时整块不占位（不给空图留个白框）
         if series.len() < 2 {
             return div().into_any_element();
         }
-        // 一屏给 5 个日期标签就够：半幅宽的图（~340px）里 `MM-DD` 占 ~30px，
-        // 再密就互相压住了（第一版用完整 `YYYY-MM-DD`，7 天窗口下相邻两个标签
-        // 直接叠成一团）。
-        let tick = (series.len() / 5).max(1);
-        let peak_calls = series.iter().map(|d| d.calls).max().unwrap_or(0);
-        let sum_calls: u64 = series.iter().map(|d| d.calls).sum();
-        let sum_tokens: u64 = series.iter().map(|d| d.total()).sum();
-        let avg_per = if sum_calls > 0 {
-            (sum_tokens as f64 / sum_calls as f64).round() as u64
-        } else {
-            0
-        };
+        let n = series.len();
+        let max_calls = series.iter().map(|d| d.calls).max().unwrap_or(1).max(1) as f64;
+        let max_per = series
+            .iter()
+            .map(|d| d.per_call())
+            .fold(0.0_f64, f64::max)
+            .max(1.0);
 
-        let calls = LineChart::new(series.clone())
-            .x(|d: &UsageDay| short_date(d))
-            .y(|d: &UsageDay| d.calls as f64)
-            .stroke(Hsla::from(rgb(colors::TEXT_PRIMARY())))
-            .tick_margin(tick)
-            .id("usage-trend-calls")
-            .name("调用次数");
-        let per_call = LineChart::new(series.clone())
-            .x(|d: &UsageDay| short_date(d))
-            .y(|d: &UsageDay| d.per_call())
-            .stroke(Hsla::from(rgb(colors::ACCENT())))
-            .tick_margin(tick)
-            .id("usage-trend-per-call")
-            .name("单次平均 token");
+        // canvas 的 paint 是 move 闭包：曲线点先归一化成 0..1 再交出去，
+        // 免得把整张表（可能上百天）搬进闭包。
+        let calls_pts: Vec<f32> = series
+            .iter()
+            .map(|d| (d.calls as f64 / max_calls) as f32)
+            .collect();
+        let per_pts: Vec<f32> = series
+            .iter()
+            .map(|d| (d.per_call() / max_per) as f32)
+            .collect();
 
-        let panel = |title: &'static str, stat: String, chart: AnyElement| {
-            div()
-                .flex_1()
-                .min_w_0()
+        let line_a = Hsla::from(rgb(colors::TEXT_PRIMARY()));
+        let line_b = Hsla::from(rgb(colors::ACCENT()));
+        let grid = Hsla::from(rgb(colors::BORDER()));
+        let plot = canvas(
+            |_, _, _| (),
+            move |bounds, _, window, _| {
+                let x0 = bounds.origin.x.as_f32() + 1.;
+                let y0 = bounds.origin.y.as_f32() + 1.;
+                let w = (bounds.size.width.as_f32() - 2.).max(1.);
+                let h = (bounds.size.height.as_f32() - 2.).max(1.);
+                // 横向网格：4 段（与左右刻度对齐，刻度文字由外层 flex 均分）
+                for i in 0..=4 {
+                    let y = y0 + h * i as f32 / 4.;
+                    let mut b = PathBuilder::stroke(px(1.));
+                    b.move_to(point(px(x0), px(y)));
+                    b.line_to(point(px(x0 + w), px(y)));
+                    if let Ok(p) = b.build() {
+                        window.paint_path(p, grid.opacity(0.55));
+                    }
+                }
+                for (pts, color) in [(&calls_pts, line_a), (&per_pts, line_b)] {
+                    let mut b = PathBuilder::stroke(px(1.6));
+                    for (i, v) in pts.iter().enumerate() {
+                        let x = x0 + w * (i as f32 / (n - 1) as f32);
+                        let y = y0 + h * (1. - *v);
+                        if i == 0 {
+                            b.move_to(point(px(x), px(y)));
+                        } else {
+                            b.line_to(point(px(x), px(y)));
+                        }
+                    }
+                    if let Ok(p) = b.build() {
+                        window.paint_path(p, color);
+                    }
+                }
+            },
+        )
+        // `Canvas::request_layout` 用的是**空样式**（`Style::default()`），自己不会
+        // 占满父容器 —— 不给尺寸时 bounds 退化成一个极小的区域，所有点被画到同一条
+        // 水平线上（实测第一版就是这样：两条曲线都变成贴着顶边的一条直线）。
+        .size_full();
+
+        // 刻度文字：左/右各三档，用 flex 均分高度，不依赖像素宽度
+        let tick_col = |w: f32, align_right: bool, items: [String; 3], color: u32| {
+            let mut col = div()
+                .w(px(w))
+                .h_full()
                 .flex()
                 .flex_col()
-                .gap_1()
-                .child(
-                    div()
-                        .flex()
-                        .flex_row()
-                        .items_center()
-                        .justify_between()
-                        .child(
-                            div()
-                                .text_size(px(11.))
-                                .text_color(rgb(colors::TEXT_SECONDARY()))
-                                .child(title),
-                        )
-                        .child(
-                            div()
-                                .text_size(px(10.))
-                                .text_color(rgb(colors::TEXT_TERTIARY()))
-                                .child(stat),
-                        ),
-                )
-                .child(div().h(px(140.)).w_full().child(chart))
+                .justify_between()
+                .text_size(px(9.))
+                .text_color(rgb(color));
+            col = if align_right {
+                col.items_end().pr_1()
+            } else {
+                col.items_start().pl_1()
+            };
+            col.children(items.into_iter().map(|t| div().child(t).into_any_element()))
         };
+        let first = short_date(&series[0]);
+        let mid = short_date(&series[n / 2]);
+        let last = short_date(&series[n - 1]);
 
         div()
             .rounded_lg()
@@ -452,24 +480,94 @@ impl ClientApp {
             .gap_2()
             .child(
                 div()
-                    .text_size(px(11.))
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_3()
+                    .text_size(px(10.))
                     .text_color(rgb(colors::TEXT_TERTIARY()))
-                    .child("每日趋势（悬停看当天明细）"),
+                    .child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .gap_1()
+                            .child(
+                                div()
+                                    .w(px(10.))
+                                    .h(px(2.))
+                                    .bg(rgb(colors::TEXT_PRIMARY()))
+                                    .rounded_full(),
+                            )
+                            .child("每日调用次数（左轴）"),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .gap_1()
+                            .child(
+                                div()
+                                    .w(px(10.))
+                                    .h(px(2.))
+                                    .bg(rgb(colors::ACCENT()))
+                                    .rounded_full(),
+                            )
+                            .child("单次平均 token（右轴）"),
+                    ),
             )
             .child(
                 div()
+                    .h(px(170.))
+                    .w_full()
                     .flex()
                     .flex_row()
-                    .gap_4()
-                    .child(panel(
-                        "每日调用次数",
-                        format!("峰值 {}", group_thousands(peak_calls)),
-                        calls.into_any_element(),
+                    .child(tick_col(
+                        44.,
+                        true,
+                        [
+                            group_thousands(max_calls as u64),
+                            group_thousands((max_calls / 2.) as u64),
+                            "0".to_string(),
+                        ],
+                        colors::TEXT_PRIMARY(),
                     ))
-                    .child(panel(
-                        "单次平均 token",
-                        format!("均值 {}", group_thousands(avg_per)),
-                        per_call.into_any_element(),
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .h_full()
+                            .flex()
+                            .flex_col()
+                            .child(div().flex_1().w_full().min_h_0().child(plot))
+                            .child(
+                                div()
+                                    .h(px(16.))
+                                    .w_full()
+                                    .flex()
+                                    .flex_row()
+                                    .items_center()
+                                    .justify_between()
+                                    // 首尾日期往里缩一点：两侧轴底部的「0」就在同一行，
+                                    // 不缩会挤成「0 11-12」「11-19 0」
+                                    .px_2()
+                                    .text_size(px(9.))
+                                    .text_color(rgb(colors::TEXT_TERTIARY()))
+                                    .child(first)
+                                    .child(mid)
+                                    .child(last),
+                            ),
+                    )
+                    .child(tick_col(
+                        52.,
+                        false,
+                        [
+                            group_thousands(max_per as u64),
+                            group_thousands((max_per / 2.) as u64),
+                            "0".to_string(),
+                        ],
+                        colors::ACCENT(),
                     )),
             )
             .into_any_element()
