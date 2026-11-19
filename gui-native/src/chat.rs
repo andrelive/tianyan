@@ -1155,7 +1155,10 @@ impl ClientApp {
             .gap_2()
             // 右组不参与压缩：窗口窄时宁可让左组少显示，也不能把「TTFT」挤成两行
             .flex_shrink_0();
-        let line = div()
+        // 水平内边距必须与输入卡片那一层对齐：`composer` 外层是 `px_4`，卡片在它
+        // 里面按 `max_w(896)` 居中；这一行原先直接挂在内容列上，少了一层 `px_4`，
+        // 屏幕一宽就比输入框每边多出 16px —— 看着像顶到了窗口两端（用户实测）。
+        let inner = div()
             .w_full()
             .max_w(px(colors::CHAT_MAX_W))
             .mx_auto()
@@ -1173,7 +1176,7 @@ impl ClientApp {
         let shown = self.usage_shown.or(self.session_usage);
         if shown.is_none() && self.request_perf.is_none() {
             // 空内容但**等高**：占位不留白条，也不让布局跳
-            return line.into_any_element();
+            return div().px_4().child(inner).into_any_element();
         }
         let dot = || div().text_color(rgb(colors::BORDER())).child("·");
         if let Some((uncached, cached, completion)) = shown {
@@ -1205,7 +1208,10 @@ impl ClientApp {
         }
         // 左组 `flex_1`：占满剩余宽度（内部仍从左排），右组因此被推到最右；
         // 左组为空时也一样（空 div 吃掉宽度），右边不会掉到左边来。
-        line.child(left.flex_1()).child(right).into_any_element()
+        div()
+            .px_4()
+            .child(inner.child(left.flex_1()).child(right))
+            .into_any_element()
     }
 
     /// 上下文详情浮层（点圆环弹出）：占用 / 缓存命中 / 输出 +「压缩会话」。
