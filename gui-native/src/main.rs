@@ -208,6 +208,8 @@ struct ClientApp {
     /// 洞察页：模型用量总计与分组（`GET /usage/stats?days=N`）
     pub(crate) usage_total: Option<UsageTotal>,
     pub(crate) usage_grouped: Vec<UsageGroup>,
+    /// 按天用量序列（设置页折线图）。**已补零**：连续日期，没调用的那天是 0。
+    pub(crate) usage_series: Vec<UsageDay>,
     pub(crate) usage_days: i64,
     /// 洞察页：调度器状态（`GET /scheduler/status`）
     pub(crate) scheduler_running: bool,

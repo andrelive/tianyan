@@ -181,6 +181,7 @@ impl ClientApp {
             insight_stats: None,
             usage_total: None,
             usage_grouped: Vec::new(),
+            usage_series: Vec::new(),
             usage_days: 7,
             scheduler_running: false,
             scheduler_executing: None,

@@ -11,6 +11,7 @@ use crate::theme::colors;
 use crate::types::*;
 use crate::widgets::stat_card;
 use crate::*;
+use gpui_kit::component::chart::LineChart;
 // 滚动扩展方法（.overflow_y_scrollbar()）
 use gpui_kit::component::scroll::ScrollableElement as _;
 
@@ -43,6 +44,10 @@ impl ClientApp {
                     Ok(body) => {
                         this.usage_total = UsageTotal::from_json(body.get("total"));
                         this.usage_grouped = UsageGroup::from_json_array(body.get("grouped"));
+                        // 折线图数据源：仓储只给"真有调用的日子"，这里补零成连续日期
+                        // （缺的那天是 0，而不是"这一天不存在"）。
+                        this.usage_series =
+                            UsageDay::fill_gaps(&UsageDay::from_json_array(body.get("series")));
                         this.usage_msg = String::new();
                     }
                     Err(e) => {
@@ -202,6 +207,9 @@ impl ClientApp {
                         "命中 / 总输入".to_string(),
                     ));
                 col = col.child(cards);
+
+                // ── 趋势（折线图）──
+                col = col.child(self.render_usage_chart());
 
                 // ── 分组表 ──
                 let group_title = if self.usage_group_by == "provider" {
@@ -363,4 +371,116 @@ impl ClientApp {
         }
         col.into_any_element()
     }
+
+    /// 用量趋势：调用次数 × 单次平均 token（两张并排的折线图）。
+    ///
+    /// **为什么不是「三条 token 曲线」**：这台机器上缓存命中是未命中的 20~60 倍，
+    /// 三条线挤在同一根轴上时，未命中与输出会被压成贴底的直线（原型阶段拿真实
+    /// 数据量过）。拆成「次数」和「单次均量」，回答的是另一个问题——用量涨，
+    /// 是喊得更频繁，还是每次请求更肥。
+    fn render_usage_chart(&self) -> AnyElement {
+        let series = &self.usage_series;
+        // 一个点连不成线；没数据时整块不占位（不给空图留个白框）
+        if series.len() < 2 {
+            return div().into_any_element();
+        }
+        // 一屏给 5 个日期标签就够：半幅宽的图（~340px）里 `MM-DD` 占 ~30px，
+        // 再密就互相压住了（第一版用完整 `YYYY-MM-DD`，7 天窗口下相邻两个标签
+        // 直接叠成一团）。
+        let tick = (series.len() / 5).max(1);
+        let peak_calls = series.iter().map(|d| d.calls).max().unwrap_or(0);
+        let sum_calls: u64 = series.iter().map(|d| d.calls).sum();
+        let sum_tokens: u64 = series.iter().map(|d| d.total()).sum();
+        let avg_per = if sum_calls > 0 {
+            (sum_tokens as f64 / sum_calls as f64).round() as u64
+        } else {
+            0
+        };
+
+        let calls = LineChart::new(series.clone())
+            .x(|d: &UsageDay| short_date(d))
+            .y(|d: &UsageDay| d.calls as f64)
+            .stroke(Hsla::from(rgb(colors::TEXT_PRIMARY())))
+            .tick_margin(tick)
+            .id("usage-trend-calls")
+            .name("调用次数");
+        let per_call = LineChart::new(series.clone())
+            .x(|d: &UsageDay| short_date(d))
+            .y(|d: &UsageDay| d.per_call())
+            .stroke(Hsla::from(rgb(colors::ACCENT())))
+            .tick_margin(tick)
+            .id("usage-trend-per-call")
+            .name("单次平均 token");
+
+        let panel = |title: &'static str, stat: String, chart: AnyElement| {
+            div()
+                .flex_1()
+                .min_w_0()
+                .flex()
+                .flex_col()
+                .gap_1()
+                .child(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .justify_between()
+                        .child(
+                            div()
+                                .text_size(px(11.))
+                                .text_color(rgb(colors::TEXT_SECONDARY()))
+                                .child(title),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(10.))
+                                .text_color(rgb(colors::TEXT_TERTIARY()))
+                                .child(stat),
+                        ),
+                )
+                .child(div().h(px(140.)).w_full().child(chart))
+        };
+
+        div()
+            .rounded_lg()
+            .border_1()
+            .border_color(rgb(colors::BORDER()))
+            .bg(rgb(colors::BG_SECONDARY()))
+            .p_3()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .child(
+                div()
+                    .text_size(px(11.))
+                    .text_color(rgb(colors::TEXT_TERTIARY()))
+                    .child("每日趋势（悬停看当天明细）"),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .gap_4()
+                    .child(panel(
+                        "每日调用次数",
+                        format!("峰值 {}", group_thousands(peak_calls)),
+                        calls.into_any_element(),
+                    ))
+                    .child(panel(
+                        "单次平均 token",
+                        format!("均值 {}", group_thousands(avg_per)),
+                        per_call.into_any_element(),
+                    )),
+            )
+            .into_any_element()
+    }
+}
+
+/// X 轴标签用的短日期（`MM-DD`）。
+///
+/// 折线图半幅宽（~340px），完整 `YYYY-MM-DD` 有 10 个字符、相邻标签会直接叠在
+/// 一起（实测 7 天窗口下就是这样）。悬停提示也沿用这个文本——同一天里看得出是
+/// 哪天，年份对"最近 N 天"这个视图没有信息量。
+fn short_date(d: &UsageDay) -> String {
+    d.date.get(5..).unwrap_or(d.date.as_str()).to_string()
 }

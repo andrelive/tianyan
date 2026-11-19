@@ -688,6 +688,185 @@ impl UsageTotal {
     }
 }
 
+/// 按天聚合的一行（`GET /usage/stats` 的 `series[]`）。
+///
+/// 仓储只返回**库里真有调用**的日子；折线图要在时间轴上连续，所以补零这件事
+/// 在 [`Self::filled`] 里做——把中间缺的那些天填成 0，否则曲线会把「那天没干活」
+/// 画成「从两天前直接连到今天」，看起来像一直在用。
+#[derive(Clone, Debug, Default)]
+pub(crate) struct UsageDay {
+    pub(crate) date: String,
+    pub(crate) calls: u64,
+    pub(crate) uncached_input: u64,
+    pub(crate) cached_input: u64,
+    pub(crate) completion_tokens: u64,
+    pub(crate) total_tokens: u64,
+}
+
+impl UsageDay {
+    /// 从 `/usage/stats` 的 `series[]` 解析（缺段 → 空表；日期为空的项丢弃）。
+    pub(crate) fn from_json_array(v: Option<&serde_json::Value>) -> Vec<Self> {
+        v.and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|d| {
+                        Some(Self {
+                            date: d.get("date")?.as_str()?.to_string(),
+                            calls: d.get("calls").and_then(|v| v.as_u64()).unwrap_or(0),
+                            uncached_input: d
+                                .get("uncached_input")
+                                .and_then(|v| v.as_u64())
+                                .unwrap_or(0),
+                            cached_input: d
+                                .get("cached_input")
+                                .and_then(|v| v.as_u64())
+                                .unwrap_or(0),
+                            completion_tokens: d
+                                .get("completion_tokens")
+                                .and_then(|v| v.as_u64())
+                                .unwrap_or(0),
+                            total_tokens: d
+                                .get("total_tokens")
+                                .and_then(|v| v.as_u64())
+                                .unwrap_or(0),
+                        })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// 总 token：**用服务端算好的那一列**，缺了才自己加。
+    ///
+    /// 服务端的 `total_tokens` 是记账时写下的原始值；自己把三项相加只在
+    /// 老数据（该列为 0）时兜底，避免两边口径在四舍五入之外又分叉一次。
+    pub(crate) fn total(&self) -> u64 {
+        if self.total_tokens > 0 {
+            self.total_tokens
+        } else {
+            self.uncached_input + self.cached_input + self.completion_tokens
+        }
+    }
+
+    /// 每次调用的平均 token（没调用则 0）。
+    pub(crate) fn per_call(&self) -> f64 {
+        if self.calls == 0 {
+            0.0
+        } else {
+            self.total() as f64 / self.calls as f64
+        }
+    }
+
+    /// 把稀疏的按天行补成**连续日期**序列（缺的天填全零）。
+    ///
+    /// 输入须按日期升序（仓储的 SQL 已 `ORDER BY d`）。不补零的后果不是"少几个点"
+    /// 那么轻：折线会从「三天前」直接连到「今天」，看起来像这三天一直在用。
+    pub(crate) fn fill_gaps(rows: &[UsageDay]) -> Vec<UsageDay> {
+        let (Some(first), Some(last)) = (rows.first(), rows.last()) else {
+            return Vec::new();
+        };
+        let mut out: Vec<UsageDay> = Vec::new();
+        let mut cursor = first.date.clone();
+        let mut ix = 0usize;
+        // 上限兜底：日期异常时不至于死循环（10 年足够）
+        while cursor.as_str() <= last.date.as_str() && out.len() < 3_600 {
+            if rows.get(ix).map(|r| r.date.as_str()) == Some(cursor.as_str()) {
+                out.push(rows[ix].clone());
+                ix += 1;
+            } else {
+                out.push(UsageDay {
+                    date: cursor.clone(),
+                    ..Default::default()
+                });
+            }
+            match next_day(&cursor) {
+                Some(next) => cursor = next,
+                None => break,
+            }
+        }
+        out
+    }
+}
+
+/// `YYYY-MM-DD` 的次日（解析失败 → `None`）。
+///
+/// 只为补零服务，不引日期库：客户端只需要"下一天"，闰年规则也就三行。
+fn next_day(date: &str) -> Option<String> {
+    let mut parts = date.split('-');
+    let y: i32 = parts.next()?.parse().ok()?;
+    let m: u32 = parts.next()?.parse().ok()?;
+    let d: u32 = parts.next()?.parse().ok()?;
+    if parts.next().is_some() || !(1..=12).contains(&m) || d == 0 {
+        return None;
+    }
+    let leap = (y % 4 == 0 && y % 100 != 0) || y % 400 == 0;
+    let dim = match m {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        _ => {
+            if leap {
+                29
+            } else {
+                28
+            }
+        }
+    };
+    if d > dim {
+        return None;
+    }
+    let (y2, m2, d2) = if d < dim {
+        (y, m, d + 1)
+    } else if m < 12 {
+        (y, m + 1, 1)
+    } else {
+        (y + 1, 1, 1)
+    };
+    Some(format!("{y2:04}-{m2:02}-{d2:02}"))
+}
+
+#[cfg(test)]
+mod usage_day_tests {
+    use super::*;
+
+    #[test]
+    fn next_day_handles_month_year_and_leap_boundaries() {
+        assert_eq!(next_day("2026-11-18").as_deref(), Some("2026-11-19"));
+        assert_eq!(next_day("2026-11-30").as_deref(), Some("2026-12-01"));
+        assert_eq!(next_day("2026-12-31").as_deref(), Some("2027-01-01"));
+        assert_eq!(next_day("2024-02-28").as_deref(), Some("2024-02-29"));
+        assert_eq!(next_day("2026-02-28").as_deref(), Some("2026-03-01"));
+        assert_eq!(next_day("bad"), None);
+        assert_eq!(next_day("2026-13-01"), None);
+    }
+
+    /// 缺的天必须补成 0：不补的话折线会从「三天前」直接连到「今天」，
+    /// 看起来像这三天一直在用。
+    #[test]
+    fn fill_gaps_marks_missing_days_as_zero() {
+        let rows = vec![
+            UsageDay {
+                date: "2026-11-01".into(),
+                calls: 3,
+                uncached_input: 10,
+                cached_input: 20,
+                completion_tokens: 1,
+                total_tokens: 31,
+            },
+            UsageDay {
+                date: "2026-11-04".into(),
+                calls: 1,
+                ..Default::default()
+            },
+        ];
+        let filled = UsageDay::fill_gaps(&rows);
+        assert_eq!(filled.len(), 4, "11-01 ~ 11-04 共四天");
+        assert_eq!(filled[1].date, "2026-11-02");
+        assert_eq!(filled[1].calls, 0);
+        assert_eq!(filled[1].total(), 0);
+        assert_eq!(filled[3].calls, 1);
+    }
+}
+
 /// 模型用量分组（`grouped[]`：按 model 或 provider）。#[derive(Clone, Debug)]
 pub(crate) struct UsageGroup {
     pub(crate) group: String,

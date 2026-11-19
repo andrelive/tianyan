@@ -14,7 +14,7 @@ use std::sync::Arc;
 
 use crate::common::error::TianyanError;
 use crate::common::types::TokenUsage;
-use crate::db::usage::{UsageRepo, UsageStat};
+use crate::db::usage::{UsageDay, UsageRepo, UsageStat};
 use crate::db::Database;
 
 /// LLM 用量日志（共享 SqliteDb 连接，与 VFS 同库）。
@@ -94,6 +94,23 @@ impl UsageLog {
     ) -> Vec<UsageStat> {
         self.repo
             .stats(since_ts, until_ts, provider, model, session_id, group_by)
+            .await
+    }
+
+    /// 按天序列（用量折线图的数据源）。
+    ///
+    /// 过滤条件与 [`Self::stats`] **同一份实现**（都走仓储的 `filters`），
+    /// 所以「总计」和「折线」永远不会因为条件不同而对不上。
+    pub async fn daily(
+        &self,
+        since_ts: Option<i64>,
+        until_ts: Option<i64>,
+        provider: Option<&str>,
+        model: Option<&str>,
+        session_id: Option<&str>,
+    ) -> Vec<UsageDay> {
+        self.repo
+            .daily(since_ts, until_ts, provider, model, session_id)
             .await
     }
 }

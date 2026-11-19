@@ -201,12 +201,26 @@ pub async fn get_usage_stats_handler(
             group_by,
         )
         .await;
+    // 按天序列（设置页用量折线图）。与两个聚合同一次请求带出：前端切时段/切分组
+    // 只花一个往返，不必再开一条"拉折线"的链路。
+    //
+    // 补零是前端的事：仓储只返回库里真有调用的日子，缺的那天不编行。
+    let series = log
+        .daily(
+            since_ts,
+            until_ts,
+            query.provider.as_deref(),
+            query.model.as_deref(),
+            query.session_id.as_deref(),
+        )
+        .await;
     Ok(Json(json!({
         "days": query.days,
         "start_ts": since_ts,
         "end_ts": until_ts,
         "total": total.first().map(|s| serde_json::to_value(s).unwrap_or_default()),
         "grouped": grouped,
+        "series": series,
     })))
 }
 

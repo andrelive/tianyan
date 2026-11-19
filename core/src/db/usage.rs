@@ -49,6 +49,27 @@ pub struct UsagePerfRow {
     pub ts: i64,
 }
 
+/// 按天聚合的一行（`GET /usage/stats` 的 `series[]`）。
+///
+/// 只读聚合，不是新表：`usage_logs` 本来就有 `ts` 与三个 token 列，
+/// 这里只是把它们按**本地日历日**分桶。日期取 `localtime` 口径 —— 用户看到的
+/// 「今天用了多少」是按自己时区算的，不是 UTC。
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct UsageDay {
+    /// `YYYY-MM-DD`（本地时区）。
+    pub date: String,
+    /// 当天 LLM 调用次数。
+    pub calls: u64,
+    /// 缓存未命中输入 token。
+    pub uncached_input: u64,
+    /// 缓存命中输入 token。
+    pub cached_input: u64,
+    /// 输出 token。
+    pub completion_tokens: u64,
+    /// 总 token。
+    pub total_tokens: u64,
+}
+
 impl UsageRepo {
     /// 创建用量仓储（共享 `Database` 单连接）。
     pub fn new(db: Arc<Database>) -> Self {
@@ -128,21 +149,18 @@ impl UsageRepo {
         }
     }
 
-    /// 聚合统计（since/until/provider/model/session_id 过滤；group_by：
-    /// provider|model|none）。`session_id` 供会话级全量统计（底部统计条——
-    /// 与消息分页窗口无关）。
-    pub async fn stats(
-        &self,
+    /// 过滤条件的**唯一构造点**：`stats`（聚合）与 [`Self::daily`]（按天序列）共用。
+    ///
+    /// 两个查询各写一遍 WHERE 是最容易出事的写法——以后加一个过滤维度（比如按
+    /// workspace），改了 A 忘了 B，两条链路的口径就悄悄分叉，而且两边都"看起来
+    /// 正常"。返回的 `where_clause` 自带前导 `" WHERE "`，无过滤时为空串。
+    fn filters(
         since_ts: Option<i64>,
         until_ts: Option<i64>,
         provider: Option<&str>,
         model: Option<&str>,
         session_id: Option<&str>,
-        group_by: &str,
-    ) -> Vec<UsageStat> {
-        // WHERE 子句**单点构造**：分组查询与总计查询共用同一份。
-        // （此前 `total_stat` 丢弃调用方传入的 SQL，改按 conds 个数/顺序硬编码
-        // 重建 WHERE——过滤条件一改就静默失配，是数据口径分裂的隐患。）
+    ) -> (String, Vec<Box<dyn rusqlite::types::ToSql + Send + Sync>>) {
         let mut conds: Vec<&str> = Vec::new();
         let mut params: Vec<Box<dyn rusqlite::types::ToSql + Send + Sync>> = Vec::new();
         if let Some(ts) = since_ts {
@@ -170,6 +188,76 @@ impl UsageRepo {
         } else {
             format!(" WHERE {}", conds.join(" AND "))
         };
+        (where_clause, params)
+    }
+
+    /// 按天序列（设置页用量折线图：`GET /usage/stats` 的 `series[]`）。
+    ///
+    /// 日期用 `localtime` 分桶——用户看的是自己时区的「今天」。
+    /// **没调用的日子不会出现在结果里**：补齐是前端的事（缺的那天就是 0，
+    /// 补零要在展示层做，仓储层只负责如实返回库里有的行）。
+    pub async fn daily(
+        &self,
+        since_ts: Option<i64>,
+        until_ts: Option<i64>,
+        provider: Option<&str>,
+        model: Option<&str>,
+        session_id: Option<&str>,
+    ) -> Vec<UsageDay> {
+        let (where_clause, params) = Self::filters(since_ts, until_ts, provider, model, session_id);
+        let sql = format!(
+            "SELECT date(ts,'unixepoch','localtime') AS d, COUNT(*), \
+             COALESCE(SUM(uncached_input),0), COALESCE(SUM(cached_input),0), \
+             COALESCE(SUM(completion_tokens),0), COALESCE(SUM(total_tokens),0) \
+             FROM usage_logs{where_clause} GROUP BY d ORDER BY d"
+        );
+        let conn = self.db.lock().await;
+        let mut stmt = match conn.prepare(&sql) {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::warn!(error = %e, "usage_log 按天序列 prepare 失败");
+                return Vec::new();
+            }
+        };
+        let params_ref: Vec<&dyn rusqlite::types::ToSql> = params
+            .iter()
+            .map(|b| b.as_ref() as &dyn rusqlite::types::ToSql)
+            .collect();
+        let rows = match stmt.query_map(params_ref.as_slice(), |row| {
+            Ok(UsageDay {
+                date: row.get(0)?,
+                calls: row.get::<_, i64>(1)? as u64,
+                uncached_input: row.get::<_, i64>(2)? as u64,
+                cached_input: row.get::<_, i64>(3)? as u64,
+                completion_tokens: row.get::<_, i64>(4)? as u64,
+                total_tokens: row.get::<_, i64>(5)? as u64,
+            })
+        }) {
+            Ok(iter) => iter.filter_map(|r| r.ok()).collect::<Vec<_>>(),
+            Err(e) => {
+                tracing::warn!(error = %e, "usage_log 按天序列查询失败");
+                return Vec::new();
+            }
+        };
+        rows
+    }
+
+    /// 聚合统计（since/until/provider/model/session_id 过滤；group_by：
+    /// provider|model|none）。`session_id` 供会话级全量统计（底部统计条——
+    /// 与消息分页窗口无关）。
+    pub async fn stats(
+        &self,
+        since_ts: Option<i64>,
+        until_ts: Option<i64>,
+        provider: Option<&str>,
+        model: Option<&str>,
+        session_id: Option<&str>,
+        group_by: &str,
+    ) -> Vec<UsageStat> {
+        // WHERE 子句**单点构造**：分组查询与总计查询共用同一份。
+        // （此前 `total_stat` 丢弃调用方传入的 SQL，改按 conds 个数/顺序硬编码
+        // 重建 WHERE——过滤条件一改就静默失配，是数据口径分裂的隐患。）
+        let (where_clause, params) = Self::filters(since_ts, until_ts, provider, model, session_id);
 
         let mut sql = format!(
             "SELECT provider, model, COUNT(*), SUM(uncached_input), SUM(cached_input), SUM(completion_tokens), SUM(total_tokens) FROM usage_logs{where_clause}"
@@ -298,6 +386,41 @@ mod tests {
         let db = Database::open_in_memory().unwrap();
         db.init_schemas().await.unwrap();
         UsageRepo::new(db)
+    }
+
+    /// 按天序列：同一天的多次调用聚成一行，求和与过滤都要对。
+    ///
+    /// 这张表只做聚合、不建新表——`usage_logs` 本来就有 `ts` 与三个 token 列，
+    /// 折线图要的是"按本地日切一刀"，不是另一份数据。
+    #[tokio::test]
+    async fn test_daily_aggregates_same_day_and_respects_filters() {
+        let repo = setup().await;
+        repo.record("s1", "deepseek", "v3", 100, 0, 10, 110, -1, -1)
+            .await;
+        repo.record("s1", "deepseek", "v3", 50, 50, 10, 110, -1, -1)
+            .await;
+        repo.record("s2", "ollama", "qwen", 7, 0, 3, 10, -1, -1)
+            .await;
+
+        let all = repo.daily(None, None, None, None, None).await;
+        assert_eq!(all.len(), 1, "同一天的记录应聚成一行");
+        let d = &all[0];
+        assert_eq!(d.calls, 3);
+        assert_eq!(d.uncached_input, 157);
+        assert_eq!(d.cached_input, 50);
+        assert_eq!(d.completion_tokens, 23);
+        assert_eq!(d.total_tokens, 230);
+        assert_eq!(d.date.len(), 10, "日期应为 YYYY-MM-DD");
+
+        // 过滤条件与 `stats` 共用同一份 `filters`：会话过滤后只剩 s1 的两条
+        let s1 = repo.daily(None, None, None, None, Some("s1")).await;
+        assert_eq!(s1.len(), 1);
+        assert_eq!(s1[0].calls, 2);
+        assert_eq!(s1[0].total_tokens, 220);
+
+        // 无匹配 → **空表**（不是一行零值）：折线图要能区分"没有数据"和"用了 0"
+        let none = repo.daily(Some(i64::MAX), None, None, None, None).await;
+        assert!(none.is_empty());
     }
 
     /// 回归测试：WHERE 子句**单点构造**——总计与分组查询共用同一过滤条件。

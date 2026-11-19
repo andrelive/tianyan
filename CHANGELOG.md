@@ -45,6 +45,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`scripts/gui-shot.ps1`**：内建截图入口（`/act {action:"screenshot"}` →
   `render_to_image`），支持 `-Tab` / `-EditPath` / `-WidthPx`，取渲染输出而非屏幕
   像素，不受 DPI 缩放与窗口遮挡影响。
+- **用量统计的「每日趋势」折线图**：调用次数 × 单次平均 token 两张并排小图，
+  悬停看当天明细。数据是 `usage_logs` 的按天聚合（`GET /usage/stats` 新增
+  `series[]`）——**不新建表、不加列**：`ts` 与三个 token 列本来就在，索引也在。
+  仓储里按天与按组的查询共用同一份 `WHERE` 构造，两条链路的口径不会分叉。
+  缺调用的日子由客户端补 0 再画：不补的话，折线会把「那天没干活」画成
+  「从两天前直接连到今天」。
 
 ### Fixed（验证脚本）
 
