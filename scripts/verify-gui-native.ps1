@@ -225,6 +225,10 @@ Check "清空输入同时清掉文件引用" (@($s.usage.composer_file_refs).Cou
 # 这条链路的三个环节各错过一次（后端 DTO 不下发 / 前端不解析 / 渲染落点不对），
 # 只看截图没法定位是哪一环断的，所以断言放在**数据面**（`/state.messages.recent.ts`）。
 Write-Host "`n[历史时间戳]" -ForegroundColor Cyan
+# 会话列表是异步拉的：刚切过来可能还没回来。先等它有内容，否则这条会偶发假红
+# （实测：同一份代码两次跑，一次 94 全绿、一次报「有会话可选」失败）。
+$null = Wait-Until { (@((Get-State).sessions_data)).Count -gt 0 } 15
+$s = Get-State
 $rows = @($s.sessions_data)
 if ($rows.Count -gt 0) {
     $r = Act @{ action = "select_session"; id = $rows[0].id } 1200
@@ -286,6 +290,11 @@ Check "只读态直接给出配置值" ($ro.value -eq "$origMaxTurns") "（实�
 Act @{ action = "settings_edit"; path = "agent.max_turns" } 300 | Out-Null
 $s = Get-State
 Check "点编辑后卡片进入编辑态" ($null -ne $s.settings_fields.edit_section) "（实际 $($s.settings_fields.edit_section)）"
+# `editor` 是编辑器的**原始内容**（不回落配置值）——它才是用户眼睛看到的东西。
+# 1.2.14 实机就是「进了编辑态、但输入框只有 placeholder『数字』」：种子写失败了，
+# 而当时这条链上没有任何断言看得见它。
+$seed = @($s.settings_fields.fields) | Where-Object { $_.path -eq "agent.max_turns" } | Select-Object -First 1
+Check "编辑态输入框里是配置值（不是空/placeholder）" ($seed.editor -eq "$origMaxTurns") "（editor=「$($seed.editor)」 / 期望 $origMaxTurns）"
 Act @{ action = "settings_text"; path = "agent.max_turns"; value = "$($origMaxTurns + 7)" } 250 | Out-Null
 $s = Get-State
 Check "改一项后脏计数 = 1" ($s.settings_fields.dirty_count -eq 1) "（实际 $($s.settings_fields.dirty_count)）"

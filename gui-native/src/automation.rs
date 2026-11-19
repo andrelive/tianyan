@@ -1695,7 +1695,8 @@ impl ClientApp {
                             format!("未知 section：{want}（可选 {all}）")
                         })?
                 };
-                self.start_settings_edit(section, cx);
+                // 自动化在窗口更新之外执行，拿不到 `&mut Window` → 走 `window_handle`
+                self.start_settings_edit(section, None, cx);
             }
             "settings_edit_cancel" => self.cancel_settings_edit(cx),
             // 向量索引改动的确认框（「仍然保存」）：与界面点按钮同一条路径

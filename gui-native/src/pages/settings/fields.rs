@@ -1195,8 +1195,9 @@ impl ClientApp {
                     .text_size(px(10.))
                     .text_color(rgb(colors::TEXT_SECONDARY()))
                     .child("编辑")
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.start_settings_edit(section, cx);
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        // 真实点击：手上就有 window，直接传下去写种子
+                        this.start_settings_edit(section, Some(window), cx);
                     })),
             );
         }
@@ -1302,12 +1303,22 @@ impl ClientApp {
     /// 灌种子只在**这一刻**发生，此时窗口早已画熟 —— 旧版在启动早期回填，
     /// `set_value` 会被随后的初始化盖掉，于是有了「标志位说填过、界面一片 placeholder」。
     /// 现在只读态压根不碰编辑器，这条路从根上没有了。
-    pub(crate) fn start_settings_edit(&mut self, section: &'static str, cx: &mut Context<Self>) {
+    ///
+    /// `window` 必须由**调用方**给：真实点击路径手上就有 `&mut Window`，直接用它写；
+    /// 若在这里对 `window_handle` 再 `update` 同一窗口，等于在窗口更新途中二次借用——
+    /// 实测症状是「点了编辑，输入框只剩 placeholder『数字』」（写值失败被静默吞掉）。
+    /// 自动化（`/act`）拿不到 window，传 `None`，那条路才走 `window_handle`。
+    pub(crate) fn start_settings_edit(
+        &mut self,
+        section: &'static str,
+        window: Option<&mut Window>,
+        cx: &mut Context<Self>,
+    ) {
         self.settings_dirty.clear();
         self.settings_msg.clear();
         self.settings_msg_err = false;
         self.settings_edit_section = Some(section);
-        let seeds: Vec<(Entity<TextareaState>, String)> = FIELDS
+        let mut seeds: Vec<(Entity<TextareaState>, String)> = FIELDS
             .iter()
             .filter(|d| d.section == section && d.kind.has_editor())
             .filter_map(|d| {
@@ -1316,12 +1327,30 @@ impl ClientApp {
                 Some((editor, text))
             })
             .collect();
-        let handle = self.window_handle;
-        let _ = handle.update(cx, move |_, window, cx| {
-            for (editor, text) in seeds {
-                editor.update(cx, |state, cx| state.set_value(text, window, cx));
+        match window {
+            Some(window) => {
+                for (editor, text) in seeds.drain(..) {
+                    editor.update(cx, |state, cx| state.set_value(text, window, cx));
+                }
             }
-        });
+            None => {
+                let handle = self.window_handle;
+                let failure = handle
+                    .update(cx, move |_, window, cx| {
+                        for (editor, text) in seeds {
+                            editor.update(cx, |state, cx| state.set_value(text, window, cx));
+                        }
+                    })
+                    .err()
+                    .map(|e| e.to_string());
+                if let Some(e) = failure {
+                    // 失败必须看得见：否则用户点开编辑只看到一排 placeholder，
+                    // 而界面没有任何提示（这正是 1.2.14 之前的样子）。
+                    self.settings_msg = format!("进入编辑失败：写不进输入框（{e}）");
+                    self.settings_msg_err = true;
+                }
+            }
+        }
         cx.notify();
     }
 
