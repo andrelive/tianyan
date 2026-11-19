@@ -21,20 +21,29 @@ impl ClientApp {
     ///
     /// **界面点击与自动化 `settings_tab` 共用这一条路径**：此前两处各写一份同样的
     /// match，新增一个「有自己的接口」的栏目时极易只改一处——自动化验收就会看到
-    /// 「界面有数据、脚本拿到空」。配置段与字段回填也在这里（回填判据见
-    /// `backfill_settings_fields` 的注释）。
+    /// 「界面有数据、脚本拿到空」。
     pub(crate) fn enter_settings_tab(&mut self, tab: SettingsTab, cx: &mut Context<Self>) {
+        // 切栏目 = 放弃正在编辑的那张卡片。
+        //
+        // 不弹模态拦一下：字段级编辑的粒度本来就小（改坏了重填两个数字），而
+        // 「看一眼别的栏目」是高频动作，每次都要确认一遍会很难受。但代价必须
+        // **看得见**——丢弃的条数写进状态行，而不是静默吞掉。
+        let lost = if self.settings_edit_section.is_some() {
+            self.settings_dirty_count(cx)
+        } else {
+            0
+        };
+        self.settings_edit_section = None;
+        self.settings_dirty.clear();
         self.settings_tab = tab;
-        // 配置段懒加载：没拉过就拉；拉过但还没回填进编辑器（例如 `load_models`
-        // 顺手设了 `raw_config`）就补一次回填——编辑器是空的话，保存会把所有
-        // 文本字段当成「被清空」。
-        if tab.config_key().is_some() {
-            if self.raw_config.is_none() {
-                self.load_config_summary(cx);
-            } else if !self.settings_backfilled || self.settings_backfill_lost(cx) {
-                // `settings_backfill_lost`：标志位说回填过、编辑器却空着 —— 重填。
-                self.backfill_settings_fields(cx);
-            }
+        if lost > 0 {
+            self.settings_msg = format!("已放弃 {lost} 项未保存的改动");
+            self.settings_msg_err = false;
+            self.settings_error = false;
+        }
+        // 配置段懒加载：只拉一次（字段引擎只读态直接读它渲染，不再有「回填进编辑器」）
+        if tab.config_key().is_some() && self.raw_config.is_none() {
+            self.load_config_summary(cx);
         }
         // 各栏目的数据源不同，同样懒加载。执行底层（Agent）是运行时事实：
         // 配置写 auto 时它才是「真正在跑的那个」，数据源是 `/config/executor`。
@@ -206,64 +215,16 @@ impl ClientApp {
                     .child(text),
             );
         }
-        if editable {
-            if dirty > 0 {
-                bar = bar.child(
-                    div()
-                        .px_2()
-                        .py_1()
-                        .rounded_md()
-                        .bg(rgba(0xffffff14))
-                        .text_size(px(10.))
-                        .text_color(rgb(colors::WARNING()))
-                        .child(format!("已修改 {dirty} 项")),
-                );
-            }
+        if editable && dirty > 0 {
             bar = bar.child(
                 div()
-                    .id("set-discard")
-                    .px_3()
+                    .px_2()
                     .py_1()
                     .rounded_md()
-                    .cursor_pointer()
-                    .bg(rgb(colors::BG_TERTIARY()))
-                    .text_size(px(11.))
-                    .text_color(rgb(if dirty > 0 {
-                        colors::TEXT_PRIMARY()
-                    } else {
-                        colors::TEXT_TERTIARY()
-                    }))
-                    .child("放弃")
-                    .on_click(cx.listener(|this, _, _window, cx| {
-                        this.discard_settings_changes(cx);
-                    })),
-            );
-            bar = bar.child(
-                div()
-                    .id("set-save")
-                    .px_3()
-                    .py_1()
-                    .rounded_md()
-                    .cursor_pointer()
-                    .bg(rgb(if dirty > 0 {
-                        colors::ACCENT()
-                    } else {
-                        colors::BG_TERTIARY()
-                    }))
-                    .text_size(px(11.))
-                    .text_color(rgb(if dirty > 0 {
-                        0xffffff
-                    } else {
-                        colors::TEXT_TERTIARY()
-                    }))
-                    .child(if dirty > 0 {
-                        format!("保存 {dirty} 项")
-                    } else {
-                        "保存".to_string()
-                    })
-                    .on_click(cx.listener(|this, _, _w, cx| {
-                        this.save_settings_fields(cx);
-                    })),
+                    .bg(rgba(0xffffff14))
+                    .text_size(px(10.))
+                    .text_color(rgb(colors::WARNING()))
+                    .child(format!("{dirty} 项改动未保存")),
             );
         }
         bar.into_any_element()
@@ -534,22 +495,11 @@ impl ClientApp {
                 let cfg = body.get("config").cloned();
                 if cfg.is_some() {
                     let _ = this.update(cx, |this, cx| {
-                        // 回填**只在从未回填过时**做一次：已有编辑器内容时再回填会覆盖
-                        // 用户正在输入的值。
-                        //
-                        // 判据不能是「`raw_config` 是不是 None」——`load_models` 也会
-                        // 顺手设 `raw_config`，那样这里就以为「不是首次」而跳过回填，
-                        // 编辑器一直是空的（界面全是 placeholder）。`settings_backfilled`
-                        // 才是「编辑器里已经有值」的权威标志。
-                        // 有未保存的编辑时不回填（否则会把用户正在输入的内容冲掉）；
-                        // 回填失败（窗口未就绪）时 `settings_backfilled` 保持 false，
-                        // 下次进设置页会重试 —— 但只在没改动过时重试。
-                        let first = (!this.settings_backfilled || this.settings_backfill_lost(cx))
-                            && this.settings_dirty.is_empty();
+                        // 只更新配置快照，**不再回填编辑器**：字段引擎的只读态直接读
+                        // `raw_config` 渲染，编辑器只在进入编辑时灌种子（见
+                        // `start_settings_edit`）。旧版这一步是「把 26 个编辑器一次填满」，
+                        // 窗口未就绪时会静默失败并被标志位固化——整页 placeholder 的根源。
                         this.raw_config = cfg;
-                        if first {
-                            this.backfill_settings_fields(cx);
-                        }
                         cx.notify();
                     });
                 }

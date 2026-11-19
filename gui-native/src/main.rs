@@ -579,9 +579,13 @@ struct ClientApp {
     pub(crate) settings_msg: String,
     /// 设置页字段引擎：上面那条是否为错误。
     pub(crate) settings_msg_err: bool,
-    /// 设置页字段引擎：配置是否已经回填进编辑器（编辑器初始为空，未回填时保存会
-    /// 把所有文本字段当成「被清空」——所以回填必须可靠触发，见 `backfill_settings_fields`）
-    pub(crate) settings_backfilled: bool,
+    /// 设置页字段引擎：当前处于编辑态的那张卡片（= `FieldDef::section`）。
+    ///
+    /// `None` = 整页只读。**只读态不读编辑器、直接渲染配置值**，所以根本没有
+    /// 「回填」这一步——编辑器只在进入编辑时按需灌种子（`start_settings_edit`）。
+    /// 这也是老版本「编辑器一片 placeholder、点保存报一串不能为空」的根治：
+    /// 那条链（建 26 个编辑器 → 回填 → 标志位 → 校验）在只读态整个不存在了。
+    pub(crate) settings_edit_section: Option<&'static str>,
     // ── 设置页「人设」 ──
     /// 人设正文编辑器（`PUT /config/soul` 的内容源）
     pub(crate) soul_editor: Entity<TextareaState>,
@@ -877,9 +881,9 @@ impl Render for ClientApp {
         if let Some(text) = self.pending_composer_text.take() {
             self.input.update(cx, |state, cx| state.set_value(text, cx));
         }
-        // 说明：设置页/人设的编辑器回填**不在这里做**——窗口隐藏时不会触发渲染，
-        // 而自动化验收正是隐藏窗口跑的。回填统一走 `window_handle.update` 现取窗口
-        // （见 `backfill_settings_fields` / `set_soul_text`）。
+        // 说明：需要「写进编辑器」的初始化**不在这里做**——窗口隐藏时不会触发渲染，
+        // 而自动化验收正是隐藏窗口跑的。这类写入统一走 `window_handle.update` 现取
+        // 窗口（见 `start_settings_edit` / `set_soul_text`）。
         let _ = window;
         // 整体骨架沿用原 Web 端 `AppLayout.tsx` 的排布：
         //   一级 rail(64px) + main(flex-1, bg-primary)
@@ -1107,7 +1111,26 @@ fn main() {
         // （它内部会重装 text view 默认样式）。漏了这一步，首屏 Markdown 的行内代码
         // 会回到组件库的 neutral 底色，切一次主题才变正常。
         crate::theme::sync_component_theme(theme.palette(), cx);
-        let bounds = Bounds::centered(None, size(px(1280.), px(820.)), cx);
+        // 默认窗口尺寸按**屏幕可用区**收缩，别写死。
+        //
+        // `Bounds::centered` 用屏幕尺寸算居中：尺寸大于屏幕时产出的是**负坐标**，
+        // 窗口左上角整个落到屏幕外，标题栏和右侧内容被屏幕边缘裁掉。实测用户机器
+        // （屏幕 1707×960 物理）上窗口矩形是 L=-7 T=-7、1721×927——看起来像「设置页
+        // 标题栏消失 / 整列内容显示不全」，很容易被误判成布局 bug。
+        // `visible_bounds` 已扣掉任务栏，再留 48 给标题栏与边框。
+        let want = size(px(1280.), px(820.));
+        let avail = cx
+            .primary_display()
+            .map(|d| d.visible_bounds().size)
+            .unwrap_or(want);
+        let bounds = Bounds::centered(
+            None,
+            size(
+                want.width.min(avail.width - px(48.)).max(px(720.)),
+                want.height.min(avail.height - px(48.)).max(px(480.)),
+            ),
+            cx,
+        );
         // 自动化端口（ADR-052）：服务在 tokio 线程、动作用 UI 线程执行，所以先把
         // `AsyncApp` 取出来带进窗口构建闭包——窗口建好才有状态可读。
         let async_cx = cx.to_async();

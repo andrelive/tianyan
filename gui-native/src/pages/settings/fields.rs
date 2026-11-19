@@ -868,119 +868,6 @@ impl ClientApp {
         map
     }
 
-    /// 把当前配置值回填到编辑器与 dirty 表（打开设置页 / 放弃修改时调用）。
-    ///
-    /// 不依赖 `render`：经窗口句柄现取 `&mut Window`。早期版本在 `Render::render`
-    /// 里消费一个「待回填」标志，结果**隐藏窗口不渲染**时回填永远不发生（自动化
-    /// 验收里 `TIANYAN_GUI_START_HIDDEN=1` 一跑就暴露：人设/字段全是空的）。
-    pub(crate) fn backfill_settings_fields(&mut self, cx: &mut Context<Self>) {
-        self.settings_dirty.clear();
-        let Some(cfg) = self.raw_config.clone() else {
-            return;
-        };
-        let editors: Vec<(Entity<TextareaState>, String)> = FIELDS
-            .iter()
-            .filter_map(|def| {
-                let editor = self.settings_editors.get(def.path)?.clone();
-                Some((editor, value_to_text(json_get(&cfg, def.path))))
-            })
-            .collect();
-        let handle = self.window_handle;
-        let applied = handle.update(cx, move |_, window, cx| {
-            for (editor, text) in editors {
-                editor.update(cx, |state, cx| state.set_value(text, window, cx));
-            }
-        });
-        // 只有**真的写进编辑器**才算回填过 —— `update` 返回 Ok 只是「调用成功」。
-        //
-        // 早先无论 `update` 成败都置位：窗口句柄还不接受更新时（启动早期、窗口尚未
-        // 显示），回填静默失败而标志已经 true —— 之后进设置页、点栏目都不再回填，
-        // 用户看到「数据目录」等文本框永远是 placeholder（实测复现：`backfilled=True`
-        // 但 `editor=''`）。标志位抢跑比不置位更糟：它把一次性失败固化成永久状态。
-        //
-        // 但只判 `is_ok()` 仍然不够：那是「调用成功」，不等于「值已落地」。窗口
-        // 尚未完成首帧时 `set_value` 会被随后的初始化盖掉，于是同样落进
-        // `backfilled=true` + `editor=''` 的固化状态；此后进设置页看到标志位就跳过
-        // 回填、连 `/config` 都不再拉（用户实例实测：启动即落到设置页，三个数字框
-        // 全是占位符「数字」，点保存报「不能为空」，服务端日志里再无 `/config` 请求）。
-        // 判据改为**回读校验**：真正写进去了才算数。
-        if applied.is_ok() && self.backfill_landed(cx) {
-            self.settings_backfilled = true;
-        }
-        cx.notify();
-    }
-
-    /// 回填是否**真的落进了编辑器**：至少一个「配置里有值」的字段，编辑器内容与之相等。
-    ///
-    /// 不用「全部相等」：`Text` 类字段空串配 `EmptyAs::Null` 是合法状态，而
-    /// 数组/多行的文本规范化也可能有细微差异。要求有值的字段全部对上，
-    /// 一个对不上就判失败——这已经足以区分「回填没跑」和「回填跑过了」。
-    fn backfill_landed(&self, cx: &App) -> bool {
-        let Some(cfg) = self.raw_config.as_ref() else {
-            return false;
-        };
-        let mut checked = 0usize;
-        for def in FIELDS {
-            if !def.kind.has_editor() {
-                continue;
-            }
-            let Some(v) = json_get(cfg, def.path) else {
-                continue;
-            };
-            let want = value_to_text(Some(v));
-            if want.trim().is_empty() {
-                continue;
-            }
-            let Some(got) = self.field_editor_text(def.path, cx) else {
-                continue;
-            };
-            if got.trim() != want.trim() {
-                return false;
-            }
-            checked += 1;
-        }
-        checked > 0
-    }
-
-    /// 标志位说「回填过」，编辑器里却什么都没有 —— 回填丢了，需要重填。
-    ///
-    /// 这条是**自愈**：标志位一旦被错误置位就不会再回填（进设置页看到
-    /// `backfilled=true` 直接跳过），用户只能重启客户端；而重启若又在窗口未就绪时
-    /// 回填，还会再丢一次。以**实际状态**为准，才治得了这种固化。
-    pub(crate) fn settings_backfill_lost(&self, cx: &App) -> bool {
-        self.raw_config.is_some() && self.settings_backfilled && !self.backfill_landed(cx)
-    }
-
-    /// 所有「配置里有值」的字段，编辑器都空着。
-    ///
-    /// 用户不可能同时把所有输入框清空，所以这是回填没落地的特征。保存前据此
-    /// 按「未回填」回落配置值（不报「不能为空」、也不把空串写进配置）——否则一次
-    /// 保存会被一堆伪错误整体中止，用户看到的就是「设置改不动」。
-    fn settings_editors_all_empty(&self, cx: &App) -> bool {
-        let Some(cfg) = self.raw_config.as_ref() else {
-            return false;
-        };
-        let mut any = false;
-        for def in FIELDS {
-            if !def.kind.has_editor() {
-                continue;
-            }
-            let Some(v) = json_get(cfg, def.path) else {
-                continue;
-            };
-            if value_to_text(Some(v)).trim().is_empty() {
-                continue;
-            }
-            any = true;
-            if let Some(t) = self.field_editor_text(def.path, cx) {
-                if !t.trim().is_empty() {
-                    return false;
-                }
-            }
-        }
-        any
-    }
-
     /// 配置里该字段的当前值（`None` = 配置未加载或缺键）。
     fn field_config_value(&self, path: &str) -> Option<serde_json::Value> {
         self.raw_config
@@ -994,15 +881,15 @@ impl ClientApp {
     /// 返回 `Result` 是因为数字/多行文本需要解析——解析失败要把**哪一项**不合法
     /// 报给用户（比笼统的「保存失败」有用）。
     fn field_edit_value(&self, def: &FieldDef, cx: &App) -> Result<serde_json::Value, String> {
-        // 从未回填过（没打开过设置页）：编辑器里是建实体时的占位空串，**不是**用户
-        // 输入。此时一律回落配置值，否则每个数字/文本字段都报「不能为空」：
-        // ① 顶部误报「已修改 27 项」；② 点保存时 `save_settings_fields` 收集到一堆
-        // 伪错误，整体中止（用户看到的是「保存失败：数据目录不能为空；…」，实际
-        // 一个字段都没改）。这条与「编辑器缺失回落」是同一条防线的两道口子。
-        // 「全部编辑器都空着」与「从未回填」是一回事：都不是用户输入，而是回填
-        // 没落地（标志位可能早已被错误置位）。不这样判，保存会收集一堆
-        // 「不能为空」伪错误并把整次保存中止——用户看到的就是「设置改不动」。
-        if !self.settings_backfilled || self.settings_editors_all_empty(cx) {
+        // 只有**当前编辑卡片**里的字段才读编辑器，其余一律回落配置值（= 不脏）。
+        //
+        // 这条同时承担三件事：
+        // ① 保存天然只提交这一张卡片的改动（其余 section 的编辑器内容根本不参与）；
+        // ② 编辑器只在进入编辑时灌过种子，不存在「空编辑器被当成用户清空」——
+        //    旧版每个数字/文本字段都报「不能为空」、把整次保存中止，用户看到的
+        //    就是「设置改不动」；
+        // ③ 只读态压根不渲染编辑器，所以「回填失败」这一整类事故不会再发生。
+        if self.settings_edit_section != Some(def.section) {
             return Ok(self.field_config_fallback(def.path));
         }
         match &def.kind {
@@ -1122,7 +1009,14 @@ impl ClientApp {
             .count()
     }
 
-    /// 渲染一个栏目的全部字段（按 `section` 分组为卡片）。
+    /// 渲染一个栏目的全部字段：**默认只读**，点卡片右上角「编辑」才进可编辑态。
+    ///
+    /// 为什么不是「整页一进来就是表单」：那既没有「我进来干什么」的起点，也没有
+    /// 「改完了」的终点——切走时屏幕和进来时一样，谁都会觉得这里还没弄完；而且
+    /// 满屏输入框意味着任何一次误触都可能改到配置。
+    ///
+    /// 只读态**不渲染编辑器**（`render_field_readonly` 直接读 `raw_config`），
+    /// 所以不存在「回填」这一环，也就没有「标志位说填过、界面一片 placeholder」的故障面。
     pub(crate) fn render_settings_fields(
         &self,
         tab: SettingsTab,
@@ -1142,45 +1036,302 @@ impl ClientApp {
             .flex_col()
             .flex_1()
             .min_h_0()
+            // 横向也要能收缩：`flex` 默认的 `min-width: auto` 会让长 hint 把整列
+            // 撑到视口外，编辑态的输入框就被推到右边看不见。
+            .min_w_0()
             .gap_4()
             .p_4()
             .overflow_y_scrollbar()
             .child(
                 div()
+                    // 宽屏下不让内容拉到屏幕边缘：设置页是「顺着读」的版面，太宽难扫行。
+                    .max_w(px(1180.))
                     .text_xs()
+                    // 长句必须允许换行，否则会撑开整列。
+                    .whitespace_normal()
                     .text_color(rgb(colors::TEXT_TERTIARY()))
                     .child(
-                        "改完点右上角「保存」——只提交真正改动过的字段（整份 PUT 前会先 \
-                         重读一次配置，避免冲掉别处刚改的东西）。带「需重启」的项在重启客户端后生效。",
+                        "下面就是当前生效的值。要改哪一块，点那张卡片右上角的「编辑」；\
+                         改完点同位置的「保存」，只提交这一块改动过的字段。",
                     ),
             );
         // 「命令执行」栏目的页首事实卡片：只读，数据来自 `/config/executor`
         // （服务进程里**已安装**的 spec）——不是配置值，所以不进字段表。
         if tab == SettingsTab::Agent {
-            col = col.child(self.render_executor_shell_card(cx));
+            col = col.child(
+                div()
+                    .max_w(px(1180.))
+                    .child(self.render_executor_shell_card(cx)),
+            );
         }
         for (section, items) in groups {
+            let editing = self.settings_edit_section == Some(section);
             let mut card = div()
+                // 宽屏限宽：太宽反而难扫行；同时不至于把右上角的按钮推出视野。
+                .max_w(px(1180.))
+                // 明确撑满父容器：不加它，卡片宽度按内容宽度算，标题行的弹簧会把
+                // 右侧按钮一路推出去。
+                .w_full()
                 .rounded_lg()
                 .border_1()
-                .border_color(rgb(colors::BORDER()))
+                .border_color(rgb(if editing {
+                    colors::ACCENT()
+                } else {
+                    colors::BORDER()
+                }))
                 .bg(rgb(colors::BG_SECONDARY()))
                 .p_3()
                 .flex()
                 .flex_col()
-                .child(
-                    div()
-                        .pb_2()
-                        .text_size(px(12.))
-                        .text_color(rgb(colors::TEXT_PRIMARY()))
-                        .child(section),
-                );
-            for def in items {
-                card = card.child(self.render_field_row(def, cx));
+                .child(self.render_section_head(section, &items, editing, cx));
+            for def in &items {
+                card = card.child(if editing {
+                    self.render_field_row(def, cx)
+                } else {
+                    self.render_field_readonly(def)
+                });
             }
             col = col.child(card);
         }
         col.into_any_element()
+    }
+
+    /// 卡片头：标题 + 「编辑中」徽标 + 右侧「编辑」/「取消 · 保存 N 项」。
+    ///
+    /// 那组按钮同时承担**状态**（有没有改动）与**出口**（保存/取消），所以放在一起；
+    /// 只留这一处，卡片底部不再重复一组。
+    fn render_section_head(
+        &self,
+        section: &'static str,
+        items: &[&FieldDef],
+        editing: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let dirty = self.section_dirty_count(items, cx);
+        let mut head = div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_2()
+            .pb_2()
+            // 撑满卡片宽度：否则标题行的弹簧会把右侧按钮推到视口外
+            .w_full()
+            .child(
+                div()
+                    .text_size(px(12.))
+                    .text_color(rgb(colors::TEXT_PRIMARY()))
+                    .child(section),
+            );
+        if editing {
+            head = head.child(
+                div()
+                    .px_2()
+                    .rounded_full()
+                    .bg(rgb(colors::WARNING()))
+                    .text_size(px(9.))
+                    .text_color(rgb(0xffffff))
+                    .child("编辑中"),
+            );
+        }
+        head = head.child(div().flex_1());
+        if editing {
+            head = head.child(
+                div()
+                    // 元素 id 只支持 (&'static str, usize) 这种复合键；同一张卡片的
+                    // 三个按钮用末位数字区分（卡内唯一即可）。
+                    .id((section, 1usize))
+                    .px_2()
+                    .py_1()
+                    .rounded_full()
+                    .border_1()
+                    .border_color(rgb(colors::BORDER()))
+                    .bg(rgb(colors::BG_PRIMARY()))
+                    .cursor_pointer()
+                    .text_size(px(10.))
+                    .text_color(rgb(colors::TEXT_SECONDARY()))
+                    .child("取消")
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.cancel_settings_edit(cx);
+                    })),
+            );
+            let (bg, fg, clickable) = if dirty > 0 {
+                (colors::ACCENT(), 0xffffffu32, true)
+            } else {
+                (colors::BG_TERTIARY(), colors::TEXT_TERTIARY(), false)
+            };
+            let label = if dirty > 0 {
+                format!("保存 {dirty} 项")
+            } else {
+                "保存".to_string()
+            };
+            let mut save = div()
+                .id((section, 2usize))
+                .px_2()
+                .py_1()
+                .rounded_full()
+                .bg(rgb(bg))
+                .text_size(px(10.))
+                .text_color(rgb(fg))
+                .child(label);
+            if clickable {
+                save = save
+                    .cursor_pointer()
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.save_settings_fields(cx);
+                    }));
+            }
+            head = head.child(save);
+        } else {
+            head = head.child(
+                div()
+                    .id((section, 3usize))
+                    .px_2()
+                    .py_1()
+                    .rounded_full()
+                    .border_1()
+                    .border_color(rgb(colors::BORDER()))
+                    .bg(rgb(colors::BG_PRIMARY()))
+                    .cursor_pointer()
+                    .text_size(px(10.))
+                    .text_color(rgb(colors::TEXT_SECONDARY()))
+                    .child("编辑")
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.start_settings_edit(section, cx);
+                    })),
+            );
+        }
+        head.into_any_element()
+    }
+
+    /// 只读行：左标签（含「需重启」徽标）+ 右侧当前值。
+    ///
+    /// 值直接来自 `raw_config`；空值写「未设置」而不是留白——留白看起来像坏了。
+    /// hint 不在这里出现（那只属于编辑态），页面因此安静一半。
+    fn render_field_readonly(&self, def: &FieldDef) -> AnyElement {
+        let text = self.readonly_text(def);
+        let empty = text.trim().is_empty();
+        let mut label = div().flex().flex_row().items_center().gap_2().child(
+            div()
+                .text_size(px(12.))
+                .text_color(rgb(colors::TEXT_SECONDARY()))
+                .child(def.label),
+        );
+        if def.restart {
+            label = label.child(
+                div()
+                    .px_1()
+                    .rounded_sm()
+                    .bg(rgba(0xffffff14))
+                    .text_size(px(9.))
+                    .text_color(rgb(colors::WARNING()))
+                    .child("需重启"),
+            );
+        }
+        let value = div()
+            .text_size(px(12.))
+            .text_color(rgb(if empty {
+                colors::TEXT_TERTIARY()
+            } else {
+                colors::TEXT_PRIMARY()
+            }))
+            .child(if empty { "未设置".to_string() } else { text });
+        div()
+            .py_2()
+            .border_t_1()
+            .border_color(rgb(colors::BORDER()))
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_3()
+            .child(div().w(px(240.)).flex_shrink_0().child(label))
+            .child(div().flex_1().min_w_0().child(value))
+            .into_any_element()
+    }
+
+    /// 只读态展示的文本：枚举取中文名、布尔说「已开启/已关闭」、数字带单位。
+    fn readonly_text(&self, def: &FieldDef) -> String {
+        let Some(v) = self.field_config_value(def.path) else {
+            return String::new();
+        };
+        match &def.kind {
+            FieldKind::Bool => {
+                if v.as_bool().unwrap_or(false) {
+                    "已开启".to_string()
+                } else {
+                    "已关闭".to_string()
+                }
+            }
+            FieldKind::Enum(options) => {
+                let raw = v.as_str().unwrap_or_default();
+                options
+                    .iter()
+                    .find(|(val, _)| *val == raw)
+                    .map(|(_, label)| (*label).to_string())
+                    .unwrap_or_else(|| raw.to_string())
+            }
+            FieldKind::Int { unit, .. } | FieldKind::Float { unit, .. } => {
+                let n = value_to_text(Some(&v));
+                if unit.is_empty() {
+                    n
+                } else {
+                    format!("{n} {unit}")
+                }
+            }
+            _ => value_to_text(Some(&v)),
+        }
+    }
+
+    /// 一张卡片里「真的改过」的字段数（决定保存按钮是否可点）。
+    fn section_dirty_count(&self, items: &[&FieldDef], cx: &App) -> usize {
+        items
+            .iter()
+            .filter(|def| {
+                let Ok(next) = self.field_edit_value(def, cx) else {
+                    return true;
+                };
+                let cur = self
+                    .field_config_value(def.path)
+                    .unwrap_or(serde_json::Value::Null);
+                next != cur
+            })
+            .count()
+    }
+
+    /// 进入某张卡片的编辑态：清 dirty、把配置值灌进这张卡片的编辑器。
+    ///
+    /// 灌种子只在**这一刻**发生，此时窗口早已画熟 —— 旧版在启动早期回填，
+    /// `set_value` 会被随后的初始化盖掉，于是有了「标志位说填过、界面一片 placeholder」。
+    /// 现在只读态压根不碰编辑器，这条路从根上没有了。
+    pub(crate) fn start_settings_edit(&mut self, section: &'static str, cx: &mut Context<Self>) {
+        self.settings_dirty.clear();
+        self.settings_msg.clear();
+        self.settings_msg_err = false;
+        self.settings_edit_section = Some(section);
+        let seeds: Vec<(Entity<TextareaState>, String)> = FIELDS
+            .iter()
+            .filter(|d| d.section == section && d.kind.has_editor())
+            .filter_map(|d| {
+                let editor = self.settings_editors.get(d.path)?.clone();
+                let text = value_to_text(self.field_config_value(d.path).as_ref());
+                Some((editor, text))
+            })
+            .collect();
+        let handle = self.window_handle;
+        let _ = handle.update(cx, move |_, window, cx| {
+            for (editor, text) in seeds {
+                editor.update(cx, |state, cx| state.set_value(text, window, cx));
+            }
+        });
+        cx.notify();
+    }
+
+    /// 放弃这张卡片的改动，回到只读。
+    pub(crate) fn cancel_settings_edit(&mut self, cx: &mut Context<Self>) {
+        self.settings_dirty.clear();
+        self.settings_msg.clear();
+        self.settings_msg_err = false;
+        self.settings_edit_section = None;
+        cx.notify();
     }
 
     /// 一行字段：左标签 + 说明，右控件（多行文本整行铺开）。
@@ -1214,6 +1365,8 @@ impl ClientApp {
         let hint = div()
             .text_size(px(10.))
             .text_color(rgb(colors::TEXT_TERTIARY()))
+            // 显式换行：hint 是长句，撑成一行会把控件区挤出去
+            .whitespace_normal()
             .child(def.hint);
 
         // 控件
@@ -1300,7 +1453,13 @@ impl ClientApp {
                 let editor = self.settings_editors.get(path).cloned();
                 let mut row = div().flex().flex_row().items_center().gap_2().w_full();
                 if let Some(editor) = editor {
-                    row = row.child(editor_box(&editor, def.kind.height()));
+                    // 数字框里就几位数：铺满整行既难看也难判断在填哪个字段，
+                    // 固定 120 宽（文本/路径类才需要宽）。
+                    row = row.child(
+                        div()
+                            .w(px(120.))
+                            .child(editor_box(&editor, def.kind.height())),
+                    );
                 }
                 if !unit.is_empty() {
                     row = row.child(
@@ -1405,7 +1564,11 @@ impl ClientApp {
                 .items_start()
                 .child(
                     div()
-                        .flex_1()
+                        // 标签列定宽 + 控件吃剩余：早先是「标签 flex_1 + 控件固定 240」，
+                        // 窗口一窄，标签列就把控件区顶到视口外（实测：编辑态整列输入框
+                        // 看不见，只剩左边的标签和 hint）。
+                        .w(px(240.))
+                        .flex_shrink_0()
                         .min_w_0()
                         .flex()
                         .flex_col()
@@ -1413,7 +1576,14 @@ impl ClientApp {
                         .child(label_row)
                         .child(hint),
                 )
-                .child(div().w(px(240.)).flex_shrink_0().child(control));
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        // 宽屏下输入框不必拉满整行，跟只读态的值列宽度对齐
+                        .max_w(px(440.))
+                        .child(control),
+                );
         }
         row.into_any_element()
     }
@@ -1545,6 +1715,8 @@ impl ClientApp {
                     let fresh = fetch_json(format!("{base}/config")).await.ok();
                     let _ = this.update(cx, |this, cx| {
                         this.settings_dirty.clear();
+                        // 保存成功 = 这张卡片的编辑结束，回到只读态（值就是刚写进去的）
+                        this.settings_edit_section = None;
                         if let Some(body) = fresh {
                             if let Some(cfg) = body.get("config").cloned() {
                                 this.raw_config = Some(cfg);
@@ -1579,9 +1751,13 @@ impl ClientApp {
         .detach();
     }
 
-    /// 放弃修改：清 dirty + 把编辑器回填成配置值。
+    /// 放弃修改：丢掉改动、回到只读态。
+    ///
+    /// 不再需要「把编辑器重填成配置值」——只读态本来就不渲染编辑器，卡片一退出
+    /// 编辑，屏幕上显示的就是配置值本身。
     pub(crate) fn discard_settings_changes(&mut self, cx: &mut Context<Self>) {
-        self.backfill_settings_fields(cx);
+        self.settings_edit_section = None;
+        self.settings_dirty.clear();
         self.settings_msg = "已放弃未保存的改动".to_string();
         self.settings_msg_err = false;
         self.settings_error = false;
@@ -1628,6 +1804,12 @@ impl ClientApp {
         if !matches!(def.kind, FieldKind::Bool | FieldKind::Enum(_)) {
             return Err(format!("{path} 是文本/数字字段，请用 set_settings_text"));
         }
+        if self.settings_edit_section != Some(def.section) {
+            return Err(format!(
+                "{path} 所在卡片「{}」未进入编辑态（先 settings_edit）",
+                def.section
+            ));
+        }
         self.settings_dirty.insert(def.path, value);
         cx.notify();
         Ok(())
@@ -1640,6 +1822,18 @@ impl ClientApp {
         text: String,
         cx: &mut Context<Self>,
     ) -> Result<(), String> {
+        let Some(def) = FIELDS.iter().find(|d| d.path == path) else {
+            return Err(format!("未知字段：{path}"));
+        };
+        // 只读态没有「正在编辑的卡片」：编辑器实体虽然存在，但它的内容不参与渲染
+        // 也不参与保存（`field_edit_value` 按 section 回落配置值）——此时写进去
+        // 等于改了个看不见的东西。拒绝比静默吞掉好。
+        if self.settings_edit_section != Some(def.section) {
+            return Err(format!(
+                "{path} 所在卡片「{}」未进入编辑态（先 settings_edit）",
+                def.section
+            ));
+        }
         let Some(editor) = self.settings_editors.get(path).cloned() else {
             return Err(format!("{path} 没有编辑器（Bool/Enum/只读字段不支持）"));
         };

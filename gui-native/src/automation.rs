@@ -704,9 +704,11 @@ impl ClientApp {
                 "msg": &self.settings_msg,
                 "msg_err": self.settings_msg_err,
                 "field_count": FIELDS.len(),
-                // 回填是否真的发生过。`value` 在未回填时会回落成配置值（保存不会错），
-                // 但界面渲染的是**编辑器**：不回填 = 用户看到一片 placeholder。
-                "backfilled": self.settings_backfilled,
+                // 当前处于编辑态的卡片（`None` = 整页只读）。
+                //
+                // 只读态**没有**「回填」这道工序：值直接由 `raw_config` 渲染。
+                // 断言要看的因此是「这张卡片进没进编辑」，而不是「编辑器填没填」。
+                "edit_section": self.settings_edit_section,
                 // 「+ 新建会话」选中的待绑定目录。它在**发首条消息时**被 take 掉并随
                 // 请求下发（`send_text` → `body["working_directory"]`），服务端建会话时
                 // 固化。这里暴露出来，是为了断言「picker 确认后确实写进去了」——
@@ -1665,6 +1667,37 @@ impl ClientApp {
                 self.remove_provider(name, cx);
             }
             "settings_save" => self.save_settings_fields(cx),
+            // 进入 / 退出某张卡片的编辑态。与界面点「编辑」「取消」同一条路径——
+            // 只读态不渲染编辑器，脚本不先进编辑就没法写字段（这是新交互的硬前置）。
+            "settings_edit" => {
+                // 两种给法：`path` 给字段路径（反查所属卡片，脚本用这个）或
+                // `section` 直接给卡片标题。前者更稳——标题是给人看的文案，会改名。
+                let section = if let Some(path) = cmd.get("path").and_then(|v| v.as_str()) {
+                    FIELDS
+                        .iter()
+                        .find(|d| d.path == path)
+                        .map(|d| d.section)
+                        .ok_or_else(|| format!("未知字段：{path}"))?
+                } else {
+                    let want = arg_str(cmd, "section")?;
+                    FIELDS
+                        .iter()
+                        .map(|d| d.section)
+                        .find(|s| *s == want)
+                        .ok_or_else(|| {
+                            let all = FIELDS
+                                .iter()
+                                .map(|d| d.section)
+                                .collect::<std::collections::BTreeSet<_>>()
+                                .into_iter()
+                                .collect::<Vec<_>>()
+                                .join(" / ");
+                            format!("未知 section：{want}（可选 {all}）")
+                        })?
+                };
+                self.start_settings_edit(section, cx);
+            }
+            "settings_edit_cancel" => self.cancel_settings_edit(cx),
             // 向量索引改动的确认框（「仍然保存」）：与界面点按钮同一条路径
             "settings_save_confirm" => self.confirm_vector_index_change(cx),
             "settings_discard" => {

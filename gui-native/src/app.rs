@@ -304,7 +304,7 @@ impl ClientApp {
             settings_dirty: std::collections::HashMap::new(),
             settings_msg: String::new(),
             settings_msg_err: false,
-            settings_backfilled: false,
+            settings_edit_section: None,
             soul_editor: cx
                 .new(|cx| TextareaState::new(window, cx).placeholder("智能体核心人设（Markdown）")),
             soul_default: String::new(),
@@ -565,24 +565,12 @@ impl ClientApp {
             View::Chat => {}
             View::Settings => {
                 self.load_models(cx);
-                // 配置段 + 字段编辑器回填：**进设置页**就要保证编辑器里有真实值。
-                //
-                // 早先只有点二级栏目才懒加载/回填（见 `settings_panel` 的 tab on_click），
-                // 于是从托盘 / 全局快捷键直接落到「上次停留的栏目」、或首屏就是「存储」时
-                // 不会触发那段逻辑 —— 用户看到「数据目录」是 `%LOCALAPPDATA%\tianyan`
-                // 这样的 placeholder，而实际配置是 `D:\tianyan`（实测复现：
-                // `/state` 里 `config_loaded=true` 但 `backfilled=false`、`editor=''`）。
+                // 配置段：进设置页拉一次就够。字段引擎的只读态直接读它渲染，
+                // 没有「回填进编辑器」这一步（编辑器只在进入编辑时灌种子，
+                // 见 `start_settings_edit`）——旧版这条链上「窗口未就绪 → 回填失败 →
+                // 标志位固化 → 整页 placeholder」的故障面已整个消失。
                 if self.raw_config.is_none() {
                     self.load_config_summary(cx);
-                } else if (!self.settings_backfilled || self.settings_backfill_lost(cx))
-                    && self.settings_dirty.is_empty()
-                {
-                    // 只在「没有未保存改动」时回填：回填会重设编辑器并清空 dirty，
-                    // 有改动时再调等于把用户刚输入的内容冲掉。
-                    //
-                    // `settings_backfill_lost` 是自愈口子：标志位说回填过、编辑器
-                    // 却是空的（窗口未就帧时回填被盖掉），否则这里会永远跳过。
-                    self.backfill_settings_fields(cx);
                 }
             }
             View::Tools => self.load_tools(cx),

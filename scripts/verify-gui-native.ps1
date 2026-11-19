@@ -69,12 +69,18 @@ function Act {
     $tmp = Join-Path $env:TEMP ("gui-native-act-" + [guid]::NewGuid().ToString("N") + ".json")
     [System.IO.File]::WriteAllText($tmp, $json, (New-Object System.Text.UTF8Encoding($false)))
     try {
-        return Invoke-RestMethod -Method Post -Uri "$base/act" -ContentType "application/json; charset=utf-8" -InFile $tmp -TimeoutSec 60
+        $resp = Invoke-RestMethod -Method Post -Uri "$base/act" -ContentType "application/json; charset=utf-8" -InFile $tmp -TimeoutSec 60
     } catch {
         throw "act 失败（$($Payload.action)）：$_"
     } finally {
         Remove-Item -LiteralPath $tmp -ErrorAction SilentlyContinue
     }
+    # ⚠️ 动作失败是 **HTTP 200 + {ok:false, error}**（服务端约定：失败也带动作后的
+    # 界面状态，好让调用方看得见失败现场）。若只 `| Out-Null` 掉响应，失败会被彻底
+    # 吞掉——实测踩过：`switch_tab` 的参数名写成 `tab`（服务端读 `view`），93 项断言
+    # 全绿，而界面从启动到结束一直停在聊天页，一张设置页截图都截不到。
+    if (-not $resp.ok) { throw "act 失败（$($Payload.action)）：$($resp.error)" }
+    return $resp
 }
 
 function Put-JsonFile {
@@ -235,7 +241,9 @@ if ($rows.Count -gt 0) {
 
 # ── 3. 设置页：14 个栏目逐个切 ─────────────────────────────────────────
 Write-Host "`n[设置页栏目]" -ForegroundColor Cyan
-Act @{ action = "switch_tab"; tab = "settings" } 300 | Out-Null
+# 服务端读的是 `view`（`switch_tab` 走 `switch_view`，与侧栏点击同一份）
+$r = Act @{ action = "switch_tab"; view = "settings" } 300
+Check "已切到设置视图" ((StateOf $r).view -eq "settings") "（实际 $((StateOf $r).view)）"
 $tabs = @("models", "storage", "agent", "soul", "security", "logging", "memory",
     "retrieval", "appearance", "connection", "mcp", "usage", "web", "about")
 foreach ($t in $tabs) {
@@ -264,8 +272,36 @@ $origCleanup = $cfg.storage.cleanup_days
 $origMinScore = $cfg.retrieval.min_score
 $origSoul = (Invoke-RestMethod -Uri "$serverBase/api/v1/config/soul" -TimeoutSec 10).content
 
+# 4-0. 卡片级编辑（新交互）：只读基线 → 进编辑 → 改 → 取消 → 回只读且值未被污染
+#
+# 覆盖用户报过的「点放弃之后显示不对」：旧版放弃 = 重新回填编辑器（回填失败就是
+# 一片空白），新版放弃 = 卡片退出编辑、只读态直接读配置值。这条链能从数据面
+# 断言到底，不必靠截图目测。
+Write-Host "`n[卡片级编辑]" -ForegroundColor Cyan
+Act @{ action = "settings_tab"; tab = "agent" } 400 | Out-Null
+$s = Get-State
+Check "进设置页默认整页只读" ($null -eq $s.settings_fields.edit_section) "（实际 $($s.settings_fields.edit_section)）"
+$ro = @($s.settings_fields.fields) | Where-Object { $_.path -eq "agent.max_turns" } | Select-Object -First 1
+Check "只读态直接给出配置值" ($ro.value -eq "$origMaxTurns") "（实际「$($ro.value)」/ 期望 $origMaxTurns）"
+Act @{ action = "settings_edit"; path = "agent.max_turns" } 300 | Out-Null
+$s = Get-State
+Check "点编辑后卡片进入编辑态" ($null -ne $s.settings_fields.edit_section) "（实际 $($s.settings_fields.edit_section)）"
+Act @{ action = "settings_text"; path = "agent.max_turns"; value = "$($origMaxTurns + 7)" } 250 | Out-Null
+$s = Get-State
+Check "改一项后脏计数 = 1" ($s.settings_fields.dirty_count -eq 1) "（实际 $($s.settings_fields.dirty_count)）"
+Act @{ action = "settings_edit_cancel" } 250 | Out-Null
+$s = Get-State
+Check "取消后回到整页只读" ($null -eq $s.settings_fields.edit_section) "（实际 $($s.settings_fields.edit_section)）"
+Check "取消后脏计数归零" ($s.settings_fields.dirty_count -eq 0) "（实际 $($s.settings_fields.dirty_count)）"
+$after = @($s.settings_fields.fields) | Where-Object { $_.path -eq "agent.max_turns" } | Select-Object -First 1
+Check "取消后显示的是配置值（不是被丢弃的输入）" ($after.value -eq "$origMaxTurns") "（实际「$($after.value)」）"
+$cfg0 = (Invoke-RestMethod -Uri "$serverBase/api/v1/config" -TimeoutSec 10).config
+Check "取消没有污染后端" ($cfg0.agent.max_turns -eq $origMaxTurns) "（实际 $($cfg0.agent.max_turns)）"
+
 # 4a. 枚举字段：改 → 脏 → 保存 → 后端一致
 $nextApproval = if ($origApproval -eq "autonomous") { "confirm" } else { "autonomous" }
+Act @{ action = "settings_tab"; tab = "security" } 400 | Out-Null
+Act @{ action = "settings_edit"; path = "security.approval_mode" } 250 | Out-Null
 Act @{ action = "settings_set"; path = "security.approval_mode"; value = $nextApproval } 200 | Out-Null
 $s = Get-State
 Check "改枚举后脏计数 = 1" ($s.settings_fields.dirty_count -eq 1) "（实际 $($s.settings_fields.dirty_count)）"
@@ -274,11 +310,14 @@ $s = StateOf $r
 # 落库是异步链（GET → PUT → reload），等它真落地再断言，不靠固定 sleep 猜
 $null = Wait-Until { ((Invoke-RestMethod -Uri "$serverBase/api/v1/config" -TimeoutSec 10).config.security.approval_mode) -eq $nextApproval }
 $cfg2 = (Invoke-RestMethod -Uri "$serverBase/api/v1/config" -TimeoutSec 10).config
+Check "保存后回到整页只读" ($null -eq $s.settings_fields.edit_section) "（实际 $($s.settings_fields.edit_section)）"
 Check "枚举保存后脏计数归零" ($s.settings_fields.dirty_count -eq 0) "（实际 $($s.settings_fields.dirty_count)）"
 Check "枚举保存后后端已落库" ($cfg2.security.approval_mode -eq $nextApproval) "（实际 $($cfg2.security.approval_mode)）"
 Check "保存状态行无错误" ($s.settings_fields.msg_err -eq $false) "（$($s.settings_fields.msg)）"
 
 # 4b. 数字字段：改 → 保存 → 后端一致
+Act @{ action = "settings_tab"; tab = "agent" } 400 | Out-Null
+Act @{ action = "settings_edit"; path = "agent.max_turns" } 250 | Out-Null
 Act @{ action = "settings_text"; path = "agent.max_turns"; value = "$($origMaxTurns + 3)" } 200 | Out-Null
 $s = Get-State
 Check "改数字后是脏的" ($s.settings_fields.dirty_count -ge 1)
@@ -288,6 +327,8 @@ $cfg3 = (Invoke-RestMethod -Uri "$serverBase/api/v1/config" -TimeoutSec 10).conf
 Check "数字保存后后端一致" ($cfg3.agent.max_turns -eq ($origMaxTurns + 3)) "（实际 $($cfg3.agent.max_turns)）"
 
 # 4c. 非法值：保存被拒，且后端不变
+Act @{ action = "settings_tab"; tab = "retrieval" } 400 | Out-Null
+Act @{ action = "settings_edit"; path = "retrieval.min_score" } 250 | Out-Null
 Act @{ action = "settings_text"; path = "retrieval.min_score"; value = "9" } 200 | Out-Null
 $r = Act @{ action = "settings_save" } 800
 $s = StateOf $r
@@ -298,8 +339,11 @@ Act @{ action = "settings_discard" } 600 | Out-Null
 
 # 4d. 恢复所有改动
 Act @{ action = "settings_tab"; tab = "security" } 300 | Out-Null
+Act @{ action = "settings_edit"; path = "security.approval_mode" } 250 | Out-Null
 Act @{ action = "settings_set"; path = "security.approval_mode"; value = $origApproval } 200 | Out-Null
 Act @{ action = "settings_save" } 1500 | Out-Null
+Act @{ action = "settings_tab"; tab = "agent" } 300 | Out-Null
+Act @{ action = "settings_edit"; path = "agent.max_turns" } 250 | Out-Null
 Act @{ action = "settings_text"; path = "agent.max_turns"; value = "$origMaxTurns" } 200 | Out-Null
 Act @{ action = "settings_save" } 1500 | Out-Null
 $null = Wait-Until {
@@ -479,11 +523,13 @@ $s = StateOf $r
 $dirField = @($s.settings_fields.fields) | Where-Object { $_.path -eq "storage.data_dir" }
 Check "数据目录字段存在" ($null -ne $dirField)
 Check "数据目录需重启标注" ($dirField.restart -eq $true)
+Act @{ action = "settings_edit"; path = "storage.cleanup_days" } 250 | Out-Null
 Act @{ action = "settings_text"; path = "storage.cleanup_days"; value = "$($origCleanup + 1)" } 200 | Out-Null
 Act @{ action = "settings_save" } 1500 | Out-Null
 $null = Wait-Until { ((Invoke-RestMethod -Uri "$serverBase/api/v1/config" -TimeoutSec 10).config.storage.cleanup_days) -eq ($origCleanup + 1) }
 $cfg6 = (Invoke-RestMethod -Uri "$serverBase/api/v1/config" -TimeoutSec 10).config
 Check "存储字段保存生效" ($cfg6.storage.cleanup_days -eq ($origCleanup + 1))
+Act @{ action = "settings_edit"; path = "storage.cleanup_days" } 250 | Out-Null
 Act @{ action = "settings_text"; path = "storage.cleanup_days"; value = "$origCleanup" } 200 | Out-Null
 Act @{ action = "settings_save" } 1500 | Out-Null
 $null = Wait-Until { ((Invoke-RestMethod -Uri "$serverBase/api/v1/config" -TimeoutSec 10).config.storage.cleanup_days) -eq $origCleanup }
