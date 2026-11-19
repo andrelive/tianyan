@@ -186,6 +186,13 @@ pub(crate) fn current_theme() -> ThemeKind {
 /// 浓度只是一个数，觉得重就调小。
 const INLINE_CODE_INK: f32 = 0.10;
 
+/// placeholder（输入框占位符）相对三级文字的浓度。
+///
+/// 占位符的颜色来源是 `muted_foreground`（`gpui-base` 的 `TextElement` 在文本为空时
+/// 用它画），原来取 `text_secondary` —— 和用户填进去的真值同一浓度，空框与填好的框
+/// 看起来一样，分不出哪格还没填。压到 75%：一眼看得出是示例，凑近仍读得清。
+const PLACEHOLDER_INK: f32 = 0.75;
+
 /// 把组件库主题里与 Markdown 相关的那几个 token 覆盖成天演 palette 的值。
 ///
 /// # 为什么必须覆盖
@@ -251,7 +258,8 @@ pub(crate) fn sync_component_theme(palette: Palette, cx: &mut gpui_kit::App) {
             std::rc::Rc::make_mut(&mut theme.light_theme)
         };
         cfg.colors.foreground = Some(hex(palette.text_primary));
-        cfg.colors.muted_foreground = Some(hex(palette.text_secondary));
+        // `muted_foreground` 是**输入框 placeholder** 的取色口（见 `PLACEHOLDER_INK`）。
+        cfg.colors.muted_foreground = Some(ink(palette.text_tertiary, PLACEHOLDER_INK));
         // 行内代码：底色 `accent`、字色 `accent_foreground`（组件库的语义叫法）
         cfg.colors.accent = Some(ink(palette.text_primary, INLINE_CODE_INK));
         cfg.colors.accent_foreground = Some(hex(palette.text_primary));
