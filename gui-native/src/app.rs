@@ -574,9 +574,14 @@ impl ClientApp {
                 // `/state` 里 `config_loaded=true` 但 `backfilled=false`、`editor=''`）。
                 if self.raw_config.is_none() {
                     self.load_config_summary(cx);
-                } else if !self.settings_backfilled && self.settings_dirty.is_empty() {
+                } else if (!self.settings_backfilled || self.settings_backfill_lost(cx))
+                    && self.settings_dirty.is_empty()
+                {
                     // 只在「没有未保存改动」时回填：回填会重设编辑器并清空 dirty，
                     // 有改动时再调等于把用户刚输入的内容冲掉。
+                    //
+                    // `settings_backfill_lost` 是自愈口子：标志位说回填过、编辑器
+                    // 却是空的（窗口未就帧时回填被盖掉），否则这里会永远跳过。
                     self.backfill_settings_fields(cx);
                 }
             }

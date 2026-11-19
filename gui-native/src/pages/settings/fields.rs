@@ -891,16 +891,94 @@ impl ClientApp {
                 editor.update(cx, |state, cx| state.set_value(text, window, cx));
             }
         });
-        // 只有**真的写进编辑器**才算回填过。
+        // 只有**真的写进编辑器**才算回填过 —— `update` 返回 Ok 只是「调用成功」。
         //
         // 早先无论 `update` 成败都置位：窗口句柄还不接受更新时（启动早期、窗口尚未
         // 显示），回填静默失败而标志已经 true —— 之后进设置页、点栏目都不再回填，
         // 用户看到「数据目录」等文本框永远是 placeholder（实测复现：`backfilled=True`
         // 但 `editor=''`）。标志位抢跑比不置位更糟：它把一次性失败固化成永久状态。
-        if applied.is_ok() {
+        //
+        // 但只判 `is_ok()` 仍然不够：那是「调用成功」，不等于「值已落地」。窗口
+        // 尚未完成首帧时 `set_value` 会被随后的初始化盖掉，于是同样落进
+        // `backfilled=true` + `editor=''` 的固化状态；此后进设置页看到标志位就跳过
+        // 回填、连 `/config` 都不再拉（用户实例实测：启动即落到设置页，三个数字框
+        // 全是占位符「数字」，点保存报「不能为空」，服务端日志里再无 `/config` 请求）。
+        // 判据改为**回读校验**：真正写进去了才算数。
+        if applied.is_ok() && self.backfill_landed(cx) {
             self.settings_backfilled = true;
         }
         cx.notify();
+    }
+
+    /// 回填是否**真的落进了编辑器**：至少一个「配置里有值」的字段，编辑器内容与之相等。
+    ///
+    /// 不用「全部相等」：`Text` 类字段空串配 `EmptyAs::Null` 是合法状态，而
+    /// 数组/多行的文本规范化也可能有细微差异。要求有值的字段全部对上，
+    /// 一个对不上就判失败——这已经足以区分「回填没跑」和「回填跑过了」。
+    fn backfill_landed(&self, cx: &App) -> bool {
+        let Some(cfg) = self.raw_config.as_ref() else {
+            return false;
+        };
+        let mut checked = 0usize;
+        for def in FIELDS {
+            if !def.kind.has_editor() {
+                continue;
+            }
+            let Some(v) = json_get(cfg, def.path) else {
+                continue;
+            };
+            let want = value_to_text(Some(v));
+            if want.trim().is_empty() {
+                continue;
+            }
+            let Some(got) = self.field_editor_text(def.path, cx) else {
+                continue;
+            };
+            if got.trim() != want.trim() {
+                return false;
+            }
+            checked += 1;
+        }
+        checked > 0
+    }
+
+    /// 标志位说「回填过」，编辑器里却什么都没有 —— 回填丢了，需要重填。
+    ///
+    /// 这条是**自愈**：标志位一旦被错误置位就不会再回填（进设置页看到
+    /// `backfilled=true` 直接跳过），用户只能重启客户端；而重启若又在窗口未就绪时
+    /// 回填，还会再丢一次。以**实际状态**为准，才治得了这种固化。
+    pub(crate) fn settings_backfill_lost(&self, cx: &App) -> bool {
+        self.raw_config.is_some() && self.settings_backfilled && !self.backfill_landed(cx)
+    }
+
+    /// 所有「配置里有值」的字段，编辑器都空着。
+    ///
+    /// 用户不可能同时把所有输入框清空，所以这是回填没落地的特征。保存前据此
+    /// 按「未回填」回落配置值（不报「不能为空」、也不把空串写进配置）——否则一次
+    /// 保存会被一堆伪错误整体中止，用户看到的就是「设置改不动」。
+    fn settings_editors_all_empty(&self, cx: &App) -> bool {
+        let Some(cfg) = self.raw_config.as_ref() else {
+            return false;
+        };
+        let mut any = false;
+        for def in FIELDS {
+            if !def.kind.has_editor() {
+                continue;
+            }
+            let Some(v) = json_get(cfg, def.path) else {
+                continue;
+            };
+            if value_to_text(Some(v)).trim().is_empty() {
+                continue;
+            }
+            any = true;
+            if let Some(t) = self.field_editor_text(def.path, cx) {
+                if !t.trim().is_empty() {
+                    return false;
+                }
+            }
+        }
+        any
     }
 
     /// 配置里该字段的当前值（`None` = 配置未加载或缺键）。
@@ -921,7 +999,10 @@ impl ClientApp {
         // ① 顶部误报「已修改 27 项」；② 点保存时 `save_settings_fields` 收集到一堆
         // 伪错误，整体中止（用户看到的是「保存失败：数据目录不能为空；…」，实际
         // 一个字段都没改）。这条与「编辑器缺失回落」是同一条防线的两道口子。
-        if !self.settings_backfilled {
+        // 「全部编辑器都空着」与「从未回填」是一回事：都不是用户输入，而是回填
+        // 没落地（标志位可能早已被错误置位）。不这样判，保存会收集一堆
+        // 「不能为空」伪错误并把整次保存中止——用户看到的就是「设置改不动」。
+        if !self.settings_backfilled || self.settings_editors_all_empty(cx) {
             return Ok(self.field_config_fallback(def.path));
         }
         match &def.kind {

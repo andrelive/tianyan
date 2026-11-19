@@ -31,7 +31,8 @@ impl ClientApp {
         if tab.config_key().is_some() {
             if self.raw_config.is_none() {
                 self.load_config_summary(cx);
-            } else if !self.settings_backfilled {
+            } else if !self.settings_backfilled || self.settings_backfill_lost(cx) {
+                // `settings_backfill_lost`：标志位说回填过、编辑器却空着 —— 重填。
                 self.backfill_settings_fields(cx);
             }
         }
@@ -543,7 +544,8 @@ impl ClientApp {
                         // 有未保存的编辑时不回填（否则会把用户正在输入的内容冲掉）；
                         // 回填失败（窗口未就绪）时 `settings_backfilled` 保持 false，
                         // 下次进设置页会重试 —— 但只在没改动过时重试。
-                        let first = !this.settings_backfilled && this.settings_dirty.is_empty();
+                        let first = (!this.settings_backfilled || this.settings_backfill_lost(cx))
+                            && this.settings_dirty.is_empty();
                         this.raw_config = cfg;
                         if first {
                             this.backfill_settings_fields(cx);
