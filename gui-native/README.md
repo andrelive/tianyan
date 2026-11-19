@@ -438,21 +438,21 @@ pwsh -NoProfile -File .\scripts\verify-enter-send.ps1 -Exe gui-native\target\deb
 > ⚠️ 收尾只按 PID 杀（`Start-Process -PassThru` 那一个），按进程名会连用户正在用的
 > 实例一起杀掉。
 
-### 像素级核对：内建截图优先，抓屏兜底
+### 像素级核对：内建截图
 
 配色 / 间距 / 字体这类「好看不好看」还得看像素。**状态验证不要用截图**。
 
-**首选内建**（`render_to_image`，需 `--features screenshot` 构建）：
+内建截图（`render_to_image`，需 `--features screenshot` 构建），脚本已入仓：
 
 ```powershell
 cargo build --features screenshot
-$env:TIANYAN_GUI_AUTOMATION_PORT = "3010"; .\target\debug\tianyan-gui-native.exe
-Invoke-RestMethod http://127.0.0.1:3010/act -Method Post -ContentType application/json `
-  -Body '{"action":"screenshot","path":"C:\\tmp\\shot.png"}'
+.\scripts\gui-shot.ps1 -Tab retrieval -Out "$env:TEMP\a.png"        # 只读态
+.\scripts\gui-shot.ps1 -Tab storage -EditPath storage.cleanup_days  # 编辑态
+.\scripts\gui-shot.ps1 -Tab retrieval -WidthPx 1350                 # 窄窗口（物理像素）
 ```
 
-它拿的是**渲染输出**而不是屏幕像素，所以不受 DPI 缩放影响；尺寸是纯客户区物理像素
-（本机 1920×1230），不含窗口边框。
+它拿的是**渲染输出**而不是屏幕像素，所以不受 DPI 缩放与窗口遮挡影响；尺寸是纯客户区
+物理像素（本机 1920×1230 = 逻辑 1280×820 @150%），不含窗口边框。
 
 > ⚠️ **但它取的是「最近一次绘制的帧」，不是「现在的界面」**（这次实测更正了原先
 > 「窗口是否可见都不受影响」的说法）：
@@ -465,22 +465,11 @@ Invoke-RestMethod http://127.0.0.1:3010/act -Method Post -ContentType applicatio
 >   前者用隐藏窗口，后者用可见窗口。
 > - 「先显示过、再 `SW_HIDE` 藏到托盘」仍能截（帧还在），与「从未显示」是两种情形。
 
-**兜底：进程外抓屏**（生产构建没有 `screenshot` feature 时）：
-
-```powershell
-.\scripts\ui-click.ps1 -X 260 -Y 120     # 坐标 = 截图里的像素坐标，原点是窗口左上角
-.\scripts\ui-shot.ps1 -Out "$env:TEMP\shot.png"
-.\scripts\ui-shot-full.ps1 -Out "$env:TEMP\full.png"   # 全屏（看系统通知/托盘这类窗口外的东西）
-```
-
-> ⛔ **必读坑：PowerShell 默认 DPI-unaware。** 本机 2560×1440 @150%，`GetWindowRect`
-> 返回的是虚拟化坐标：物理 1920×1230 的窗口只报 1295×857，于是 `CopyFromScreen`
-> **只抓到窗口左上角那块**。症状极像「右下角的元素没渲染」（消息区空白、输入卡片
-> 消失、任务面板不见），曾据此误判 GPUI 的 flex 布局失效、白查数轮。
-> `scripts/ui-shot.ps1` 已用 `SetProcessDpiAwareness(2)` 修掉，**不要再手写截图**。
->
-> 第二个坑：`CopyFromScreen` 抓的是屏幕像素，窗口被别的窗口挡住会抓到遮挡物，
-> 所以脚本里先 `ShowWindow` + `HWND_TOPMOST` + `SetForegroundWindow`。
+> ⛔ **不要自己写抓屏**（`CopyFromScreen`）。PowerShell 默认 DPI-unaware，
+> `GetWindowRect` 返回虚拟化坐标：物理 1920×1230 的窗口只报 1295×857，于是只抓到
+> 窗口左上角那一块。症状极像「右下角的元素没渲染」（消息区空白、输入卡片消失、
+> 卡片右上角的按钮不见），2026-10 与 2026-11 各因此误判过一轮布局失效。
+> 抓屏还受遮挡影响：压在窗口上的任何窗口都会被一起抓进来。
 
 GPUI 自己的 `#[gpui_kit::test]`（headless 窗口 + 真实事件 + 断言，需开 `test-support`
 feature）适合**纯视图逻辑的单元级验证**（不进真实 app 状态机）；而自动化端口验证的是
