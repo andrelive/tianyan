@@ -5,6 +5,24 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.15] - 2026-11-20
+
+### Fixed
+
+- **点别处，输入卡片上的浮层不收起**：模型选择 / 思考强度 / 上下文占用三个浮层
+  此前只有「点三个按钮互相把对方关掉」这一条关闭路径，点输入框、点侧栏、点消息
+  列表都得再点一次同一个按钮才收起来。现在三个浮层都挂 `on_mouse_down_out`
+  （捕获阶段、鼠标落在自己 bounds 之外即关闭，与 gpui-component 的
+  `Select` / `Popover` / `PopupMenu` 同一手法），并补 `.occlude()`（面板盖住的
+  地方不再把鼠标/滚轮交给下层）。「按下点在触发按钮上」用一条标记让浮层让路，
+  关闭交给按钮自己的 `on_click`——**不能**改成在捕获阶段 `stop_propagation()`：
+  那会把同一次按下的冒泡阶段整段跳过，而 `on_click` 依赖的 `pending_mouse_down`
+  正是在冒泡阶段写入的（实测症状是按钮彻底点不动）。
+- **图片放大遮罩下滚轮会带着背后的会话一起滚**（回归）：`occlude` 当初收敛在
+  `dialogs::modal_overlay()` 里，而图片遮罩是根层自绘的**第二个**全屏覆盖层，没走
+  那个构造函数，于是弹窗修好、它一直漏着。已补 `.occlude()`（首次启动引导覆盖层
+  同步），并在注释里写明「新增全屏覆盖层要照此挂」。
+
 ## [1.2.14] - 2026-11-19
 
 ### Changed

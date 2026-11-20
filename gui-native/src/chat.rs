@@ -1012,6 +1012,13 @@ impl ClientApp {
                                         div()
                                             .id("model-select")
                                             .relative()
+                                            // 标记「这一下按在触发按钮上」：浮层的点外关闭据此
+                                            // 让路（理由见 `close_composer_popovers`）
+                                            .capture_any_mouse_down(cx.listener(
+                                                |this, _, _, _cx| {
+                                                    this.popover_trigger_pressed = true;
+                                                },
+                                            ))
                                             .px_1()
                                             .py_1()
                                             .rounded_lg()
@@ -1040,6 +1047,12 @@ impl ClientApp {
                                         div()
                                             .id("ctx-ring-btn")
                                             .relative()
+                                            // 标记「这一下按在触发按钮上」（见模型按钮处的说明）
+                                            .capture_any_mouse_down(cx.listener(
+                                                |this, _, _, _cx| {
+                                                    this.popover_trigger_pressed = true;
+                                                },
+                                            ))
                                             .flex()
                                             .items_center()
                                             .px_1()
@@ -1214,6 +1227,32 @@ impl ClientApp {
             .into_any_element()
     }
 
+    /// 收掉输入卡片上的三个浮层（模型 / 思考 / 上下文），返回是否真的收了。
+    ///
+    /// 三个浮层各自的「点浮层外面就关闭」都走这里：它们挂在 `.on_mouse_down_out()`
+    /// 上——gpui 的**捕获阶段**、鼠标落在自己 bounds 之外时触发，和 gpui-component
+    /// 的 `Select` / `Popover` / `PopupMenu` 是同一个手法。效果是点输入框、点侧栏、
+    /// 点消息列表、点发送按钮都会顺手收掉面板，不用再点一次同一个按钮（用户实测指出
+    /// 此前必须手点两下）。
+    ///
+    /// ⚠️ 三个**触发按钮**在浮层 bounds 之外，不处理的话「按下」先被浮层判成「点了
+    /// 外面」关掉，「抬起」时按钮的 `on_click` 又按新状态 toggle 回打开——用户看到的
+    /// 就是「点按钮关不掉」。这里用 `ClientApp::popover_trigger_pressed` 这条标记
+    /// 把「按下点在按钮上」告诉浮层，**不能**改成在按钮上 `stop_propagation()`：
+    /// gpui 的 `on_click` 要靠**同一次按下的冒泡阶段**写入 `pending_mouse_down`
+    /// （见 `elements/div.rs` 里那对 `on_mouse_event`），捕获阶段一停，冒泡整段被
+    /// 跳过，按钮彻底点不动（实测症状）。
+    ///
+    /// 关面板时连 `ctx_compress`（压缩结果提示）一起清，与点圆环关闭时的口径一致。
+    pub(crate) fn close_composer_popovers(&mut self) -> bool {
+        let had = self.model_menu_open || self.thinking_menu_open || self.ctx_panel_open;
+        self.model_menu_open = false;
+        self.thinking_menu_open = false;
+        self.ctx_panel_open = false;
+        self.ctx_compress = None;
+        had
+    }
+
     /// 上下文详情浮层（点圆环弹出）：占用 / 缓存命中 / 输出 +「压缩会话」。
     /// 环本身只是缩略，口径（最近一轮 vs 会话累计）写在浮层里。
     pub(crate) fn render_ctx_panel(&self, cx: &mut Context<Self>) -> AnyElement {
@@ -1248,6 +1287,19 @@ impl ClientApp {
             .flex_col()
             .gap_2()
             .text_xs()
+            // 点面板外面（输入框 / 侧栏 / 消息列表 / 其它按钮）就收起
+            .on_mouse_down_out(cx.listener(|this, _, _window, cx| {
+                // 按下点在触发按钮上 = 用户想「用按钮关面板」：让给按钮的 on_click
+                if this.popover_trigger_pressed {
+                    return;
+                }
+                if this.close_composer_popovers() {
+                    cx.notify();
+                }
+            }))
+            // 面板挡住的地方不该再让下层响应：gpui 的鼠标/滚轮是「命中链全员响应」，
+            // 只有 `BlockMouse` 才截断（机制详见 `main.rs` 图片遮罩处的说明）。
+            .occlude()
             .child(kv_row(
                 "上下文占用",
                 match ctx_usage {
@@ -1414,7 +1466,19 @@ impl ClientApp {
                 .bg(rgb(colors::BG_PRIMARY()))
                 .py_1()
                 .flex()
-                .flex_col();
+                .flex_col()
+                // 点浮层外面就收起（见 `close_composer_popovers`）
+                .on_mouse_down_out(cx.listener(|this, _, _window, cx| {
+                    // 按下点在触发按钮上 = 用户想「用按钮关面板」：让给按钮的 on_click
+                    if this.popover_trigger_pressed {
+                        return;
+                    }
+                    if this.close_composer_popovers() {
+                        cx.notify();
+                    }
+                }))
+                // 挡住的地方不该再让下层响应
+                .occlude();
             for (ix, opt) in opts.iter().enumerate() {
                 // `off` = 不附加思考参数（None）；其余档位值原样发后端
                 let value: Option<String> = if opt == "off" {
@@ -1464,6 +1528,10 @@ impl ClientApp {
                 div()
                     .id("thinking-select")
                     .relative()
+                    // 标记「这一下按在触发按钮上」（见模型按钮处的说明）
+                    .capture_any_mouse_down(cx.listener(|this, _, _, _cx| {
+                        this.popover_trigger_pressed = true;
+                    }))
                     .flex()
                     .flex_row()
                     .items_center()
@@ -1522,7 +1590,19 @@ impl ClientApp {
             .bg(rgb(colors::BG_PRIMARY()))
             .py_1()
             .flex()
-            .flex_col();
+            .flex_col()
+            // 点浮层外面就收起（点输入框、点侧栏……见 `close_composer_popovers`）
+            .on_mouse_down_out(cx.listener(|this, _, _window, cx| {
+                // 按下点在触发按钮上 = 用户想「用按钮关面板」：让给按钮的 on_click
+                if this.popover_trigger_pressed {
+                    return;
+                }
+                if this.close_composer_popovers() {
+                    cx.notify();
+                }
+            }))
+            // 挡住的地方不该再让下层响应（gpui 鼠标/滚轮是「命中链全员响应」）
+            .occlude();
         for (ix, (provider, name)) in chat_models.iter().enumerate() {
             let provider = provider.clone();
             let name = name.clone();

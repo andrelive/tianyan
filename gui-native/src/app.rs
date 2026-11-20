@@ -278,6 +278,7 @@ impl ClientApp {
             ctx_live: None,
             ctx_window_live: 0,
             ctx_panel_open: false,
+            popover_trigger_pressed: false,
             ctx_compressing: false,
             ctx_compress: None,
             session_usage: None,

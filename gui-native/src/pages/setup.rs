@@ -31,6 +31,9 @@ impl ClientApp {
             .top(px(0.))
             .left(px(0.))
             .size_full()
+            // 与 `dialogs::modal_overlay()` / 图片遮罩同一个理由：gpui 的滚轮是
+            // 「命中链全员响应」，全屏覆盖层不挂 `occlude` 就等于把滚轮漏给背后。
+            .occlude()
             .flex()
             .items_center()
             .justify_center()

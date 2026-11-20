@@ -505,6 +505,17 @@ struct ClientApp {
     pub(crate) ctx_window_live: u64,
     /// 上下文详情面板是否展开（点圆环打开：占用 / 缓存命中 / 输出 + 压缩入口）
     pub(crate) ctx_panel_open: bool,
+    /// 「本次按下的起点落在某个浮层触发按钮上」——**只服务于浮层的点外关闭**。
+    ///
+    /// 时序：根上的一次捕获监听先把它清零（每次按下都重置），触发按钮的捕获监听在
+    /// 命中自己时置真，浮层的 `on_mouse_down_out` 再据此判断「这一下是按在按钮上」，
+    /// 于是不关面板、留给按钮自己的 `on_click` 去 toggle。
+    ///
+    /// ⚠️ 不能让按钮直接在捕获阶段 `stop_propagation()`：gpui 的 `on_click` 依赖
+    /// **同一次按下的冒泡阶段**写入 `pending_mouse_down`（见 `elements/div.rs` 的
+    /// `on_mouse_event` 注册），捕获阶段一停，冒泡整段被跳过，`on_click` 永远不触发
+    /// ——实测症状是「按钮彻底点不动」。
+    pub(crate) popover_trigger_pressed: bool,
     /// 压缩进行中（按钮禁点 + 文案「压缩中…」）
     pub(crate) ctx_compressing: bool,
     /// 压缩结果提示：`(是否成功, 文案)`
@@ -895,6 +906,13 @@ impl Render for ClientApp {
             .flex_row()
             // 相对定位：模态对话框覆盖层用 `absolute` 相对这里铺满整窗
             .relative()
+            // 每次按下先把「按在浮层触发按钮上」清零（捕获阶段正序 = 渲染顺序，
+            // 根最先执行）。清在这里而不是按钮上，是因为按钮的捕获监听只在鼠标
+            // 命中自己时执行——按在别处时标记会残留成脏值。语义与判据见
+            // `ClientApp::popover_trigger_pressed`。
+            .capture_any_mouse_down(cx.listener(|this, _, _, _cx| {
+                this.popover_trigger_pressed = false;
+            }))
             .bg(rgb(colors::BG_PRIMARY()))
             .text_color(rgb(colors::TEXT_PRIMARY()))
             .child(self.render_rail(cx))
@@ -930,6 +948,17 @@ impl Render for ClientApp {
                     .bottom(px(0.))
                     // 半透明黑（0xRRGGBBAA）
                     .bg(rgba(0x000000cc))
+                    // 遮罩必须 `occlude()`：gpui 的滚轮分发不是 DOM 那种「冒泡 +
+                    // stopPropagation」，而是**命中链全员响应**——`Window::hit_test`
+                    // 把几何上包含鼠标的 hitbox 全收进 `ids`，只有 `HitboxBehavior::BlockMouse`
+                    // 才截断；滚动容器的判据是 `ids.contains(self)`。遮罩只有 `bg` 时
+                    // 连 hitbox 都不产生，于是在图片上滚轮，背后消息列表跟着滚
+                    // （2026-11-16 用户再次实测：这个修过、又回归了）。
+                    //
+                    // 回归的根因是结构性的：`occlude` 收敛在 `dialogs::modal_overlay()`
+                    // （见那里的文档），而本遮罩是根层自绘的第二个全屏覆盖层，没走那个
+                    // 构造函数。**新增全屏覆盖层时照着这里挂 `.occlude()`**。
+                    .occlude()
                     .flex()
                     .items_center()
                     .justify_center()
