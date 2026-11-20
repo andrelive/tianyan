@@ -1046,20 +1046,7 @@ impl ClientApp {
             .min_w_0()
             .gap_4()
             .p_4()
-            .overflow_y_scrollbar()
-            .child(
-                div()
-                    // 宽屏下不让内容拉到屏幕边缘：设置页是「顺着读」的版面，太宽难扫行。
-                    .max_w(px(1180.))
-                    .text_xs()
-                    // 长句必须允许换行，否则会撑开整列。
-                    .whitespace_normal()
-                    .text_color(rgb(colors::TEXT_TERTIARY()))
-                    .child(
-                        "下面就是当前生效的值。要改哪一块，点那张卡片右上角的「编辑」；\
-                         改完点同位置的「保存」，只提交这一块改动过的字段。",
-                    ),
-            );
+            .overflow_y_scrollbar();
         // 「命令执行」栏目的页首事实卡片：只读，数据来自 `/config/executor`
         // （服务进程里**已安装**的 spec）——不是配置值，所以不进字段表。
         if tab == SettingsTab::Agent {

@@ -337,12 +337,6 @@ impl ClientApp {
                             .text_color(rgb(colors::TEXT_PRIMARY()))
                             .child(format!("模型（{}）", self.models.len())),
                     )
-                    .child(
-                        div()
-                            .text_size(px(10.))
-                            .text_color(rgb(colors::TEXT_TERTIARY()))
-                            .child("点按钮即时切换首选，无需「保存设置」"),
-                    )
                     .child(div().flex_1())
                     .child(button(
                         "model-add-toggle",

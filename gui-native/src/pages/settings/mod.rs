@@ -363,10 +363,6 @@ impl ClientApp {
                 _ => "-".to_string(),
             },
         ));
-        col = col.child(kv_line(
-            "与 Web 版关系",
-            "同一内嵌 server、同一套 HTTP/SSE 协议".to_string(),
-        ));
         // 两条版本线是**预期**的：不解释就会被当成「装错了版本」
         col = col.child(kv_line(
             "版本说明",
