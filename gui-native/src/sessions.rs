@@ -47,6 +47,19 @@ pub(crate) fn projection_usable(
     connected && snap_epoch == stream_epoch && message_count > 0
 }
 
+/// 把 `Option<&mut Window>` 重新借出来一次（`&mut` 不能复制）。
+///
+/// 为什么需要它：`open_session` / `start_new_session` 要把同一个窗口连着借给两个
+/// 方法（`restore_input` 恢复输入框实体，`ensure_clarify_inputs` 补建追问的编辑框）。
+/// 两条惯用写法在 clippy 下互相打架 —— `window.as_deref_mut()` 被判
+/// `needless_option_as_deref`（说它「多余」），换成 `as_mut().map(|w| &mut **w)`
+/// 又被 `option_as_ref_deref`（说「该改用 as_deref_mut」）建议回去。这里显式写
+/// reborrow 并就地关掉这条 lint，比在每个调用点各写一遍更清楚。
+#[allow(clippy::option_as_ref_deref)]
+fn reborrow_window<'a>(window: &'a mut Option<&mut Window>) -> Option<&'a mut Window> {
+    window.as_mut().map(|w| &mut **w)
+}
+
 impl ClientApp {
     pub(crate) fn load_sessions(&self, cx: &mut Context<Self>) {
         let port = self.port;
@@ -780,9 +793,9 @@ impl ClientApp {
         // 附件也按会话存草稿（上面已 save），这里清空后由 restore 填回本档的草稿
         // ——不会把上一会话的附件误发到新会话，也不会丢掉自己写了一半的内容
         self.composer_images.clear();
-        self.restore_input(window.as_deref_mut(), cx);
+        self.restore_input(reborrow_window(&mut window), cx);
         // 追问编辑框跟着这份视图状态一起补（`None` 会话也可能带着挂起追问的草稿）
-        self.ensure_clarify_inputs(window.as_deref_mut(), cx);
+        self.ensure_clarify_inputs(reborrow_window(&mut window), cx);
         // 「新建会话」= 回到默认工作区：这里重置待绑定目录。
         //
         // 位置很关键：必须放在 `park_view_state` / `restore_view_state` **之后**——
@@ -889,12 +902,12 @@ impl ClientApp {
         // （订阅曾失败）的会照常补发，那正是它需要的。
         self.subscribe_session(sid_for_subscribe, !use_projection && history_empty, cx);
         // 选中态与「当前会话始终可见」都体现在左栏行上
-        self.restore_input(window.as_deref_mut(), cx);
+        self.restore_input(reborrow_window(&mut window), cx);
         // 追问编辑框按恢复出来的问题数补齐（切回一个挂起追问的会话时要能继续答）。
         // **必须把窗口传下去**：`window_handle.update` 在「同一窗口更新中」（点击
         // listener 就是这种上下文）会失败，而失败以前是静默清空 ⇒ 卡片上那几块
         // 输入框直接消失（用户报的「没办法补充信息」）。
-        self.ensure_clarify_inputs(window.as_deref_mut(), cx);
+        self.ensure_clarify_inputs(reborrow_window(&mut window), cx);
         self.rebuild_session_rows(cx);
     }
 

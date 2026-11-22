@@ -626,7 +626,7 @@ impl ClientApp {
     /// 「补充其他信息（可选）」下面的**一片空白**，只能得出「这个卡片不能补充信息」。
     pub(crate) fn ensure_clarify_inputs(
         &mut self,
-        mut window: Option<&mut Window>,
+        window: Option<&mut Window>,
         cx: &mut Context<Self>,
     ) {
         use gpui_kit::component::input::TextareaState;
@@ -651,7 +651,7 @@ impl ClientApp {
             self.clarify_inputs_error = None;
             return;
         }
-        if let Some(w) = window.as_deref_mut() {
+        if let Some(w) = window {
             let mut created: Vec<Entity<TextareaState>> = Vec::with_capacity(need);
             for i in 0..need {
                 let placeholder = Self::clarify_placeholder(i, need);
