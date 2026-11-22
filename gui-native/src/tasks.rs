@@ -566,6 +566,7 @@ impl ClientApp {
                         this.clarify_answers.clear();
                         this.clarify_tab = 0;
                         this.clarify_inputs.clear();
+                        this.clarify_inputs_error = None;
                     }
                     Err(e) => this.set_error(format!("提交回答失败：{e}")),
                 }
@@ -599,14 +600,43 @@ impl ClientApp {
             .unwrap_or_default()
     }
 
-    /// 按当前追问（N 个问题 + 1 屏补充信息）准备好编辑框实体。
+    /// 追问卡片的编辑框占位文字：`i == need - 1` 那个是**常驻**的补充信息框。
+    fn clarify_placeholder(i: usize, need: usize) -> String {
+        if i + 1 == need {
+            "补充其他信息（可选）…".to_string()
+        } else {
+            "或输入自定义回答…".to_string()
+        }
+    }
+
+    /// 按当前追问（N 个问题 + 末尾 1 个补充信息框）准备好编辑框实体。
     ///
-    /// 走 `window_handle.update` 新建：这条路径**不需要 `&mut Window`**，所以
-    /// `open_session`（有窗口）和自动化动作（没有窗口）都能调（与 `restore_input`
-    /// 的自动化分支同一手法）。数量不匹配时清空，由下一次调用重建。
-    pub(crate) fn ensure_clarify_inputs(&mut self, cx: &mut Context<Self>) {
+    /// **两条创建路径，顺序不能反**：
+    ///
+    /// 1. 调用方手上有窗口（`open_session` 的点击路径、卡片上的「点此启用输入框」）
+    ///    → 直接 `cx.new`。这条路径必须存在：`window_handle.update` 在「同一窗口
+    ///    正在更新中」（gpui 的 listener / 事件回调正是如此）会失败，而失败就等于
+    ///    **问询卡片上没有输入框** —— 用户只能点选项，想自己写一句时无处可写
+    ///    （2026-11-22 用户复报「很多时候没办法补充信息」）。
+    /// 2. 调用方没有窗口（SSE 事件路径 / 自动化动作）→ 走 `window_handle.update` 现取
+    ///    （与 `restore_input` 的自动化分支同一手法）。
+    ///
+    /// 失败时**不清空已有实体**、也不再静默返回空元素：记一条错误，由渲染层显示
+    /// 「点此启用输入框」。早先的写法是 `clear()` 之后什么都不说 —— 用户面对的是
+    /// 「补充其他信息（可选）」下面的**一片空白**，只能得出「这个卡片不能补充信息」。
+    pub(crate) fn ensure_clarify_inputs(
+        &mut self,
+        mut window: Option<&mut Window>,
+        cx: &mut Context<Self>,
+    ) {
         use gpui_kit::component::input::TextareaState;
 
+        // 离线会话的事件（`apply_event_offline`）不得碰当前会话的编辑框实体：
+        // 那里 `self.clarification` 装的是**别的会话**的问题，按它建出来的框
+        // 数量、占位文字都对不上，还会把用户已经写了一半的回答整批换掉。
+        if self.offline {
+            return;
+        }
         let need = self
             .clarification
             .as_ref()
@@ -614,33 +644,40 @@ impl ClientApp {
             .unwrap_or(0);
         if need == 0 {
             self.clarify_inputs.clear();
+            self.clarify_inputs_error = None;
             return;
         }
         if self.clarify_inputs.len() == need {
+            self.clarify_inputs_error = None;
+            return;
+        }
+        if let Some(w) = window.as_deref_mut() {
+            let mut created: Vec<Entity<TextareaState>> = Vec::with_capacity(need);
+            for i in 0..need {
+                let placeholder = Self::clarify_placeholder(i, need);
+                let w: &mut Window = &mut *w;
+                created.push(cx.new(|cx| TextareaState::new(w, cx).placeholder(placeholder)));
+            }
+            self.clarify_inputs = created;
+            self.clarify_inputs_error = None;
             return;
         }
         let handle = self.window_handle;
         let mut created: Vec<Entity<TextareaState>> = Vec::new();
-        for i in 0..need {
-            let placeholder = if i + 1 == need {
-                "补充其他信息（可选）…"
-            } else {
-                "或输入自定义回答…"
-            };
-            let ok = handle
-                .update(cx, |_, window, cx| {
-                    created
-                        .push(cx.new(|cx| TextareaState::new(window, cx).placeholder(placeholder)));
-                })
-                .is_ok();
-            if !ok {
-                break;
-            }
-        }
-        if created.len() == need {
+        let ok = handle
+            .update(cx, |_, window, cx| {
+                for i in 0..need {
+                    let placeholder = Self::clarify_placeholder(i, need);
+                    let w: &mut Window = &mut *window;
+                    created.push(cx.new(|cx| TextareaState::new(w, cx).placeholder(placeholder)));
+                }
+            })
+            .is_ok();
+        if ok && created.len() == need {
             self.clarify_inputs = created;
+            self.clarify_inputs_error = None;
         } else {
-            self.clarify_inputs.clear();
+            self.clarify_inputs_error = Some("回答输入框没建起来".to_string());
         }
     }
 
@@ -675,11 +712,16 @@ impl ClientApp {
     }
 
     /// 追问卡片（`ask_user` 挂起时接管输入区）：**分步 tab**，与 vite 版
-    /// `ClarificationBubble` 同构（此前 native 是「所有问题平铺」）。
+    /// `ClarificationBubble` 同构。
     ///
     /// 形态：`[问题 1][问题 2]…[补充信息]` 分步 tab，每屏一个问题；点选项**自动跳到
-    /// 下一屏**（vite 同款交互），也可以在每屏下方自己写回答；最后一屏是「补充信息」
-    /// （可选）。全部问题答完才可提交——与 vite 的 `canSubmit` 口径一致。
+    /// 下一屏**，也可以在每屏下方自己写回答；最后一屏是「补充信息」（可选）。
+    /// 全部问题答完才可提交。
+    ///
+    /// 这四块（题面 / 选项 / 每题的自定义回答框 / 补充信息框）**都是固定渲染的**，
+    /// 与 `ask_user` 的参数长什么样无关 —— 之前「看不到、填不了」不是功能没做，
+    /// 而是编辑框实体建不起来时渲染层返回了空元素（见
+    /// [`Self::render_clarify_editor`] 与 [`Self::ensure_clarify_inputs`]）。
     pub(crate) fn render_clarification(&self, cx: &mut Context<Self>) -> AnyElement {
         let Some(questions) = self.clarification.clone() else {
             return div().into_any_element();
@@ -781,7 +823,7 @@ impl ClientApp {
                         .text_color(rgb(colors::TEXT_TERTIARY()))
                         .child("补充其他信息（可选）"),
                 )
-                .child(self.render_clarify_editor(extra_tab));
+                .child(self.render_clarify_editor(extra_tab, cx));
         } else {
             let (question, options) = questions[tab].clone();
             card = card.child(
@@ -854,7 +896,7 @@ impl ClientApp {
                 }
                 card = card.child(list);
             }
-            card = card.child(self.render_clarify_editor(tab));
+            card = card.child(self.render_clarify_editor(tab, cx));
         }
 
         // ── 底栏：进度 + 提交 ──
@@ -905,13 +947,39 @@ impl ClientApp {
         .into_any_element()
     }
 
-    /// 追问的编辑框（第 `ix` 屏）：`ix == questions.len()` 时是「补充信息」那屏。
+    /// 追问的编辑框：`ix < questions.len()` 是第 `ix` 题的自定义回答框，
+    /// `ix == questions.len()` 是**常驻**的补充信息框。
     ///
-    /// 实体缺失（还没建/已清空）时返回空元素 —— 渲染期是 `&self`，不能现造实体，
-    /// 只能等 `ensure_clarify_inputs` 补上（它由事件处理与 `open_session` 调）。
-    fn render_clarify_editor(&self, ix: usize) -> AnyElement {
+    /// 实体缺失时渲染一个**看得见**的占位 + 重试入口，**不再返回空元素**：
+    /// 渲染期是 `&self` 不能现造实体，但点击回调里有 `&mut Window`，可以补建。
+    /// 早先这里 `return div()` —— 用户面对「补充其他信息（可选）」下面的**一片
+    /// 空白**，唯一能得出的结论就是「这个卡片没法补充信息」（2026-11-22 复报）。
+    fn render_clarify_editor(&self, ix: usize, cx: &mut Context<Self>) -> AnyElement {
         let Some(ed) = self.clarify_inputs.get(ix) else {
-            return div().into_any_element();
+            let hint = self
+                .clarify_inputs_error
+                .clone()
+                .unwrap_or_else(|| "回答输入框没建起来".to_string());
+            return div()
+                .id(("clarify-ensure-input", ix))
+                .w_full()
+                .h(px(44.))
+                .rounded_xl()
+                .border_1()
+                .border_color(rgb(colors::BORDER()))
+                .bg(rgb(colors::BG_PRIMARY()))
+                .flex()
+                .items_center()
+                .justify_center()
+                .text_xs()
+                .text_color(rgb(colors::TEXT_TERTIARY()))
+                .cursor_pointer()
+                .child(format!("{hint} · 点此启用"))
+                .on_click(cx.listener(|this, _, window, cx| {
+                    this.ensure_clarify_inputs(Some(window), cx);
+                    cx.notify();
+                }))
+                .into_any_element();
         };
         div()
             .w_full()

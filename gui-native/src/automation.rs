@@ -579,6 +579,12 @@ impl ClientApp {
             // 追问分步 tab（0..问题数 = 问题屏；== 问题数 = 「补充信息」屏）
             "clarify_tab": self.clarify_tab,
             "clarify_extra": self.clarify_extra_of(cx),
+            // 编辑框实体的**实际个数**（应为 `问题数 + 1`：每问一个 + 常驻补充信息框）。
+            // 断言面：卡片渲染出「补充其他信息（可选）」这块标题，不等于下面那个
+            // 输入框真的存在 —— 实体没建起来时用户看到的是标题 + 一片空白
+            // （2026-11-22 用户复报），只能靠这个计数把它钉成可判据。
+            "clarify_editors": self.clarify_inputs.len(),
+            "clarify_inputs_error": self.clarify_inputs_error.clone(),
             "tools": {
                 "count": self.tools.len(),
                 "query": &self.tools_query,

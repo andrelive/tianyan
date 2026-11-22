@@ -298,6 +298,7 @@ impl ClientApp {
             clarify_answers: Vec::new(),
             clarify_tab: 0,
             clarify_inputs: Vec::new(),
+            clarify_inputs_error: None,
             providers: Vec::new(),
             editing_provider: None,
             edit_endpoint: endpoint_input,
@@ -814,7 +815,7 @@ impl ClientApp {
                         self.clarification = Some(qs.clone());
                         self.clarify_answers = vec![String::new(); qs.len()];
                         self.clarify_tab = 0;
-                        self.ensure_clarify_inputs(cx);
+                        self.ensure_clarify_inputs(None, cx);
                         println!("[事件] 快照带回挂起追问 {sid}：{} 个问题", qs.len());
                     }
                 }
@@ -1045,10 +1046,41 @@ impl ClientApp {
         let have = self.msg_list_state.item_count();
         if want > have {
             // 末尾新增：把「尾后」的空区间替换成新增的项
-            self.msg_list_state.splice(have..have, want - have);
+            self.splice_list(have..have, want - have);
         } else if want < have {
             // 变少（裁头/替换）：把尾部多出来的删掉，保留前 want 项
-            self.msg_list_state.splice(want..have, 0);
+            self.splice_list(want..have, 0);
+        }
+    }
+
+    /// 在列表里替换一段区间，并**重测新末行与它前面的那一项**。
+    ///
+    /// 为什么必须重测：行高不是均匀的 —— 行与行之间有时间戳、留白、`is_continuation`
+    /// 的压紧差异，**末行**又是特例（没有下间距 / 时间戳落点不同）。追加一条消息后，
+    /// 原来那条末行的身份翻转成「中间行」，它的真实高度随之变化，而测量缓存里仍是
+    /// 旧值；布局拿缓存算累计高度，位置就会偏，`summary().height` 也跟着变小 ——
+    /// 「内容突然跳一下」正是这一步的签名。
+    ///
+    /// 口径与官方 `gpui_component::message_scroller::MessageScrollerState::splice`
+    /// 一致（原文注释：the default row wrapper pads every row except the last, so a
+    /// row whose "last" status may have flipped carries a stale measured height。
+    /// 它随后 remeasure 新末行 + 相邻那一项）。
+    ///
+    /// 我们此前两处 `splice`（`push_assistant_row` / `sync_list_count`）都没有这一步。
+    /// 而流式一轮多步时**每一步都会新开一条 assistant 消息**（ADR-002），
+    /// 「末行身份翻转」于是每隔几秒就发生一次 —— 与用户报的「流式输出时跳」同频。
+    fn splice_list(&mut self, old_range: std::ops::Range<usize>, count: usize) {
+        let have = self.msg_list_state.item_count();
+        if old_range.start > old_range.end || old_range.end > have {
+            return;
+        }
+        let neighbor = old_range.start.checked_sub(1);
+        self.msg_list_state.splice(old_range, count);
+        if let Some(last) = self.msg_list_state.item_count().checked_sub(1) {
+            self.msg_list_state.remeasure_items(last..last + 1);
+            if let Some(nb) = neighbor.filter(|nb| *nb != last) {
+                self.msg_list_state.remeasure_items(nb..nb + 1);
+            }
         }
     }
 
@@ -1155,6 +1187,9 @@ impl ClientApp {
             snap.has_more_history,
             std::mem::replace(&mut self.clarification, snap.clarification),
             std::mem::take(&mut self.clarify_answers),
+            // 追问 tab 也属于**被换过去的那份会话态**：漏了它，后台会话收到的
+            // `ask_user` 事件会把当前会话正看的那一屏悄悄改成 0。
+            std::mem::replace(&mut self.clarify_tab, snap.clarify_tab),
         );
         self.offline = true;
         self.apply_stream_event(ev, sid, cx);
@@ -1165,6 +1200,7 @@ impl ClientApp {
         snap.has_more_history = self.has_more_history;
         snap.clarification = std::mem::replace(&mut self.clarification, saved.4);
         snap.clarify_answers = std::mem::replace(&mut self.clarify_answers, saved.5);
+        snap.clarify_tab = std::mem::replace(&mut self.clarify_tab, saved.6);
         self.message_total = saved.1;
         self.oldest_seq = saved.2;
         self.has_more_history = saved.3;
@@ -1272,7 +1308,7 @@ impl ClientApp {
                             self.clarify_tab = 0;
                             self.clarification = Some(questions);
                             // 编辑框按问题数补齐（渲染期是 `&self`，不能在那里造实体）
-                            self.ensure_clarify_inputs(cx);
+                            self.ensure_clarify_inputs(None, cx);
                         }
                     }
                 }
@@ -1474,8 +1510,10 @@ impl ClientApp {
         let n = self.messages.len();
         self.message_total = self.messages.len();
         if !self.offline {
-            self.msg_list_state
-                .splice(n.saturating_sub(1)..n.saturating_sub(1), 1);
+            // 走 `splice_list`（splice + 重测新末行与邻居）：直接 `splice` 会让
+            // **原来那条末行**保留旧高度 —— 它此刻已经变成中间行（多出时间戳 /
+            // 下间距），见 `splice_list` 的注释。
+            self.splice_list(n.saturating_sub(1)..n.saturating_sub(1), 1);
             self.scroll_to_end_if_following();
         }
         idx

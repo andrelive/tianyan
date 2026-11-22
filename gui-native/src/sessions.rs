@@ -754,7 +754,7 @@ impl ClientApp {
     /// 生成的 id 创建（事件按 `session_id` 路由，id 必须发起前就确定）。
     pub(crate) fn start_new_session(
         &mut self,
-        window: Option<&mut Window>,
+        mut window: Option<&mut Window>,
         cx: &mut Context<Self>,
     ) {
         // 先存草稿：切走再切回写了一半的内容还在（与 Web 版 ChatInput 同语义）
@@ -780,7 +780,9 @@ impl ClientApp {
         // 附件也按会话存草稿（上面已 save），这里清空后由 restore 填回本档的草稿
         // ——不会把上一会话的附件误发到新会话，也不会丢掉自己写了一半的内容
         self.composer_images.clear();
-        self.restore_input(window, cx);
+        self.restore_input(window.as_deref_mut(), cx);
+        // 追问编辑框跟着这份视图状态一起补（`None` 会话也可能带着挂起追问的草稿）
+        self.ensure_clarify_inputs(window.as_deref_mut(), cx);
         // 「新建会话」= 回到默认工作区：这里重置待绑定目录。
         //
         // 位置很关键：必须放在 `park_view_state` / `restore_view_state` **之后**——
@@ -794,7 +796,7 @@ impl ClientApp {
     pub(crate) fn open_session(
         &mut self,
         id: String,
-        window: Option<&mut Window>,
+        mut window: Option<&mut Window>,
         cx: &mut Context<Self>,
     ) {
         // 切换前先存当前会话的草稿（写了一半的 prompt 不能因为点另一个会话就没了）
@@ -887,9 +889,12 @@ impl ClientApp {
         // （订阅曾失败）的会照常补发，那正是它需要的。
         self.subscribe_session(sid_for_subscribe, !use_projection && history_empty, cx);
         // 选中态与「当前会话始终可见」都体现在左栏行上
-        self.restore_input(window, cx);
-        // 追问编辑框按恢复出来的问题数补齐（切回一个挂起追问的会话时要能继续答）
-        self.ensure_clarify_inputs(cx);
+        self.restore_input(window.as_deref_mut(), cx);
+        // 追问编辑框按恢复出来的问题数补齐（切回一个挂起追问的会话时要能继续答）。
+        // **必须把窗口传下去**：`window_handle.update` 在「同一窗口更新中」（点击
+        // listener 就是这种上下文）会失败，而失败以前是静默清空 ⇒ 卡片上那几块
+        // 输入框直接消失（用户报的「没办法补充信息」）。
+        self.ensure_clarify_inputs(window.as_deref_mut(), cx);
         self.rebuild_session_rows(cx);
     }
 

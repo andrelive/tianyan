@@ -567,12 +567,18 @@ struct ClientApp {
     pub(crate) clarify_answers: Vec<String>,
     /// 追问卡片当前的分步 tab（`0..questions.len()`；最后一屏 = 补充信息）
     pub(crate) clarify_tab: usize,
-    /// 追问的自定义回答编辑框（**每问题一个** + 末尾一个补充信息框）
+    /// 追问的编辑框（**每问题一个** + 末尾一个「补充信息」框）
     ///
     /// 为什么不是一个共享框：切 tab 只是换显示哪一个，共享框会把上一个问题的草稿
     /// 冲掉（vite 用受控 textarea 数组天然没有这个问题）。实体由
     /// `ensure_clarify_inputs` 按当前问题数补齐。
     pub(crate) clarify_inputs: Vec<Entity<TextareaState>>,
+    /// 编辑框实体创建失败的说明（`None` = 一切正常）。
+    ///
+    /// 存在的意义只有一个：**渲染层不许静默空白**。实体建不起来时卡片上要出现
+    /// 「…· 点此启用」的可点占位，否则用户看到的是标题底下一片空白，只会得出
+    /// 「这个卡片不能补充信息」的结论（2026-11-22 用户复报）。
+    pub(crate) clarify_inputs_error: Option<String>,
     /// 设置页：provider 列表（含 endpoint / api_key，供编辑回填）
     pub(crate) providers: Vec<ProviderRow>,
     /// 设置页：正在编辑的 provider（None = 未打开编辑器）

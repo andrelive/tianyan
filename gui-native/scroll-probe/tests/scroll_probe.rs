@@ -61,6 +61,47 @@ fn draw(cx: &mut VisualTestContext, view: &Entity<TestView>) {
     });
 }
 
+/// 跟随态下**逐帧小增量**（流式回答的真实节奏：每帧几十像素）：视口起点必须
+/// 单调向上推进，且每帧都严格贴底。
+///
+/// 为什么要单独一条：另外三条用的是「跳着涨」的 tail 高度（100 → 250 → 900），
+/// 而用户报的「流式输出时跳」发生在**每帧都在长**的那段时间里。帧内位置一旦
+/// 来回翻（例如「末尾之后」与「贴底」两种表示交替），视觉上就是上下抖动。
+#[gpui::test]
+fn follow_tail_smooth_streaming_growth_is_monotonic(cx: &mut TestAppContext) {
+    let cx = cx.add_empty_window();
+    let tail_h = Rc::new(Cell::new(200usize));
+    let (state, view) = build(cx, tail_h.clone());
+    draw(cx, &view);
+
+    let mut prev_top: Option<f32> = None;
+    // 末条从 200px 长到 3200px，每帧 +37px（≈ 两行正文）
+    let mut step = 200usize;
+    while step <= 3200 {
+        tail_h.set(step);
+        draw(cx, &view);
+        let top = state.logical_scroll_top();
+        let top_px = f32::from(px(top.item_ix as f32 * 100.) + top.offset_in_item);
+        let total = 11. * 100. + step as f32;
+        assert!(
+            top_px + VIEW_H <= total + 0.5,
+            "tail={step}：视口越过了内容末尾（下方留白）top={top:?} top_px={top_px}"
+        );
+        assert!(
+            top_px + VIEW_H >= total - 0.5,
+            "tail={step}：没有贴到底 top={top:?} top_px={top_px}"
+        );
+        if let Some(prev) = prev_top {
+            assert!(
+                top_px >= prev - 0.5,
+                "tail={step}：内容只增不减，视口起点却回退了 {prev} -> {top_px}"
+            );
+        }
+        prev_top = Some(top_px);
+        step += 37;
+    }
+}
+
 #[gpui::test]
 fn one_pixel_scroll_up_does_not_re_engage_follow(cx: &mut TestAppContext) {
     let cx = cx.add_empty_window();
