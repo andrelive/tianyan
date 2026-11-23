@@ -1376,15 +1376,22 @@ impl AgentLoop {
         if lines[0] == 0 || lines[1] == 0 {
             return;
         }
-        if crate::agent::context_report::crossed_notice_line(used as u64, &lines, notified)
-            .is_none()
-        {
+        let Some(tier_ix) =
+            crate::agent::context_report::crossed_notice_line(used as u64, &lines, notified)
+        else {
             return;
-        }
+        };
         let window = report.budget.context_window;
         let remaining = window.saturating_sub(used as u64);
+        // 档位由**越过的哪条线**决定（`lines` 升序 = `[threshold, critical]`）：
+        // 下标 0 = 60% 线（报余量 + 免责），下标 1 = 80% 线（要求本步后先压一次）。
+        let tier = if tier_ix >= 1 {
+            crate::agent::context_report::NoticeTier::Critical
+        } else {
+            crate::agent::context_report::NoticeTier::Approaching
+        };
         messages.push(Message::system(
-            crate::agent::context_report::threshold_notice_text(used as u64, window, remaining),
+            crate::agent::context_report::context_notice_text(tier, used as u64, window, remaining),
         ));
         tracing::info!(
             session = %session_id,

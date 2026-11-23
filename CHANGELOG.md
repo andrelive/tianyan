@@ -5,6 +5,29 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.16] - 2026-11-23
+
+### Changed
+
+- **轮内上下文提示改成两档措辞**：60% 档只报余量，并明确「这是余量信息，不是收尾信号：
+  手上这一步照常做完」；80% 档要求「本步工具结果出来后先压一次再继续」，并说清撞上
+  窗口上限会导致请求直接发不出去。两档都**不再**写「调 compress_context（handoff 写清
+  接下来做什么）」——那是 `context_status` / `compress_context` 两个工具描述里已有的
+  内容，写进提示既占 token，又把「一段信息」变成「一道指令」。
+- **`context_status` 只返回能据以行动的量**：删掉 `threshold_tokens` / `critical_tokens` /
+  `remaining_to_threshold` / `should_compress` / `is_critical` 五个系统策略量。阈值只在
+  轮收尾生效，模型既不能触发、也不知道收尾何时到，读到只能推出「还有系统兜底」（而这
+  正是它真正会撞墙的时段）；`remaining_to_threshold` 还会被转述成「总余量」——实测模型
+  说的是「距压缩阈值仅剩 2.4k token」，而窗口余量其实是 402416。
+
+### Fixed
+
+- **`hint` 在「显示 60% 但判定未越线」时说「上下文充裕」**：`used_pct` 是四舍五入的
+  （597584 / 1000000 = 59.76% → 显示 60），而 `should_compress` 用严格大于，于是同一份
+  返回值同时给出「60%」与「充裕」，模型只能自己编一句话。新增一档「即将触及自动压缩线：
+  不必现在压，但别开新的长任务」（距阈值不足窗口 5%），并让 `hint` **不再复述百分比**——
+  同一份占用不许有两个分母。
+
 ## [1.2.15] - 2026-11-22
 
 ### Fixed
