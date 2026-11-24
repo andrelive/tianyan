@@ -1366,6 +1366,35 @@ impl ClientApp {
                 self.clarify_tab = tab.min(max);
                 cx.notify();
             }
+            // 写追问编辑框正文（多行输入的布局验收用）：与用户键入落到同一个
+            // `TextareaState::set_value`，不另造路径。`index == 问题数` 是「补充信息」框。
+            //
+            // 为什么需要它：多行输入的**抖动**只有在「内容变化 → 重排」时才出现，
+            // 而 `/state` 里读不到编辑器的行高/滚动位置；靠真实键盘敲字无法自动化。
+            // 有了这个入口就能「逐字递增地写 + 每步截图」，把「渲染是否稳定」变成
+            // 可比较的像素事实。
+            "clarify_set" => {
+                let ix: usize = arg_str(cmd, "index")?
+                    .parse()
+                    .map_err(|_| "index 必须是数字".to_string())?;
+                let text = arg_str(cmd, "text")?;
+                let Some(ed) = self.clarify_inputs.get(ix).cloned() else {
+                    return Err(format!(
+                        "第 {ix} 个追问编辑框不存在（clarify_editors 共 {}）",
+                        self.clarify_inputs.len()
+                    ));
+                };
+                let handle = self.window_handle;
+                let ok = handle
+                    .update(cx, |_, window, cx| {
+                        ed.update(cx, |state, cx| state.set_value(text, window, cx));
+                    })
+                    .is_ok();
+                if !ok {
+                    return Err("写入追问编辑框失败（窗口不可用）".to_string());
+                }
+                cx.notify();
+            }
             "answer_clarification" => {
                 let answers: Vec<String> = cmd
                     .get("answers")

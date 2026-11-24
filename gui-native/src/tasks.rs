@@ -656,7 +656,11 @@ impl ClientApp {
             for i in 0..need {
                 let placeholder = Self::clarify_placeholder(i, need);
                 let w: &mut Window = &mut *w;
-                created.push(cx.new(|cx| TextareaState::new(w, cx).placeholder(placeholder)));
+                created.push(cx.new(|cx| {
+                    TextareaState::new(w, cx)
+                        .placeholder(placeholder)
+                        .auto_grow(1, 8)
+                }));
             }
             self.clarify_inputs = created;
             self.clarify_inputs_error = None;
@@ -669,7 +673,11 @@ impl ClientApp {
                 for i in 0..need {
                     let placeholder = Self::clarify_placeholder(i, need);
                     let w: &mut Window = &mut *window;
-                    created.push(cx.new(|cx| TextareaState::new(w, cx).placeholder(placeholder)));
+                    created.push(cx.new(|cx| {
+                        TextareaState::new(w, cx)
+                            .placeholder(placeholder)
+                            .auto_grow(1, 8)
+                    }));
                 }
             })
             .is_ok();
@@ -983,7 +991,20 @@ impl ClientApp {
         };
         div()
             .w_full()
-            .h(px(64.))
+            // **最小**高而不是固定高（2026-11-23 用户报「多行打字时文字疯狂上下抖、出残影」）。
+            //
+            // 病因：编辑器此前是多行固定行数模式，自身高度按「行数」定；外层再写死
+            // `h(px(64.))`，内容一超过一屏就**溢出被裁**，`Input` 于是每帧都在「把光标滚进
+            // 可见区」与「容器顶部裁切」之间做选择 —— 打字每来一个字符就重排一次，文本在
+            // 两条基线之间来回落，看起来就是上下抖 + 残影。
+            //
+            // 修法：编辑器开 `auto_grow(1, 8)`（高度由行数决定），容器只给**最小**视觉高度。
+            // max 取 8 而不是 4 —— `Input` 一旦进入**内部滚动**（内容超过 max 行），滚动位置
+            // 与换行宽度会互相影响（滚动条是否出现 → 可用宽度 → 换行行数 → 是否滚动），在
+            // 边界上逐帧摇摆：实测 5 行内容 + max=4 时，两次同样内容的截图里输入框高度差
+            // 一整行（`%TEMP%\tianyan-scratch\ml-compare.png`）。8 行覆盖追问框的实际输入，
+            // 把「内部滚动」推到很罕见的位置。
+            .min_h(px(64.))
             .rounded_xl()
             .border_1()
             .border_color(rgb(colors::BORDER()))
