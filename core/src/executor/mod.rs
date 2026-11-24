@@ -181,3 +181,39 @@ mod atomic_tests {
         assert!(target.parent().unwrap().is_dir());
     }
 }
+/// 文件「读-改-写」的全局串行锁。
+///
+/// ## 为什么必须有
+///
+/// 工具调用是**并行执行**的（`ToolRegistry` 用 `JoinSet` 跑同一轮里的多个
+/// tool_call）。而 `apply_edit` / `apply_patch` / `write_file` 都是
+/// 「**读**全文 → 在内存里改 → **写**回全文」：
+///
+/// ```text
+/// 任务 A: read(main.rs) → 加 mod mm;      → write(旧内容 + A)
+/// 任务 B: read(main.rs) → 加 static ...   → write(旧内容 + B)   ← 覆盖掉 A
+/// ```
+///
+/// 两个调用**都返回成功**，但 A 的编辑凭空消失。用户实测（2026-11-24，玄女 OS）：
+/// 同一秒对 `kernel/src/main.rs` 发了两次 `apply_edit`（日志时间戳差 87 微秒），
+/// 结果只有第二条落盘，模型看到 `mod mm;` 不在文件里，于是判「报告成功但没落盘」，
+/// 改用 PowerShell 重写一遍 —— 排查成本全落在用户那边。
+///
+/// ## 为什么是全局一把，而不是按路径分锁
+///
+/// `apply_patch` 一次跨多文件（若按路径逐个加锁，两个 patch 交叉加锁会死锁）。
+/// 而文件写入本来就是串行资源 —— 一把全局锁换来「不可能丢更新」，代价只是写操作
+/// 不并行（读/搜索/命令执行完全不受影响）。
+static FILE_WRITE_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+/// 在文件写锁内执行一段「读-改-写」。
+///
+/// 调用方必须是**整段**（含读取）在锁内，只锁最后那次 `write` 没有意义 ——
+/// 竞态发生在读取那一刻。
+pub(crate) async fn with_file_write_lock<F, T>(f: F) -> T
+where
+    F: std::future::Future<Output = T>,
+{
+    let _guard = FILE_WRITE_LOCK.lock().await;
+    f.await
+}

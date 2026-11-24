@@ -213,18 +213,24 @@ fn apply_normalized(content: &str, edits: &[ContentEdit]) -> Result<String> {
 ///
 /// 返回结构化 JSON：path 与 edits_applied。
 pub async fn apply_edit_action(path: &str, edits: Vec<ContentEdit>) -> Result<Value> {
-    let content = tokio::fs::read_to_string(path)
-        .await
-        .map_err(|e| TianyanError::Custom(format!("executor: apply_edit: 读取失败：{e}")))?;
-    let new_content = apply_edits_to_content(&content, &edits)?;
-    // T1-15：原子写（同目录临时文件 + rename）——避免半截文件
-    crate::executor::write_file_atomic(path, &new_content, false)
-        .await
-        .map_err(|e| TianyanError::Custom(format!("executor: apply_edit: 写入失败：{e}")))?;
-    Ok(json!({
-        "path": path,
-        "edits_applied": edits.len(),
-    }))
+    // 整段「读-改-写」在文件写锁内：同一轮里两个 `apply_edit` 会**并行**执行，
+    // 各自读到同一份旧内容、各自整文件写回 —— 后写的把前一个的编辑覆盖掉，
+    // 而两个调用都报成功（2026-11-24 用户实测：`mod mm;` 与 `static` 只落一条）。
+    crate::executor::with_file_write_lock(async {
+        let content = tokio::fs::read_to_string(path)
+            .await
+            .map_err(|e| TianyanError::Custom(format!("executor: apply_edit: 读取失败：{e}")))?;
+        let new_content = apply_edits_to_content(&content, &edits)?;
+        // T1-15：原子写（同目录临时文件 + rename）——避免半截文件
+        crate::executor::write_file_atomic(path, &new_content, false)
+            .await
+            .map_err(|e| TianyanError::Custom(format!("executor: apply_edit: 写入失败：{e}")))?;
+        Ok(json!({
+            "path": path,
+            "edits_applied": edits.len(),
+        }))
+    })
+    .await
 }
 
 #[cfg(test)]

@@ -228,10 +228,15 @@ pub async fn execute_write_file(
     create_dirs: bool,
 ) -> Result<Value, TianyanError> {
     // T1-15：原子写（同目录临时文件 + rename）——避免“写一半”损坏用户源码
-    crate::executor::write_file_atomic(path, content, create_dirs)
-        .await
-        .map_err(|e| TianyanError::Custom(format!("executor: 文件操作失败：{}", e)))?;
-    Ok(Value::String("写入成功".to_string()))
+    // 与 `apply_edit` / `apply_patch` 共用一把文件写锁：三者都是「读/改 → 整文件写回」，
+    // 并行跑时后写的会覆盖前一个的结果，而两边都报成功（见 `FILE_WRITE_LOCK` 的注释）。
+    crate::executor::with_file_write_lock(async {
+        crate::executor::write_file_atomic(path, content, create_dirs)
+            .await
+            .map_err(|e| TianyanError::Custom(format!("executor: 文件操作失败：{}", e)))?;
+        Ok(Value::String("写入成功".to_string()))
+    })
+    .await
 }
 
 #[cfg(test)]

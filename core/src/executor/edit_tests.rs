@@ -134,3 +134,52 @@ fn crlf_multiline_old_string_matches() {
         "多行 old_string 用 \n 也能匹配 CRLF 文件"
     );
 }
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_apply_edits_do_not_lose_updates() {
+    // 回归（2026-11-24 玄女 OS 实测）：同一轮里对**同一文件**发两个 `apply_edit`
+    // 时，工具调用是并行执行的（`ToolRegistry` 的 `JoinSet`）。两个任务各自
+    // 「读全文 → 改 → 整文件写回」，后写的那个基于**旧内容**，于是把前一个的编辑
+    // 覆盖掉 —— 而两个调用**都返回成功**。模型看到文件里没有自己刚写的东西，
+    // 判成「报告成功但没落盘」，改用 PowerShell 重写。
+    //!
+    // 多轮是为了提高命中率：单轮里两个 future 有可能恰好串行（那样不丢更新），
+    // 而竞态一旦发生就是必丢。
+    for round in 0..20 {
+        let dir = tempfile::tempdir().expect("临时目录");
+        let path = dir.path().join("main.rs");
+        tokio::fs::write(&path, "mod a;\nmod b;\n\nfn main() {}\n")
+            .await
+            .expect("写初始文件");
+        let p = path.to_string_lossy().to_string();
+
+        let p1 = p.clone();
+        let t1 = tokio::spawn(async move {
+            apply_edit_action(&p1, vec![edit("mod a;", "mod a;\nmod mm;", false)]).await
+        });
+        let p2 = p.clone();
+        let t2 = tokio::spawn(async move {
+            apply_edit_action(
+                &p2,
+                vec![edit(
+                    "fn main() {}",
+                    "static MAGIC: u64 = 1;\n\nfn main() {}",
+                    false,
+                )],
+            )
+            .await
+        });
+        let (r1, r2) = (t1.await.expect("任务1"), t2.await.expect("任务2"));
+        r1.expect("第一处编辑应成功");
+        r2.expect("第二处编辑应成功");
+
+        let after = tokio::fs::read_to_string(&path).await.expect("读回");
+        assert!(
+            after.contains("mod mm;"),
+            "第 {round} 轮：第一条编辑被并发覆盖掉了（这正是「报告成功但文件没变」）：\n{after}"
+        );
+        assert!(
+            after.contains("static MAGIC"),
+            "第 {round} 轮：第二条编辑丢了：\n{after}"
+        );
+    }
+}

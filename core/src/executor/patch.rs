@@ -667,6 +667,12 @@ pub fn first_patch_path(patch_text: &str) -> String {
 /// 所有文件的块全部定位成功后才写入任一文件；任一失败则零写入。
 /// 返回 `{ "files": [{ path, hunks_applied, lines_changed }], "total_files" }`。
 pub async fn apply_patch_action(patch_text: &str, base_dir: &Path) -> Result<Value> {
+    // 与 `apply_edit` / `write_file` 共用一把文件写锁（见 `FILE_WRITE_LOCK` 的注释）：
+    // 本函数跨多个文件「全读 → 全写」，并行跑另一个写操作时会互相覆盖。
+    crate::executor::with_file_write_lock(apply_patch_action_locked(patch_text, base_dir)).await
+}
+
+async fn apply_patch_action_locked(patch_text: &str, base_dir: &Path) -> Result<Value> {
     let files = parse_patch(patch_text)?;
 
     let mut planned: Vec<PlannedWrite> = Vec::with_capacity(files.len());
