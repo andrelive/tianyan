@@ -25,10 +25,7 @@ const OVERDRAW: f32 = 400.;
 
 /// 与 gui-native 的 `new_msg_list_state` 同口径：
 /// Top 对齐 + 400px overdraw + Tail 跟随 + 预置视口高，**不**全量测量、**不**给估值。
-fn build(
-    cx: &mut VisualTestContext,
-    tail_h: Rc<Cell<usize>>,
-) -> (ListState, Entity<TestView>) {
+fn build(cx: &mut VisualTestContext, tail_h: Rc<Cell<usize>>) -> (ListState, Entity<TestView>) {
     let state = ListState::new(12, gpui::ListAlignment::Top, px(OVERDRAW));
     state.set_follow_mode(FollowMode::Tail);
     state.seed_viewport_height(px(VIEW_H));
@@ -54,7 +51,7 @@ impl Render for TestView {
     }
 }
 
-fn draw(cx: &mut VisualTestContext, view: &Entity<TestView>) {
+fn draw<V: Render>(cx: &mut VisualTestContext, view: &Entity<V>) {
     let v = view.clone();
     cx.draw(point(px(0.), px(0.)), size(px(300.), px(VIEW_H)), |_, _| {
         v.into_any_element()
@@ -99,6 +96,81 @@ fn follow_tail_smooth_streaming_growth_is_monotonic(cx: &mut TestAppContext) {
         }
         prev_top = Some(top_px);
         step += 37;
+    }
+}
+
+struct LongTailView {
+    state: ListState,
+    tail_h: Rc<Cell<usize>>,
+    count: Rc<Cell<usize>>,
+}
+
+impl Render for LongTailView {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        let tail = self.tail_h.get();
+        let n = self.count.get();
+        list(self.state.clone(), move |ix, _, _| {
+            let h = if ix + 1 == n { tail } else { 100 };
+            div().h(px(h as f32)).w_full().into_any()
+        })
+        .w_full()
+        .h_full()
+    }
+}
+
+/// **全新列表（所有项都未测量）** 前几帧的收敛：切换会话时就是这个状态。
+///
+/// 对应 2026-11-24 的现场：切到一个 160 条的会话后，`logical_scroll_top` 在
+/// `(159, 840.7)` 与 `(159, 900.7)` 之间交替了 8 帧才稳定。若这条用例也抖，
+/// 说明「未测量项 → 累计高度逐步修正」就是根因（1.2.13 删掉 `measure_all` /
+/// 未测项估值之后才有的形态）。
+#[gpui::test]
+fn fresh_list_settles_without_oscillating(cx: &mut TestAppContext) {
+    let cx = cx.add_empty_window();
+    let tail_h = Rc::new(Cell::new(100usize));
+    let (state, view) = build(cx, tail_h);
+    let mut seq = Vec::new();
+    for _ in 0..8 {
+        draw(cx, &view);
+        let t = state.logical_scroll_top();
+        seq.push((t.item_ix, f32::from(t.offset_in_item)));
+    }
+    assert!(
+        seq.windows(2).all(|w| w[0] == w[1]),
+        "全新列表前 8 帧位置在变（未测量 → 逐步修正的签名）：{seq:?}"
+    );
+}
+
+/// 跟随态 + **最后一条很长**（2400px）+ 内容不变：连续 draw 位置必须恒定。
+///
+/// 这条对应 2026-11-24 的现场：`gui-scroll.log` 里 `streaming=false`、
+/// `following=true`、`item_ix` 停在最后一条（count-1），`off` 在 60px 的两个值之间
+/// 往返（如 `1688.7 <-> 1748.7`）。若引擎在「末项高度不变」时也能保持位置恒定，
+/// 抖动就只能来自**应用层那一条消息的渲染高度在两次布局间不一致**。
+#[gpui::test]
+fn follow_tail_long_last_item_is_stable(cx: &mut TestAppContext) {
+    let cx = cx.add_empty_window();
+    let state = ListState::new(12, gpui::ListAlignment::Top, px(OVERDRAW));
+    state.set_follow_mode(FollowMode::Tail);
+    state.seed_viewport_height(px(VIEW_H));
+    let s = state.clone();
+    let view = cx.update(|_, cx| {
+        cx.new(|_| LongTailView {
+            state: s,
+            tail_h: Rc::new(Cell::new(2400usize)),
+            count: Rc::new(Cell::new(12usize)),
+        })
+    });
+    draw(cx, &view);
+    let first = state.logical_scroll_top();
+    for step in 0..10 {
+        draw(cx, &view);
+        let now = state.logical_scroll_top();
+        assert_eq!(
+            (first.item_ix, f32::from(first.offset_in_item)),
+            (now.item_ix, f32::from(now.offset_in_item)),
+            "第 {step} 次重绘：内容未变，跟随态位置却动了 {first:?} -> {now:?}"
+        );
     }
 }
 
