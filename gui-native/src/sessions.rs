@@ -1782,5 +1782,3 @@ mod projection_tests {
         assert_ne!(RestoreOutcome::Stale, RestoreOutcome::Fresh);
     }
 }
-
-
