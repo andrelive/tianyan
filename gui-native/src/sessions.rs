@@ -502,6 +502,14 @@ impl ClientApp {
             .msg_list_state
             .as_ref()
             .map(|ls| ls.logical_scroll_top());
+        // `seq` 之外的**备用锚点**：窗口内索引。
+        //
+        // 为什么需要它：`seq` 可能是 0（流式占位消息在权威消息到达前就是 0），而下面
+        // 那句 `filter(|s| *s > 0)` 会把它丢掉 —— 于是「视口顶部正好停在占位消息上」
+        // 的切走被视为「没有锚点」，切回来直接 `scroll_to_end()`（用户实测：切走时在
+        // 红框那条长回复上，切回来到底了）。索引在新窗口里语义可能偏，但比"整段跳到底"
+        // 好得多：它至少落在同一会话的相近位置。
+        let anchor_ix = anchor.map(|off| off.item_ix);
         let anchor_seq = anchor
             .and_then(|off| snap.messages.get(off.item_ix))
             .map(|m| m.seq)
@@ -529,6 +537,20 @@ impl ClientApp {
         // 意图先落定：恢复锚点**不改变**「用户滚离过底部」这个事实，所以取快照里
         // 存的值，而不是下面那句按 `item_ix` 反推。
         let scrolled_up_at_park = snap.msg_scrolled_up;
+        // 锚点定位：`seq` 优先（窗口整体换过也能找回那条消息），退而用窗口索引
+        // （`seq == 0` 的流式占位消息走这一条，见 `anchor_ix` 的注释）。
+        let restored_ix = anchor_seq
+            .and_then(|seq| self.messages.iter().position(|m| m.seq == seq))
+            .or_else(|| anchor_ix.filter(|ix| *ix < self.messages.len()));
+        // 「要不要精确恢复位置」：用户离开时**不在真底部**，或**视口顶部落在某条消息
+        // 内部**（`anchor_offset > 0`，长回复的典型形态）。
+        //
+        // 后一种以前被当成「在底部」直接贴底，而贴底位置是 `内容末尾 − 视口高` **现算**
+        // 的：切走期间内容只要长了一点（流式收尾 / 工具结果 / 产出物块到达），切回来
+        // 看到的就是另一个位置 —— 用户实测「切走前在红框那条，切回来到底了」。
+        // 代价是这一次不再自动跟底（`scroll_to` 会 `stop_following`），但那正是
+        // 「保持我离开时看的东西」的语义；要继续看最新，滚到底即可。
+        let restore_exact = scrolled_up_at_park || anchor_offset > px(0.);
         // ⚠️ **复用**快照里那个 `ListState`，不要新建。
         //
         // 这是「上滚一屏后切回必贴底」的根因所在，也是唯一不需要任何补帧动作的修法。
@@ -581,15 +603,15 @@ impl ClientApp {
                 self.last_viewport_h,
             ),
         };
-        if let Some(seq) = anchor_seq {
-            if let Some(ix) = self.messages.iter().position(|m| m.seq == seq) {
+        if restored_ix.is_some() {
+            if let Some(ix) = restored_ix {
                 // 后续新内容/流式增量不得把用户拉回底部 —— 依据是**他切走前就在
                 // 滚离状态**，不是"这条消息是不是最后一条"。
                 //
                 // 早先这里写的是 `set(ix + 1 < len)`：视口顶部落在最后一条长消息
                 // 内部时 `ix == len - 1`，推导出 false，等于宣布"他在底部"，
                 // 切回后任何跟随都会贴底（用户实测：上滚一屏必现，多滚几屏反而正常）。
-                self.msg_scrolled_up.set(scrolled_up_at_park);
+                self.msg_scrolled_up.set(restore_exact);
                 // 定位分三步，顺序不能换（每步都在拆掉下一步的坑）：
                 //
                 // ① 重测锚点那条及它后面的。它们的测量缓存可能停在「内容还没长成
@@ -618,7 +640,7 @@ impl ClientApp {
                     self.msg_list_state.remeasure_items(ix..n);
                 }
                 self.msg_list_state.scroll_to_end();
-                if scrolled_up_at_park {
+                if restore_exact {
                     self.msg_list_state.scroll_to(gpui_kit::ListOffset {
                         item_ix: ix,
                         offset_in_item: anchor_offset,
@@ -1760,3 +1782,5 @@ mod projection_tests {
         assert_ne!(RestoreOutcome::Stale, RestoreOutcome::Fresh);
     }
 }
+
+

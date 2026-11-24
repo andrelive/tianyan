@@ -425,6 +425,12 @@ impl ClientApp {
                 // 切走再切回必须保持原位置，而不是被 `load_messages` 的
                 // `scroll_to_end` 冲到底部。0 = 在顶部，`loaded-1` ≈ 在底部。
                 "scroll_item": self.msg_list_state.logical_scroll_top().item_ix,
+                // 视口顶部在 `scroll_item` 那条消息**内部**的像素偏移。
+                //
+                // 断言面：`scroll_item` 只看索引，而「视口顶部落在最后一条长消息的
+                // 中段」与「贴在它顶部」是同一个索引 —— 分不开就验不了「切走再切回
+                // 位置保持」（2026-11-24 的 bug 正是这种情形被当成"在底部"）。
+                "scroll_off": f32::from(self.msg_list_state.logical_scroll_top().offset_in_item),
                 // 折叠态快照：断言「点一下摘要/思考有没有真的切过去」只能看这里
                 // （截图能看出结果，但分不清「没点中」还是「点了没重绘」）
                 "expanded": expanded_json,
